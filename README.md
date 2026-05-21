@@ -13,7 +13,7 @@ dnf install python3-gobject gtk4 gstreamer1-plugins-base gstreamer1-plugin-pipew
 
 **Debian/Ubuntu:**
 ```bash
-apt install python3-gi gir1.2-gdk-4.0 gir1.2-gtk-4.0 gstreamer1.0-pipewire libasound2-dev pulseaudio-utils pipewire-pulse
+apt install python3-gi gir1.2-gtk-4.0 gstreamer1.0-pipewire libasound2-dev pulseaudio-utils pipewire-pulse
 ```
 
 **Arch:**

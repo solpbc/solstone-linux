@@ -43,10 +43,10 @@ this is the developer/from-source path; most installs should use `sol observer i
    sudo dnf install python3-gobject gtk4 gstreamer1-plugins-base gstreamer1-plugin-pipewire pipewire-gstreamer alsa-lib-devel pulseaudio-utils pipewire-pulseaudio xdg-desktop-portal pipx
    ```
 
-   **debian / ubuntu:**
-   ```
-   sudo apt install python3-gi gir1.2-gdk-4.0 gir1.2-gtk-4.0 gstreamer1.0-pipewire libasound2-dev pulseaudio-utils pipewire-pulse xdg-desktop-portal pipx
-   ```
+  **debian / ubuntu:**
+  ```
+  sudo apt install python3-gi gir1.2-gtk-4.0 gstreamer1.0-pipewire libasound2-dev pulseaudio-utils pipewire-pulse xdg-desktop-portal pipx
+  ```
 
    **arch:**
    ```
