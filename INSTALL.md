@@ -45,7 +45,7 @@ this is the developer/from-source path; most installs should use the `pipx insta
 
    **debian / ubuntu:**
    ```
-   sudo apt install python3-gi python3-cairo gir1.2-gtk-4.0 gstreamer1.0-pipewire libasound2-dev pulseaudio-utils pipewire-pulse xdg-desktop-portal pipx gcc python3-dev pkg-config libcairo2-dev
+   sudo apt install python3-gi python3-cairo gir1.2-gtk-4.0 gstreamer1.0-pipewire gstreamer1.0-tools libasound2-dev pulseaudio-utils pipewire-pulse xdg-desktop-portal pipx gcc python3-dev pkg-config libcairo2-dev
    ```
 
    **arch:**

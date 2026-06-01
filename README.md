@@ -6,20 +6,25 @@ Standalone Linux desktop observer for [solstone](https://solpbc.org). Experience
 
 ## System Dependencies
 
-**Fedora:**
-```bash
-dnf install python3-gobject gtk4 gstreamer1-plugins-base gstreamer1-plugin-pipewire pipewire-gstreamer alsa-lib-devel pulseaudio-utils pipewire-pulseaudio
-```
+   **Fedora:**
+   ```
+   sudo dnf install python3-gobject python3-cairo gtk4 gstreamer1-plugins-base pipewire-gstreamer alsa-lib-devel pulseaudio-utils pipewire-pulseaudio xdg-desktop-portal pipx gcc python3-devel pkgconf-pkg-config cairo-devel cairo-gobject-devel
+   ```
 
-**Debian/Ubuntu:**
-```bash
-apt install python3-gi gir1.2-gdk-4.0 gir1.2-gtk-4.0 gstreamer1.0-pipewire libasound2-dev pulseaudio-utils pipewire-pulse
-```
+   **Debian / Ubuntu:**
+   ```
+   sudo apt install python3-gi python3-cairo gir1.2-gtk-4.0 gstreamer1.0-pipewire gstreamer1.0-tools libasound2-dev pulseaudio-utils pipewire-pulse xdg-desktop-portal pipx gcc python3-dev pkg-config libcairo2-dev
+   ```
 
-**Arch:**
-```bash
-pacman -S python-gobject gtk4 gstreamer gst-plugin-pipewire libpulse alsa-lib
-```
+   **Arch:**
+   ```
+   sudo pacman -S python-gobject gtk4 gstreamer gst-plugin-pipewire libpulse alsa-lib xdg-desktop-portal pipx
+   ```
+
+   **openSUSE:**
+   ```
+   sudo zypper install python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-4_0 gtk4-tools gstreamer-plugins-base gstreamer-plugin-pipewire pipewire-pulseaudio pulseaudio-utils alsa-devel xdg-desktop-portal python3-pipx
+   ```
 
 ## Install
 
