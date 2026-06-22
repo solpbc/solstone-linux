@@ -4,7 +4,9 @@ these instructions are for a coding agent and human working together. solstone-l
 
 solstone must already be installed and running. if it isn't, start there: https://solstone.app/install
 
-> **most users install solstone-linux from PyPI in three commands** on the machine that will host the observer: `pipx install solstone-linux`, `solstone-linux install-service`, then `solstone-linux setup` (which registers against your journal over the local `http://localhost:5015` link — no URL to type). if the observer machine reaches your solstone host directly instead, run `solstone-linux setup --server-url <journal-url>`. the instructions below are for developers building from source or troubleshooting the install.
+> **most users install solstone-linux from PyPI in three commands** on the machine that will host the observer: `pipx install --system-site-packages solstone-linux`, `solstone-linux install-service`, then `solstone-linux setup` (which registers against your journal over the local `http://localhost:5015` link — no URL to type). if the observer machine reaches your solstone host directly instead, run `solstone-linux setup --server-url <journal-url>`. the instructions below are for developers building from source or troubleshooting the install.
+>
+> the `--system-site-packages` flag is **required**: it lets pipx's virtualenv reuse your distro's system PyGObject, pycairo, and GStreamer bindings (the `python3-gi` / `python3-cairo` packages installed below) instead of rebuilding PyGObject from source. a plain `pipx install solstone-linux` rebuilds PyGObject in an isolated venv, which needs the full GObject-Introspection build toolchain (`libgirepository-2.0-dev`) — and that dev package isn't even available on every supported distro (Debian 12 stable doesn't ship it). `--system-site-packages` is the path that works on every distro and skips the compile entirely.
 
 ## before you begin
 
@@ -34,7 +36,7 @@ By default the observer registers over the local `http://localhost:5015` link, s
 
 ## install sequence
 
-this is the developer/from-source path; most installs should use the `pipx install solstone-linux` + `solstone-linux install-service` + `solstone-linux setup` flow described in the callout above.
+this is the developer/from-source path; most installs should use the `pipx install --system-site-packages solstone-linux` + `solstone-linux install-service` + `solstone-linux setup` flow described in the callout above.
 
 1. install system dependencies for your distro, including `pipx`. if you need sudo, walk your human through it.
 
@@ -62,7 +64,7 @@ this is the developer/from-source path; most installs should use the `pipx insta
    ```
    note: package names diverge from Fedora — `typelib-1_0-Gtk-4_0` (not `gtk4`), `gstreamer-plugin-pipewire` (singular), and `alsa-devel` (not `alsa-lib-devel`).
 
-   the `cairo` headers + `gcc` + Python dev headers in the Fedora/Debian lines above are there because `pycairo` builds from source during install; without them the install fails with a compile error before you'd reach the Troubleshooting section. they're the same fixes listed under Troubleshooting, hoisted up so a fresh install works in one shot.
+   with the recommended `pipx install --system-site-packages solstone-linux`, the system `python3-gi` and `python3-cairo` packages above satisfy PyGObject and pycairo, so **neither builds from source**. the `cairo` headers + `gcc` + Python dev headers in the Fedora/Debian lines are kept as a fallback for any other pure-Python dependency that lacks a prebuilt wheel on your platform — and they're what an *isolated*-venv install (a plain `pipx install` without `--system-site-packages`) needs to compile pycairo from source. (an isolated-venv install also needs `libgirepository-2.0-dev`; see Troubleshooting.)
 
    `uv` / `pipx`: Fedora packages both (`sudo dnf install uv pipx`); Debian/Ubuntu package `pipx` but not `uv`. the PyPI install flow only needs `pipx` — `uv` is optional and used by the from-source dev workflow in the Makefile.
 
@@ -140,11 +142,13 @@ Common install-time errors and their fixes:
   - arch: `sudo pacman -S pkgconf cairo`
   - opensuse: `sudo zypper install pkgconf-pkg-config cairo-devel`
 
-- **`girepository-2.0` missing or `pygobject` build failure**
-  - fedora: `sudo dnf install gobject-introspection-devel`
-  - debian/ubuntu: `sudo apt install libgirepository1.0-dev`
-  - arch: `sudo pacman -S gobject-introspection`
-  - opensuse: `sudo zypper install gobject-introspection-devel`
+- **`girepository-2.0` missing or `pygobject` build failure** — only hit when installing into an *isolated* venv (a plain `pipx install` **without** `--system-site-packages`), which rebuilds PyGObject from PyPI from source. the recommended `pipx install --system-site-packages solstone-linux` uses your system `python3-gi` and skips this build entirely.
+  - **first, retry with `--system-site-packages`.** `pipx install --system-site-packages solstone-linux` needs no build toolchain. this is the fix on Debian 12 (stable) and other distros that don't package the `-2.0` dev headers at all.
+  - if you must build from source: PyPI's PyGObject (3.50+, Sept 2024 onward) needs the girepository-**2.0** dev headers, not the old 1.0 package:
+    - fedora: `sudo dnf install gobject-introspection-devel`
+    - debian/ubuntu: `sudo apt install libgirepository-2.0-dev` (Debian 13 / Ubuntu 24.04+; older releases that ship PyGObject < 3.50 use `libgirepository1.0-dev`)
+    - arch: `sudo pacman -S gobject-introspection`
+    - opensuse: `sudo zypper install gobject-introspection-devel`
 
 - **`Python.h: No such file or directory`**
   - fedora: `sudo dnf install python3-devel`

@@ -33,10 +33,12 @@ solstone (the journal) must already be installed and running on the host this ob
 On the machine that will host the observer:
 
 ```bash
-pipx install solstone-linux
+pipx install --system-site-packages solstone-linux
 solstone-linux install-service
 solstone-linux setup
 ```
+
+The `--system-site-packages` flag is required: it lets pipx reuse your distro's system PyGObject/pycairo/GStreamer bindings (the `python3-gi` / `python3-cairo` packages from System Dependencies above) instead of rebuilding PyGObject from source — which needs the GObject-Introspection build toolchain and isn't packaged on every distro. See `INSTALL.md` if a plain `pipx install` failed with a `girepository-2.0` build error.
 
 `setup` registers the observer against your journal over the local `http://localhost:5015` link, so there's no URL to type. If this machine reaches your solstone host directly instead, run `solstone-linux setup --server-url <journal-url>`. (Legacy fallback: mint a key on the journal host with `journal observer create <name>` and paste it during setup.)
 
