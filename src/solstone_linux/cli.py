@@ -322,6 +322,7 @@ def cmd_install_service(args: argparse.Namespace) -> int:
         "Exec=/bin/sh -c 'systemctl --user import-environment"
         " DISPLAY XAUTHORITY XDG_SESSION_TYPE 2>/dev/null;"
         " systemctl --user start solstone-linux.service'\n"
+        "Icon=solstone-observer\n"
         "StartupNotify=false\n"
         "X-GNOME-Autostart-enabled=true\n"
         "Hidden=false\n"
@@ -364,6 +365,19 @@ def cmd_install_service(args: argparse.Namespace) -> int:
             if svg.suffix == ".svg":
                 shutil.copy2(svg, status_dir / svg.name)
                 print(f"Installed {status_dir / svg.name}")
+
+        # Application icon — the unified sol app icon (wordmark, transparent
+        # ground), installed into the hicolor *apps* context under the name
+        # "solstone-observer" (matches the SNI app_id and the .desktop Icon=).
+        # Mirrors every freedesktop size dir the repo ships (PNG ladder +
+        # scalable SVG). Distinct from the status/ tray icons above.
+        for ctx_dir in sorted(icon_source.glob("*/apps")):
+            dest_ctx = icon_dest / ctx_dir.parent.name / "apps"
+            dest_ctx.mkdir(parents=True, exist_ok=True)
+            for asset in sorted(ctx_dir.iterdir()):
+                if asset.suffix in (".png", ".svg"):
+                    shutil.copy2(asset, dest_ctx / asset.name)
+                    print(f"Installed {dest_ctx / asset.name}")
 
         # Self-heal: earlier installs copied a solstone index.theme into this
         # shared hicolor dir. Because the user icon dir out-ranks
