@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_TIMEOUT = 300
 EVENT_TIMEOUT = 30
+STREAM_TYPE = "desktop"
 
 
 def _auth_headers(key: str) -> dict[str, str]:
@@ -65,6 +66,10 @@ class UploadClient:
     def is_revoked(self) -> bool:
         return self._revoked
 
+    @property
+    def is_registered(self) -> bool:
+        return bool(self._key)
+
     def _persist_registration(self, config: Config, key: str, stream: str) -> None:
         """Persist the server-issued handle and locked stream back to config."""
         from .config import save_config
@@ -86,7 +91,7 @@ class UploadClient:
         descriptor: dict[str, Any] = {
             "platform": platform.system().lower(),
             "hostname": socket.gethostname(),
-            "stream_type": "desktop",
+            "stream_type": STREAM_TYPE,
             "version": __version__,
         }
         if self._stream:

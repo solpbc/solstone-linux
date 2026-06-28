@@ -32,6 +32,7 @@ import numpy as np
 from dbus_next.aio import MessageBus
 from dbus_next.constants import BusType
 
+from . import __version__
 from .activity import (
     is_power_save_active,
     is_screen_locked,
@@ -44,7 +45,7 @@ from .config import Config
 from .recovery import write_segment_metadata
 from .screencast import Screencaster, SilentStream, StreamInfo, X11Screencaster
 from .sync import SyncService
-from .upload import UploadClient
+from .upload import STREAM_TYPE, UploadClient
 
 logger = logging.getLogger(__name__)
 
@@ -475,16 +476,27 @@ class Observer:
             "power_save": self.cached_power_save,
         }
 
-        self._client.relay_event(
-            "observe",
-            "status",
-            mode=self.current_mode,
-            screencast=screencast_info,
-            audio=audio_info,
-            activity=activity_info,
-            host=HOST,
-            platform=PLATFORM,
-        )
+        status_fields = {
+            "mode": self.current_mode,
+            "screencast": screencast_info,
+            "audio": audio_info,
+            "activity": activity_info,
+            "host": HOST,
+            "platform": PLATFORM,
+        }
+        if self._client.is_registered and self.stream:
+            status_fields.update(
+                {
+                    "name": self.stream,
+                    "stream_type": STREAM_TYPE,
+                    "version": __version__,
+                    "uptime": elapsed,
+                }
+            )
+            if self._sync is not None:
+                status_fields.update(self._sync.health_beacon_fields())
+
+        self._client.relay_event("observe", "status", **status_fields)
 
     def _refresh_tray(self):
         """Refresh the SNI tray UI. Safe when tray is unavailable; disables on failure."""

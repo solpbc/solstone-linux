@@ -72,6 +72,10 @@ solstone-linux run
 solstone-linux status
 ```
 
+Registered observers also include a diagnostics-only status beacon in the
+journal: identity, version, uptime, and sync liveness counts only, with no
+captured or experienced content.
+
 ## License
 
 AGPL-3.0-only — Copyright (c) 2026 sol pbc

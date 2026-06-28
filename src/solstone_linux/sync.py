@@ -25,7 +25,7 @@ import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .config import Config
 from .sync_health import (
@@ -97,6 +97,28 @@ class SyncService:
     @property
     def progress(self) -> str:
         return self._facts.progress
+
+    def health_beacon_fields(self) -> dict[str, Any]:
+        """Diagnostics-only sync fields: counts, epoch seconds, and error class."""
+        last_successful_sync = self._facts.last_successful_sync
+        last_error_class = self._facts.last_error_class
+        last_error_code = self._facts.last_error_code
+
+        if last_error_class is None:
+            last_error_reason = None
+        elif last_error_code is not None:
+            last_error_reason = f"{last_error_class.value}:{last_error_code}"
+        else:
+            last_error_reason = last_error_class.value
+
+        return {
+            "last_successful_sync": int(last_successful_sync)
+            if last_successful_sync is not None
+            else None,
+            "pending_queue_depth": self._facts.pending_confirmed,
+            "recent_error_count": min(99, max(0, self._consecutive_failures)),
+            "last_error_reason": last_error_reason,
+        }
 
     def _synced_days_path(self) -> Path:
         return self._config.state_dir / "synced_days.json"

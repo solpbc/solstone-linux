@@ -47,6 +47,8 @@ State machine has two modes: `screencast` (screen active, recording video) and `
 
 The capture loop never makes network calls. It writes locally; sync handles all uploads.
 
+The `observe/status` heartbeat carries top-level diagnostics-only health-beacon fields for registered observers; these contain no captured content, paths, URLs, tokens, titles, or labels. Missing or legacy beacons are liveness-only and not failures; journal-side ingest rejections (`health.ingest_rejection`) are separate and are not produced by the observer.
+
 ## Commands
 
 ```bash

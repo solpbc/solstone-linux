@@ -4,6 +4,11 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+- this observer now sends your journal a small, diagnostics-only health note alongside its regular check-in — its name, version, how long it's been running, and whether syncing is keeping up. it carries none of what it experiences with you: no screen, audio, file paths, or titles — just enough for you to see at a glance that an observer is alive and in good health.
+
 ## [0.4.1] - 2026-06-17
 
 ### Added
