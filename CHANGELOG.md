@@ -4,10 +4,16 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [0.4.2] - 2026-06-29
 
 ### Added
-- this observer now sends your journal a small, diagnostics-only health note alongside its regular check-in — its name, version, how long it's been running, and whether syncing is keeping up. it carries none of what it experiences with you: no screen, audio, file paths, or titles — just enough for you to see at a glance that an observer is alive and in good health.
+- this observer now sends your journal a small, diagnostics-only health note alongside its regular check-in, covering its name, version, how long it's been running, and whether syncing is keeping up. it carries none of what it experiences with you: no screen, audio, file paths, or titles. just enough for you to see at a glance that an observer is alive and in good health.
+
+### Changed
+- this observer now carries the sol mark across your desktop, in the app launcher and menus. the tray status icons are unchanged.
+
+### Fixed
+- installing solstone-linux now works cleanly on current debian and ubuntu. the earlier steps could fail while rebuilding the desktop graphics libraries from scratch; the updated install reuses the ones already on your system, so it goes through.
 
 ## [0.4.1] - 2026-06-17
 

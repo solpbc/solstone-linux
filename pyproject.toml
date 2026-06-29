@@ -1,6 +1,6 @@
 [project]
 name = "solstone-linux"
-version = "0.4.1"
+version = "0.4.2"
 description = "Standalone Linux desktop observer for solstone"
 readme = "README.md"
 license = "AGPL-3.0-only"
