@@ -2,11 +2,11 @@
      role="img" aria-label="solstone icon syncing state">
   <title>solstone — syncing</title>
   <!-- Top 5 rays only (no clip path needed) -->
-  <path fill="#F5C740" d="M16.0 2.5 L18.6 7.3 A9.1 9.1 0 0 0 13.4 7.3 Z"/>
-  <path fill="#F5C740" d="M23.9 5.1 L23.2 10.5 A9.1 9.1 0 0 0 19.0 7.4 Z"/>
-  <path fill="#F5C740" d="M28.8 11.8 L25.1 15.8 A9.1 9.1 0 0 0 23.5 10.9 Z"/>
-  <path fill="#F5C740" d="M3.2 11.8 L8.5 10.9 A9.1 9.1 0 0 0 6.9 15.8 Z"/>
-  <path fill="#F5C740" d="M8.1 5.1 L13.0 7.4 A9.1 9.1 0 0 0 8.8 10.5 Z"/>
+  <path fill="#FFCF33" d="M16.0 2.5 L18.6 7.3 A9.1 9.1 0 0 0 13.4 7.3 Z"/>
+  <path fill="#FFCF33" d="M23.9 5.1 L23.2 10.5 A9.1 9.1 0 0 0 19.0 7.4 Z"/>
+  <path fill="#FFCF33" d="M28.8 11.8 L25.1 15.8 A9.1 9.1 0 0 0 23.5 10.9 Z"/>
+  <path fill="#FFCF33" d="M3.2 11.8 L8.5 10.9 A9.1 9.1 0 0 0 6.9 15.8 Z"/>
+  <path fill="#FFCF33" d="M8.1 5.1 L13.0 7.4 A9.1 9.1 0 0 0 8.8 10.5 Z"/>
   <!-- Top arc of the ring -->
   <path fill="none" stroke="#E8923A" stroke-width="1.7"
         d="M 9.5 16.0 A 6.5 6.5 0 0 1 22.5 16.0"/>
