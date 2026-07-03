@@ -7,7 +7,16 @@ import os
 import stat
 from pathlib import Path
 
-from solstone_linux.config import Config, load_config, save_config
+import pytest
+
+from solstone_linux.config import (
+    DEFAULT_SEGMENT_INTERVAL,
+    DEFAULT_SYNC_MAX_RETRIES,
+    DEFAULT_SYNC_RETRY_DELAYS,
+    Config,
+    load_config,
+    save_config,
+)
 
 
 class TestConfig:
@@ -72,6 +81,58 @@ class TestConfig:
 
         config = load_config(base_dir=tmp_path, config_dir=tmp_path / "config")
         assert config.server_url == ""
+
+    @pytest.mark.parametrize(
+        ("field", "value", "expected"),
+        [
+            ("capture_framerate", "abc", 1),
+            ("segment_interval", "300", DEFAULT_SEGMENT_INTERVAL),
+            ("sync_retry_delays", "oops", list(DEFAULT_SYNC_RETRY_DELAYS)),
+            ("sync_max_retries", "many", DEFAULT_SYNC_MAX_RETRIES),
+            ("cache_retention_days", [], 7),
+        ],
+    )
+    def test_load_invalid_typed_fields_warn_and_default(
+        self,
+        tmp_path: Path,
+        caplog,
+        field,
+        value,
+        expected,
+    ):
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text(json.dumps({field: value}))
+
+        with caplog.at_level(logging.WARNING):
+            config = load_config(base_dir=tmp_path, config_dir=config_dir)
+
+        assert getattr(config, field) == expected
+        warning_records = [
+            record for record in caplog.records if field in record.message
+        ]
+        assert len(warning_records) == 1
+
+    def test_load_non_object_json_warns_and_defaults(self, tmp_path: Path, caplog):
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text("[]")
+
+        with caplog.at_level(logging.WARNING):
+            config = load_config(base_dir=tmp_path, config_dir=config_dir)
+
+        assert config.server_url == ""
+        assert config.key == ""
+        assert config.stream == ""
+        assert config.segment_interval == DEFAULT_SEGMENT_INTERVAL
+        assert config.sync_retry_delays == list(DEFAULT_SYNC_RETRY_DELAYS)
+        assert config.sync_max_retries == DEFAULT_SYNC_MAX_RETRIES
+        assert config.cache_retention_days == 7
+        assert config.capture_framerate == 1
+        warning_records = [
+            record for record in caplog.records if "not a JSON object" in record.message
+        ]
+        assert len(warning_records) == 1
 
     def test_permissions(self, tmp_path: Path):
         config = Config(base_dir=tmp_path, config_dir=tmp_path / "config")

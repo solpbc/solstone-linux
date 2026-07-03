@@ -41,6 +41,7 @@ class AudioRecorder:
         self.audio_queue = Queue()
         self._running = True
         self.recording_thread = None
+        self.fatal_error: str | None = None
 
     def detect(self):
         """Detect microphone and system audio devices."""
@@ -98,6 +99,7 @@ class AudioRecorder:
                                     f"dtype={getattr(sys_chunk, 'dtype', 'N/A')}"
                                 )
                                 # Stop recording thread and trigger shutdown
+                                self.fatal_error = error_msg
                                 self._running = False
                                 os.kill(os.getpid(), signal.SIGTERM)
                                 return

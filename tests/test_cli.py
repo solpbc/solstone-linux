@@ -19,7 +19,11 @@ from solstone_linux.cli import (
     cmd_settings,
     cmd_status,
 )
-from solstone_linux.config import Config, DEFAULT_SERVER_URL
+from solstone_linux.config import (
+    Config,
+    DEFAULT_SERVER_URL,
+    load_config as real_load_config,
+)
 from solstone_linux.sync_health import ErrorType, SyncFacts, save_facts
 
 
@@ -152,6 +156,25 @@ def test_cmd_status_prints_sync_health(tmp_path: Path, monkeypatch, capsys):
     assert "Synced:" not in out
 
 
+def test_cmd_status_handles_corrupt_config(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text("[]")
+
+    monkeypatch.setattr(
+        cli_module,
+        "load_config",
+        lambda: real_load_config(base_dir=tmp_path, config_dir=config_dir),
+    )
+    monkeypatch.setattr(
+        cli_module.subprocess,
+        "run",
+        MagicMock(return_value=MagicMock(stdout="inactive\n")),
+    )
+
+    assert cmd_status(_args()) == 0
+
+
 def test_cmd_install_service_uses_environment_path(tmp_path: Path):
     binary = "/home/user/.local/pipx/venvs/solstone-linux/bin/solstone-linux"
     unit_path = tmp_path / ".config" / "systemd" / "user" / "solstone-linux.service"
@@ -167,6 +190,8 @@ def test_cmd_install_service_uses_environment_path(tmp_path: Path):
                         assert cmd_install_service(_args()) == 0
 
     unit_content = unit_path.read_text()
+    assert "PartOf=graphical-session.target" in unit_content
+    assert "WantedBy=graphical-session.target" in unit_content
     path_line = next(
         line
         for line in unit_content.splitlines()

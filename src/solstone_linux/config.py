@@ -26,6 +26,7 @@ DEFAULT_SEGMENT_INTERVAL = 300
 DEFAULT_SYNC_RETRY_DELAYS = [5, 30, 120, 300]
 DEFAULT_SYNC_MAX_RETRIES = 10
 DEFAULT_SYNC_STALE_THRESHOLD = 600
+INVALID_CONFIG_VALUE_WARNING = "Invalid config value for %s=%r; using default %r"
 
 
 def _default_config_dir() -> Path:
@@ -112,6 +113,28 @@ def _migrate_legacy_config(config: Config) -> None:
         pass
 
 
+def _load_int(data: dict, key: str, default: int) -> int:
+    if key not in data:
+        return default
+    value = data[key]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    logger.warning(INVALID_CONFIG_VALUE_WARNING, key, value, default)
+    return default
+
+
+def _load_int_list(data: dict, key: str, default: list[int]) -> list[int]:
+    if key not in data:
+        return list(default)
+    value = data[key]
+    if isinstance(value, list) and all(
+        isinstance(item, (int, float)) and not isinstance(item, bool) for item in value
+    ):
+        return [int(item) for item in value]
+    logger.warning(INVALID_CONFIG_VALUE_WARNING, key, value, default)
+    return list(default)
+
+
 def load_config(base_dir: Path | None = None, config_dir: Path | None = None) -> Config:
     """Load config from disk, returning defaults if not found."""
     config = Config()
@@ -132,26 +155,28 @@ def load_config(base_dir: Path | None = None, config_dir: Path | None = None) ->
         logger.warning(f"Failed to load config from {config_path}: {e}")
         return config
 
+    if not isinstance(data, dict):
+        logger.warning(f"Config at {config_path} is not a JSON object; using defaults")
+        return config
+
     config.server_url = data.get("server_url", "")
     config.key = data.get("key", "")
     config.stream = data.get("stream", "")
-    config.segment_interval = data.get("segment_interval", DEFAULT_SEGMENT_INTERVAL)
-    if "sync_retry_delays" in data:
-        config.sync_retry_delays = data["sync_retry_delays"]
-    if "sync_max_retries" in data:
-        config.sync_max_retries = data["sync_max_retries"]
-    try:
-        config.sync_stale_threshold = int(
-            data.get("sync_stale_threshold", DEFAULT_SYNC_STALE_THRESHOLD)
-        )
-    except (TypeError, ValueError):
-        config.sync_stale_threshold = DEFAULT_SYNC_STALE_THRESHOLD
-    try:
-        config.cache_retention_days = int(data.get("cache_retention_days", 7))
-    except (TypeError, ValueError):
-        config.cache_retention_days = 7
+    config.segment_interval = _load_int(
+        data, "segment_interval", DEFAULT_SEGMENT_INTERVAL
+    )
+    config.sync_retry_delays = _load_int_list(
+        data, "sync_retry_delays", config.sync_retry_delays
+    )
+    config.sync_max_retries = _load_int(
+        data, "sync_max_retries", config.sync_max_retries
+    )
+    config.sync_stale_threshold = _load_int(
+        data, "sync_stale_threshold", DEFAULT_SYNC_STALE_THRESHOLD
+    )
+    config.cache_retention_days = _load_int(data, "cache_retention_days", 7)
     config.chat_bridge_enabled = data.get("chat_bridge_enabled", True)
-    config.capture_framerate = max(1, min(int(data.get("capture_framerate", 1)), 10))
+    config.capture_framerate = max(1, min(_load_int(data, "capture_framerate", 1), 10))
     config.draw_cursor = bool(data.get("draw_cursor", True))
     config.start_paused = bool(data.get("start_paused", False))
 

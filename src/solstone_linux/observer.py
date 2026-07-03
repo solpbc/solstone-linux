@@ -30,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 from dbus_next.aio import MessageBus
-from dbus_next.constants import BusType
+from dbus_next.constants import BusType, NameFlag, RequestNameReply
 
 from . import __version__
 from .activity import (
@@ -42,7 +42,7 @@ from .audio_mute import is_sink_muted
 from .audio_recorder import AudioRecorder
 from .chat_bridge import run_chat_bridge
 from .config import Config
-from .recovery import write_segment_metadata
+from .recovery import recover_incomplete_segments, write_segment_metadata
 from .screencast import Screencaster, SilentStream, StreamInfo, X11Screencaster
 from .sync import SyncService
 from .upload import STREAM_TYPE, UploadClient
@@ -149,6 +149,25 @@ class Observer:
 
     async def setup(self) -> bool:
         """Initialize audio devices, DBus connection, and sync service."""
+        # Connect to DBus and acquire the singleton service name before any
+        # capture, registration, export, or recovery side effects.
+        self.bus = await MessageBus(bus_type=BusType.SESSION).connect()
+        logger.info("DBus connection established")
+
+        from .dbus_service import BUS_NAME, OBJECT_PATH, ObserverService
+
+        reply = await self.bus.request_name(BUS_NAME, NameFlag.DO_NOT_QUEUE)
+        if reply not in (
+            RequestNameReply.PRIMARY_OWNER,
+            RequestNameReply.ALREADY_OWNER,
+        ):
+            logger.error(
+                "Another solstone-linux observer is already running (owns %s). "
+                "Check: systemctl --user status solstone-linux",
+                BUS_NAME,
+            )
+            return False
+
         # Detect audio devices with retry (devices may still be initializing)
         detected = False
         for attempt in range(DETECT_RETRIES):
@@ -170,10 +189,6 @@ class Observer:
         self.audio_recorder.start_recording()
         logger.info("Audio recording started")
 
-        # Connect to DBus for activity detection
-        self.bus = await MessageBus(bus_type=BusType.SESSION).connect()
-        logger.info("DBus connection established")
-
         # Probe which activity signals are available (logging only)
         await probe_activity_services(self.bus)
 
@@ -190,11 +205,8 @@ class Observer:
         self.stream = self.config.stream
         self._sync = SyncService(self.config, self._client)
 
-        from .dbus_service import BUS_NAME, OBJECT_PATH, ObserverService
-
         self._dbus_service = ObserverService(self)
         self.bus.export(OBJECT_PATH, self._dbus_service)
-        await self.bus.request_name(BUS_NAME)
         self._sync._dbus_service = self._dbus_service
         logger.info("D-Bus service exported as %s", BUS_NAME)
 
@@ -561,35 +573,16 @@ class Observer:
             self.pause(0)
             logger.info("Starting in paused mode (start_paused=true)")
 
-        # Start initial capture based on mode (skipped when starting paused)
-        if not self._paused:
-            if new_mode == MODE_SCREENCAST and not self.cached_screen_locked:
-                try:
-                    await self.initialize_screencast()
-                except RuntimeError:
-                    self.running = False
-                    if sync_task:
-                        if self._sync:
-                            self._sync.stop()
-                        sync_task.cancel()
-                        try:
-                            await sync_task
-                        except asyncio.CancelledError:
-                            pass
-                    bridge_stop_event.set()
-                    if bridge_task:
-                        bridge_task.cancel()
-                        try:
-                            await bridge_task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    return
-            else:
-                self._start_segment()
-
-        logger.info(f"Initial mode: {self.current_mode}")
-
         try:
+            # Start initial capture based on mode (skipped when starting paused)
+            if not self._paused:
+                if new_mode == MODE_SCREENCAST and not self.cached_screen_locked:
+                    await self.initialize_screencast()
+                else:
+                    self._start_segment()
+
+            logger.info(f"Initial mode: {self.current_mode}")
+
             while self.running:
                 await asyncio.sleep(CHUNK_DURATION)
 
@@ -814,6 +807,12 @@ async def async_run(config: Config) -> int:
         logger.error("Observer setup failed")
         return 1
 
+    recovered = recover_incomplete_segments(
+        config.captures_dir, config.segment_interval
+    )
+    if recovered:
+        logger.info("Recovered %d incomplete segment(s)", recovered)
+
     try:
         await observer.main_loop()
     except RuntimeError as e:
@@ -821,6 +820,10 @@ async def async_run(config: Config) -> int:
         return 1
     except Exception as e:
         logger.error(f"Observer error: {e}", exc_info=True)
+        return 1
+
+    if observer.audio_recorder.fatal_error:
+        logger.error("Fatal audio error: %s", observer.audio_recorder.fatal_error)
         return 1
 
     return 0

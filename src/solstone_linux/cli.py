@@ -100,7 +100,6 @@ def _prompt_retention(current: int) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     """Start the capture loop + sync service."""
     from .observer import async_run
-    from .recovery import recover_incomplete_segments
 
     config = load_config()
     config.ensure_dirs()
@@ -114,13 +113,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if args.interval:
         config.segment_interval = args.interval
-
-    # Crash recovery before starting
-    recovered = recover_incomplete_segments(
-        config.captures_dir, config.segment_interval
-    )
-    if recovered:
-        print(f"Recovered {recovered} incomplete segment(s)")
 
     try:
         return asyncio.run(async_run(config))

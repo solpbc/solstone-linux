@@ -3,14 +3,27 @@
 
 """Tests for the observer module — segment lifecycle and local cache."""
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from dbus_next.constants import RequestNameReply
 
 from solstone_linux.config import Config
-from solstone_linux.observer import Observer
+from solstone_linux.observer import Observer, async_run
 from solstone_linux.recovery import write_segment_metadata
+
+
+def _fake_async_run_observer(config: Config) -> MagicMock:
+    observer = MagicMock()
+    observer.config = config
+    observer.running = True
+    observer.setup = AsyncMock(return_value=True)
+    observer.main_loop = AsyncMock(return_value=None)
+    observer.audio_recorder = MagicMock()
+    observer.audio_recorder.fatal_error = None
+    return observer
 
 
 class TestSegmentMetadata:
@@ -180,3 +193,171 @@ class TestStartPaused:
 
         assert observer._paused is False
         assert "segment" in capture_calls
+
+
+class TestServiceLifecycle:
+    @pytest.mark.asyncio
+    async def test_async_run_returns_1_when_main_loop_runtime_error(
+        self, tmp_path: Path
+    ):
+        config = Config(base_dir=tmp_path)
+        observer = _fake_async_run_observer(config)
+        observer.main_loop.side_effect = RuntimeError("boom")
+
+        with (
+            patch("solstone_linux.session_env.check_session_ready", return_value=None),
+            patch("solstone_linux.observer.Observer", return_value=observer),
+            patch(
+                "solstone_linux.observer.recover_incomplete_segments", return_value=0
+            ),
+        ):
+            result = await async_run(config)
+
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_async_run_returns_1_when_audio_recorder_has_fatal_error(
+        self, tmp_path: Path
+    ):
+        config = Config(base_dir=tmp_path)
+        observer = _fake_async_run_observer(config)
+
+        async def mark_fatal_error():
+            observer.audio_recorder.fatal_error = "Fatal audio format error"
+
+        observer.main_loop.side_effect = mark_fatal_error
+
+        with (
+            patch("solstone_linux.session_env.check_session_ready", return_value=None),
+            patch("solstone_linux.observer.Observer", return_value=observer),
+            patch(
+                "solstone_linux.observer.recover_incomplete_segments", return_value=0
+            ),
+        ):
+            result = await async_run(config)
+
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_async_run_returns_0_on_normal_main_loop_return(self, tmp_path: Path):
+        config = Config(base_dir=tmp_path)
+        observer = _fake_async_run_observer(config)
+
+        with (
+            patch("solstone_linux.session_env.check_session_ready", return_value=None),
+            patch("solstone_linux.observer.Observer", return_value=observer),
+            patch(
+                "solstone_linux.observer.recover_incomplete_segments", return_value=0
+            ) as recover_mock,
+        ):
+            result = await async_run(config)
+
+        assert result == 0
+        recover_mock.assert_called_once_with(
+            config.captures_dir, config.segment_interval
+        )
+
+    @pytest.mark.asyncio
+    async def test_async_run_returns_75_when_session_not_ready(self, tmp_path: Path):
+        config = Config(base_dir=tmp_path)
+
+        with (
+            patch(
+                "solstone_linux.session_env.check_session_ready",
+                return_value="missing display",
+            ),
+            patch("solstone_linux.observer.Observer") as observer_cls,
+            patch(
+                "solstone_linux.observer.recover_incomplete_segments"
+            ) as recover_mock,
+        ):
+            result = await async_run(config)
+
+        assert result == 75
+        observer_cls.assert_not_called()
+        recover_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_run_returns_1_and_skips_recovery_when_setup_fails(
+        self, tmp_path: Path
+    ):
+        config = Config(base_dir=tmp_path)
+        observer = _fake_async_run_observer(config)
+        observer.setup.return_value = False
+
+        with (
+            patch("solstone_linux.session_env.check_session_ready", return_value=None),
+            patch("solstone_linux.observer.Observer", return_value=observer),
+            patch(
+                "solstone_linux.observer.recover_incomplete_segments"
+            ) as recover_mock,
+        ):
+            result = await async_run(config)
+
+        assert result == 1
+        recover_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_initial_screencast_failure_runs_shutdown_and_propagates(
+        self, tmp_path: Path
+    ):
+        config = Config(base_dir=tmp_path)
+        config.chat_bridge_enabled = False
+        observer = Observer(config)
+        observer._sync = None
+        observer.audio_recorder = MagicMock()
+        observer.screencaster.stop = AsyncMock(return_value=([], []))
+
+        async def mock_check_activity():
+            return "screencast"
+
+        with (
+            patch.object(observer, "check_activity_status", mock_check_activity),
+            patch.object(
+                observer,
+                "initialize_screencast",
+                AsyncMock(side_effect=RuntimeError("portal failed")),
+            ),
+            patch("solstone_linux.observer.asyncio.sleep", AsyncMock()),
+        ):
+            with pytest.raises(RuntimeError):
+                await observer.main_loop()
+
+        observer.audio_recorder.stop_recording.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reply",
+        [RequestNameReply.IN_QUEUE, RequestNameReply.EXISTS],
+    )
+    async def test_setup_returns_false_when_dbus_name_taken(
+        self,
+        tmp_path: Path,
+        caplog,
+        reply: RequestNameReply,
+    ):
+        config = Config(base_dir=tmp_path)
+        observer = Observer(config)
+        observer.audio_recorder = MagicMock()
+        bus_mock = MagicMock()
+        bus_mock.request_name = AsyncMock(return_value=reply)
+        bus_mock.export = MagicMock()
+        bus_connection = MagicMock()
+        bus_connection.connect = AsyncMock(return_value=bus_mock)
+
+        with (
+            caplog.at_level(logging.ERROR),
+            patch("solstone_linux.observer.MessageBus", return_value=bus_connection),
+            patch("solstone_linux.observer.UploadClient") as upload_client_cls,
+        ):
+            result = await observer.setup()
+
+        assert result is False
+        observer.audio_recorder.detect.assert_not_called()
+        observer.audio_recorder.start_recording.assert_not_called()
+        upload_client_cls.assert_not_called()
+        bus_mock.export.assert_not_called()
+        assert any(
+            "Another solstone-linux observer is already running" in record.message
+            for record in caplog.records
+        )
