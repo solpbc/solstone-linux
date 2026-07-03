@@ -116,7 +116,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         config.segment_interval = args.interval
 
     # Crash recovery before starting
-    recovered = recover_incomplete_segments(config.captures_dir)
+    recovered = recover_incomplete_segments(
+        config.captures_dir, config.segment_interval
+    )
     if recovered:
         print(f"Recovered {recovered} incomplete segment(s)")
 

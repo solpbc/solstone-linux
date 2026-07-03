@@ -43,6 +43,39 @@ class TestSegmentDirStructure:
         assert str(config.restore_token_path).endswith("restore_token")
 
 
+class TestFinalizeSegment:
+    def test_finalize_segment_clamps_duration_to_interval(self, tmp_path: Path):
+        config = Config(base_dir=tmp_path)
+        config.segment_interval = 5
+        observer = Observer(config)
+        seg_dir = tmp_path / "captures" / "20260101" / "archon" / "120000.incomplete"
+        seg_dir.mkdir(parents=True)
+        (seg_dir / "audio.flac").write_bytes(b"audio")
+        observer.segment_dir = seg_dir
+        observer.start_at = 100.0
+
+        with patch("solstone_linux.observer.time.time", return_value=200.0):
+            segment_key = observer._finalize_segment()
+
+        assert segment_key is not None
+        assert segment_key.endswith("_5")
+
+    def test_finalize_segment_floor_is_one(self, tmp_path: Path):
+        config = Config(base_dir=tmp_path)
+        observer = Observer(config)
+        seg_dir = tmp_path / "captures" / "20260101" / "archon" / "120000.incomplete"
+        seg_dir.mkdir(parents=True)
+        (seg_dir / "audio.flac").write_bytes(b"audio")
+        observer.segment_dir = seg_dir
+        observer.start_at = 200.0
+
+        with patch("solstone_linux.observer.time.time", return_value=199.0):
+            segment_key = observer._finalize_segment()
+
+        assert segment_key is not None
+        assert segment_key.endswith("_1")
+
+
 class TestPauseResumeState:
     def test_observer_init_not_paused(self, tmp_path: Path):
         config = Config(base_dir=tmp_path)

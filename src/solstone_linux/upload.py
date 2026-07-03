@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 UPLOAD_TIMEOUT = 300
 EVENT_TIMEOUT = 30
 STREAM_TYPE = "desktop"
+OBSERVER_PROTOCOL_VERSION = 2
+OBSERVER_PROTOCOL_VERSION_HEADER = "X-Solstone-Protocol-Version"
+_CONTENT_TYPES = {".flac": "audio/flac", ".webm": "video/webm"}
 
 
 def _auth_headers(key: str) -> dict[str, str]:
@@ -41,12 +44,15 @@ class UploadResult(NamedTuple):
     success: bool
     duplicate: bool = False
     error_type: ErrorType | None = None
+    stored_key: str | None = None
 
 
 class QueryResult(NamedTuple):
     segments: list[dict] | None
     error_type: ErrorType | None = None
     status_code: int | None = None
+    legacy: bool = False
+    truncated: bool = False
 
 
 class UploadClient:
@@ -172,9 +178,10 @@ class UploadClient:
                         continue
                     fh = open(path, "rb")
                     file_handles.append(fh)
-                    files_data.append(
-                        ("files", (path.name, fh, "application/octet-stream"))
+                    content_type = _CONTENT_TYPES.get(
+                        path.suffix.lower(), "application/octet-stream"
                     )
+                    files_data.append(("files", (path.name, fh, content_type)))
 
                 if not files_data:
                     return UploadResult(False)
@@ -191,8 +198,16 @@ class UploadClient:
 
                 if response.status_code == 200:
                     resp_data = response.json()
-                    is_duplicate = resp_data.get("status") == "duplicate"
-                    return UploadResult(True, duplicate=is_duplicate)
+                    status = resp_data.get("status")
+                    is_duplicate = status == "duplicate"
+                    stored_key = (
+                        resp_data.get("existing_segment")
+                        if is_duplicate
+                        else resp_data.get("segment")
+                    )
+                    return UploadResult(
+                        True, duplicate=is_duplicate, stored_key=stored_key
+                    )
 
                 error_type = self.classify_error(response.status_code)
 
@@ -244,13 +259,29 @@ class UploadClient:
             return QueryResult(None, ErrorType.CLIENT, None)
 
         url = f"{self._url}/app/observer/ingest/segments/{day}"
+        headers = {
+            **_auth_headers(self._key),
+            OBSERVER_PROTOCOL_VERSION_HEADER: str(OBSERVER_PROTOCOL_VERSION),
+        }
 
         try:
-            resp = self._session.get(
-                url, headers=_auth_headers(self._key), timeout=EVENT_TIMEOUT
-            )
+            resp = self._session.get(url, headers=headers, timeout=EVENT_TIMEOUT)
             if resp.status_code == 200:
-                return QueryResult(resp.json(), None, resp.status_code)
+                body = resp.json()
+                if isinstance(body, list):
+                    return QueryResult(body, None, resp.status_code, legacy=True)
+                if isinstance(body, dict):
+                    items = body.get("items", [])
+                    total = body.get("total", len(items))
+                    truncated = total != len(items)
+                    return QueryResult(
+                        items,
+                        None,
+                        resp.status_code,
+                        legacy=False,
+                        truncated=truncated,
+                    )
+                return QueryResult([], None, resp.status_code)
             error_type = self.classify_error(resp.status_code)
             if error_type == ErrorType.AUTH:
                 if resp.status_code == 403:

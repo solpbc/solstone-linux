@@ -322,7 +322,7 @@ class Observer:
             return None
 
         _, time_part = _get_timestamp_parts(self.start_at)
-        duration = int(time.time() - self.start_at)
+        duration = max(1, min(int(time.time() - self.start_at), self.interval))
         segment_key = f"{time_part}_{duration}"
         final_dir = self.segment_dir.parent / segment_key
 

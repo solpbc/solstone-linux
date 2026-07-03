@@ -2,21 +2,26 @@
 # Copyright (c) 2026 sol pbc
 
 import asyncio
+import hashlib
 import json
 import os
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from solstone_linux.config import Config
-from solstone_linux.recovery import recover_incomplete_segments
+from solstone_linux.recovery import _recover_segment, recover_incomplete_segments
 from solstone_linux.sync import (
     CIRCUIT_COOLDOWN_INITIAL,
     CIRCUIT_COOLDOWN_MAX,
     SyncService,
+    _segment_proven_held,
 )
 from solstone_linux.sync_health import (
     ErrorType,
@@ -25,7 +30,54 @@ from solstone_linux.sync_health import (
     load_facts,
     save_facts,
 )
-from solstone_linux.upload import QueryResult, UploadClient
+from solstone_linux.upload import QueryResult, UploadClient, UploadResult
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _server_file(
+    path: Path,
+    *,
+    status: str = "present",
+    name: str | None = None,
+    submitted_name: str | None = None,
+    sha256: str | None = None,
+) -> dict:
+    record = {
+        "name": name or path.name,
+        "size": path.stat().st_size,
+        "sha256": sha256 or _sha256(path),
+        "status": status,
+    }
+    if submitted_name is not None:
+        record["submitted_name"] = submitted_name
+    return record
+
+
+def _server_item(
+    key: str,
+    segment_dir: Path,
+    *,
+    original_key: str | None = None,
+    files: list[dict] | None = None,
+    status: str = "present",
+) -> dict:
+    item = {
+        "key": key,
+        "observed": False,
+        "files": files
+        if files is not None
+        else [
+            _server_file(path, status=status)
+            for path in segment_dir.iterdir()
+            if path.is_file() and not path.name.startswith(".")
+        ],
+    }
+    if original_key is not None:
+        item["original_key"] = original_key
+    return item
 
 
 class TestRecovery:
@@ -87,6 +139,73 @@ class TestRecovery:
         # Duration should be based on metadata start timestamp, not mtime-ctime
         duration = int(dirs[0].split("_")[1])
         assert 55 <= duration <= 65  # ~60 seconds
+
+    def test_recovery_metadata_duration_clamps_to_window_ceiling(self, tmp_path: Path):
+        captures_dir = tmp_path / "captures"
+        seg_dir = captures_dir / "20260403" / "archon" / "140000.incomplete"
+        seg_dir.mkdir(parents=True)
+        (seg_dir / "screen.webm").write_bytes(b"\x00" * 100)
+        (seg_dir / ".metadata").write_text(
+            json.dumps({"start_timestamp": time.time() - 1000})
+        )
+        old_time = time.time() - 300
+        os.utime(seg_dir, (old_time, old_time))
+
+        recovered = recover_incomplete_segments(captures_dir, window_ceiling=60)
+
+        assert recovered == 1
+        assert (captures_dir / "20260403" / "archon" / "140000_60").exists()
+
+    def test_recovery_filesystem_fallback_duration_clamps_to_window_ceiling(
+        self, tmp_path: Path
+    ):
+        seg_dir = tmp_path / "captures" / "20260403" / "archon" / "140000.incomplete"
+        seg_dir.mkdir(parents=True)
+        (seg_dir / "screen.webm").write_bytes(b"\x00" * 100)
+        original_stat = Path.stat
+
+        def fake_stat(path: Path, *args, **kwargs):
+            if path == seg_dir:
+                return SimpleNamespace(st_mtime=1000, st_ctime=0)
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", fake_stat):
+            assert _recover_segment(seg_dir, window_ceiling=60) is True
+
+        assert (tmp_path / "captures" / "20260403" / "archon" / "140000_60").exists()
+
+    def test_recovery_bounds_duration_by_readable_flac(self, tmp_path: Path):
+        captures_dir = tmp_path / "captures"
+        seg_dir = captures_dir / "20260403" / "archon" / "140000.incomplete"
+        seg_dir.mkdir(parents=True)
+        frames = np.zeros(4 * 16000, dtype=np.float32)
+        sf.write(seg_dir / "audio.flac", frames, 16000, format="FLAC")
+        (seg_dir / ".metadata").write_text(
+            json.dumps({"start_timestamp": time.time() - 1000})
+        )
+        old_time = time.time() - 300
+        os.utime(seg_dir, (old_time, old_time))
+
+        recovered = recover_incomplete_segments(captures_dir, window_ceiling=300)
+
+        assert recovered == 1
+        assert (captures_dir / "20260403" / "archon" / "140000_4").exists()
+
+    def test_recovery_webm_only_uses_ceiling_clamped_elapsed(self, tmp_path: Path):
+        captures_dir = tmp_path / "captures"
+        seg_dir = captures_dir / "20260403" / "archon" / "140000.incomplete"
+        seg_dir.mkdir(parents=True)
+        (seg_dir / "screen.webm").write_bytes(b"\x00" * 100)
+        (seg_dir / ".metadata").write_text(
+            json.dumps({"start_timestamp": time.time() - 1000})
+        )
+        old_time = time.time() - 300
+        os.utime(seg_dir, (old_time, old_time))
+
+        recovered = recover_incomplete_segments(captures_dir, window_ceiling=60)
+
+        assert recovered == 1
+        assert (captures_dir / "20260403" / "archon" / "140000_60").exists()
 
     def test_skips_recent_incomplete(self, tmp_path: Path):
         captures_dir = tmp_path / "captures"
@@ -523,13 +642,15 @@ class TestSyncHealthFacts:
         sync = self._make_sync(tmp_path)
         older_day = "20260101"
         today = datetime.now().strftime("%Y%m%d")
-        self._create_segment(
+        segment = self._create_segment(
             sync._config.captures_dir, older_day, "archon", "120000_300"
         )
         sync._synced_days.add(older_day)
         sync._client.get_server_segments = MagicMock(
             side_effect=lambda day: QueryResult(
-                [{"key": "120000_300"}] if day == older_day else [], None, 200
+                [_server_item("120000_300", segment)] if day == older_day else [],
+                None,
+                200,
             )
         )
 
@@ -741,6 +862,280 @@ class TestQuarantineClientError:
         assert sync._consecutive_failures >= 5
 
 
+class TestReconcilePredicate:
+    def _make_sync(self, tmp_path: Path, retention: int = 7) -> SyncService:
+        config = Config(base_dir=tmp_path)
+        config.cache_retention_days = retention
+        config.ensure_dirs()
+        client = UploadClient(config)
+        return SyncService(config, client)
+
+    def _create_segment(
+        self, captures_dir: Path, day: str, stream: str, name: str
+    ) -> Path:
+        seg_dir = captures_dir / day / stream / name
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        (seg_dir / "screen.webm").write_bytes(b"screen")
+        return seg_dir
+
+    def _query_for(self, day: str, items: list[dict], **kwargs):
+        def fake_query(query_day: str):
+            if query_day == day:
+                return QueryResult(items, None, 200, **kwargs)
+            return QueryResult([], None, 200, **kwargs)
+
+        return fake_query
+
+    def test_present_status_with_mismatched_sha_is_not_proof(self, tmp_path: Path):
+        segment = self._create_segment(
+            tmp_path / "captures", "20260101", "archon", "120000_300"
+        )
+        item = _server_item(
+            "120000_300",
+            segment,
+            files=[_server_file(segment / "screen.webm", sha256="0" * 64)],
+        )
+
+        assert not _segment_proven_held(segment, item)
+
+    @pytest.mark.asyncio
+    async def test_present_status_with_mismatched_sha_uploads(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item(
+            "120000_300",
+            segment,
+            files=[_server_file(segment / "screen.webm", sha256="0" * 64)],
+        )
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        with patch.object(
+            sync, "_upload_segment", new_callable=AsyncMock, return_value=True
+        ) as upload:
+            await sync._sync()
+
+        upload.assert_called_once()
+
+    def test_swapped_sha_by_filename_is_not_proof(self, tmp_path: Path):
+        segment = self._create_segment(
+            tmp_path / "captures", "20260101", "archon", "120000_300"
+        )
+        audio = segment / "audio.flac"
+        audio.write_bytes(b"audio")
+        item = _server_item(
+            "120000_300",
+            segment,
+            files=[
+                _server_file(segment / "screen.webm", sha256=_sha256(audio)),
+                _server_file(audio, sha256=_sha256(segment / "screen.webm")),
+            ],
+        )
+
+        assert not _segment_proven_held(segment, item)
+
+    def test_relocated_matching_sha_is_held(self, tmp_path: Path):
+        segment = self._create_segment(
+            tmp_path / "captures", "20260101", "archon", "120000_300"
+        )
+        item = _server_item("120000_300", segment, status="relocated")
+
+        assert _segment_proven_held(segment, item)
+
+    def test_submitted_name_matches_local_filename(self, tmp_path: Path):
+        segment = tmp_path / "captures" / "20260101" / "archon" / "120000_300"
+        segment.mkdir(parents=True)
+        local_file = segment / "120000_300_audio.flac"
+        local_file.write_bytes(b"audio")
+        item = _server_item(
+            "120000_300",
+            segment,
+            files=[
+                _server_file(
+                    local_file,
+                    name="audio.flac",
+                    submitted_name="120000_300_audio.flac",
+                )
+            ],
+        )
+
+        assert _segment_proven_held(segment, item)
+
+    @pytest.mark.asyncio
+    async def test_missing_status_uploads_and_cleanup_keeps(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item("120000_300", segment, status="missing")
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        with patch.object(
+            sync, "_upload_segment", new_callable=AsyncMock, return_value=True
+        ) as upload:
+            await sync._sync()
+
+        upload.assert_called_once()
+        sync._synced_days.add(day)
+        await sync._cleanup_synced_segments()
+
+        assert segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_all_present_sha_match_skips_and_cleanup_deletes(
+        self, tmp_path: Path
+    ):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item("120000_300", segment)
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        with patch.object(sync, "_upload_segment", new_callable=AsyncMock) as upload:
+            await sync._sync()
+
+        upload.assert_not_called()
+        assert not segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_sha_cleanup_keeps(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item("120000_300", segment)
+        sync._synced_days.add(day)
+        sync._client.get_server_segments = MagicMock(
+            return_value=QueryResult([item], None, 200)
+        )
+
+        with patch("solstone_linux.sync._sha256_file", return_value=None):
+            await sync._cleanup_synced_segments()
+
+        assert segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_truncated_envelope_uploads_and_cleanup_keeps(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item("120000_300", segment)
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item], truncated=True)
+        )
+
+        with patch.object(
+            sync, "_upload_segment", new_callable=AsyncMock, return_value=True
+        ) as upload:
+            await sync._sync()
+
+        upload.assert_called_once()
+        sync._synced_days.add(day)
+        await sync._cleanup_synced_segments()
+
+        assert segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_legacy_listing_logs_once_and_cleanup_keeps(
+        self, tmp_path: Path, caplog
+    ):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        failed = self._create_segment(
+            sync._config.captures_dir, day, "archon", "130000_300.failed"
+        )
+        sync._client.get_server_segments = MagicMock(
+            return_value=QueryResult([{"key": "120000_300"}], None, 200, legacy=True)
+        )
+
+        with (
+            caplog.at_level("WARNING", logger="solstone_linux.sync"),
+            patch.object(sync, "_upload_segment", new_callable=AsyncMock) as upload,
+        ):
+            await sync._sync()
+
+        upload.assert_not_called()
+        assert segment.exists()
+        assert not failed.exists()
+        degraded = [
+            rec for rec in caplog.records if "pre-v2 bare array" in rec.getMessage()
+        ]
+        assert len(degraded) == 1
+
+    @pytest.mark.asyncio
+    async def test_duplicate_marker_stops_reupload(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path, retention=-1)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        sync._client.get_server_segments = MagicMock(
+            return_value=QueryResult([], None, 200)
+        )
+        sync._client.upload_segment = MagicMock(
+            return_value=UploadResult(True, duplicate=True, stored_key="existing_300")
+        )
+
+        await sync._sync()
+
+        assert (segment / ".server_key").read_text().strip() == "existing_300"
+        item = _server_item("existing_300", segment)
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+        sync._client.upload_segment.reset_mock()
+
+        await sync._sync()
+
+        sync._client.upload_segment.assert_not_called()
+        assert day in sync._synced_days
+
+    @pytest.mark.asyncio
+    async def test_collision_marker_and_original_key_reconcile(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path, retention=-1)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        sync._client.get_server_segments = MagicMock(
+            return_value=QueryResult([], None, 200)
+        )
+        sync._client.upload_segment = MagicMock(
+            return_value=UploadResult(True, stored_key="120000_301")
+        )
+
+        await sync._sync()
+
+        assert (segment / ".server_key").read_text().strip() == "120000_301"
+        item = _server_item("120000_301", segment, original_key="120000_300")
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+        sync._client.upload_segment.reset_mock()
+
+        await sync._sync()
+
+        sync._client.upload_segment.assert_not_called()
+        assert day in sync._synced_days
+
+
 class TestCleanupSyncedSegments:
     """Test cache retention cleanup of synced segments."""
 
@@ -765,10 +1160,10 @@ class TestCleanupSyncedSegments:
         sync = self._make_sync(tmp_path, retention=7)
         captures = sync._config.captures_dir
 
-        self._create_segment(captures, "20260101", "archon", "120000_300")
+        segment = self._create_segment(captures, "20260101", "archon", "120000_300")
         sync._synced_days.add("20260101")
 
-        server_response = [{"key": "120000_300"}]
+        server_response = [_server_item("120000_300", segment)]
         with patch(
             "asyncio.to_thread",
             new_callable=AsyncMock,
@@ -787,7 +1182,9 @@ class TestCleanupSyncedSegments:
         self._create_segment(captures, "20260101", "archon", "120000_300")
         sync._synced_days.add("20260101")
 
-        server_response = [{"key": "999999_300"}]
+        server_response = [
+            _server_item("999999_300", captures / "20260101" / "archon" / "120000_300")
+        ]
         with patch(
             "asyncio.to_thread",
             new_callable=AsyncMock,
@@ -836,10 +1233,10 @@ class TestCleanupSyncedSegments:
         captures = sync._config.captures_dir
 
         self._create_segment(captures, "20260101", "archon", "120000.incomplete")
-        self._create_segment(captures, "20260101", "archon", "140000_300")
+        complete = self._create_segment(captures, "20260101", "archon", "140000_300")
         sync._synced_days.add("20260101")
 
-        server_response = [{"key": "140000_300"}]
+        server_response = [_server_item("140000_300", complete)]
         with patch(
             "asyncio.to_thread",
             new_callable=AsyncMock,
@@ -875,10 +1272,10 @@ class TestCleanupSyncedSegments:
 
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
 
-        self._create_segment(captures, yesterday, "archon", "120000_300")
+        segment = self._create_segment(captures, yesterday, "archon", "120000_300")
         sync._synced_days.add(yesterday)
 
-        server_response = [{"key": "120000_300"}]
+        server_response = [_server_item("120000_300", segment)]
         with patch(
             "asyncio.to_thread",
             new_callable=AsyncMock,
@@ -913,10 +1310,10 @@ class TestCleanupSyncedSegments:
         sync = self._make_sync(tmp_path, retention=7)
         captures = sync._config.captures_dir
 
-        self._create_segment(captures, "20260101", "archon", "120000_300")
+        segment = self._create_segment(captures, "20260101", "archon", "120000_300")
         sync._synced_days.add("20260101")
 
-        server_response = [{"key": "120000_300"}]
+        server_response = [_server_item("120000_300", segment)]
         with patch(
             "asyncio.to_thread",
             new_callable=AsyncMock,
@@ -933,10 +1330,12 @@ class TestCleanupSyncedSegments:
         sync = self._make_sync(tmp_path, retention=7)
         captures = sync._config.captures_dir
 
-        self._create_segment(captures, "20260101", "archon", "120000_300")
+        segment = self._create_segment(captures, "20260101", "archon", "120000_300")
         sync._synced_days.add("20260101")
 
-        server_response = [{"key": "renamed_key", "original_key": "120000_300"}]
+        server_response = [
+            _server_item("renamed_key", segment, original_key="120000_300")
+        ]
         with patch(
             "asyncio.to_thread",
             new_callable=AsyncMock,

@@ -18,6 +18,7 @@ Refinements over tmux baseline:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -54,6 +55,84 @@ SYNCED_DAYS_MAX_AGE = 90
 
 # Flush durable contact at most this often during long healthy drains.
 CONTACT_FLUSH_INTERVAL = 30
+
+SERVER_KEY_FILENAME = ".server_key"
+
+
+def _eligible_files(segment_dir: Path) -> list[Path]:
+    """Files eligible for upload and reconcile."""
+    return [
+        f for f in segment_dir.iterdir() if f.is_file() and not f.name.startswith(".")
+    ]
+
+
+def _sha256_file(path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _segment_proven_held(segment_dir: Path, entry: dict) -> bool:
+    local_files = _eligible_files(segment_dir)
+    if not local_files:
+        return False
+
+    remote_by_name = {}
+    for remote_file in entry.get("files", []):
+        name = remote_file.get("submitted_name") or remote_file.get("name")
+        if name:
+            remote_by_name[name] = remote_file
+
+    for local_file in local_files:
+        remote_file = remote_by_name.get(local_file.name)
+        if remote_file is None:
+            return False
+        if remote_file.get("status") not in ("present", "relocated"):
+            return False
+        local_sha = _sha256_file(local_file)
+        if local_sha is None or local_sha != remote_file.get("sha256"):
+            return False
+
+    return True
+
+
+def _index_entries(items: list[dict]) -> dict[str, dict]:
+    entries = {}
+    for item in items:
+        key = item.get("key")
+        if key:
+            entries[key] = item
+        original_key = item.get("original_key")
+        if original_key:
+            entries[original_key] = item
+    return entries
+
+
+def _read_server_key(segment_dir: Path) -> str | None:
+    try:
+        key = (segment_dir / SERVER_KEY_FILENAME).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return key or None
+
+
+def _write_server_key(segment_dir: Path, key: str) -> None:
+    try:
+        (segment_dir / SERVER_KEY_FILENAME).write_text(f"{key}\n", encoding="utf-8")
+    except OSError as e:
+        logger.warning("Failed to write server key marker for %s: %s", segment_dir, e)
+
+
+def _lookup_entry(entries_by_key: dict[str, dict], segment_dir: Path) -> dict | None:
+    for key in (segment_dir.name, _read_server_key(segment_dir)):
+        if key and key in entries_by_key:
+            return entries_by_key[key]
+    return None
 
 
 class SyncService:
@@ -233,11 +312,10 @@ class SyncService:
                 continue
             self._record_contact()
 
-            server_keys: set[str] = set()
-            for seg in query_result.segments:
-                server_keys.add(seg.get("key", ""))
-                if "original_key" in seg:
-                    server_keys.add(seg["original_key"])
+            proof_available = not query_result.legacy and not query_result.truncated
+            entries_by_key = (
+                _index_entries(query_result.segments) if proof_available else {}
+            )
 
             deleted_day = 0
 
@@ -261,7 +339,12 @@ class SyncService:
                         deleted_day += 1
                         continue
 
-                    if name not in server_keys:
+                    entry = _lookup_entry(entries_by_key, seg_dir)
+                    if not (
+                        proof_available
+                        and entry is not None
+                        and _segment_proven_held(seg_dir, entry)
+                    ):
                         logger.warning(
                             "Cleanup: keeping %s/%s — not confirmed on server",
                             day,
@@ -499,6 +582,7 @@ class SyncService:
         pass_success = True
         pass_error_type: ErrorType | None = None
         pass_error_code: int | None = None
+        legacy_logged = False
 
         for day in sorted(days, reverse=True):
             if not self._running:
@@ -531,12 +615,18 @@ class SyncService:
                 continue
             self._record_contact()
 
-            # Build lookup
-            server_keys: set[str] = set()
-            for seg in query_result.segments:
-                server_keys.add(seg.get("key", ""))
-                if "original_key" in seg:
-                    server_keys.add(seg["original_key"])
+            if query_result.legacy:
+                if not legacy_logged:
+                    logger.warning(
+                        "Journal listing is pre-v2 bare array; per-file reconcile "
+                        "unavailable; syncing on key-membership; cleanup will not delete"
+                    )
+                    legacy_logged = True
+                key_set = set(_index_entries(query_result.segments).keys())
+                entries_by_key = {}
+            else:
+                key_set = set()
+                entries_by_key = _index_entries(query_result.segments)
 
             any_needed_upload = False
 
@@ -545,11 +635,24 @@ class SyncService:
                     break
 
                 segment_key = segment_dir.name
-                if segment_key in server_keys:
+                if query_result.legacy:
+                    server_key = _read_server_key(segment_dir)
+                    held = segment_key in key_set or (
+                        server_key is not None and server_key in key_set
+                    )
+                elif query_result.truncated:
+                    held = False
+                else:
+                    entry = _lookup_entry(entries_by_key, segment_dir)
+                    held = entry is not None and _segment_proven_held(
+                        segment_dir, entry
+                    )
+
+                if held:
                     continue
 
                 # Quarantine segments where all files are zero-byte (corrupt)
-                files = [f for f in segment_dir.iterdir() if f.is_file()]
+                files = _eligible_files(segment_dir)
                 if files and all(f.stat().st_size == 0 for f in files):
                     self._quarantine_segment(segment_dir, "all files zero-byte")
                     continue
@@ -630,7 +733,7 @@ class SyncService:
     async def _upload_segment(self, day: str, segment_dir: Path) -> bool:
         """Upload a single segment with retry logic."""
         segment_key = segment_dir.name
-        files = [f for f in segment_dir.iterdir() if f.is_file()]
+        files = _eligible_files(segment_dir)
         if not files:
             return True  # Nothing to upload
 
@@ -639,6 +742,8 @@ class SyncService:
         )
 
         if result.success:
+            if result.stored_key and result.stored_key != segment_key:
+                _write_server_key(segment_dir, result.stored_key)
             self._record_contact()
             logger.info(f"Uploaded: {day}/{segment_key} ({len(files)} files)")
             return True

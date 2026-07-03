@@ -18,6 +18,10 @@ import os
 import time
 from pathlib import Path
 
+import soundfile as sf
+
+from .config import DEFAULT_SEGMENT_INTERVAL
+
 logger = logging.getLogger(__name__)
 
 # Segments newer than this are assumed to be actively recording
@@ -54,7 +58,9 @@ def _read_segment_metadata(segment_dir: Path) -> dict | None:
         return None
 
 
-def recover_incomplete_segments(captures_dir: Path) -> int:
+def recover_incomplete_segments(
+    captures_dir: Path, window_ceiling: int = DEFAULT_SEGMENT_INTERVAL
+) -> int:
     """Scan captures dir for orphaned .incomplete directories and finalize them.
 
     For each .incomplete directory older than 2 minutes:
@@ -98,7 +104,7 @@ def recover_incomplete_segments(captures_dir: Path) -> int:
                     continue
 
                 logger.info(f"Recovering incomplete segment: {dir_name}")
-                if _recover_segment(segment_dir):
+                if _recover_segment(segment_dir, window_ceiling):
                     recovered += 1
 
     if recovered:
@@ -106,7 +112,24 @@ def recover_incomplete_segments(captures_dir: Path) -> int:
     return recovered
 
 
-def _recover_segment(segment_dir: Path) -> bool:
+def _readable_media_duration(files: list[Path]) -> float | None:
+    """Return the max duration across readable FLAC files, if any."""
+    durations = []
+    for path in files:
+        if path.suffix.lower() != ".flac" or not path.is_file():
+            continue
+        try:
+            info = sf.info(str(path))
+            if info.samplerate > 0:
+                durations.append(info.frames / info.samplerate)
+        except Exception:
+            continue
+    if not durations:
+        return None
+    return max(durations)
+
+
+def _recover_segment(segment_dir: Path, window_ceiling: int) -> bool:
     """Recover a single incomplete segment directory.
 
     Returns True on success.
@@ -118,12 +141,12 @@ def _recover_segment(segment_dir: Path) -> bool:
     metadata = _read_segment_metadata(segment_dir)
     if metadata and "start_timestamp" in metadata:
         start_ts = metadata["start_timestamp"]
-        duration = max(1, int(time.time() - start_ts))
+        duration = max(1, min(int(time.time() - start_ts), window_ceiling))
     else:
         # Fall back to filesystem timestamps
         try:
             st = segment_dir.stat()
-            duration = max(1, int(st.st_mtime - st.st_ctime))
+            duration = max(1, min(int(st.st_mtime - st.st_ctime), window_ceiling))
         except OSError:
             return _mark_failed(segment_dir)
 
@@ -135,6 +158,10 @@ def _recover_segment(segment_dir: Path) -> bool:
             return _mark_failed(segment_dir)
     except OSError:
         return _mark_failed(segment_dir)
+
+    readable_duration = _readable_media_duration(contents)
+    if readable_duration is not None:
+        duration = max(1, min(duration, int(readable_duration)))
 
     # Build final segment key with duration
     segment_key = f"{time_prefix}_{duration}"
