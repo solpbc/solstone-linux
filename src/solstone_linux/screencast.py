@@ -26,6 +26,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,8 @@ REQ_IFACE = "org.freedesktop.portal.Request"
 SESSION_IFACE = "org.freedesktop.portal.Session"
 
 MIN_HEALTHY_WEBM_BYTES = 2048
+STDERR_DRAIN_LINE_CAP = 500
+STDERR_DRAIN_JOIN_TIMEOUT = 2.0
 PORTAL_CALL_TIMEOUT = 30
 PORTAL_INTERACTIVE_TIMEOUT = 600
 
@@ -256,6 +259,42 @@ def _match_streams_to_monitors(streams: list[dict], monitors: list[dict]) -> lis
     return matched
 
 
+class _StderrDrain:
+    """Continuously drain a subprocess stderr pipe.
+
+    A chatty GStreamer pipeline can fill the OS pipe buffer (~64 KB); once
+    full, gst blocks on write(2) and stops producing frames while the
+    process stays alive — so is_healthy() would stay green while capture
+    silently stalls. Draining on a daemon thread (mirroring audio_recorder's
+    thread lifecycle) keeps the pipe empty. The thread ends on EOF when the
+    process exits; stop() reaps it via join().
+    """
+
+    def __init__(self, stderr, tag: str):
+        self._stderr = stderr
+        self._tag = tag
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            for raw in iter(self._stderr.readline, b""):
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line:
+                    continue
+                if len(line) > STDERR_DRAIN_LINE_CAP:
+                    line = line[:STDERR_DRAIN_LINE_CAP] + "…"
+                logger.debug("%s stderr: %s", self._tag, line)
+        except (ValueError, OSError):
+            # stderr closed underneath us (e.g. during stop()); done.
+            pass
+
+    def join(self, timeout: float = STDERR_DRAIN_JOIN_TIMEOUT) -> None:
+        self._thread.join(timeout=timeout)
+
+
 class Screencaster:
     """Portal-based multi-monitor screencast manager."""
 
@@ -266,7 +305,17 @@ class Screencaster:
         self.gst_process: subprocess.Popen | None = None
         self.streams: list[StreamInfo] = []
         self._started = False
+        self._stderr_drain: _StderrDrain | None = None
         self._restore_token_path = restore_token_path
+
+    def _close_pw_fd(self) -> None:
+        """Close the PipeWire fd exactly once, if held."""
+        if self.pw_fd is not None:
+            try:
+                os.close(self.pw_fd)
+            except OSError:
+                pass
+            self.pw_fd = None
 
     async def connect(self) -> bool:
         """
@@ -516,19 +565,36 @@ class Screencaster:
             self.streams.append(stream_obj)
 
             # GStreamer branch for this stream
-            branch = (
-                f"pipewiresrc fd={self.pw_fd} path={node_id} ! "
-                f"videorate ! video/x-raw,framerate={framerate}/1 ! "
-                f"videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 "
-                f"keyframe-max-dist=30 static-threshold=100 ! webmmux ! "
-                f"filesink location={file_path}"
-            )
+            branch = [
+                "pipewiresrc",
+                f"fd={self.pw_fd}",
+                f"path={node_id}",
+                "!",
+                "videorate",
+                "!",
+                f"video/x-raw,framerate={framerate}/1",
+                "!",
+                "videoconvert",
+                "!",
+                "vp8enc",
+                "end-usage=cq",
+                "cq-level=4",
+                "max-quantizer=15",
+                "keyframe-max-dist=30",
+                "static-threshold=100",
+                "!",
+                "webmmux",
+                "!",
+                "filesink",
+                f"location={file_path}",
+            ]
             pipeline_parts.append(branch)
 
             logger.info(f"  Stream {node_id}: {position} ({connector}) -> {file_path}")
 
-        pipeline_str = " ".join(pipeline_parts)
-        cmd = ["gst-launch-1.0", "-e"] + pipeline_str.split()
+        cmd = ["gst-launch-1.0", "-e"]
+        for branch in pipeline_parts:
+            cmd.extend(branch)
 
         try:
             self.gst_process = subprocess.Popen(
@@ -538,9 +604,11 @@ class Screencaster:
                 stderr=subprocess.PIPE,
             )
         except FileNotFoundError:
+            self._close_pw_fd()
             await self._close_session()
             raise RuntimeError("gst-launch-1.0 not found")
         except Exception as e:
+            self._close_pw_fd()
             await self._close_session()
             raise RuntimeError(f"Failed to start GStreamer: {e}")
 
@@ -548,12 +616,17 @@ class Screencaster:
         await asyncio.sleep(0.2)
         if self.gst_process.poll() is not None:
             stderr = (
-                self.gst_process.stderr.read().decode()
+                self.gst_process.stderr.read().decode("utf-8", errors="replace")
                 if self.gst_process.stderr
                 else ""
             )
+            self._close_pw_fd()
             await self._close_session()
             raise RuntimeError(f"GStreamer exited immediately: {stderr[:200]}")
+
+        if self.gst_process.stderr is not None:
+            self._stderr_drain = _StderrDrain(self.gst_process.stderr, "gst")
+            self._stderr_drain.start()
 
         self._started = True
         return self.streams
@@ -584,6 +657,10 @@ class Screencaster:
                 logger.warning(f"Error stopping GStreamer: {e}")
 
         self.gst_process = None
+
+        if self._stderr_drain is not None:
+            self._stderr_drain.join()
+            self._stderr_drain = None
 
         healthy: list[StreamInfo] = []
         silent: list[SilentStream] = []
@@ -623,12 +700,7 @@ class Screencaster:
                 logger.warning("could not unlink silent stream %s: %s", file_path, exc)
 
         # Close PipeWire fd
-        if self.pw_fd is not None:
-            try:
-                os.close(self.pw_fd)
-            except OSError:
-                pass
-            self.pw_fd = None
+        self._close_pw_fd()
 
         # Close portal session
         await self._close_session()
@@ -691,6 +763,7 @@ class X11Screencaster:
         self.gst_process: subprocess.Popen | None = None
         self.streams: list[StreamInfo] = []
         self._started = False
+        self._stderr_drain: _StderrDrain | None = None
 
     async def connect(self) -> bool:
         """Verify the X11 display and GStreamer are available."""
@@ -758,23 +831,43 @@ class X11Screencaster:
             endx = x1 + w - 1
             endy = y1 + h - 1
 
-            branch = (
-                f"ximagesrc display-name={display} "
-                f"startx={x1} starty={y1} endx={endx} endy={endy} "
-                f"use-damage=false show-pointer={show_pointer} ! "
-                f"videorate ! video/x-raw,framerate={framerate}/1 ! "
-                f"videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 "
-                f"keyframe-max-dist=30 static-threshold=100 ! webmmux ! "
-                f"filesink location={file_path}"
-            )
+            branch = [
+                "ximagesrc",
+                f"display-name={display}",
+                f"startx={x1}",
+                f"starty={y1}",
+                f"endx={endx}",
+                f"endy={endy}",
+                "use-damage=false",
+                f"show-pointer={show_pointer}",
+                "!",
+                "videorate",
+                "!",
+                f"video/x-raw,framerate={framerate}/1",
+                "!",
+                "videoconvert",
+                "!",
+                "vp8enc",
+                "end-usage=cq",
+                "cq-level=4",
+                "max-quantizer=15",
+                "keyframe-max-dist=30",
+                "static-threshold=100",
+                "!",
+                "webmmux",
+                "!",
+                "filesink",
+                f"location={file_path}",
+            ]
             pipeline_parts.append(branch)
 
             logger.info(
                 "  X11 stream %d: %s (%s) -> %s", idx, position, connector, file_path
             )
 
-        pipeline_str = " ".join(pipeline_parts)
-        cmd = ["gst-launch-1.0", "-e"] + pipeline_str.split()
+        cmd = ["gst-launch-1.0", "-e"]
+        for branch in pipeline_parts:
+            cmd.extend(branch)
 
         try:
             self.gst_process = subprocess.Popen(
@@ -790,11 +883,15 @@ class X11Screencaster:
         await asyncio.sleep(0.2)
         if self.gst_process.poll() is not None:
             stderr = (
-                self.gst_process.stderr.read().decode()
+                self.gst_process.stderr.read().decode("utf-8", errors="replace")
                 if self.gst_process.stderr
                 else ""
             )
             raise RuntimeError(f"GStreamer (X11) exited immediately: {stderr[:200]}")
+
+        if self.gst_process.stderr is not None:
+            self._stderr_drain = _StderrDrain(self.gst_process.stderr, "gst-x11")
+            self._stderr_drain.start()
 
         self._started = True
         return self.streams
@@ -819,6 +916,10 @@ class X11Screencaster:
                 logger.warning("Error stopping GStreamer (X11): %s", e)
 
         self.gst_process = None
+
+        if self._stderr_drain is not None:
+            self._stderr_drain.join()
+            self._stderr_drain = None
 
         healthy: list[StreamInfo] = []
         silent: list[SilentStream] = []
