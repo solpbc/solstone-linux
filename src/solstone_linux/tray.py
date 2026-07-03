@@ -13,7 +13,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from dbus_next.aio import MessageBus
+from dbus_fast.aio import MessageBus
 
 from . import __version__
 from .dbusmenu import DBusMenu, MenuItem, separator

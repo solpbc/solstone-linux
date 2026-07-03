@@ -3,7 +3,7 @@
 
 from unittest.mock import MagicMock
 
-from dbus_next import Variant
+from dbus_fast import Variant
 
 from solstone_linux.dbusmenu import DBusMenu, MenuItem
 

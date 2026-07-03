@@ -5,8 +5,8 @@
 import logging
 import time
 
-from dbus_next import PropertyAccess, Variant
-from dbus_next.service import (
+from dbus_fast import PropertyAccess, Variant
+from dbus_fast.service import (
     ServiceInterface,
     dbus_property,
     method,

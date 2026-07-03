@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 # ruff: noqa: F722, F821
-"""com.canonical.dbusmenu implementation over dbus-next.
+"""com.canonical.dbusmenu implementation over dbus-fast.
 
 This implements the D-Bus menu protocol used by StatusNotifierItem
 to export application menus to the desktop environment's tray host.
@@ -12,8 +12,8 @@ Reference: https://github.com/AyatanaIndicators/libdbusmenu/blob/master/libdbusm
 
 import logging
 
-from dbus_next import PropertyAccess, Variant
-from dbus_next.service import (
+from dbus_fast import PropertyAccess, Variant
+from dbus_fast.service import (
     ServiceInterface,
     dbus_property,
     method,

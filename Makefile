@@ -156,7 +156,7 @@ versions: .installed
 	$(PYTHON) --version
 	@echo ""
 	@echo "=== Installed packages ==="
-	@$(UV) pip list | grep -E "^(pytest|ruff|requests|numpy|soundfile|soundcard|dbus-next|PyGObject)" || true
+	@$(UV) pip list | grep -E "^(pytest|ruff|requests|numpy|soundfile|soundcard|dbus-fast|PyGObject)" || true
 
 release: ## Publish solstone-linux to PyPI (production)
 	@bash scripts/release.sh

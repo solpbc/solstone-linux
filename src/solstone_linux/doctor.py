@@ -123,9 +123,9 @@ def check_pipewire() -> CheckResult:
 
 
 async def check_portal() -> CheckResult:
-    from dbus_next.aio import MessageBus
-    from dbus_next.constants import BusType
-    from dbus_next.errors import AuthError, DBusError, InvalidAddressError
+    from dbus_fast.aio import MessageBus
+    from dbus_fast.constants import BusType
+    from dbus_fast.errors import AuthError, DBusError, InvalidAddressError
 
     async def _body() -> CheckResult:
         bus = None

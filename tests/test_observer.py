@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
-from dbus_next.constants import RequestNameReply
+from dbus_fast.constants import RequestNameReply
 
 from solstone_linux.config import Config
 from solstone_linux.observer import MODE_IDLE, Observer, async_run

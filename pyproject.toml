@@ -10,7 +10,7 @@ dependencies = [
     "numpy",
     "soundfile",
     "soundcard",
-    "dbus-next",
+    "dbus-fast>=5.0",
     "PyGObject",
 ]
 

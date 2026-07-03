@@ -8,7 +8,7 @@ import subprocess
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from dbus_next.errors import DBusError, InvalidMemberNameError
+from dbus_fast.errors import DBusError, InvalidMemberNameError
 
 from solstone_linux import activity
 

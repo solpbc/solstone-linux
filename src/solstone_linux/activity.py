@@ -17,9 +17,9 @@ import shutil
 import subprocess
 import weakref
 
-from dbus_next import Variant
-from dbus_next.aio import MessageBus
-from dbus_next.errors import (
+from dbus_fast import Variant
+from dbus_fast.aio import MessageBus
+from dbus_fast.errors import (
     DBusError,
     InvalidIntrospectionError,
     InvalidMemberNameError,
@@ -466,7 +466,7 @@ def get_monitor_geometries() -> list[dict]:
 
 
 def _unwrap_variants(obj):
-    """Recursively unwrap dbus-next Variants in nested DBus structures."""
+    """Recursively unwrap dbus-fast Variants in nested DBus structures."""
     if isinstance(obj, Variant):
         return _unwrap_variants(obj.value)
     if isinstance(obj, dict):

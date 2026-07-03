@@ -31,18 +31,14 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from dbus_next import Variant, introspection
-from dbus_next.aio import MessageBus
-from dbus_next.constants import BusType
-from dbus_next.errors import (
+from dbus_fast import Variant
+from dbus_fast.aio import MessageBus
+from dbus_fast.constants import BusType
+from dbus_fast.errors import (
     DBusError,
     InvalidIntrospectionError,
     InvalidMemberNameError,
 )
-
-# Workaround for dbus-next issue #122: portal has properties with hyphens
-# (e.g., "power-saver-enabled") which violate strict D-Bus naming validation.
-introspection.assert_member_name_valid = lambda name: None
 
 logger = logging.getLogger(__name__)
 

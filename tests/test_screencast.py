@@ -11,8 +11,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from dbus_next import Variant
-from dbus_next.errors import DBusError
+from dbus_fast import Variant
+from dbus_fast.errors import DBusError
 
 from solstone_linux import screencast as screencast_module
 from solstone_linux.screencast import (

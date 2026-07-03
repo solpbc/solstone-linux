@@ -287,7 +287,7 @@ class _FakeBus:
 @pytest.mark.asyncio
 async def test_check_portal_registered_returns_ok(monkeypatch):
     fake_instance = _FakeBus(iface=_FakeIface(owned=True))
-    monkeypatch.setattr("dbus_next.aio.MessageBus", lambda bus_type=None: fake_instance)
+    monkeypatch.setattr("dbus_fast.aio.MessageBus", lambda bus_type=None: fake_instance)
 
     result = await doctor.check_portal()
 
@@ -300,7 +300,7 @@ async def test_check_portal_registered_returns_ok(monkeypatch):
 async def test_check_portal_not_registered_returns_fail(monkeypatch):
     monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
     fake_instance = _FakeBus(iface=_FakeIface(owned=False))
-    monkeypatch.setattr("dbus_next.aio.MessageBus", lambda bus_type=None: fake_instance)
+    monkeypatch.setattr("dbus_fast.aio.MessageBus", lambda bus_type=None: fake_instance)
 
     result = await doctor.check_portal()
 
@@ -313,7 +313,7 @@ async def test_check_portal_not_registered_returns_fail(monkeypatch):
 @pytest.mark.asyncio
 async def test_check_portal_bus_unreachable_returns_fail(monkeypatch):
     fake_instance = _FakeBus(connect_exc=OSError("no bus"))
-    monkeypatch.setattr("dbus_next.aio.MessageBus", lambda bus_type=None: fake_instance)
+    monkeypatch.setattr("dbus_fast.aio.MessageBus", lambda bus_type=None: fake_instance)
 
     result = await doctor.check_portal()
 
@@ -326,7 +326,7 @@ async def test_check_portal_bus_unreachable_returns_fail(monkeypatch):
 async def test_check_portal_timeout_returns_fail(monkeypatch):
     fake_instance = _FakeBus(introspect_hang=True)
     monkeypatch.setattr(doctor, "_PORTAL_CHECK_TIMEOUT_SEC", 0.05)
-    monkeypatch.setattr("dbus_next.aio.MessageBus", lambda bus_type=None: fake_instance)
+    monkeypatch.setattr("dbus_fast.aio.MessageBus", lambda bus_type=None: fake_instance)
 
     result = await doctor.check_portal()
 
@@ -339,7 +339,7 @@ async def test_check_portal_timeout_returns_fail(monkeypatch):
 async def test_check_portal_x11_not_registered_returns_warn(monkeypatch):
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     fake_instance = _FakeBus(iface=_FakeIface(owned=False))
-    monkeypatch.setattr("dbus_next.aio.MessageBus", lambda bus_type=None: fake_instance)
+    monkeypatch.setattr("dbus_fast.aio.MessageBus", lambda bus_type=None: fake_instance)
 
     result = await doctor.check_portal()
 
@@ -350,7 +350,7 @@ async def test_check_portal_x11_not_registered_returns_warn(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_check_portal_tolerates_hyphenated_portal_properties(monkeypatch):
-    from dbus_next.errors import InvalidMemberNameError
+    from dbus_fast.errors import InvalidMemberNameError
 
     fake_instance = _FakeBus(
         iface=_FakeIface(owned=True),
@@ -358,7 +358,7 @@ async def test_check_portal_tolerates_hyphenated_portal_properties(monkeypatch):
             "invalid member name: power-saver-enabled"
         ),
     )
-    monkeypatch.setattr("dbus_next.aio.MessageBus", lambda bus_type=None: fake_instance)
+    monkeypatch.setattr("dbus_fast.aio.MessageBus", lambda bus_type=None: fake_instance)
 
     result = await doctor.check_portal()
 

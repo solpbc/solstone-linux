@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from dbus_next.service import ServiceInterface
+from dbus_fast.service import ServiceInterface
 
 from solstone_linux.capture_stats import compute_capture_stats
 from solstone_linux.config import Config

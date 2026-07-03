@@ -29,8 +29,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-from dbus_next.aio import MessageBus
-from dbus_next.constants import BusType, NameFlag, RequestNameReply
+from dbus_fast.aio import MessageBus
+from dbus_fast.constants import BusType, NameFlag, RequestNameReply
 
 from . import __version__
 from .activity import (

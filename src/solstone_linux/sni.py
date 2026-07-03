@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 # ruff: noqa: F722, F821
-"""StatusNotifierItem (SNI) implementation over dbus-next.
+"""StatusNotifierItem (SNI) implementation over dbus-fast.
 
 Implements the org.kde.StatusNotifierItem D-Bus interface for
 registering a tray icon with KDE Plasma's system tray or GNOME's
@@ -13,9 +13,9 @@ tray host — this code just exposes the data over D-Bus.
 
 import logging
 
-from dbus_next import PropertyAccess
-from dbus_next.aio import MessageBus
-from dbus_next.service import (
+from dbus_fast import PropertyAccess
+from dbus_fast.aio import MessageBus
+from dbus_fast.service import (
     ServiceInterface,
     dbus_property,
     method,

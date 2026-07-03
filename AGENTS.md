@@ -123,7 +123,7 @@ Python packages (in pyproject.toml):
 - `numpy` — Audio buffer manipulation and RMS computation
 - `soundfile` — FLAC encoding
 - `soundcard` — Audio device enumeration and recording
-- `dbus-next` — Async DBus client for portal and activity detection
+- `dbus-fast` — Async DBus client for portal and activity detection
 - `PyGObject` — GDK monitor geometry (installed from system)
 
 ## Data Paths

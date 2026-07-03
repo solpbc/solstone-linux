@@ -6,7 +6,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
-from dbus_next.service import ServiceInterface
+from dbus_fast.service import ServiceInterface
 
 from solstone_linux import cli as cli_module
 from solstone_linux import doctor
