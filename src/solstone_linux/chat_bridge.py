@@ -50,6 +50,12 @@ _HANDLED_EVENTS = frozenset(
 )
 RECONNECT_DELAYS = [1, 2, 4, 8, 16, 30]
 HEARTBEAT_STALE_SECONDS = 60
+SSE_CONNECT_TIMEOUT_SECONDS = 10
+# Read must outlast the soft-stale window; deriving it keeps the invariant fixed.
+SSE_READ_TIMEOUT_SECONDS = HEARTBEAT_STALE_SECONDS + 30
+NOTIFY_ACTION_KEY = "open"
+# A body that ran at least this long before crashing resets the restart ladder.
+HEALTHY_RUN_SECONDS = 60
 OPT_IN_POLL_SECONDS = 300
 PENDING_CAP = 32
 
@@ -152,7 +158,7 @@ def _sse_worker(
             url,
             stream=True,
             headers=_auth_headers(key),
-            timeout=(10, None),
+            timeout=(SSE_CONNECT_TIMEOUT_SECONDS, SSE_READ_TIMEOUT_SECONDS),
         )
         if response.status_code in (401, 403):
             _push_frame(
@@ -220,14 +226,14 @@ async def _handle_one_notification(
         "--wait",
         "--app-name",
         "solstone",
-        "--action=open=Open",
+        f"--action={NOTIFY_ACTION_KEY}=Open",
         NOTIFY_TITLE,
         req.summary,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        await proc.communicate()
+        stdout, _ = await proc.communicate()
     except asyncio.CancelledError:
         proc.terminate()
         try:
@@ -239,6 +245,11 @@ async def _handle_one_notification(
 
     if proc.returncode != 0:
         logger.debug("notify-send exited with status %s", proc.returncode)
+        return
+
+    action = stdout.decode("utf-8", "replace").strip() if stdout else ""
+    if action != NOTIFY_ACTION_KEY:
+        logger.debug("notify-send dismissed without action")
         return
 
     logger.info("Opening chat request: %s", req.request_id)
@@ -382,112 +393,123 @@ async def _sleep_reconnect(delay: int, stop_event: asyncio.Event) -> None:
         await asyncio.sleep(delay)
 
 
-async def run_chat_bridge(config: Config, stop_event: asyncio.Event) -> None:
+async def _run_bridge_body(config: Config, stop_event: asyncio.Event) -> None:
+    server_url = config.server_url.rstrip("/")
+    key = config.key
+    sse_url = f"{server_url}/app/observer/callosum"
+    pending: OrderedDict[str, PendingRequest] = OrderedDict()
+    opt_in_state = {"value": False}
+    opt_in_task = asyncio.create_task(_opt_in_poll_loop(server_url, key, opt_in_state))
+    reconnect_index = 0
+    is_stale = False
+    stale_logged = False
+    worker_task: asyncio.Task | None = None
+    thread_stop: threading.Event | None = None
+
     try:
-        if not config.chat_bridge_enabled:
-            return
-        if not config.server_url or not config.key:
-            logger.debug("Chat bridge disabled: server_url or key missing")
-            return
+        while not stop_event.is_set():
+            queue: asyncio.Queue = asyncio.Queue()
+            thread_stop = threading.Event()
+            loop = asyncio.get_running_loop()
+            worker_task = asyncio.create_task(
+                asyncio.to_thread(_sse_worker, sse_url, key, queue, loop, thread_stop)
+            )
+            last_frame_at = time.monotonic()
+            reconnect = False
 
-        server_url = config.server_url.rstrip("/")
-        key = config.key
-        sse_url = f"{server_url}/app/observer/callosum"
-        pending: OrderedDict[str, PendingRequest] = OrderedDict()
-        opt_in_state = {"value": False}
-        opt_in_task = asyncio.create_task(
-            _opt_in_poll_loop(server_url, key, opt_in_state)
-        )
-        reconnect_index = 0
-        is_stale = False
-        stale_logged = False
-        worker_task: asyncio.Task | None = None
-        thread_stop: threading.Event | None = None
-
-        try:
             while not stop_event.is_set():
-                queue: asyncio.Queue = asyncio.Queue()
-                thread_stop = threading.Event()
-                loop = asyncio.get_running_loop()
-                worker_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        _sse_worker, sse_url, key, queue, loop, thread_stop
+                try:
+                    frame = await asyncio.wait_for(queue.get(), timeout=5)
+                except asyncio.TimeoutError:
+                    is_stale, stale_logged = _mark_stale_if_needed(
+                        last_frame_at, is_stale, stale_logged
                     )
-                )
-                last_frame_at = time.monotonic()
-                reconnect = False
-
-                while not stop_event.is_set():
-                    try:
-                        frame = await asyncio.wait_for(queue.get(), timeout=5)
-                    except asyncio.TimeoutError:
-                        is_stale, stale_logged = _mark_stale_if_needed(
-                            last_frame_at, is_stale, stale_logged
-                        )
-                        if worker_task.done():
-                            reconnect = True
-                            break
-                        continue
-
-                    if frame.get("_terminal"):
-                        logger.error(
-                            "Chat bridge SSE authorization failed: status %s",
-                            frame.get("status"),
-                        )
-                        thread_stop.set()
-                        return
-
-                    if frame.get("_transport_error"):
-                        logger.debug(
-                            "Chat bridge transport error: %s", frame.get("error")
-                        )
+                    if worker_task.done():
                         reconnect = True
                         break
+                    continue
 
-                    last_frame_at = time.monotonic()
-                    reconnect_index = 0
-                    is_stale, stale_logged = _mark_live_frame(is_stale, stale_logged)
-
-                    if frame.get("_heartbeat"):
-                        continue
-
-                    data = frame.get("data")
-                    if not isinstance(data, str):
-                        continue
-                    try:
-                        payload = json.loads(data)
-                    except json.JSONDecodeError as e:
-                        logger.debug("Chat bridge frame JSON decode failed: %s", e)
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    await _dispatch_event(
-                        payload,
-                        pending,
-                        opt_in_state["value"],
-                        is_stale,
-                        config,
+                if frame.get("_terminal"):
+                    logger.error(
+                        "Chat bridge SSE authorization failed: status %s",
+                        frame.get("status"),
                     )
-
-                if thread_stop:
                     thread_stop.set()
-                await _await_worker(worker_task)
-                worker_task = None
-                if stop_event.is_set():
+                    return
+
+                if frame.get("_transport_error"):
+                    logger.debug("Chat bridge transport error: %s", frame.get("error"))
+                    reconnect = True
                     break
-                if reconnect:
-                    delay = RECONNECT_DELAYS[
-                        min(reconnect_index, len(RECONNECT_DELAYS) - 1)
-                    ]
-                    reconnect_index += 1
-                    logger.info("Chat bridge reconnecting in %ss", delay)
-                    await _sleep_reconnect(delay, stop_event)
-        finally:
+
+                last_frame_at = time.monotonic()
+                reconnect_index = 0
+                is_stale, stale_logged = _mark_live_frame(is_stale, stale_logged)
+
+                if frame.get("_heartbeat"):
+                    continue
+
+                data = frame.get("data")
+                if not isinstance(data, str):
+                    continue
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError as e:
+                    logger.debug("Chat bridge frame JSON decode failed: %s", e)
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                await _dispatch_event(
+                    payload,
+                    pending,
+                    opt_in_state["value"],
+                    is_stale,
+                    config,
+                )
+
             if thread_stop:
                 thread_stop.set()
-            opt_in_task.cancel()
-            await asyncio.gather(opt_in_task, return_exceptions=True)
-            await _cancel_pending_notifications(pending)
             await _await_worker(worker_task)
-    except Exception as e:
-        logger.error("Chat bridge crashed: %s", e, exc_info=True)
+            worker_task = None
+            if stop_event.is_set():
+                break
+            if reconnect:
+                delay = RECONNECT_DELAYS[
+                    min(reconnect_index, len(RECONNECT_DELAYS) - 1)
+                ]
+                reconnect_index += 1
+                logger.info("Chat bridge reconnecting in %ss", delay)
+                await _sleep_reconnect(delay, stop_event)
+    finally:
+        if thread_stop:
+            thread_stop.set()
+        opt_in_task.cancel()
+        await asyncio.gather(opt_in_task, return_exceptions=True)
+        await _cancel_pending_notifications(pending)
+        await _await_worker(worker_task)
+
+
+async def run_chat_bridge(config: Config, stop_event: asyncio.Event) -> None:
+    if not config.chat_bridge_enabled:
+        return
+    if not config.server_url or not config.key:
+        logger.debug("Chat bridge disabled: server_url or key missing")
+        return
+
+    supervise_index = 0
+    while not stop_event.is_set():
+        started = time.monotonic()
+        try:
+            await _run_bridge_body(config, stop_event)
+            return
+        except Exception as e:
+            logger.error("Chat bridge crashed: %s", e, exc_info=True)
+        if stop_event.is_set():
+            break
+        ran_for = time.monotonic() - started
+        if ran_for >= HEALTHY_RUN_SECONDS:
+            supervise_index = 0
+        delay = RECONNECT_DELAYS[min(supervise_index, len(RECONNECT_DELAYS) - 1)]
+        supervise_index += 1
+        logger.info("Chat bridge restarting in %ss", delay)
+        await _sleep_reconnect(delay, stop_event)

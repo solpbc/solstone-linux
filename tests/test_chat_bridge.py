@@ -5,6 +5,7 @@ import asyncio
 import errno
 import logging
 import os
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -17,14 +18,19 @@ from solstone_linux.chat_bridge import (
     EVENT_OWNER_CHAT_OPEN,
     EVENT_SOL_CHAT_REQUEST,
     EVENT_SOL_CHAT_REQUEST_SUPERSEDED,
+    HEALTHY_RUN_SECONDS,
     HEARTBEAT_STALE_SECONDS,
+    NOTIFY_ACTION_KEY,
     PENDING_CAP,
+    SSE_CONNECT_TIMEOUT_SECONDS,
+    SSE_READ_TIMEOUT_SECONDS,
     PendingRequest,
     _chat_url,
     _dispatch_event,
     _handle_one_notification,
     _mark_live_frame,
     _mark_stale_if_needed,
+    _sse_worker,
     _SseParser,
     _write_fifo,
     run_chat_bridge,
@@ -46,13 +52,14 @@ class FakeResponse:
 
 
 class FakeProc:
-    def __init__(self, returncode=0):
+    def __init__(self, returncode=0, stdout=b""):
         self.returncode = returncode
+        self._stdout = stdout
         self.terminated = False
         self.killed = False
 
     async def communicate(self):
-        return b"", b""
+        return self._stdout, b""
 
     async def wait(self):
         return self.returncode
@@ -345,6 +352,32 @@ def test_heartbeat_new_frame_recovers_from_stale(caplog):
 
 
 @pytest.mark.asyncio
+async def test_sse_worker_uses_finite_read_timeout():
+    queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    with patch(
+        "solstone_linux.chat_bridge.requests.get",
+        return_value=FakeResponse(status_code=200, lines=[]),
+    ) as get:
+        _sse_worker(
+            "https://server.test/app/observer/callosum",
+            "key-123",
+            queue,
+            loop,
+            threading.Event(),
+        )
+
+    timeout = get.call_args.kwargs["timeout"]
+    assert timeout == (SSE_CONNECT_TIMEOUT_SECONDS, SSE_READ_TIMEOUT_SECONDS)
+    assert timeout != (10, None)
+
+
+def test_read_timeout_exceeds_staleness_threshold():
+    assert SSE_READ_TIMEOUT_SECONDS > HEARTBEAT_STALE_SECONDS
+
+
+@pytest.mark.asyncio
 async def test_reconnect_transport_error_backoff_sequence():
     stop_event = asyncio.Event()
     delays = []
@@ -362,6 +395,42 @@ async def test_reconnect_transport_error_backoff_sequence():
                 await run_chat_bridge(_config(), stop_event)
 
     assert delays == [1, 2, 4, 8, 16, 30, 30]
+
+
+@pytest.mark.asyncio
+async def test_read_timeout_reconnects_and_clears_stale():
+    stop_event = asyncio.Event()
+    attempts = 0
+    delays = []
+
+    def worker(url, key, queue, loop, thread_stop):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {"_transport_error": True, "error": "read timed out"},
+            )
+            return
+        loop.call_soon_threadsafe(queue.put_nowait, {"_heartbeat": True})
+        loop.call_soon_threadsafe(
+            queue.put_nowait, {"_transport_error": True, "error": "stop"}
+        )
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        if len(delays) >= 2:
+            stop_event.set()
+
+    with patch("solstone_linux.chat_bridge._sse_worker", new=worker):
+        with patch("solstone_linux.chat_bridge._opt_in_poll_loop", new=_never_poll):
+            with patch(
+                "solstone_linux.chat_bridge.asyncio.sleep", side_effect=fake_sleep
+            ):
+                await run_chat_bridge(_config(), stop_event)
+
+    assert attempts == 2
+    assert delays == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -422,7 +491,7 @@ async def test_terminal_403_exits_without_reconnect(caplog):
 
 @pytest.mark.asyncio
 async def test_click_post_reachable_posts_then_xdg_open():
-    proc = FakeProc(returncode=0)
+    proc = FakeProc(returncode=0, stdout=f"{NOTIFY_ACTION_KEY}\n".encode("utf-8"))
     response = FakeResponse(status_code=200)
 
     with patch(
@@ -449,7 +518,7 @@ async def test_click_post_reachable_posts_then_xdg_open():
 
 @pytest.mark.asyncio
 async def test_click_post_unreachable_still_xdg_open():
-    proc = FakeProc(returncode=0)
+    proc = FakeProc(returncode=0, stdout=f"{NOTIFY_ACTION_KEY}\n".encode("utf-8"))
 
     with patch(
         "asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc
@@ -466,6 +535,45 @@ async def test_click_post_unreachable_still_xdg_open():
                 )
 
     popen.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dismissal_empty_stdout_no_ack_no_open():
+    proc = FakeProc(returncode=0, stdout=b"")
+
+    with patch(
+        "asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc
+    ):
+        with patch("solstone_linux.chat_bridge.requests.post") as post:
+            with patch("solstone_linux.chat_bridge.subprocess.Popen") as popen:
+                await _handle_one_notification(
+                    PendingRequest("req-1", "hello", "https://server.test/app/chat/x"),
+                    "https://server.test",
+                    "key-123",
+                )
+
+    post.assert_not_called()
+    popen.assert_not_called()
+
+
+@pytest.mark.parametrize("stdout", [b"nope", b"op"])
+@pytest.mark.asyncio
+async def test_nonaction_stdout_treated_as_dismissal(stdout):
+    proc = FakeProc(returncode=0, stdout=stdout)
+
+    with patch(
+        "asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc
+    ):
+        with patch("solstone_linux.chat_bridge.requests.post") as post:
+            with patch("solstone_linux.chat_bridge.subprocess.Popen") as popen:
+                await _handle_one_notification(
+                    PendingRequest("req-1", "hello", "https://server.test/app/chat/x"),
+                    "https://server.test",
+                    "key-123",
+                )
+
+    post.assert_not_called()
+    popen.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -503,8 +611,14 @@ def test_chat_url_missing_day_or_event_index_uses_today():
 
 
 @pytest.mark.asyncio
-async def test_bridge_crash_isolation_logs_and_returns(caplog):
+async def test_bridge_crash_restarts_after_backoff(caplog):
+    stop_event = asyncio.Event()
+    delays = []
+    worker_calls = 0
+
     def worker(url, key, queue, loop, thread_stop):
+        nonlocal worker_calls
+        worker_calls += 1
         loop.call_soon_threadsafe(
             queue.put_nowait,
             {
@@ -515,19 +629,179 @@ async def test_bridge_crash_isolation_logs_and_returns(caplog):
             },
         )
 
+    async def fake_sleep(delay):
+        delays.append(delay)
+        stop_event.set()
+
     with caplog.at_level(logging.ERROR):
         with patch("solstone_linux.chat_bridge._sse_worker", new=worker):
             with patch("solstone_linux.chat_bridge._opt_in_poll_loop", new=_never_poll):
                 with patch(
-                    "solstone_linux.chat_bridge._dispatch_event",
-                    new_callable=AsyncMock,
-                    side_effect=RuntimeError("boom"),
+                    "solstone_linux.chat_bridge.asyncio.sleep",
+                    side_effect=fake_sleep,
                 ):
-                    await run_chat_bridge(_config(), asyncio.Event())
+                    with patch(
+                        "solstone_linux.chat_bridge._dispatch_event",
+                        new_callable=AsyncMock,
+                        side_effect=RuntimeError("boom"),
+                    ):
+                        await run_chat_bridge(_config(), stop_event)
 
     error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert any("Chat bridge crashed" in r.message for r in error_records)
     assert any(r.exc_info for r in error_records)
+    assert delays == [1]
+    assert worker_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_supervision_backoff_climbs_then_healthy_reset():
+    stop_event = asyncio.Event()
+    delays = []
+    durations = [1, 1, 1, 1, 1, 1, 1, HEALTHY_RUN_SECONDS]
+    monotonic_values = []
+    now = 1000.0
+
+    for duration in durations:
+        monotonic_values.extend([now, now + duration])
+        now += duration + 1
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        if len(delays) >= len(durations):
+            stop_event.set()
+
+    body = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with patch("solstone_linux.chat_bridge._run_bridge_body", body):
+        with patch(
+            "solstone_linux.chat_bridge.time.monotonic",
+            side_effect=monotonic_values,
+        ):
+            with patch(
+                "solstone_linux.chat_bridge.asyncio.sleep", side_effect=fake_sleep
+            ):
+                await run_chat_bridge(_config(), stop_event)
+
+    assert body.await_count == len(durations)
+    assert delays == [1, 2, 4, 8, 16, 30, 30, 1]
+
+
+@pytest.mark.asyncio
+async def test_supervision_no_task_leak_across_restarts():
+    stop_event = asyncio.Event()
+    delays = []
+    worker_calls = 0
+    opt_in_entries = 0
+    opt_in_tasks = []
+    opt_in_alive_before = []
+    opt_in_cancelled = []
+    notify_tasks = []
+    notify_cancelled = []
+    wait_failures = []
+    condition = threading.Condition()
+    real_sleep = asyncio.sleep
+
+    async def fake_opt_in_poll_loop(server_url, key, state):
+        nonlocal opt_in_entries
+        task = asyncio.current_task()
+        opt_in_alive_before.append(sum(1 for t in opt_in_tasks if not t.done()))
+        opt_in_tasks.append(task)
+        state["value"] = True
+        with condition:
+            opt_in_entries += 1
+            condition.notify_all()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            opt_in_cancelled.append(task)
+            raise
+
+    async def fake_notify(req, server_url, key):
+        task = asyncio.current_task()
+        notify_tasks.append(task)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            notify_cancelled.append(task)
+            raise
+
+    async def crashing_dispatch(payload, pending, opt_in, is_stale, config):
+        await _dispatch_event(payload, pending, opt_in, is_stale, config)
+        await real_sleep(0)
+        raise RuntimeError("boom")
+
+    def worker(url, key, queue, loop, thread_stop):
+        nonlocal worker_calls
+        worker_calls += 1
+        with condition:
+            if not condition.wait_for(
+                lambda: opt_in_entries >= worker_calls, timeout=1
+            ):
+                wait_failures.append(worker_calls)
+        loop.call_soon_threadsafe(
+            queue.put_nowait,
+            {
+                "data": (
+                    '{"tract": "chat", "event": "sol_chat_request", '
+                    '"request_id": "req-1", "summary": "hello"}'
+                )
+            },
+        )
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        if len(delays) >= 3:
+            stop_event.set()
+
+    with patch("solstone_linux.chat_bridge._sse_worker", new=worker):
+        with patch(
+            "solstone_linux.chat_bridge._opt_in_poll_loop",
+            new=fake_opt_in_poll_loop,
+        ):
+            with patch(
+                "solstone_linux.chat_bridge._handle_one_notification",
+                new=fake_notify,
+            ):
+                with patch("solstone_linux.chat_bridge._write_fifo"):
+                    with patch(
+                        "solstone_linux.chat_bridge._dispatch_event",
+                        new=crashing_dispatch,
+                    ):
+                        with patch(
+                            "solstone_linux.chat_bridge.asyncio.sleep",
+                            side_effect=fake_sleep,
+                        ):
+                            await run_chat_bridge(_config(), stop_event)
+
+    assert wait_failures == []
+    assert worker_calls == 3
+    assert delays == [1, 2, 4]
+    assert len(opt_in_tasks) == worker_calls
+    assert opt_in_alive_before == [0, 0, 0]
+    assert len(opt_in_cancelled) == worker_calls
+    assert all(task.done() and task.cancelled() for task in opt_in_tasks)
+    assert len(notify_tasks) == worker_calls
+    assert len(notify_cancelled) == worker_calls
+    assert all(task.done() and task.cancelled() for task in notify_tasks)
+
+
+@pytest.mark.asyncio
+async def test_stop_during_supervision_backoff_no_restart():
+    stop_event = asyncio.Event()
+    delays = []
+    body = AsyncMock(side_effect=RuntimeError("boom"))
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        stop_event.set()
+
+    with patch("solstone_linux.chat_bridge._run_bridge_body", body):
+        with patch("solstone_linux.chat_bridge.asyncio.sleep", side_effect=fake_sleep):
+            await run_chat_bridge(_config(), stop_event)
+
+    assert body.await_count == 1
+    assert delays == [1]
 
 
 @pytest.mark.asyncio
