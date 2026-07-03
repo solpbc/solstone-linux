@@ -88,10 +88,6 @@ CAPTURE_STATS_REFRESH_INTERVAL = 60  # seconds
 MODE_IDLE = "idle"
 MODE_SCREENCAST = "screencast"
 
-# Audio detection retry
-DETECT_RETRIES = 3
-DETECT_RETRY_DELAY = 5  # seconds
-
 
 def _get_timestamp_parts(timestamp: float | None = None) -> tuple[str, str]:
     """Get date and time parts from timestamp."""
@@ -172,24 +168,9 @@ class Observer:
             )
             return False
 
-        # Detect audio devices with retry (devices may still be initializing)
-        detected = False
-        for attempt in range(DETECT_RETRIES):
-            if self.audio_recorder.detect():
-                detected = True
-                break
-            if attempt < DETECT_RETRIES - 1:
-                logger.info(
-                    "Audio detection attempt %d/%d failed, retrying in %ds",
-                    attempt + 1,
-                    DETECT_RETRIES,
-                    DETECT_RETRY_DELAY,
-                )
-                await asyncio.sleep(DETECT_RETRY_DELAY)
-        if not detected:
-            logger.error("Failed to detect audio devices")
-            return False
-
+        # Screen capture must not wait on audio; the recorder thread re-detects
+        # devices still initializing within REDETECT_INTERVAL.
+        self.audio_recorder.detect()
         self.audio_recorder.start_recording()
         logger.info("Audio recording started")
 
@@ -492,6 +473,7 @@ class Observer:
         audio_info = {
             "threshold_hits": self.threshold_hits,
             "will_save": self.threshold_hits >= MIN_HITS_FOR_SAVE,
+            "available": self.audio_recorder.audio_available,
         }
 
         # Activity info
