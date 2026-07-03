@@ -40,6 +40,7 @@ from .activity import (
 )
 from .audio_mute import is_sink_muted
 from .audio_recorder import AudioRecorder
+from .capture_stats import compute_capture_stats
 from .chat_bridge import run_chat_bridge
 from .config import Config
 from .recovery import recover_incomplete_segments, write_segment_metadata
@@ -81,6 +82,7 @@ PLATFORM = platform.system().lower()
 RMS_THRESHOLD = 0.01
 MIN_HITS_FOR_SAVE = 3
 CHUNK_DURATION = 5  # seconds
+CAPTURE_STATS_REFRESH_INTERVAL = 60  # seconds
 
 # Capture modes
 MODE_IDLE = "idle"
@@ -120,6 +122,8 @@ class Observer:
         self._start_mono = time.monotonic()
         self.threshold_hits = 0
         self.accumulated_audio_buffer = np.array([], dtype=np.float32).reshape(0, 2)
+        self.capture_stats = {"captures_today": 0, "total_size_mb": 0}
+        self._last_capture_stats_refresh = -CAPTURE_STATS_REFRESH_INTERVAL
 
         # Mode tracking
         self.current_mode = MODE_IDLE
@@ -254,6 +258,17 @@ class Observer:
         self.cached_is_active = screen_active or has_audio_activity
 
         return mode
+
+    async def _refresh_capture_stats(self) -> None:
+        today = datetime.datetime.now().strftime("%Y%m%d")
+        try:
+            self.capture_stats = await asyncio.to_thread(
+                compute_capture_stats,
+                self.config.captures_dir,
+                today,
+            )
+        except Exception:
+            logger.warning("Capture stats refresh failed", exc_info=True)
 
     def compute_rms(self, audio_buffer: np.ndarray) -> float:
         """Compute per-channel RMS and return maximum (stereo: mic=left, sys=right)."""
@@ -436,18 +451,17 @@ class Observer:
             return
         segment_dir_basename = self.segment_dir.name if self.segment_dir else ""
         duration_seconds = int(time.time() - self.start_at) if self.start_at else 0
-        self._client.relay_event(
-            "observe",
-            "stream_silent",
-            connector=silent.connector,
-            position=silent.position,
-            node_id=silent.node_id,
-            file_bytes=silent.file_bytes,
-            segment_dir=segment_dir_basename,
-            duration_seconds=duration_seconds,
-            host=HOST,
-            platform=PLATFORM,
-        )
+        fields = {
+            "connector": silent.connector,
+            "position": silent.position,
+            "node_id": silent.node_id,
+            "file_bytes": silent.file_bytes,
+            "segment_dir": segment_dir_basename,
+            "duration_seconds": duration_seconds,
+            "host": HOST,
+            "platform": PLATFORM,
+        }
+        self._client.enqueue_stream_silent(fields)
 
     def emit_status(self):
         """Emit observe.status event with current state (fire-and-forget)."""
@@ -495,6 +509,7 @@ class Observer:
             "activity": activity_info,
             "host": HOST,
             "platform": PLATFORM,
+            "paused": self._paused,
         }
         if self._client.is_registered and self.stream:
             status_fields.update(
@@ -508,7 +523,7 @@ class Observer:
             if self._sync is not None:
                 status_fields.update(self._sync.health_beacon_fields())
 
-        self._client.relay_event("observe", "status", **status_fields)
+        self._client.enqueue_status(status_fields)
 
     def _refresh_tray(self):
         """Refresh the SNI tray UI. Safe when tray is unavailable; disables on failure."""
@@ -585,6 +600,14 @@ class Observer:
 
             while self.running:
                 await asyncio.sleep(CHUNK_DURATION)
+
+                now = time.monotonic()
+                if (
+                    now - self._last_capture_stats_refresh
+                    >= CAPTURE_STATS_REFRESH_INTERVAL
+                ):
+                    self._last_capture_stats_refresh = now
+                    await self._refresh_capture_stats()
 
                 # Check auto-resume from timed pause
                 if (

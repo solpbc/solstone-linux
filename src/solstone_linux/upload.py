@@ -24,12 +24,14 @@ import requests
 
 from . import __version__
 from .config import Config
+from .event_sender import EventSender
 from .sync_health import ErrorType
 
 logger = logging.getLogger(__name__)
 
 UPLOAD_TIMEOUT = 300
 EVENT_TIMEOUT = 30
+EVENT_DRAIN_TIMEOUT = 3.0
 STREAM_TYPE = "desktop"
 OBSERVER_PROTOCOL_VERSION = 2
 OBSERVER_PROTOCOL_VERSION_HEADER = "X-Solstone-Protocol-Version"
@@ -64,6 +66,8 @@ class UploadClient:
         self._stream = config.stream
         self._revoked = False
         self._session = requests.Session()
+        self._event_session = requests.Session()
+        self._event_sender = EventSender(self.relay_event)
         self._retry_backoff = config.sync_retry_delays or [5, 30, 120, 300]
         # Respect configured retry cap — no hard min(config, 3)
         self._max_retries = config.sync_max_retries
@@ -301,7 +305,7 @@ class UploadClient:
         url = f"{self._url}/app/observer/ingest/event"
         payload = {"tract": tract, "event": event, **fields}
         try:
-            resp = self._session.post(
+            resp = self._event_session.post(
                 url,
                 json=payload,
                 headers=_auth_headers(self._key),
@@ -315,5 +319,15 @@ class UploadClient:
         except requests.RequestException:
             return False
 
+    def enqueue_status(self, fields: dict[str, Any]) -> None:
+        self._event_sender.submit_status(fields)
+        self._event_sender.start()
+
+    def enqueue_stream_silent(self, fields: dict[str, Any]) -> None:
+        self._event_sender.submit_stream_silent(fields)
+        self._event_sender.start()
+
     def stop(self) -> None:
+        self._event_sender.stop(EVENT_DRAIN_TIMEOUT)
+        self._event_session.close()
         self._session.close()

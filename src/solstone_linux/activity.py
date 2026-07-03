@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import weakref
 
 from dbus_next import Variant
 from dbus_next.aio import MessageBus
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _DBUS_PROBE_TIMEOUT_SEC = 2.0
 _POWER_SAVE_WARNED_BACKENDS: set[str] = set()
+_PROXY_CACHE = weakref.WeakKeyDictionary()
 
 _SERVICE_MISSING_ERRORS = (
     "org.freedesktop.DBus.Error.ServiceUnknown",
@@ -86,6 +88,27 @@ def _is_gnome_desktop() -> bool:
         token.strip().casefold() == "gnome"
         for token in os.environ.get("XDG_CURRENT_DESKTOP", "").split(":")
     )
+
+
+async def _cached_interface(bus: MessageBus, service: str, path: str, iface_name: str):
+    cache = _PROXY_CACHE.setdefault(bus, {})
+    key = (service, path, iface_name)
+    if key in cache:
+        return cache[key]
+
+    intro = await bus.introspect(service, path)
+    obj = bus.get_proxy_object(service, path, intro)
+    iface = obj.get_interface(iface_name)
+    cache[key] = iface
+    return iface
+
+
+def _invalidate_interface(
+    bus: MessageBus, service: str, path: str, iface_name: str
+) -> None:
+    cache = _PROXY_CACHE.get(bus)
+    if cache is not None:
+        cache.pop((service, path, iface_name), None)
 
 
 async def _name_has_owner(bus: MessageBus, bus_name: str) -> bool:
@@ -253,9 +276,12 @@ async def is_screen_locked(bus: MessageBus) -> bool:
     if not _is_gnome_desktop():
         # Try freedesktop.org ScreenSaver first (KDE kwin and other non-GNOME desktops)
         try:
-            intro = await bus.introspect(FDO_SCREENSAVER_BUS, FDO_SCREENSAVER_PATH)
-            obj = bus.get_proxy_object(FDO_SCREENSAVER_BUS, FDO_SCREENSAVER_PATH, intro)
-            iface = obj.get_interface(FDO_SCREENSAVER_IFACE)
+            iface = await _cached_interface(
+                bus,
+                FDO_SCREENSAVER_BUS,
+                FDO_SCREENSAVER_PATH,
+                FDO_SCREENSAVER_IFACE,
+            )
             return bool(await iface.call_get_active())
         except (
             DBusError,
@@ -263,6 +289,12 @@ async def is_screen_locked(bus: MessageBus) -> bool:
             InvalidIntrospectionError,
             OSError,
         ) as exc:
+            _invalidate_interface(
+                bus,
+                FDO_SCREENSAVER_BUS,
+                FDO_SCREENSAVER_PATH,
+                FDO_SCREENSAVER_IFACE,
+            )
             if not _is_service_missing(exc):
                 logger.warning(
                     "is_screen_locked FDO backend failed: service=%s path=%s: %s: %s",
@@ -274,9 +306,12 @@ async def is_screen_locked(bus: MessageBus) -> bool:
 
     # Fall back to GNOME ScreenSaver
     try:
-        intro = await bus.introspect(GNOME_SCREENSAVER_BUS, GNOME_SCREENSAVER_PATH)
-        obj = bus.get_proxy_object(GNOME_SCREENSAVER_BUS, GNOME_SCREENSAVER_PATH, intro)
-        iface = obj.get_interface(GNOME_SCREENSAVER_IFACE)
+        iface = await _cached_interface(
+            bus,
+            GNOME_SCREENSAVER_BUS,
+            GNOME_SCREENSAVER_PATH,
+            GNOME_SCREENSAVER_IFACE,
+        )
         return bool(await iface.call_get_active())
     except (
         DBusError,
@@ -284,6 +319,12 @@ async def is_screen_locked(bus: MessageBus) -> bool:
         InvalidIntrospectionError,
         OSError,
     ) as exc:
+        _invalidate_interface(
+            bus,
+            GNOME_SCREENSAVER_BUS,
+            GNOME_SCREENSAVER_PATH,
+            GNOME_SCREENSAVER_IFACE,
+        )
         if not _is_service_missing(exc):
             logger.warning(
                 "is_screen_locked GNOME backend failed: service=%s path=%s: %s: %s",
@@ -318,9 +359,12 @@ async def is_power_save_active(bus: MessageBus) -> bool:
 
     # Try GNOME Mutter DisplayConfig first
     try:
-        intro = await bus.introspect(DISPLAY_CONFIG_BUS, DISPLAY_CONFIG_PATH)
-        obj = bus.get_proxy_object(DISPLAY_CONFIG_BUS, DISPLAY_CONFIG_PATH, intro)
-        iface = obj.get_interface("org.freedesktop.DBus.Properties")
+        iface = await _cached_interface(
+            bus,
+            DISPLAY_CONFIG_BUS,
+            DISPLAY_CONFIG_PATH,
+            "org.freedesktop.DBus.Properties",
+        )
         mode_variant = await iface.call_get(DISPLAY_CONFIG_IFACE, "PowerSaveMode")
         mode = int(mode_variant.value)
         return mode != 0
@@ -330,6 +374,12 @@ async def is_power_save_active(bus: MessageBus) -> bool:
         InvalidIntrospectionError,
         OSError,
     ) as exc:
+        _invalidate_interface(
+            bus,
+            DISPLAY_CONFIG_BUS,
+            DISPLAY_CONFIG_PATH,
+            "org.freedesktop.DBus.Properties",
+        )
         if not _is_service_missing(exc):
             log_backend_failure_once(
                 "Mutter",
@@ -340,9 +390,12 @@ async def is_power_save_active(bus: MessageBus) -> bool:
 
     # Fall back to KDE Solid PowerManagement
     try:
-        intro = await bus.introspect(KDE_POWER_BUS, KDE_POWER_PATH)
-        obj = bus.get_proxy_object(KDE_POWER_BUS, KDE_POWER_PATH, intro)
-        iface = obj.get_interface(KDE_POWER_IFACE)
+        iface = await _cached_interface(
+            bus,
+            KDE_POWER_BUS,
+            KDE_POWER_PATH,
+            KDE_POWER_IFACE,
+        )
         return bool(await iface.call_is_lid_closed())
     except (
         DBusError,
@@ -350,6 +403,12 @@ async def is_power_save_active(bus: MessageBus) -> bool:
         InvalidIntrospectionError,
         OSError,
     ) as exc:
+        _invalidate_interface(
+            bus,
+            KDE_POWER_BUS,
+            KDE_POWER_PATH,
+            KDE_POWER_IFACE,
+        )
         if not _is_service_missing(exc):
             log_backend_failure_once("KDE", KDE_POWER_BUS, KDE_POWER_PATH, exc)
 

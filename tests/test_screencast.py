@@ -4,17 +4,73 @@
 """Tests for portal screencast stream matching and X11 capture."""
 
 import logging
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from dbus_next import Variant
 from dbus_next.errors import DBusError
 
+from solstone_linux import screencast as screencast_module
 from solstone_linux.screencast import (
     Screencaster,
     X11Screencaster,
     _match_streams_to_monitors,
 )
+
+
+def _make_signal_message(path: str, results: dict):
+    msg = MagicMock()
+    msg.message_type.name = "SIGNAL"
+    msg.path = path
+    msg.interface = screencast_module.REQ_IFACE
+    msg.member = "Response"
+    msg.body = [0, results]
+    return msg
+
+
+def _emit_portal_response(bus, token: str, results: dict):
+    handler = bus.add_message_handler.call_args.args[0]
+    handler(
+        _make_signal_message(
+            screencast_module._make_request_handle(bus, token), results
+        )
+    )
+
+
+def _make_fake_portal_bus():
+    bus = MagicMock()
+    bus.unique_name = ":1.77"
+    bus.introspect = AsyncMock(return_value=object())
+    bus.add_message_handler = MagicMock()
+    bus.remove_message_handler = MagicMock()
+
+    screencast_iface = MagicMock()
+    session_iface = MagicMock()
+    session_iface.call_close = AsyncMock(return_value=None)
+
+    def get_proxy_object(_service, path, _intro):
+        obj = MagicMock()
+        if path == screencast_module.PORTAL_PATH:
+            obj.get_interface.return_value = screencast_iface
+        else:
+            obj.get_interface.return_value = session_iface
+        return obj
+
+    bus.get_proxy_object.side_effect = get_proxy_object
+    return bus, screencast_iface, session_iface
+
+
+def _patch_monitor_fallbacks(monkeypatch):
+    monkeypatch.setattr(
+        "solstone_linux.activity.get_monitor_geometries",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "solstone_linux.activity.get_monitor_geometries_kscreen",
+        AsyncMock(return_value=[]),
+    )
 
 
 class TestMatchStreamsToMonitors:
@@ -205,6 +261,130 @@ async def test_close_session_call_close_failure_logs_and_clears_handle(caplog):
         "DBusError: broke"
     ]
     assert screencaster.session_handle is None
+
+
+@pytest.mark.asyncio
+async def test_start_times_out_unresolved_response_and_removes_handler(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(screencast_module, "PORTAL_CALL_TIMEOUT", 0.01)
+    monkeypatch.setattr(screencast_module, "PORTAL_INTERACTIVE_TIMEOUT", 0.01)
+    _patch_monitor_fallbacks(monkeypatch)
+    bus, screencast_iface, session_iface = _make_fake_portal_bus()
+    screencaster = Screencaster(restore_token_path=tmp_path / "token")
+    screencaster.bus = bus
+
+    async def create_session(opts):
+        token = opts["handle_token"].value
+        _emit_portal_response(
+            bus,
+            token,
+            {"session_handle": Variant("o", "/org/freedesktop/portal/session/fake")},
+        )
+
+    screencast_iface.call_create_session = AsyncMock(side_effect=create_session)
+    screencast_iface.call_select_sources = AsyncMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="SelectSources timed out"):
+        await screencaster.start(str(tmp_path))
+
+    session_iface.call_close.assert_awaited_once()
+    assert bus.add_message_handler.call_count == bus.remove_message_handler.call_count
+
+
+@pytest.mark.asyncio
+async def test_start_times_out_method_call_and_removes_handler(monkeypatch, tmp_path):
+    monkeypatch.setattr(screencast_module, "PORTAL_CALL_TIMEOUT", 0.01)
+    monkeypatch.setattr(screencast_module, "PORTAL_INTERACTIVE_TIMEOUT", 0.01)
+    _patch_monitor_fallbacks(monkeypatch)
+    bus, screencast_iface, session_iface = _make_fake_portal_bus()
+    screencaster = Screencaster(restore_token_path=tmp_path / "token")
+    screencaster.bus = bus
+
+    async def create_session(opts):
+        token = opts["handle_token"].value
+        _emit_portal_response(
+            bus,
+            token,
+            {"session_handle": Variant("o", "/org/freedesktop/portal/session/fake")},
+        )
+
+    async def hang_forever(*_args):
+        await asyncio.Future()
+
+    screencast_iface.call_create_session = AsyncMock(side_effect=create_session)
+    screencast_iface.call_select_sources = AsyncMock(side_effect=hang_forever)
+
+    with pytest.raises(RuntimeError, match="SelectSources timed out"):
+        await screencaster.start(str(tmp_path))
+
+    session_iface.call_close.assert_awaited_once()
+    assert bus.add_message_handler.call_count == bus.remove_message_handler.call_count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "restore_token,expected_response_timeout",
+    [
+        (None, 22),
+        ("saved-token", 11),
+    ],
+)
+async def test_start_selects_response_timeout_from_restore_token(
+    monkeypatch, tmp_path, restore_token, expected_response_timeout
+):
+    monkeypatch.setattr(screencast_module, "PORTAL_CALL_TIMEOUT", 11)
+    monkeypatch.setattr(screencast_module, "PORTAL_INTERACTIVE_TIMEOUT", 22)
+    _patch_monitor_fallbacks(monkeypatch)
+    if restore_token:
+        (tmp_path / "token").write_text(f"{restore_token}\n", encoding="utf-8")
+
+    timeouts = []
+    real_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout):
+        timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(screencast_module.asyncio, "wait_for", recording_wait_for)
+
+    bus, screencast_iface, _session_iface = _make_fake_portal_bus()
+    screencaster = Screencaster(restore_token_path=tmp_path / "token")
+    screencaster.bus = bus
+
+    async def create_session(opts):
+        token = opts["handle_token"].value
+        _emit_portal_response(
+            bus,
+            token,
+            {"session_handle": Variant("o", "/org/freedesktop/portal/session/fake")},
+        )
+
+    async def select_sources(_session_handle, _opts):
+        token = _opts["handle_token"].value
+        _emit_portal_response(bus, token, {})
+
+    async def start_session(_session_handle, _parent_window, opts):
+        token = opts["handle_token"].value
+        _emit_portal_response(bus, token, {"streams": [(10, {})]})
+
+    fd_obj = MagicMock()
+    fd_obj.take.return_value = 42
+    process = MagicMock()
+    process.poll.return_value = None
+    process.stderr = None
+    screencast_iface.call_create_session = AsyncMock(side_effect=create_session)
+    screencast_iface.call_select_sources = AsyncMock(side_effect=select_sources)
+    screencast_iface.call_start = AsyncMock(side_effect=start_session)
+    screencast_iface.call_open_pipe_wire_remote = AsyncMock(return_value=fd_obj)
+
+    with patch("solstone_linux.screencast.subprocess.Popen", return_value=process):
+        streams = await screencaster.start(str(tmp_path))
+
+    screencaster.pw_fd = None
+    assert len(streams) == 1
+    assert timeouts[4] == expected_response_timeout
+    assert timeouts[6] == expected_response_timeout
 
 
 class TestX11Screencaster:

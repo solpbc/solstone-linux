@@ -12,7 +12,6 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from datetime import datetime
 
 from dbus_next.aio import MessageBus
 
@@ -96,7 +95,6 @@ class TrayApp:
         self.error = ""
         self.paused_remaining = 0
         self.stats = {}
-        self._last_stats_time = 0.0
 
         # Menu item references for dynamic updates
         self._status_header: MenuItem = None
@@ -160,7 +158,7 @@ class TrayApp:
 
         return True
 
-    def update(self, force_stats=False):
+    def update(self):
         """Read observer state and update tray display."""
         obs = self._observer
         now = time.monotonic()
@@ -188,45 +186,12 @@ class TrayApp:
         else:
             pause_remaining = max(0, int(obs._pause_until - now))
 
-        # Compute stats (throttled — filesystem walk every 60s)
-        if force_stats or now - self._last_stats_time >= 60:
-            self._last_stats_time = now
-            captures_today = 0
-            total_size = 0
-            today = datetime.now().strftime("%Y%m%d")
-            captures_dir = obs.config.captures_dir
-
-            try:
-                if captures_dir.exists():
-                    for day_dir in captures_dir.iterdir():
-                        if not day_dir.is_dir():
-                            continue
-                        for stream_dir in day_dir.iterdir():
-                            if not stream_dir.is_dir():
-                                continue
-                            for seg_dir in stream_dir.iterdir():
-                                if not seg_dir.is_dir():
-                                    continue
-                                if seg_dir.name.endswith(".incomplete"):
-                                    continue
-                                if seg_dir.name.endswith(".failed"):
-                                    continue
-                                if day_dir.name == today:
-                                    captures_today += 1
-                                for file_path in seg_dir.iterdir():
-                                    if file_path.is_file():
-                                        total_size += file_path.stat().st_size
-            except OSError:
-                pass
-
-            total_size_mb = int(total_size / (1024 * 1024))
-            uptime_seconds = int(now - obs._start_mono)
-
-            self.stats = {
-                "captures_today": captures_today,
-                "total_size_mb": total_size_mb,
-                "uptime_seconds": uptime_seconds,
-            }
+        capture_stats = obs.capture_stats
+        self.stats = {
+            "captures_today": capture_stats["captures_today"],
+            "total_size_mb": capture_stats["total_size_mb"],
+            "uptime_seconds": int(now - obs._start_mono),
+        }
 
         self._update_status(status, health)
         self._update_sync(health)
@@ -241,7 +206,7 @@ class TrayApp:
         """
         before = self.menu._props_emitted
         try:
-            self.update(force_stats=True)
+            self.update()
         except Exception:
             log.warning("Tray on-open recompute failed", exc_info=True)
             return False

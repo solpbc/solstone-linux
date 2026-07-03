@@ -4,7 +4,6 @@
 
 import logging
 import time
-from datetime import datetime
 
 from dbus_next import PropertyAccess, Variant
 from dbus_next.service import (
@@ -94,40 +93,12 @@ class ObserverService(ServiceInterface):
 
     @method()
     def GetStats(self) -> "a{sv}":
-        captures_today = 0
-        total_size = 0
-        today = datetime.now().strftime("%Y%m%d")
-        captures_dir = self._observer.config.captures_dir
-
-        try:
-            if captures_dir.exists():
-                for day_dir in captures_dir.iterdir():
-                    if not day_dir.is_dir():
-                        continue
-                    for stream_dir in day_dir.iterdir():
-                        if not stream_dir.is_dir():
-                            continue
-                        for seg_dir in stream_dir.iterdir():
-                            if not seg_dir.is_dir():
-                                continue
-                            if seg_dir.name.endswith(".incomplete"):
-                                continue
-                            if seg_dir.name.endswith(".failed"):
-                                continue
-                            if day_dir.name == today:
-                                captures_today += 1
-                            for file_path in seg_dir.iterdir():
-                                if file_path.is_file():
-                                    total_size += file_path.stat().st_size
-        except OSError:
-            pass
-
-        total_size_mb = int(total_size / (1024 * 1024))
+        stats = self._observer.capture_stats
         uptime_seconds = int(time.monotonic() - self._observer._start_mono)
 
         return {
-            "captures_today": Variant("i", captures_today),
-            "total_size_mb": Variant("i", total_size_mb),
+            "captures_today": Variant("i", stats["captures_today"]),
+            "total_size_mb": Variant("i", stats["total_size_mb"]),
             "uptime_seconds": Variant("i", uptime_seconds),
         }
 

@@ -266,6 +266,41 @@ class TestIsScreenLocked:
             "DBusError: broke",
         ]
 
+    @pytest.mark.asyncio
+    async def test_is_screen_locked_caches_and_invalidates_same_bus(self):
+        activity._PROXY_CACHE.clear()
+        bus = MagicMock()
+        bus.introspect = AsyncMock(return_value=object())
+        fdo_iface = MagicMock()
+        fdo_iface.call_get_active = AsyncMock(
+            side_effect=[False, False, _no_reply("broke"), False]
+        )
+        gnome_iface = MagicMock()
+        gnome_iface.call_get_active = AsyncMock(return_value=False)
+
+        def get_proxy_object(service, _path, _intro):
+            if service == activity.FDO_SCREENSAVER_BUS:
+                return _make_proxy_with_interface(fdo_iface)
+            return _make_proxy_with_interface(gnome_iface)
+
+        bus.get_proxy_object.side_effect = get_proxy_object
+
+        assert await activity.is_screen_locked(bus) is False
+        assert await activity.is_screen_locked(bus) is False
+        assert bus.introspect.await_count == 1
+
+        assert await activity.is_screen_locked(bus) is False
+        assert bus.introspect.await_count == 2
+        assert bus.introspect.await_args_list[-1] == call(
+            activity.GNOME_SCREENSAVER_BUS, activity.GNOME_SCREENSAVER_PATH
+        )
+
+        assert await activity.is_screen_locked(bus) is False
+        assert bus.introspect.await_count == 3
+        assert bus.introspect.await_args_list[-1] == call(
+            activity.FDO_SCREENSAVER_BUS, activity.FDO_SCREENSAVER_PATH
+        )
+
 
 class TestIsPowerSaveActive:
     """Test power save fallback order."""

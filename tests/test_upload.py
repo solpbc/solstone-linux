@@ -152,12 +152,12 @@ def test_upload_segment_returns_stored_key(
 def test_relay_event_uses_bearer_and_keyless_route(tmp_path: Path):
     config = Config(base_dir=tmp_path, server_url="http://localhost:9999", key="K")
     client = UploadClient(config)
-    client._session = MagicMock()
-    client._session.post.return_value = MagicMock(status_code=200)
+    client._event_session = MagicMock()
+    client._event_session.post.return_value = MagicMock(status_code=200)
 
     assert client.relay_event("observe", "status", mode="idle") is True
 
-    call = client._session.post.call_args
+    call = client._event_session.post.call_args
     assert call.args[0].endswith("/app/observer/ingest/event")
     assert call.kwargs["headers"] == {"Authorization": "Bearer K"}
     assert call.kwargs["json"] == {

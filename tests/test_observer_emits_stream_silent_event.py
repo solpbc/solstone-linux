@@ -28,9 +28,9 @@ def test_emits_with_full_fields(tmp_path: Path):
 
     observer._emit_stream_silent(_silent_stream())
 
-    observer._client.relay_event.assert_called_once()
-    args, kwargs = observer._client.relay_event.call_args
-    assert args == ("observe", "stream_silent")
+    observer._client.enqueue_stream_silent.assert_called_once()
+    args, _ = observer._client.enqueue_stream_silent.call_args
+    kwargs = args[0]
     assert kwargs["connector"] == "HDMI-1"
     assert kwargs["position"] == "right"
     assert kwargs["node_id"] == 42
@@ -56,5 +56,6 @@ def test_segment_dir_empty_when_none(tmp_path: Path):
 
     observer._emit_stream_silent(_silent_stream())
 
-    _, kwargs = observer._client.relay_event.call_args
+    args, _ = observer._client.enqueue_stream_silent.call_args
+    kwargs = args[0]
     assert kwargs["segment_dir"] == ""

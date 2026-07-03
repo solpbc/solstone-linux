@@ -51,6 +51,7 @@ def _make_observer(config: Config, health):
     observer.stream = "test-stream"
     observer._sync = _FakeSync(health)
     observer._dbus_service = None
+    observer.capture_stats = {"captures_today": 0, "total_size_mb": 0}
     return observer
 
 

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 from dbus_next.service import ServiceInterface
 
+from solstone_linux.capture_stats import compute_capture_stats
 from solstone_linux.config import Config
 from solstone_linux.dbus_service import ObserverService
 from solstone_linux.sync import SyncService
@@ -44,6 +45,7 @@ def _make_observer(captures_dir: Path | None = None):
     observer.stream = "test-stream"
     observer._sync = None
     observer._dbus_service = None
+    observer.capture_stats = {"captures_today": 0, "total_size_mb": 0}
     return observer
 
 
@@ -170,21 +172,44 @@ class TestSegmentTimerAndPauseRemaining:
         assert _get_prop(service, "PauseRemaining") == 0
 
 
-class TestGetStats:
-    def test_returns_stats_dict(self, tmp_path: Path):
+class TestComputeCaptureStats:
+    def test_returns_walk_counts(self, tmp_path: Path):
         captures_dir = tmp_path / "captures"
         today = datetime.now().strftime("%Y%m%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
         segment_dir = captures_dir / today / "stream-a" / "120000_300"
+        incomplete_dir = captures_dir / today / "stream-a" / "120500.incomplete"
+        failed_dir = captures_dir / today / "stream-a" / "121000_300.failed"
+        old_segment = captures_dir / yesterday / "stream-a" / "130000_300"
         segment_dir.mkdir(parents=True)
+        incomplete_dir.mkdir(parents=True)
+        failed_dir.mkdir(parents=True)
+        old_segment.mkdir(parents=True)
         (segment_dir / "audio.flac").write_bytes(b"x" * (1024 * 1024))
+        (incomplete_dir / "audio.flac").write_bytes(b"x" * (1024 * 1024))
+        (failed_dir / "audio.flac").write_bytes(b"x" * (1024 * 1024))
+        (old_segment / "audio.flac").write_bytes(b"x")
 
-        observer = _make_observer(captures_dir)
+        stats = compute_capture_stats(captures_dir, today)
+
+        assert stats == {"captures_today": 1, "total_size_mb": 1}
+
+    def test_empty_captures(self, tmp_path: Path):
+        stats = compute_capture_stats(tmp_path / "captures", "20260101")
+
+        assert stats == {"captures_today": 0, "total_size_mb": 0}
+
+
+class TestGetStats:
+    def test_returns_cached_stats_dict(self, tmp_path: Path):
+        observer = _make_observer(tmp_path / "captures")
+        observer.capture_stats = {"captures_today": 7, "total_size_mb": 42}
         service = ObserverService(observer)
 
         stats = _call_method(service, "GetStats")
 
-        assert stats["captures_today"].value == 1
-        assert stats["total_size_mb"].value == 1
+        assert stats["captures_today"].value == 7
+        assert stats["total_size_mb"].value == 42
         assert "synced_days" not in stats
         assert stats["uptime_seconds"].value >= 0
 
@@ -198,18 +223,9 @@ class TestGetStats:
         assert stats["total_size_mb"].value == 0
         assert "synced_days" not in stats
 
-    def test_counts_today_only(self, tmp_path: Path):
-        captures_dir = tmp_path / "captures"
-        today = datetime.now().strftime("%Y%m%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-        today_segment = captures_dir / today / "stream-a" / "120000_300"
-        old_segment = captures_dir / yesterday / "stream-a" / "130000_300"
-        today_segment.mkdir(parents=True)
-        old_segment.mkdir(parents=True)
-        (today_segment / "audio.flac").write_bytes(b"x")
-        (old_segment / "audio.flac").write_bytes(b"x")
-
-        observer = _make_observer(captures_dir)
+    def test_uses_cached_today_count(self, tmp_path: Path):
+        observer = _make_observer(tmp_path / "captures")
+        observer.capture_stats = {"captures_today": 1, "total_size_mb": 0}
         service = ObserverService(observer)
 
         stats = _call_method(service, "GetStats")

@@ -2,7 +2,6 @@
 # Copyright (c) 2026 sol pbc
 
 import time
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import call
 from unittest.mock import MagicMock
@@ -41,6 +40,7 @@ def _make_app(tmp_path=None):
     observer._start_mono = time.monotonic()
     observer._sync = None
     observer._dbus_service = None
+    observer.capture_stats = {"captures_today": 0, "total_size_mb": 0}
     bus = MagicMock()
     app = TrayApp(observer, bus)
     return app
@@ -62,16 +62,8 @@ def _offline_health():
     return _health(SyncFacts(last_error_class=ErrorType.TRANSIENT))
 
 
-def _create_capture_segment(app, size=1024 * 1024):
-    today = datetime.now().strftime("%Y%m%d")
-    segment_dir = app.config.captures_dir / today / "test-stream" / "120000_300"
-    segment_dir.mkdir(parents=True)
-    (segment_dir / "screen.mp4").write_bytes(b"x" * size)
-    return segment_dir
-
-
 def _prepare_open_refresh_state(app, now):
-    segment_dir = _create_capture_segment(app)
+    segment_dir = Path("/tmp/test.incomplete")
     app._observer.current_mode = "screencast"
     app._observer._paused = False
     app._observer.segment_dir = segment_dir
@@ -80,7 +72,7 @@ def _prepare_open_refresh_state(app, now):
     app._observer.interval = 300
     app._observer._sync = MagicMock()
     app._observer._sync.health = _connected_health()
-    app._last_stats_time = now - 10
+    app._observer.capture_stats = {"captures_today": 1, "total_size_mb": 1}
     return segment_dir
 
 

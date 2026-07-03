@@ -53,6 +53,8 @@ REQ_IFACE = "org.freedesktop.portal.Request"
 SESSION_IFACE = "org.freedesktop.portal.Session"
 
 MIN_HEALTHY_WEBM_BYTES = 2048
+PORTAL_CALL_TIMEOUT = 30
+PORTAL_INTERACTIVE_TIMEOUT = 600
 
 
 @dataclass
@@ -108,7 +110,9 @@ def _make_request_handle(bus: MessageBus, token: str) -> str:
     return f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
 
 
-def _prepare_request_handler(bus: MessageBus, handle: str) -> asyncio.Future:
+def _prepare_request_handler(
+    bus: MessageBus, handle: str
+) -> tuple[asyncio.Future, object]:
     """Set up signal handler for Request::Response before calling portal method."""
     loop = asyncio.get_running_loop()
     fut: asyncio.Future = loop.create_future()
@@ -124,10 +128,9 @@ def _prepare_request_handler(bus: MessageBus, handle: str) -> asyncio.Future:
             results = msg.body[1] if len(msg.body) > 1 else {}
             if not fut.done():
                 fut.set_result((int(response), results))
-            bus.remove_message_handler(_message_handler)
 
     bus.add_message_handler(_message_handler)
-    return fut
+    return fut, _message_handler
 
 
 def _variant_or_value(val):
@@ -282,7 +285,10 @@ class Screencaster:
             ).connect()
 
             # Verify portal interface exists
-            root_intro = await self.bus.introspect(PORTAL_BUS, PORTAL_PATH)
+            root_intro = await asyncio.wait_for(
+                self.bus.introspect(PORTAL_BUS, PORTAL_PATH),
+                PORTAL_CALL_TIMEOUT,
+            )
             root_obj = self.bus.get_proxy_object(PORTAL_BUS, PORTAL_PATH, root_intro)
             root_obj.get_interface(SC_IFACE)
             return True
@@ -338,22 +344,38 @@ class Screencaster:
                 monitors = []
 
         # Get portal interface
-        root_intro = await self.bus.introspect(PORTAL_BUS, PORTAL_PATH)
+        try:
+            root_intro = await asyncio.wait_for(
+                self.bus.introspect(PORTAL_BUS, PORTAL_PATH),
+                PORTAL_CALL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            await self._close_session()
+            raise RuntimeError("Portal introspect timed out")
         root_obj = self.bus.get_proxy_object(PORTAL_BUS, PORTAL_PATH, root_intro)
         screencast = root_obj.get_interface(SC_IFACE)
 
         # 1) CreateSession
         create_token = "h_" + uuid.uuid4().hex
         create_handle = _make_request_handle(self.bus, create_token)
-        create_fut = _prepare_request_handler(self.bus, create_handle)
+        create_fut, create_handler = _prepare_request_handler(self.bus, create_handle)
 
         create_opts = {
             "handle_token": Variant("s", create_token),
             "session_handle_token": Variant("s", "s_" + uuid.uuid4().hex),
         }
 
-        await screencast.call_create_session(create_opts)
-        resp, results = await create_fut
+        try:
+            await asyncio.wait_for(
+                screencast.call_create_session(create_opts),
+                PORTAL_CALL_TIMEOUT,
+            )
+            resp, results = await asyncio.wait_for(create_fut, PORTAL_CALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            await self._close_session()
+            raise RuntimeError("CreateSession timed out")
+        finally:
+            self.bus.remove_message_handler(create_handler)
         if resp != 0:
             raise RuntimeError(f"CreateSession failed with code {resp}")
 
@@ -372,7 +394,7 @@ class Screencaster:
 
         select_token = "h_" + uuid.uuid4().hex
         select_handle = _make_request_handle(self.bus, select_token)
-        select_fut = _prepare_request_handler(self.bus, select_handle)
+        select_fut, select_handler = _prepare_request_handler(self.bus, select_handle)
 
         select_opts = {
             "handle_token": Variant("s", select_token),
@@ -384,8 +406,20 @@ class Screencaster:
         if restore_token:
             select_opts["restore_token"] = Variant("s", restore_token)
 
-        await screencast.call_select_sources(self.session_handle, select_opts)
-        resp, _ = await select_fut
+        response_timeout = (
+            PORTAL_INTERACTIVE_TIMEOUT if not restore_token else PORTAL_CALL_TIMEOUT
+        )
+        try:
+            await asyncio.wait_for(
+                screencast.call_select_sources(self.session_handle, select_opts),
+                PORTAL_CALL_TIMEOUT,
+            )
+            resp, _ = await asyncio.wait_for(select_fut, response_timeout)
+        except asyncio.TimeoutError:
+            await self._close_session()
+            raise RuntimeError("SelectSources timed out")
+        finally:
+            self.bus.remove_message_handler(select_handler)
         if resp != 0:
             await self._close_session()
             raise RuntimeError(f"SelectSources failed with code {resp}")
@@ -393,11 +427,23 @@ class Screencaster:
         # 3) Start
         start_token = "h_" + uuid.uuid4().hex
         start_handle = _make_request_handle(self.bus, start_token)
-        start_fut = _prepare_request_handler(self.bus, start_handle)
+        start_fut, start_handler = _prepare_request_handler(self.bus, start_handle)
 
         start_opts = {"handle_token": Variant("s", start_token)}
-        await screencast.call_start(self.session_handle, "", start_opts)
-        resp, results = await start_fut
+        response_timeout = (
+            PORTAL_INTERACTIVE_TIMEOUT if not restore_token else PORTAL_CALL_TIMEOUT
+        )
+        try:
+            await asyncio.wait_for(
+                screencast.call_start(self.session_handle, "", start_opts),
+                PORTAL_CALL_TIMEOUT,
+            )
+            resp, results = await asyncio.wait_for(start_fut, response_timeout)
+        except asyncio.TimeoutError:
+            await self._close_session()
+            raise RuntimeError("Start timed out")
+        finally:
+            self.bus.remove_message_handler(start_handler)
         if resp != 0:
             await self._close_session()
             raise RuntimeError(f"Start failed with code {resp}")
@@ -432,7 +478,14 @@ class Screencaster:
         logger.info(f"Portal returned {len(stream_info)} stream(s)")
 
         # 4) OpenPipeWireRemote
-        fd_obj = await screencast.call_open_pipe_wire_remote(self.session_handle, {})
+        try:
+            fd_obj = await asyncio.wait_for(
+                screencast.call_open_pipe_wire_remote(self.session_handle, {}),
+                PORTAL_CALL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            await self._close_session()
+            raise RuntimeError("OpenPipeWireRemote timed out")
         if hasattr(fd_obj, "take"):
             self.pw_fd = fd_obj.take()
         else:
@@ -589,15 +642,20 @@ class Screencaster:
         """Close the portal session."""
         if self.session_handle and self.bus:
             try:
-                session_intro = await self.bus.introspect(
-                    PORTAL_BUS, self.session_handle
+                session_intro = await asyncio.wait_for(
+                    self.bus.introspect(PORTAL_BUS, self.session_handle),
+                    PORTAL_CALL_TIMEOUT,
                 )
                 session_obj = self.bus.get_proxy_object(
                     PORTAL_BUS, self.session_handle, session_intro
                 )
                 session_iface = session_obj.get_interface(SESSION_IFACE)
-                await session_iface.call_close()
+                await asyncio.wait_for(
+                    session_iface.call_close(),
+                    PORTAL_CALL_TIMEOUT,
+                )
             except (
+                asyncio.TimeoutError,
                 DBusError,
                 InvalidMemberNameError,
                 InvalidIntrospectionError,

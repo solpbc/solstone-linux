@@ -30,6 +30,7 @@ BASE_STATUS_KEYS = {
     "activity",
     "host",
     "platform",
+    "paused",
 }
 
 
@@ -46,9 +47,8 @@ def _observer(tmp_path, registered: bool = True) -> Observer:
 
 def _status_kwargs(observer: Observer) -> dict:
     observer.emit_status()
-    args, kwargs = observer._client.relay_event.call_args
-    assert args == ("observe", "status")
-    return kwargs
+    args, _ = observer._client.enqueue_status.call_args
+    return args[0]
 
 
 def test_registered_first_emit_includes_all_health_fields_top_level(tmp_path):
@@ -128,14 +128,13 @@ def test_successful_no_work_sync_reflected_in_health_beacon(tmp_path):
     assert kwargs["last_error_reason"] is None
 
 
-def test_failed_delivery_return_false_is_nonfatal_for_status_emit(tmp_path):
+def test_status_enqueue_is_nonfatal_for_status_emit(tmp_path):
     observer = _observer(tmp_path)
-    observer._client.relay_event.return_value = False
 
     observer.emit_status()
     observer.emit_status()
 
-    assert observer._client.relay_event.call_count == 2
+    assert observer._client.enqueue_status.call_count == 2
 
 
 def test_unregistered_observer_emits_base_status_without_health_fields(tmp_path):
@@ -145,6 +144,16 @@ def test_unregistered_observer_emits_base_status_without_health_fields(tmp_path)
 
     assert BASE_STATUS_KEYS.issubset(kwargs)
     assert HEALTH_KEYS.isdisjoint(kwargs)
+
+
+def test_status_includes_paused_state(tmp_path):
+    observer = _observer(tmp_path)
+
+    assert _status_kwargs(observer)["paused"] is False
+
+    observer._paused = True
+
+    assert _status_kwargs(observer)["paused"] is True
 
 
 def test_failure_count_clamps_and_last_error_reason_is_safe(tmp_path):
