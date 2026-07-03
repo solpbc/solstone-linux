@@ -4,6 +4,11 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+- the app now calls itself sol everywhere you see it — the launcher, tray, menus, status, and notifications. your journal is the memory it keeps, and solstone is the platform underneath. nothing about what it keeps with you changed, only what it's called.
+
 ## [0.4.2] - 2026-06-29
 
 ### Added

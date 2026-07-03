@@ -562,7 +562,7 @@ def test_cmd_setup_env_token_fallback(tmp_path: Path, capsys):
     saved_config = save_mock.call_args.args[0]
     captured = capsys.readouterr()
     assert saved_config.key == "envtok"
-    assert "shared machines" not in captured.err
+    assert "shared computers" not in captured.err
 
 
 def test_cmd_setup_cli_token_beats_env(tmp_path: Path, capsys):
@@ -587,7 +587,7 @@ def test_cmd_setup_cli_token_beats_env(tmp_path: Path, capsys):
     saved_config = save_mock.call_args.args[0]
     captured = capsys.readouterr()
     assert saved_config.key == "clitok"
-    assert "shared machines" in captured.err
+    assert "shared computers" in captured.err
 
 
 def test_cmd_setup_registers_via_http_when_no_token(tmp_path: Path):

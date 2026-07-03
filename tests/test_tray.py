@@ -113,7 +113,7 @@ class TestBuildMenu:
         app._build_menu()
 
         assert isinstance(app._status_item, MenuItem)
-        assert app._status_item.label == "observing"
+        assert app._status_item.label == "on"
         assert app._status_item.enabled is False
         assert app._sync_item.label == "sync: checking..."
         assert app._pause_submenu.children_display == "submenu"
@@ -241,7 +241,7 @@ class TestUpdateLiveStats:
 
         assert app._segment_item.label == "segment: 4:05 remaining"
         assert app._cache_item.label == "cache: 42 MB"
-        assert app._captures_item.label == "captures today: 5 segments"
+        assert app._captures_item.label == "today: 5 segments"
         assert app._uptime_item.label == "uptime: 2h 1m"
 
     def test_update_live_stats_skips_unchanged_menu_updates(self):
@@ -310,8 +310,8 @@ class TestHeaderLabel:
         assert (
             call(app._status_item, "label") in app.menu.update_properties.call_args_list
         )
-        assert app._status_header.label == "observing — connected"
-        assert app._status_item.label == "observing — connected"
+        assert app._status_header.label == "on — connected"
+        assert app._status_item.label == "on — connected"
 
         app.menu.update_properties.reset_mock()
 
@@ -327,8 +327,8 @@ class TestHeaderLabel:
 
         app.update()
 
-        assert app._status_header.label == "observing — connected"
-        assert app._status_item.label == "observing — connected"
+        assert app._status_header.label == "on — connected"
+        assert app._status_item.label == "on — connected"
 
     def test_header_paused_with_timer(self):
         app = _make_app()
@@ -350,17 +350,17 @@ class TestHeaderLabel:
 
         app.update()
 
-        assert app._status_header.label == "observing — offline (saving locally)"
-        assert app._status_item.label == "observing — offline (saving locally)"
+        assert app._status_header.label == "on — offline (saving locally)"
+        assert app._status_item.label == "on — offline (saving locally)"
 
 
 class TestComputeHeaderLabel:
     @pytest.mark.parametrize(
         "status,health_key,pause_remaining,expected",
         [
-            ("recording", "connected", 0, "observing — connected"),
-            ("recording", "syncing", 0, "observing — syncing"),
-            ("recording", "offline", 0, "observing — offline (saving locally)"),
+            ("recording", "connected", 0, "on — connected"),
+            ("recording", "syncing", 0, "on — syncing"),
+            ("recording", "offline", 0, "on — offline (saving locally)"),
             ("idle", "connected", 0, "idle — connected"),
             ("idle", "syncing", 0, "idle — syncing"),
             ("idle", "offline", 0, "idle — offline (saving locally)"),
@@ -387,7 +387,7 @@ class TestBuildTooltip:
 
         tooltip = app._build_tooltip()
 
-        assert "observing" in tooltip
+        assert tooltip.startswith("on")
         assert "sync: not confirmed yet" in tooltip
 
     def test_build_tooltip_stopped(self):
@@ -419,11 +419,11 @@ class TestStatusNotifierItem:
     def test_accessible_desc_properties(self):
         sni = StatusNotifierItem()
 
-        sni.set_icon_accessible_desc("Solstone observer — recording")
-        sni.set_attention_accessible_desc("Solstone observer — recording")
+        sni.set_icon_accessible_desc("sol — on")
+        sni.set_attention_accessible_desc("sol — on")
 
-        assert sni.IconAccessibleDesc == "Solstone observer — recording"
-        assert sni.AttentionAccessibleDesc == "Solstone observer — recording"
+        assert sni.IconAccessibleDesc == "sol — on"
+        assert sni.AttentionAccessibleDesc == "sol — on"
 
 
 class TestUpdate:
@@ -444,10 +444,10 @@ class TestUpdate:
         }
         assert app._segment_item.label == "segment: 3:45 remaining"
         assert app._cache_item.label == "cache: 1 MB"
-        assert app._captures_item.label == "captures today: 1 segments"
+        assert app._captures_item.label == "today: 1 segments"
         assert app._uptime_item.label == "uptime: 1h 1m"
         assert app._sync_item.label == "sync: up to date"
-        assert app._status_item.label == "observing — connected"
+        assert app._status_item.label == "on — connected"
 
     def test_about_to_show_returns_true_and_layout_has_refreshed_labels(self, tmp_path):
         app = _make_app(tmp_path)
@@ -492,21 +492,21 @@ class TestUpdate:
             [app._status_item.id],
             [],
         )
-        assert props[0][1]["label"].value == "observing"
+        assert props[0][1]["label"].value == "on"
 
     def test_first_update_clears_starting_tooltip(self):
-        """Tray tooltip must not stay on 'starting...' after first update."""
+        """Tray tooltip must not stay on 'starting…' after first update."""
         app = _make_app()
         app._build_menu()
         # Simulate what TrayApp.start() sets before any update
-        app.sni.set_tooltip("solstone observer", "starting...")
+        app.sni.set_tooltip("sol", "starting…")
         app._observer.current_mode = "screencast"
         app._observer._paused = False
 
         app.update()
 
-        # Tooltip body should no longer be "starting..."
-        assert app.sni._tooltip_body != "starting..."
+        # Tooltip body should no longer be "starting…"
+        assert app.sni._tooltip_body != "starting…"
 
     def test_update_reads_observer_state(self):
         app = _make_app()

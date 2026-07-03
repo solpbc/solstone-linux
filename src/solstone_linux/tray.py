@@ -33,7 +33,7 @@ ICONS = {
 }
 
 # Agent instructions template copied to clipboard
-AGENT_INSTRUCTIONS = """solstone observer (Linux)
+AGENT_INSTRUCTIONS = """sol for Linux (repo: solstone-linux)
 Source: {source_dir}
 Read INSTALL.md in the source directory for setup and architecture.
 Config: {config_path}
@@ -137,7 +137,7 @@ class TrayApp:
         # Set initial icon
         self.sni.set_icon(ICONS["recording"])
         self._update_accessible_descriptions()
-        self.sni.set_tooltip("solstone observer", "starting...")
+        self.sni.set_tooltip("sol", "starting…")
 
         # Build menu
         self._build_menu()
@@ -215,14 +215,14 @@ class TrayApp:
     def _build_menu(self):
         """Build the full tray menu structure."""
 
-        self._status_header = MenuItem(label="observing", enabled=False)
+        self._status_header = MenuItem(label="on", enabled=False)
 
         # ── Status submenu (live data) ──
-        self._status_item = MenuItem(label="observing", enabled=False)
+        self._status_item = MenuItem(label="on", enabled=False)
         self._sync_item = MenuItem(label="sync: checking...", enabled=False)
         self._segment_item = MenuItem(label="segment: --:--", enabled=False)
         self._cache_item = MenuItem(label="cache: --", enabled=False)
-        self._captures_item = MenuItem(label="captures today: --", enabled=False)
+        self._captures_item = MenuItem(label="today: --", enabled=False)
         self._uptime_item = MenuItem(label="uptime: --", enabled=False)
 
         status_submenu = MenuItem(
@@ -278,7 +278,7 @@ class TrayApp:
 
         # ── About submenu ──
         about_version = MenuItem(
-            label=f"solstone observer v{__version__}",
+            label=f"sol v{__version__}",
             enabled=False,
         )
         about_website = MenuItem(
@@ -369,7 +369,7 @@ class TrayApp:
         self.sni.set_icon(icon)
 
         # Update tooltip
-        self.sni.set_tooltip("solstone observer", self._build_tooltip(health))
+        self.sni.set_tooltip("sol", self._build_tooltip(health))
 
         # Toggle pause/resume
         is_paused = status == "paused"
@@ -416,7 +416,7 @@ class TrayApp:
             else:
                 self.sni.set_status(health.sni_status)
 
-        self.sni.set_tooltip("solstone observer", self._build_tooltip(health))
+        self.sni.set_tooltip("sol", self._build_tooltip(health))
         self._update_accessible_descriptions(health)
 
     def _update_live_stats(self, segment_timer: int, pause_remaining: int):
@@ -436,7 +436,7 @@ class TrayApp:
             uptime = self.stats.get("uptime_seconds", 0)
 
             new_cache = f"cache: {size_mb} MB"
-            new_captures = f"captures today: {captures} segments"
+            new_captures = f"today: {captures} segments"
 
             hours = uptime // 3600
             mins_up = (uptime % 3600) // 60
@@ -467,7 +467,7 @@ class TrayApp:
         parts = []
 
         status_labels = {
-            "recording": "observing",
+            "recording": "on",
             "paused": "paused",
             "idle": "idle (screen inactive)",
             "stopped": "not running",
@@ -485,13 +485,13 @@ class TrayApp:
         if health is None:
             health = self.health
         if self.error:
-            desc = "Solstone observer — error"
+            desc = "sol — error"
         elif self.status == "paused":
-            desc = "Solstone observer — paused"
+            desc = "sol — paused"
         elif self.status == "idle":
             desc = health.accessible_idle
         elif self.status == "stopped":
-            desc = "Solstone observer — stopped"
+            desc = "sol — stopped"
         else:
             desc = health.accessible_recording
 

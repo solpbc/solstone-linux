@@ -64,7 +64,7 @@ def _make_observer(config: Config, health):
                 last_successful_sync=1_800_000_000.0,
                 last_successful_contact=1_800_000_000.0,
             ),
-            "observing — connected",
+            "on — connected",
             "Active",
             "connected",
             "Sync: connected — up to date (0 pending)",
@@ -72,7 +72,7 @@ def _make_observer(config: Config, health):
         ),
         (
             SyncFacts(last_error_class=ErrorType.INCOMPATIBLE, last_error_code=404),
-            "observing — update needed",
+            "on — update needed",
             "NeedsAttention",
             "update-needed",
             "Sync: update needed — update solstone-linux; pending unconfirmed",
@@ -169,13 +169,11 @@ async def test_404_query_cycle_drives_failing_state_on_all_surfaces(
     app._build_menu()
     app.update()
 
-    assert app._status_header.label == "observing — update needed"
-    assert app._status_header.label != "observing — connected"
+    assert app._status_header.label == "on — update needed"
+    assert app._status_header.label != "on — connected"
     assert app._sync_item.label == "sync: update solstone-linux"
     assert "sync: update needed; update solstone-linux" in app.sni._tooltip_body
-    assert app.sni._icon_accessible_desc == (
-        "Solstone observer — observing, update needed"
-    )
+    assert app.sni._icon_accessible_desc == "sol — on, update needed"
     assert app.sni._status == "NeedsAttention"
 
     service = ObserverService(observer)

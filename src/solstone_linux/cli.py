@@ -69,7 +69,7 @@ def _prompt_positive_int(label: str, current: int) -> int:
 
 def _prompt_framerate(current: int) -> int:
     while True:
-        value = input(f"Capture framerate [{current}]: ").strip()
+        value = input(f"Framerate [{current}]: ").strip()
         if value == "":
             return current
         try:
@@ -138,7 +138,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     if cli_token:
         print(
-            "warning: --token on the command line may be visible in shell history and /proc on shared machines",
+            "warning: --token on the command line may be visible in shell history and /proc on shared computers",
             file=sys.stderr,
         )
 
@@ -173,7 +173,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"Stream: {config.stream}")
         print("Using provided token; skipping registration.")
         print(f"\nConfig saved to {config.config_path}")
-        print(f"Captures will go to {config.captures_dir}")
+        print(f"segments are kept in {config.captures_dir}")
         print(
             "\nRun 'solstone-linux run' to start, or 'solstone-linux install-service' for systemd."
         )
@@ -198,7 +198,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"Stream: {config.stream}")
 
     print(f"\nConfig saved to {config.config_path}")
-    print(f"Captures will go to {config.captures_dir}")
+    print(f"segments are kept in {config.captures_dir}")
     print(
         "\nRun 'solstone-linux run' to start, or 'solstone-linux install-service' for systemd."
     )
@@ -244,7 +244,7 @@ def _cmd_setup_interactive() -> int:
         print(f"Stream: {config.stream}")
 
     print(f"\nConfig saved to {config.config_path}")
-    print(f"Captures will go to {config.captures_dir}")
+    print(f"segments are kept in {config.captures_dir}")
     print(
         "\nRun 'solstone-linux run' to start, or 'solstone-linux install-service' for systemd."
     )
@@ -311,8 +311,8 @@ def cmd_install_service(args: argparse.Namespace) -> int:
         "[Desktop Entry]\n"
         "Version=1.2\n"
         "Type=Application\n"
-        "Name=Solstone Observer\n"
-        "Comment=Experience screen and audio with your solstone journal\n"
+        "Name=sol\n"
+        "Comment=sol takes in your screen and audio and keeps it in your journal\n"
         "Exec=/bin/sh -c 'systemctl --user import-environment"
         " DISPLAY XAUTHORITY XDG_SESSION_TYPE 2>/dev/null;"
         " systemctl --user start solstone-linux.service'\n"
@@ -484,7 +484,7 @@ def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="solstone-linux",
-        description="Standalone Linux desktop observer for solstone",
+        description="sol for Linux — takes in your screen and audio and keeps it in your journal. part of solstone.",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
@@ -495,7 +495,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
 
     # run
-    run_parser = subparsers.add_parser("run", help="Start capture + sync")
+    run_parser = subparsers.add_parser("run", help="start sol")
     run_parser.add_argument(
         "--interval",
         type=int,
@@ -527,13 +527,13 @@ def main() -> None:
     )
 
     # settings
-    subparsers.add_parser("settings", help="Edit capture/behavior settings")
+    subparsers.add_parser("settings", help="edit settings")
 
     # install-service
     subparsers.add_parser("install-service", help="Install systemd user service")
 
     # status
-    subparsers.add_parser("status", help="Show capture and sync state")
+    subparsers.add_parser("status", help="show status")
 
     args = parser.parse_args()
     _setup_logging(args.verbose)

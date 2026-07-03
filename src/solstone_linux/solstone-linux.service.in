@@ -1,5 +1,5 @@
 [Unit]
-Description=Solstone Linux Desktop Observer
+Description=sol for Linux
 After=graphical-session.target
 PartOf=graphical-session.target
 StartLimitIntervalSec=300

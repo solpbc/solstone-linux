@@ -225,7 +225,7 @@ async def _handle_one_notification(
         "notify-send",
         "--wait",
         "--app-name",
-        "solstone",
+        "sol",
         f"--action={NOTIFY_ACTION_KEY}=Open",
         NOTIFY_TITLE,
         req.summary,
