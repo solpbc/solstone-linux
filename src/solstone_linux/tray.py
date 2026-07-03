@@ -35,7 +35,7 @@ ICONS = {
 # Agent instructions template copied to clipboard
 AGENT_INSTRUCTIONS = """sol for Linux (repo: solstone-linux)
 Source: {source_dir}
-Read INSTALL.md in the source directory for setup and architecture.
+Read INSTALL.md at https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md for setup and architecture.
 Config: {config_path}
 Captures: {captures_dir}
 Logs: journalctl --user -u solstone-linux -f
@@ -510,7 +510,7 @@ class TrayApp:
 
     def _open_journal(self):
         log.info("Opening journal")
-        self._open_url(self.config.server_url or "https://journal.solstone.app")
+        self._open_url(self.config.server_url or "https://solstone.app")
 
     def _open_config(self):
         config_path = str(self.config.config_path)

@@ -342,75 +342,28 @@ class TestIsPowerSaveActive:
         )
 
     @pytest.mark.asyncio
-    async def test_gnome_failure_kde_lid_closed_returns_true(self):
+    async def test_mutter_backend_failure_returns_false(self):
         bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[_service_unknown("gnome unavailable"), object()]
-        )
-        kde_iface = MagicMock()
-        kde_iface.call_is_lid_closed = AsyncMock(return_value=True)
-        bus.get_proxy_object.return_value = _make_proxy_with_interface(kde_iface)
-
-        result = await activity.is_power_save_active(bus)
-
-        assert result is True
-        assert bus.introspect.await_args_list == [
-            call(activity.DISPLAY_CONFIG_BUS, activity.DISPLAY_CONFIG_PATH),
-            call(activity.KDE_POWER_BUS, activity.KDE_POWER_PATH),
-        ]
-
-    @pytest.mark.asyncio
-    async def test_gnome_failure_kde_lid_open_returns_false(self):
-        bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[_service_unknown("gnome unavailable"), object()]
-        )
-        kde_iface = MagicMock()
-        kde_iface.call_is_lid_closed = AsyncMock(return_value=False)
-        bus.get_proxy_object.return_value = _make_proxy_with_interface(kde_iface)
+        bus.introspect = AsyncMock(side_effect=[_service_unknown("gnome unavailable")])
 
         result = await activity.is_power_save_active(bus)
 
         assert result is False
         assert bus.introspect.await_args_list == [
             call(activity.DISPLAY_CONFIG_BUS, activity.DISPLAY_CONFIG_PATH),
-            call(activity.KDE_POWER_BUS, activity.KDE_POWER_PATH),
         ]
 
     @pytest.mark.asyncio
-    async def test_both_backends_fail_returns_false(self):
-        bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[
-                _service_unknown("gnome unavailable"),
-                _service_unknown("kde unavailable"),
-            ]
-        )
-
-        result = await activity.is_power_save_active(bus)
-
-        assert result is False
-        assert bus.introspect.await_args_list == [
-            call(activity.DISPLAY_CONFIG_BUS, activity.DISPLAY_CONFIG_PATH),
-            call(activity.KDE_POWER_BUS, activity.KDE_POWER_PATH),
-        ]
-
-    @pytest.mark.asyncio
-    async def test_is_power_save_active_mutter_parser_error_falls_through_to_kde(
+    async def test_is_power_save_active_mutter_parser_error_non_x11_returns_false(
         self, caplog
     ):
         bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[InvalidMemberNameError("bad"), object()]
-        )
-        kde_iface = MagicMock()
-        kde_iface.call_is_lid_closed = AsyncMock(return_value=True)
-        bus.get_proxy_object.return_value = _make_proxy_with_interface(kde_iface)
+        bus.introspect = AsyncMock(side_effect=[InvalidMemberNameError("bad")])
 
         with caplog.at_level(logging.WARNING):
             result = await activity.is_power_save_active(bus)
 
-        assert result is True
+        assert result is False
         assert [record.message for record in caplog.records] == [
             "is_power_save_active Mutter backend failed: "
             "service=org.gnome.Mutter.DisplayConfig "
@@ -430,12 +383,7 @@ class TestIsPowerSaveActive:
         self, caplog, error_name
     ):
         bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[
-                DBusError(error_name, "missing"),
-                DBusError(error_name, "missing"),
-            ]
-        )
+        bus.introspect = AsyncMock(side_effect=[DBusError(error_name, "missing")])
 
         with caplog.at_level(logging.WARNING):
             result = await activity.is_power_save_active(bus)
@@ -444,11 +392,11 @@ class TestIsPowerSaveActive:
         assert caplog.records == []
 
     @pytest.mark.asyncio
-    async def test_is_power_save_active_both_backends_broken_logs_both_warnings(
+    async def test_is_power_save_active_mutter_backend_broken_logs_warning(
         self, caplog
     ):
         bus = MagicMock()
-        bus.introspect = AsyncMock(side_effect=[_no_reply("broke"), _no_reply("broke")])
+        bus.introspect = AsyncMock(side_effect=[_no_reply("broke")])
 
         with caplog.at_level(logging.WARNING):
             result = await activity.is_power_save_active(bus)
@@ -458,17 +406,14 @@ class TestIsPowerSaveActive:
             "is_power_save_active Mutter backend failed: "
             "service=org.gnome.Mutter.DisplayConfig "
             "path=/org/gnome/Mutter/DisplayConfig: DBusError: broke",
-            "is_power_save_active KDE backend failed: "
-            "service=org.kde.Solid.PowerManagement "
-            "path=/org/kde/Solid/PowerManagement: DBusError: broke",
         ]
 
     @pytest.mark.asyncio
-    async def test_is_power_save_active_repeated_backend_failures_log_debug_after_first(
+    async def test_is_power_save_active_repeated_mutter_failures_log_debug_after_first(
         self, caplog
     ):
         bus = MagicMock()
-        bus.introspect = AsyncMock(side_effect=[_no_reply("broke")] * 4)
+        bus.introspect = AsyncMock(side_effect=[_no_reply("broke")] * 2)
 
         with caplog.at_level(logging.DEBUG):
             assert await activity.is_power_save_active(bus) is False
@@ -488,22 +433,16 @@ class TestIsPowerSaveActive:
             "is_power_save_active Mutter backend failed: "
             "service=org.gnome.Mutter.DisplayConfig "
             "path=/org/gnome/Mutter/DisplayConfig: DBusError: broke",
-            "is_power_save_active KDE backend failed: "
-            "service=org.kde.Solid.PowerManagement "
-            "path=/org/kde/Solid/PowerManagement: DBusError: broke",
         ]
         assert debug == warnings
 
     @pytest.mark.asyncio
-    async def test_both_backends_fail_x11_falls_back_to_dpms_active(self, monkeypatch):
+    async def test_mutter_unavailable_non_gnome_x11_dpms_standby_reads_power_save(
+        self, monkeypatch
+    ):
         monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[
-                _service_unknown("gnome unavailable"),
-                _service_unknown("kde unavailable"),
-            ]
-        )
+        bus.introspect = AsyncMock(side_effect=[_service_unknown("gnome unavailable")])
         monkeypatch.setattr(activity, "is_dpms_active", AsyncMock(return_value=True))
 
         result = await activity.is_power_save_active(bus)
@@ -511,15 +450,10 @@ class TestIsPowerSaveActive:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_both_backends_fail_x11_dpms_returns_false(self, monkeypatch):
+    async def test_mutter_unavailable_x11_dpms_returns_false(self, monkeypatch):
         monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[
-                _service_unknown("gnome unavailable"),
-                _service_unknown("kde unavailable"),
-            ]
-        )
+        bus.introspect = AsyncMock(side_effect=[_service_unknown("gnome unavailable")])
         monkeypatch.setattr(activity, "is_dpms_active", AsyncMock(return_value=False))
 
         result = await activity.is_power_save_active(bus)
@@ -527,15 +461,10 @@ class TestIsPowerSaveActive:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_both_backends_fail_non_x11_skips_dpms(self, monkeypatch):
+    async def test_mutter_unavailable_non_x11_skips_dpms(self, monkeypatch):
         monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
         bus = MagicMock()
-        bus.introspect = AsyncMock(
-            side_effect=[
-                _service_unknown("gnome unavailable"),
-                _service_unknown("kde unavailable"),
-            ]
-        )
+        bus.introspect = AsyncMock(side_effect=[_service_unknown("gnome unavailable")])
         mock_dpms = AsyncMock(return_value=True)
         monkeypatch.setattr(activity, "is_dpms_active", mock_dpms)
 
@@ -557,7 +486,6 @@ class TestProbeActivityServices:
         assert results["fdo_screensaver"] is True
         assert results["gnome_screensaver"] is True
         assert results["gnome_display_config"] is True
-        assert results["kde_power"] is True
         assert results["kscreen"] is True
         assert results["gtk4"] is activity._HAS_GTK
 
@@ -571,20 +499,18 @@ class TestProbeActivityServices:
         assert results["fdo_screensaver"] is False
         assert results["gnome_screensaver"] is False
         assert results["gnome_display_config"] is False
-        assert results["kde_power"] is False
         assert results["kscreen"] is False
         assert "No activity backends available" in caplog.text
 
     @pytest.mark.asyncio
     async def test_mixed_service_availability_returns_correct_results(self):
-        bus, _ = _make_name_has_owner_bus(side_effect=[True, False, True, False, True])
+        bus, _ = _make_name_has_owner_bus(side_effect=[True, False, True, True])
 
         results = await activity.probe_activity_services(bus)
 
         assert results["fdo_screensaver"] is True
         assert results["gnome_screensaver"] is False
         assert results["gnome_display_config"] is True
-        assert results["kde_power"] is False
         assert results["kscreen"] is True
 
     @pytest.mark.asyncio
@@ -592,7 +518,7 @@ class TestProbeActivityServices:
         self, caplog
     ):
         bus, _ = _make_name_has_owner_bus(
-            side_effect=[True, InvalidMemberNameError("bad"), True, True, True]
+            side_effect=[True, InvalidMemberNameError("bad"), True, True]
         )
 
         with caplog.at_level(logging.INFO):
@@ -601,7 +527,6 @@ class TestProbeActivityServices:
         assert results["fdo_screensaver"] is True
         assert results["gnome_screensaver"] is False
         assert results["gnome_display_config"] is True
-        assert results["kde_power"] is True
         assert results["kscreen"] is True
         assert results["gtk4"] is activity._HAS_GTK
         assert "dpms" in results

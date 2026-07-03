@@ -553,3 +553,14 @@ class TestConfigIntegration:
         assert SOURCE_DIR in text
         assert str(app.config.config_path) in text
         assert str(app.config.captures_dir) in text
+        assert "https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md" in text
+        assert "in the source directory" not in text
+
+    def test_open_journal_uses_public_site_when_server_url_empty(self):
+        app = _make_app()
+        app.config.server_url = ""
+        app._open_url = MagicMock()
+
+        app._open_journal()
+
+        app._open_url.assert_called_once_with("https://solstone.app")

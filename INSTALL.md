@@ -52,7 +52,7 @@ this is the developer/from-source path; most installs should use the `pipx insta
 
    **arch:**
    ```
-   sudo pacman -S python-gobject gtk4 gstreamer gst-plugin-pipewire libpulse alsa-lib xdg-desktop-portal pipx
+   sudo pacman -S python-gobject gtk4 gstreamer gst-plugin-pipewire gst-plugins-good libpulse alsa-lib xdg-desktop-portal python-pipx uv python-cairo
    ```
 
    **opensuse:**
@@ -88,6 +88,15 @@ this is the developer/from-source path; most installs should use the `pipx insta
    systemctl --user status solstone-linux
    ```
 
+## updating from PyPI
+
+```
+pipx upgrade solstone-linux
+systemctl --user restart solstone-linux
+```
+
+the systemd unit template and icons only refresh when you re-run `solstone-linux install-service`, so after upgrading across a release that changed the unit, re-run `solstone-linux install-service`.
+
 ## updating after a code change
 
 ```
@@ -96,7 +105,7 @@ git pull && make install-service
 
 ## notes
 
-- activity detection (idle timeout, screen lock, power save) works on both GNOME and KDE. on other desktops the observer still experiences your screen and audio fine, but activity-based segment boundaries won't trigger.
+- Activity detection uses screen-lock and power-save signals to notice when you step away. Coverage varies by desktop: GNOME provides both signals; KDE (Wayland) provides screen lock only; any X11 session also provides DPMS power save; other Wayland desktops provide screen lock where the compositor exposes it. Where neither signal is available, solstone-linux still experiences your screen and audio, but activity-based segment boundaries won't trigger.
 - the tray icon uses the StatusNotifierItem (SNI) D-Bus protocol. it works on KDE natively and GNOME with the AppIndicator extension. if no SNI host is available, the observer runs normally without a tray icon.
 
 ## appendix: GNOME tray support

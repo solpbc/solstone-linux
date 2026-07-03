@@ -16,7 +16,10 @@ src/solstone_linux/
     cli.py                  CLI entry point (run, setup, settings, install-service, status)
     solstone-linux.service.in        Systemd unit template (rendered by install-service)
     config.py               Config loading/persistence (config under ~/.config/solstone-linux/)
+    doctor.py               Install prerequisite checks for the doctor command
+    install_guard.py        Install ownership guard for pipx-managed service installs
     observer.py             Main capture loop — state machine (idle/screencast), audio + video
+    capture_stats.py        Shared capture cache statistics
     screencast.py           Portal-based multi-monitor recording (xdg-desktop-portal + GStreamer)
     audio_recorder.py       Stereo audio recording (mic + system via soundcard)
     audio_detect.py         Audio device detection via ultrasonic tone
@@ -25,9 +28,16 @@ src/solstone_linux/
     monitor_positions.py    Monitor position assignment from geometry
     session_env.py          Desktop session environment checks and recovery
     streams.py              Stream name derivation (hostname-based)
+    event_sender.py         Background sender for observer event relay
     sync.py                 Background sync service — uploads completed segments to server
+    sync_health.py          Sync health facts, derivation, persistence, and surface copy
     upload.py               HTTP upload client for solstone ingest server
     recovery.py             Crash recovery for orphaned .incomplete segments
+    chat_bridge.py          Server-initiated chat event bridge to local notifications
+    dbus_service.py         Observer status/control D-Bus service interface
+    dbusmenu.py             D-Bus menu protocol implementation for tray menus
+    sni.py                  StatusNotifierItem D-Bus interface for tray icons
+    tray.py                 In-process D-Bus SNI tray icon, menu, and tooltip
 
 tests/                      pytest test suite
 contrib/                    Reference icons for development fallback

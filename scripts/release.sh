@@ -75,6 +75,16 @@ SDIST_NAME=$(basename "${SDISTS[0]}")
 VERSION="${SDIST_NAME#solstone_linux-}"
 VERSION="${VERSION%.tar.gz}"
 
+INIT_VERSION=$(grep -E '^__version__ = "[^"]+"' src/solstone_linux/__init__.py | sed 's/^__version__ = "\([^"]*\)".*/\1/' || true)
+if [[ -z "$INIT_VERSION" ]]; then
+  echo "error: could not read __version__ from src/solstone_linux/__init__.py" >&2
+  exit 1
+fi
+if [[ "$INIT_VERSION" != "$VERSION" ]]; then
+  echo "error: version mismatch: sdist version ${VERSION}, src/solstone_linux/__init__.py __version__ ${INIT_VERSION}" >&2
+  exit 1
+fi
+
 uvx twine check dist/*
 
 # Pre-flight: verify the CHANGELOG block exists before publishing.

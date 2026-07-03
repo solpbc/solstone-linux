@@ -64,10 +64,6 @@ DISPLAY_CONFIG_BUS = "org.gnome.Mutter.DisplayConfig"
 DISPLAY_CONFIG_PATH = "/org/gnome/Mutter/DisplayConfig"
 DISPLAY_CONFIG_IFACE = "org.gnome.Mutter.DisplayConfig"
 
-KDE_POWER_BUS = "org.kde.Solid.PowerManagement"
-KDE_POWER_PATH = "/org/kde/Solid/PowerManagement"
-KDE_POWER_IFACE = "org.kde.Solid.PowerManagement"
-
 # DBus service constants — monitor geometry (KDE)
 KSCREEN_BUS = "org.kde.KScreen"
 KSCREEN_PATH = "/backend"
@@ -222,7 +218,6 @@ async def probe_activity_services(bus: MessageBus) -> dict[str, bool]:
         "fdo_screensaver": FDO_SCREENSAVER_BUS,
         "gnome_screensaver": GNOME_SCREENSAVER_BUS,
         "gnome_display_config": DISPLAY_CONFIG_BUS,
-        "kde_power": KDE_POWER_BUS,
         "kscreen": KSCREEN_BUS,
     }
     results = {}
@@ -235,7 +230,7 @@ async def probe_activity_services(bus: MessageBus) -> dict[str, bool]:
 
     # Log grouped by function
     lock_backends = ["fdo_screensaver", "gnome_screensaver"]
-    power_backends = ["gnome_display_config", "kde_power"]
+    power_backends = ["gnome_display_config"]
     monitor_backends = ["kscreen"]
 
     def _status(keys):
@@ -337,9 +332,10 @@ async def is_screen_locked(bus: MessageBus) -> bool:
 
 
 async def is_power_save_active(bus: MessageBus) -> bool:
-    """Check display power save via GNOME Mutter, then KDE Solid.
+    """Return True when the session reports a power-saving/display-off state.
 
-    Returns True if power save is active, False otherwise.
+    Checks GNOME Mutter PowerSaveMode, then falls back to X11 DPMS when
+    XDG_SESSION_TYPE is x11; degrades to False when no backend is available.
     """
 
     def log_backend_failure_once(backend: str, bus_name: str, path: str, exc) -> None:
@@ -387,30 +383,6 @@ async def is_power_save_active(bus: MessageBus) -> bool:
                 DISPLAY_CONFIG_PATH,
                 exc,
             )
-
-    # Fall back to KDE Solid PowerManagement
-    try:
-        iface = await _cached_interface(
-            bus,
-            KDE_POWER_BUS,
-            KDE_POWER_PATH,
-            KDE_POWER_IFACE,
-        )
-        return bool(await iface.call_is_lid_closed())
-    except (
-        DBusError,
-        InvalidMemberNameError,
-        InvalidIntrospectionError,
-        OSError,
-    ) as exc:
-        _invalidate_interface(
-            bus,
-            KDE_POWER_BUS,
-            KDE_POWER_PATH,
-            KDE_POWER_IFACE,
-        )
-        if not _is_service_missing(exc):
-            log_backend_failure_once("KDE", KDE_POWER_BUS, KDE_POWER_PATH, exc)
 
     # X11-only fallback: DPMS via xset
     if os.environ.get("XDG_SESSION_TYPE", "").lower() == "x11":

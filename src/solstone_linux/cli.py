@@ -6,6 +6,7 @@
 Subcommands:
     run             Start capture loop + sync service (default)
     setup           Interactive configuration
+    doctor          Verify install prerequisites
     settings        Edit capture/behavior settings
     install-service Write systemd user unit, enable, start
     status          Show capture and sync state
@@ -86,7 +87,8 @@ def _prompt_framerate(current: int) -> int:
 def _prompt_retention(current: int) -> int:
     while True:
         value = input(
-            "Cache retention days (-1 = keep forever, 0 = delete after sync, "
+            "Cache retention days (-1 = keep forever, "
+            "0 = delete synced segments after the day ends, "
             f"N = keep N days) [{current}]: "
         ).strip()
         if value == "":
@@ -457,7 +459,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if retention < 0:
         print("Retain: forever")
     elif retention == 0:
-        print("Retain: delete after sync")
+        print("Retain: delete synced segments after the day ends")
     else:
         print(f"Retain: {retention} day(s)")
 
