@@ -202,6 +202,54 @@ def test_upload_low_cap_makes_single_attempt(tmp_path: Path):
     assert result.error_type == ErrorType.TRANSIENT
 
 
+def test_upload_zero_retries_makes_single_attempt(tmp_path: Path):
+    config = Config(
+        base_dir=tmp_path,
+        server_url="http://localhost:9999",
+        key="K",
+    )
+    config.sync_max_retries = 0
+    client = UploadClient(config)
+    client._session = MagicMock()
+    client._session.post.return_value = MagicMock(
+        status_code=500,
+        text="boom",
+        json=lambda: {},
+    )
+    media = tmp_path / "audio.flac"
+    media.write_bytes(b"audio")
+
+    result = client.upload_segment("20260101", "120000_005", [media])
+
+    assert client._session.post.call_count == 1
+    assert result.success is False
+    assert result.error_type == ErrorType.TRANSIENT
+
+
+def test_upload_negative_retries_makes_single_attempt(tmp_path: Path):
+    config = Config(
+        base_dir=tmp_path,
+        server_url="http://localhost:9999",
+        key="K",
+    )
+    config.sync_max_retries = -1
+    client = UploadClient(config)
+    client._session = MagicMock()
+    client._session.post.return_value = MagicMock(
+        status_code=500,
+        text="boom",
+        json=lambda: {},
+    )
+    media = tmp_path / "audio.flac"
+    media.write_bytes(b"audio")
+
+    result = client.upload_segment("20260101", "120000_005", [media])
+
+    assert client._session.post.call_count == 1
+    assert result.success is False
+    assert result.error_type == ErrorType.TRANSIENT
+
+
 def test_upload_interrupt_during_wait_returns_transient(tmp_path: Path):
     config = Config(
         base_dir=tmp_path,

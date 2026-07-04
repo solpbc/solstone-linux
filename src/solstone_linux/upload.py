@@ -77,9 +77,11 @@ class UploadClient:
         self._event_session = requests.Session()
         self._event_sender = EventSender(self.relay_event)
         self._retry_backoff = config.sync_retry_delays or [5, 30, 120, 300]
-        # Immediate in-call attempts: honor a low configured cap, bound a high one.
+        # Immediate in-call attempts: floor at 1, honor a low cap, bound a high one.
         # Long retry is owned by SyncService + circuit breaker (see upload_segment).
-        self._immediate_attempts = min(config.sync_max_retries, MAX_IMMEDIATE_ATTEMPTS)
+        self._immediate_attempts = max(
+            1, min(config.sync_max_retries, MAX_IMMEDIATE_ATTEMPTS)
+        )
 
     @property
     def is_revoked(self) -> bool:
