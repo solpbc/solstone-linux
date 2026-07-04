@@ -5,12 +5,20 @@
 
 import logging
 import subprocess
+import weakref
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from dbus_fast.errors import DBusError, InvalidMemberNameError
 
 from solstone_linux import activity
+
+
+@pytest.fixture(autouse=True)
+def _clear_proxy_cache():
+    activity._PROXY_CACHE.clear()
+    yield
+    activity._PROXY_CACHE.clear()
 
 
 def _make_proxy_with_interface(interface: MagicMock) -> MagicMock:
@@ -45,6 +53,17 @@ def _make_name_has_owner_bus(
         iface.call_name_has_owner = AsyncMock(return_value=return_value)
     bus.get_proxy_object.return_value = _make_proxy_with_interface(iface)
     return bus, iface
+
+
+class _WeakrefLessBus:
+    """Mimics dbus-fast's cython MessageBus: no __weakref__ slot, so
+    weakref.ref(bus) raises TypeError exactly like the real object."""
+
+    __slots__ = ("introspect", "get_proxy_object")
+
+    def __init__(self, introspect, get_proxy_object):
+        self.introspect = introspect
+        self.get_proxy_object = get_proxy_object
 
 
 class TestIsScreenLocked:
@@ -298,6 +317,45 @@ class TestIsScreenLocked:
         assert await activity.is_screen_locked(bus) is False
         assert bus.introspect.await_count == 3
         assert bus.introspect.await_args_list[-1] == call(
+            activity.FDO_SCREENSAVER_BUS, activity.FDO_SCREENSAVER_PATH
+        )
+
+    @pytest.mark.asyncio
+    async def test_is_screen_locked_caches_weakref_less_bus(self):
+        introspect = AsyncMock(return_value=object())
+        fdo_iface = MagicMock()
+        fdo_iface.call_get_active = AsyncMock(
+            side_effect=[False, False, _no_reply("broke"), False]
+        )
+        gnome_iface = MagicMock()
+        gnome_iface.call_get_active = AsyncMock(return_value=False)
+
+        def get_proxy_object(service, _path, _intro):
+            if service == activity.FDO_SCREENSAVER_BUS:
+                return _make_proxy_with_interface(fdo_iface)
+            return _make_proxy_with_interface(gnome_iface)
+
+        bus = _WeakrefLessBus(
+            introspect=introspect,
+            get_proxy_object=MagicMock(side_effect=get_proxy_object),
+        )
+
+        with pytest.raises(TypeError):
+            weakref.ref(bus)
+
+        assert await activity.is_screen_locked(bus) is False
+        assert await activity.is_screen_locked(bus) is False
+        assert introspect.await_count == 1
+
+        assert await activity.is_screen_locked(bus) is False
+        assert introspect.await_count == 2
+        assert introspect.await_args_list[-1] == call(
+            activity.GNOME_SCREENSAVER_BUS, activity.GNOME_SCREENSAVER_PATH
+        )
+
+        assert await activity.is_screen_locked(bus) is False
+        assert introspect.await_count == 3
+        assert introspect.await_args_list[-1] == call(
             activity.FDO_SCREENSAVER_BUS, activity.FDO_SCREENSAVER_PATH
         )
 

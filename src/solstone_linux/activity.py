@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import subprocess
-import weakref
 
 from dbus_fast import Variant
 from dbus_fast.aio import MessageBus
@@ -29,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 _DBUS_PROBE_TIMEOUT_SEC = 2.0
 _POWER_SAVE_WARNED_BACKENDS: set[str] = set()
-_PROXY_CACHE = weakref.WeakKeyDictionary()
+# One session bus lives for the whole process, so id(bus) is stable and
+# never recycled — a plain dict needs no eviction. Keyed by bus identity
+# because dbus-fast's cython MessageBus cannot be weak-referenced.
+_PROXY_CACHE: dict = {}
 
 _SERVICE_MISSING_ERRORS = (
     "org.freedesktop.DBus.Error.ServiceUnknown",
@@ -87,24 +89,20 @@ def _is_gnome_desktop() -> bool:
 
 
 async def _cached_interface(bus: MessageBus, service: str, path: str, iface_name: str):
-    cache = _PROXY_CACHE.setdefault(bus, {})
-    key = (service, path, iface_name)
-    if key in cache:
-        return cache[key]
-
+    key = (id(bus), service, path, iface_name)
+    if key in _PROXY_CACHE:
+        return _PROXY_CACHE[key]
     intro = await bus.introspect(service, path)
     obj = bus.get_proxy_object(service, path, intro)
     iface = obj.get_interface(iface_name)
-    cache[key] = iface
+    _PROXY_CACHE[key] = iface
     return iface
 
 
 def _invalidate_interface(
     bus: MessageBus, service: str, path: str, iface_name: str
 ) -> None:
-    cache = _PROXY_CACHE.get(bus)
-    if cache is not None:
-        cache.pop((service, path, iface_name), None)
+    _PROXY_CACHE.pop((id(bus), service, path, iface_name), None)
 
 
 async def _name_has_owner(bus: MessageBus, bus_name: str) -> bool:
