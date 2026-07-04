@@ -7,7 +7,8 @@ Extracted from solstone's observe/remote_client.py. Accepts Config
 as constructor parameter instead of reading config internally.
 
 Refinements over tmux baseline:
-- Respects configured sync_max_retries without hard cap
+- Bounded immediate in-call retries (MAX_IMMEDIATE_ATTEMPTS); long retry is
+  owned by the sync loop + circuit breaker
 - Error classification: auth (401/403) vs transient (5xx/network)
 """
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 import logging
 import platform
 import socket
+import threading
 import time
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -35,6 +37,11 @@ EVENT_DRAIN_TIMEOUT = 3.0
 STREAM_TYPE = "desktop"
 OBSERVER_PROTOCOL_VERSION = 2
 OBSERVER_PROTOCOL_VERSION_HEADER = "X-Solstone-Protocol-Version"
+
+# Immediate in-call upload attempts before deferring to the sync loop.
+# Long retry/backoff is owned by SyncService + the circuit breaker, not here.
+MAX_IMMEDIATE_ATTEMPTS = 2
+
 _CONTENT_TYPES = {".flac": "audio/flac", ".webm": "video/webm"}
 
 
@@ -65,12 +72,14 @@ class UploadClient:
         self._key = config.key
         self._stream = config.stream
         self._revoked = False
+        self._stop_event = threading.Event()
         self._session = requests.Session()
         self._event_session = requests.Session()
         self._event_sender = EventSender(self.relay_event)
         self._retry_backoff = config.sync_retry_delays or [5, 30, 120, 300]
-        # Respect configured retry cap — no hard min(config, 3)
-        self._max_retries = config.sync_max_retries
+        # Immediate in-call attempts: honor a low configured cap, bound a high one.
+        # Long retry is owned by SyncService + circuit breaker (see upload_segment).
+        self._immediate_attempts = min(config.sync_max_retries, MAX_IMMEDIATE_ATTEMPTS)
 
     @property
     def is_revoked(self) -> bool:
@@ -79,6 +88,10 @@ class UploadClient:
     @property
     def is_registered(self) -> bool:
         return bool(self._key)
+
+    def request_stop(self) -> None:
+        """Signal any in-flight upload retry wait to return promptly (transient)."""
+        self._stop_event.set()
 
     def _persist_registration(self, config: Config, key: str, stream: str) -> None:
         """Persist the server-issued handle and locked stream back to config."""
@@ -171,7 +184,7 @@ class UploadClient:
 
         url = f"{self._url}/app/observer/ingest"
 
-        for attempt in range(self._max_retries):
+        for attempt in range(self._immediate_attempts):
             file_handles = []
             files_data = []
             error_type = None
@@ -243,12 +256,13 @@ class UploadClient:
                     except Exception:
                         pass
 
-            if attempt < self._max_retries - 1:
+            if attempt < self._immediate_attempts - 1:
                 delay = self._retry_backoff[min(attempt, len(self._retry_backoff) - 1)]
-                time.sleep(delay)
+                if self._stop_event.wait(delay):
+                    return UploadResult(False, error_type=ErrorType.TRANSIENT)
 
         logger.error(
-            f"Upload failed after {self._max_retries} attempts: {day}/{segment}"
+            f"Upload failed after {self._immediate_attempts} attempts: {day}/{segment}"
         )
         return UploadResult(False, error_type=error_type)
 
@@ -328,6 +342,7 @@ class UploadClient:
         self._event_sender.start()
 
     def stop(self) -> None:
+        self._stop_event.set()
         self._event_sender.stop(EVENT_DRAIN_TIMEOUT)
         self._event_session.close()
         self._session.close()

@@ -34,7 +34,12 @@ from solstone_linux.sync_health import (
     load_facts,
     save_facts,
 )
-from solstone_linux.upload import QueryResult, UploadClient, UploadResult
+from solstone_linux.upload import (
+    MAX_IMMEDIATE_ATTEMPTS,
+    QueryResult,
+    UploadClient,
+    UploadResult,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -568,20 +573,65 @@ class TestCircuitBreakerRecovery:
 
 
 class TestRetryCapRespected:
-    """Test that upload respects configured retry cap (no hard min(config,3))."""
+    """Test that upload bounds immediate attempts while honoring low caps."""
 
-    def test_respects_configured_max_retries(self):
-        """Upload client should use the configured max_retries, not cap at 3."""
-        config = Config()
+    def test_high_config_bounded_to_immediate_cap(self, tmp_path: Path):
+        config = Config(
+            base_dir=tmp_path,
+            server_url="http://localhost:9999",
+            key="K",
+        )
         config.sync_max_retries = 10
+        config.sync_retry_delays = [0]
         client = UploadClient(config)
-        assert client._max_retries == 10
+        client._session = MagicMock()
+        client._session.post.return_value = MagicMock(
+            status_code=500,
+            text="boom",
+            json=lambda: {},
+        )
+        media = tmp_path / "audio.flac"
+        media.write_bytes(b"audio")
 
-    def test_low_max_retries_respected(self):
-        config = Config()
+        result = client.upload_segment("20260101", "120000_005", [media])
+
+        assert client._session.post.call_count == MAX_IMMEDIATE_ATTEMPTS
+        assert result.error_type == ErrorType.TRANSIENT
+
+    def test_low_config_single_attempt(self, tmp_path: Path):
+        config = Config(
+            base_dir=tmp_path,
+            server_url="http://localhost:9999",
+            key="K",
+        )
         config.sync_max_retries = 1
         client = UploadClient(config)
-        assert client._max_retries == 1
+        client._session = MagicMock()
+        client._session.post.return_value = MagicMock(
+            status_code=500,
+            text="boom",
+            json=lambda: {},
+        )
+        media = tmp_path / "audio.flac"
+        media.write_bytes(b"audio")
+
+        result = client.upload_segment("20260101", "120000_005", [media])
+
+        assert client._session.post.call_count == 1
+        assert result.error_type == ErrorType.TRANSIENT
+
+    def test_sync_stop_signals_client_interrupt(self, tmp_path: Path):
+        config = Config(base_dir=tmp_path)
+        config.ensure_dirs()
+        client = UploadClient(config)
+        sync = SyncService(config, client)
+
+        assert client._stop_event.is_set() is False
+
+        sync.stop()
+
+        assert client._stop_event.is_set() is True
+        assert sync._running is False
 
 
 class TestSyncHealthFacts:

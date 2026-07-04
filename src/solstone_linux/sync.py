@@ -8,7 +8,8 @@ background task in the same event loop as capture. Walks cache days
 newest-to-oldest, queries server for existing segments, uploads missing ones.
 
 Refinements over tmux baseline:
-- Respects configured sync_max_retries (no hard min(config,3) cap)
+- Owns long retry/backoff and the circuit breaker; per-upload immediate
+  retries are bounded and interruptible in UploadClient
 - Circuit breaker tuned by error type: auth=immediate, transient=5-10
 - Transient circuit breaker recovers via half-open probe with exponential backoff
 - Auth/revoked circuit breaker is permanent (requires restart)
@@ -527,6 +528,7 @@ class SyncService:
         """Stop the sync service."""
         self._running = False
         self._trigger.set()
+        self._client.request_stop()
 
     async def run(self) -> None:
         """Main sync loop — waits for triggers, then syncs."""

@@ -8,7 +8,11 @@ import pytest
 
 from solstone_linux.config import Config, load_config
 from solstone_linux.sync_health import ErrorType
-from solstone_linux.upload import OBSERVER_PROTOCOL_VERSION_HEADER, UploadClient
+from solstone_linux.upload import (
+    MAX_IMMEDIATE_ATTEMPTS,
+    OBSERVER_PROTOCOL_VERSION_HEADER,
+    UploadClient,
+)
 
 
 def test_ensure_registered_posts_descriptor_and_persists(tmp_path: Path):
@@ -147,6 +151,81 @@ def test_upload_segment_returns_stored_key(
     assert result.success
     assert result.duplicate is expected_duplicate
     assert result.stored_key == expected_key
+
+
+def test_upload_bounds_immediate_attempts(tmp_path: Path):
+    config = Config(
+        base_dir=tmp_path,
+        server_url="http://localhost:9999",
+        key="K",
+    )
+    config.sync_max_retries = 10
+    config.sync_retry_delays = [0]
+    client = UploadClient(config)
+    client._session = MagicMock()
+    client._session.post.return_value = MagicMock(
+        status_code=500,
+        text="boom",
+        json=lambda: {},
+    )
+    media = tmp_path / "audio.flac"
+    media.write_bytes(b"audio")
+
+    result = client.upload_segment("20260101", "120000_005", [media])
+
+    assert client._session.post.call_count == MAX_IMMEDIATE_ATTEMPTS
+    assert result.success is False
+    assert result.error_type == ErrorType.TRANSIENT
+
+
+def test_upload_low_cap_makes_single_attempt(tmp_path: Path):
+    config = Config(
+        base_dir=tmp_path,
+        server_url="http://localhost:9999",
+        key="K",
+    )
+    config.sync_max_retries = 1
+    client = UploadClient(config)
+    client._session = MagicMock()
+    client._session.post.return_value = MagicMock(
+        status_code=500,
+        text="boom",
+        json=lambda: {},
+    )
+    media = tmp_path / "audio.flac"
+    media.write_bytes(b"audio")
+
+    result = client.upload_segment("20260101", "120000_005", [media])
+
+    assert client._session.post.call_count == 1
+    assert result.success is False
+    assert result.error_type == ErrorType.TRANSIENT
+
+
+def test_upload_interrupt_during_wait_returns_transient(tmp_path: Path):
+    config = Config(
+        base_dir=tmp_path,
+        server_url="http://localhost:9999",
+        key="K",
+    )
+    config.sync_max_retries = 10
+    client = UploadClient(config)
+    client._session = MagicMock()
+    client._session.post.return_value = MagicMock(
+        status_code=500,
+        text="boom",
+        json=lambda: {},
+    )
+    media = tmp_path / "audio.flac"
+    media.write_bytes(b"audio")
+    client.request_stop()
+
+    result = client.upload_segment("20260101", "120000_005", [media])
+
+    assert client._session.post.call_count == 1
+    assert result.success is False
+    assert result.error_type == ErrorType.TRANSIENT
+    assert client.is_revoked is False
 
 
 def test_relay_event_uses_bearer_and_keyless_route(tmp_path: Path):
