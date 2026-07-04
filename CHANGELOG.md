@@ -4,11 +4,17 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [0.4.3] - 2026-07-03
 
 ### Changed
-- the app now calls itself sol everywhere you see it — the launcher, tray, menus, status, and notifications. your journal is the memory it keeps, and solstone is the platform underneath. nothing about what it keeps with you changed, only what it's called.
-- captures your journal rejected or this observer couldn't recover are now held visibly for 30 days instead of being dropped silently. `status` and `doctor` show the count, so you can see when any are waiting there.
+- the app now calls itself sol everywhere you see it — the launcher, tray, menus, status, and notifications. your journal is the memory it keeps, and solstone is the platform underneath. the command you run stays `solstone-linux`; nothing about what it does changed, only what it's called.
+- segments your journal rejected or sol couldn't recover are now held for 30 days before they're removed, instead of being dropped silently. `status` and `doctor` show the count, so you can see when any are waiting.
+
+### Fixed
+- local cleanup now deletes a synced segment only after your journal confirms, file by file, that it holds everything in it. previously a segment could be cleaned up while your journal was missing part of it. if your journal can't yet confirm file by file, cleanup holds off and keeps the local copy.
+- sol now recovers on its own from situations that used to leave it quietly stalled or stopped: the first screen-share dialog being dismissed, a journal that's slow to respond or offline, and speakers muted at startup (it goes on without audio and picks it back up when a device is available). an accidental second copy now declines to run rather than disturb the one already going. a round of smaller stability improvements rides along.
+- closing the lid on a docked KDE laptop no longer makes sol go idle.
+- chat notifications now come back on their own after a network drop, and dismissing a notification no longer counts as opening it.
 
 ## [0.4.2] - 2026-06-29
 
