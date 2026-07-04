@@ -53,6 +53,9 @@ CIRCUIT_COOLDOWN_MAX = 300  # cap at 5 minutes
 # Synced days older than this are pruned from the cache
 SYNCED_DAYS_MAX_AGE = 90
 
+# Quarantined (.failed) segments are dropped once this old (age from quarantine entry)
+QUARANTINE_TTL_DAYS = 30
+
 # Flush durable contact at most this often during long healthy drains.
 CONTACT_FLUSH_INTERVAL = 30
 
@@ -246,6 +249,12 @@ class SyncService:
         failed_path = segment_dir.with_name(segment_dir.name + ".failed")
         try:
             segment_dir.rename(failed_path)
+            try:
+                os.utime(failed_path, (self._now(), self._now()))
+            except OSError as e:
+                logger.warning(
+                    "Failed to stamp quarantine time for %s: %s", failed_path, e
+                )
             logger.warning(
                 "Quarantined %s/%s — %s",
                 segment_dir.parent.parent.name,
@@ -332,11 +341,8 @@ class SyncService:
                     if name.endswith(".incomplete"):
                         continue
 
-                    # Delete quarantined (.failed) segments — no server confirmation needed
+                    # Quarantined (.failed) segments are handled by the age-based sweep, never here.
                     if name.endswith(".failed"):
-                        shutil.rmtree(seg_dir)
-                        logger.info("Cleanup: deleted quarantined %s/%s", day, name)
-                        deleted_day += 1
                         continue
 
                     entry = _lookup_entry(entries_by_key, seg_dir)
@@ -369,6 +375,56 @@ class SyncService:
 
         if deleted_total:
             logger.info("Cleanup: deleted %d segment(s) total", deleted_total)
+
+    def _sweep_expired_quarantine(self) -> None:
+        """Drop quarantined (.failed) segments past the local TTL.
+
+        Purely local and unconditional: independent of _synced_days, server
+        reachability, cache_retention_days, and circuit state. Age is measured
+        from quarantine-entry time (the .failed dir's stamped mtime), not
+        capture time. Anything younger than the TTL is always kept.
+        """
+        captures_dir = self._config.captures_dir
+        if not captures_dir.exists():
+            return
+
+        cutoff = self._now() - QUARANTINE_TTL_DAYS * 86400
+
+        for day_dir in sorted(captures_dir.iterdir()):
+            if not day_dir.is_dir():
+                continue
+            day = day_dir.name
+            for stream_dir in day_dir.iterdir():
+                if not stream_dir.is_dir():
+                    continue
+                for seg_dir in sorted(stream_dir.iterdir()):
+                    if not seg_dir.is_dir() or not seg_dir.name.endswith(".failed"):
+                        continue
+                    try:
+                        mtime = seg_dir.stat().st_mtime
+                    except OSError:
+                        continue
+                    if mtime > cutoff:
+                        continue
+                    age_days = int((self._now() - mtime) // 86400)
+                    try:
+                        shutil.rmtree(seg_dir)
+                    except OSError as e:
+                        logger.error(
+                            "Failed to drop quarantined %s/%s: %s",
+                            day,
+                            seg_dir.name,
+                            e,
+                        )
+                        continue
+                    logger.warning(
+                        "Dropping quarantined %s/%s — held %dd, past %dd limit; "
+                        "unrecovered quarantined data discarded",
+                        day,
+                        seg_dir.name,
+                        age_days,
+                        QUARANTINE_TTL_DAYS,
+                    )
 
     def _save_health(self) -> None:
         try:
@@ -700,6 +756,14 @@ class SyncService:
                 await self._cleanup_synced_segments()
             except Exception as e:
                 logger.error(f"Cleanup error: {e}", exc_info=True)
+
+        # Expire quarantined segments past the local TTL — runs even when the
+        # circuit is open / server is down / day was never synced / retention == -1.
+        if self._running:
+            try:
+                self._sweep_expired_quarantine()
+            except Exception as e:
+                logger.error(f"Quarantine sweep error: {e}", exc_info=True)
 
     def _collect_segments(self, captures_dir: Path) -> dict[str, list[Path]]:
         """Collect completed segments grouped by day."""

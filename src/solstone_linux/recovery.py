@@ -195,6 +195,10 @@ def _mark_failed(segment_dir: Path) -> bool:
 
     try:
         os.rename(str(segment_dir), str(failed_dir))
+        try:
+            os.utime(str(failed_dir), None)
+        except OSError as e:
+            logger.warning(f"Failed to stamp quarantine time for {failed_name}: {e}")
         logger.warning(f"Marked as failed: {dir_name} -> {failed_name}")
     except OSError as e:
         logger.error(f"Failed to mark as failed: {e}")

@@ -16,7 +16,11 @@ import pytest
 import soundfile as sf
 
 from solstone_linux.config import Config
-from solstone_linux.recovery import _recover_segment, recover_incomplete_segments
+from solstone_linux.recovery import (
+    _mark_failed,
+    _recover_segment,
+    recover_incomplete_segments,
+)
 from solstone_linux.sync import (
     CIRCUIT_COOLDOWN_INITIAL,
     CIRCUIT_COOLDOWN_MAX,
@@ -231,6 +235,21 @@ class TestRecovery:
 
         failed_dir = captures_dir / "20260403" / "archon" / "140000.failed"
         assert failed_dir.exists()
+
+    def test_mark_failed_stamps_quarantine_mtime(self, tmp_path: Path):
+        captures_dir = tmp_path / "captures"
+        seg_dir = captures_dir / "20260403" / "archon" / "140000.incomplete"
+        seg_dir.mkdir(parents=True)
+        old_time = time.time() - 100 * 86400
+        os.utime(seg_dir, (old_time, old_time))
+
+        before = time.time()
+        _mark_failed(seg_dir)
+        after = time.time()
+
+        failed_dir = captures_dir / "20260403" / "archon" / "140000.failed"
+        assert failed_dir.exists()
+        assert before - 5 <= failed_dir.stat().st_mtime <= after + 5
 
     def test_metadata_removed_on_recovery(self, tmp_path: Path):
         """The .metadata file should be removed during recovery."""
@@ -809,6 +828,21 @@ class TestQuarantineClientError:
         assert not seg.exists()
         assert seg.with_name("120000_300.failed").exists()
 
+    def test_quarantine_segment_stamps_quarantine_mtime(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        captures = sync._config.captures_dir
+        seg = self._create_segment(captures, "20260410", "archon", "120000_300")
+        old_time = time.time() - 100 * 86400
+        os.utime(seg, (old_time, old_time))
+
+        before = time.time()
+        assert sync._quarantine_segment(seg, "test") is True
+        after = time.time()
+
+        failed_dir = seg.with_name("120000_300.failed")
+        assert failed_dir.exists()
+        assert before - 5 <= failed_dir.stat().st_mtime <= after + 5
+
     @pytest.mark.asyncio
     async def test_client_error_does_not_trip_circuit(self, tmp_path: Path):
         """CLIENT errors should not increment consecutive_failures or open circuit."""
@@ -1073,7 +1107,7 @@ class TestReconcilePredicate:
 
         upload.assert_not_called()
         assert segment.exists()
-        assert not failed.exists()
+        assert failed.exists()
         degraded = [
             rec for rec in caplog.records if "pre-v2 bare array" in rec.getMessage()
         ]
@@ -1347,7 +1381,7 @@ class TestCleanupSyncedSegments:
 
 
 class TestCleanupFailedSegments:
-    """Test that .failed segments are cleaned up on retention schedule."""
+    """Test that retention cleanup skips .failed segments."""
 
     def _make_sync(self, tmp_path: Path, retention: int = 7) -> SyncService:
         config = Config(base_dir=tmp_path)
@@ -1363,25 +1397,6 @@ class TestCleanupFailedSegments:
         seg_dir.mkdir(parents=True, exist_ok=True)
         (seg_dir / "screen.webm").write_bytes(b"\x00" * 100)
         return seg_dir
-
-    @pytest.mark.asyncio
-    async def test_failed_segments_deleted_on_retention(self, tmp_path: Path):
-        """.failed segments are deleted when day meets retention age."""
-        sync = self._make_sync(tmp_path, retention=7)
-        captures = sync._config.captures_dir
-
-        self._create_segment(captures, "20260101", "archon", "120000_300.failed")
-        sync._synced_days.add("20260101")
-
-        server_response = []
-        with patch(
-            "asyncio.to_thread",
-            new_callable=AsyncMock,
-            return_value=QueryResult(server_response),
-        ):
-            await sync._cleanup_synced_segments()
-
-        assert not (captures / "20260101" / "archon" / "120000_300.failed").exists()
 
     @pytest.mark.asyncio
     async def test_failed_segments_kept_if_day_not_synced(self, tmp_path: Path):
@@ -1437,3 +1452,98 @@ class TestCleanupFailedSegments:
             await sync._cleanup_synced_segments()
 
         assert (captures / "20260101" / "archon" / "120000.incomplete").exists()
+
+
+class TestSweepExpiredQuarantine:
+    """Test local TTL sweep for quarantined .failed segments."""
+
+    def _make_sync(self, tmp_path: Path, retention: int = 7) -> SyncService:
+        config = Config(base_dir=tmp_path)
+        config.cache_retention_days = retention
+        config.ensure_dirs()
+        client = UploadClient(config)
+        return SyncService(config, client)
+
+    def _create_segment(
+        self, captures_dir: Path, day: str, stream: str, name: str
+    ) -> Path:
+        seg_dir = captures_dir / day / stream / name
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        (seg_dir / "screen.webm").write_bytes(b"\x00" * 100)
+        return seg_dir
+
+    def test_fresh_quarantine_survives_repeated_sweeps(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        captures = sync._config.captures_dir
+        seg = self._create_segment(captures, "20260101", "archon", "120000_300.failed")
+        now = time.time()
+        os.utime(seg, (now, now))
+
+        sync._sweep_expired_quarantine()
+        sync._sweep_expired_quarantine()
+
+        assert seg.exists()
+
+    def test_fresh_dir_mtime_beats_ancient_day_and_file_mtimes(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        captures = sync._config.captures_dir
+        seg = self._create_segment(captures, "20200101", "archon", "120000_300.failed")
+        ancient = time.time() - 100 * 86400
+        os.utime(seg / "screen.webm", (ancient, ancient))
+        now = time.time()
+        os.utime(seg, (now, now))
+
+        sync._sweep_expired_quarantine()
+
+        assert seg.exists()
+
+    def test_aged_quarantine_deleted_without_server_query(self, tmp_path: Path, caplog):
+        sync = self._make_sync(tmp_path)
+        captures = sync._config.captures_dir
+        seg = self._create_segment(captures, "20200101", "archon", "120000_300.failed")
+        old_time = time.time() - 40 * 86400
+        os.utime(seg, (old_time, old_time))
+        assert "20200101" not in sync._synced_days
+
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            with caplog.at_level("WARNING", logger="solstone_linux.sync"):
+                sync._sweep_expired_quarantine()
+
+        assert not seg.exists()
+        mock_thread.assert_not_called()
+        warnings = [
+            rec
+            for rec in caplog.records
+            if rec.name == "solstone_linux.sync" and rec.levelname == "WARNING"
+        ]
+        assert len(warnings) == 1
+        assert "120000_300.failed" in warnings[0].getMessage()
+
+    def test_aged_quarantine_deleted_with_retention_disabled(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path, retention=-1)
+        captures = sync._config.captures_dir
+        seg = self._create_segment(captures, "20260101", "archon", "120000_300.failed")
+        old_time = time.time() - 40 * 86400
+        os.utime(seg, (old_time, old_time))
+
+        sync._sweep_expired_quarantine()
+
+        assert not seg.exists()
+
+    def test_aged_quarantine_deletes_both_name_shapes(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        captures = sync._config.captures_dir
+        duration_shape = self._create_segment(
+            captures, "20260101", "archon", "120000_300.failed"
+        )
+        bare_shape = self._create_segment(
+            captures, "20260101", "archon", "130000.failed"
+        )
+        old_time = time.time() - 40 * 86400
+        os.utime(duration_shape, (old_time, old_time))
+        os.utime(bare_shape, (old_time, old_time))
+
+        sync._sweep_expired_quarantine()
+
+        assert not duration_shape.exists()
+        assert not bare_shape.exists()

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import __version__, doctor, streams
 from .config import DEFAULT_SERVER_URL, load_config, save_config
+from .capture_stats import compute_quarantine_stats, format_quarantine_line
 from .streams import stream_name
 from .sync_health import derive_health, load_facts
 
@@ -451,6 +452,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         )
         if incomplete_count:
             print(f"        {incomplete_count} incomplete segment(s)")
+        quarantine_line = format_quarantine_line(compute_quarantine_stats(captures_dir))
+        if quarantine_line:
+            print(f"        {quarantine_line}")
     else:
         print(f"Cache:  {captures_dir} (not created yet)")
 

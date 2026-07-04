@@ -4,6 +4,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -154,6 +155,32 @@ def test_cmd_status_prints_sync_health(tmp_path: Path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Sync: offline — saving locally; pending unconfirmed (will retry)" in out
     assert "Synced:" not in out
+    assert "Quarantine:" not in out
+
+
+def test_cmd_status_prints_quarantine_line(tmp_path: Path, monkeypatch, capsys):
+    config = Config(
+        base_dir=tmp_path,
+        server_url="https://test.example.com",
+        key="K123456789",
+        stream="test-stream",
+    )
+    config.ensure_dirs()
+    failed_dir = config.captures_dir / "20260101" / "test-stream" / "120000_300.failed"
+    failed_dir.mkdir(parents=True)
+    old_time = time.time() - 5 * 86400
+    os.utime(failed_dir, (old_time, old_time))
+    monkeypatch.setattr(cli_module, "load_config", lambda: config)
+    monkeypatch.setattr(
+        cli_module.subprocess,
+        "run",
+        MagicMock(return_value=MagicMock(stdout="active\n")),
+    )
+
+    assert cmd_status(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "Quarantine:" in out
 
 
 def test_cmd_status_handles_corrupt_config(tmp_path: Path, monkeypatch):

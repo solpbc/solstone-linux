@@ -16,6 +16,7 @@ import sys
 import time
 from typing import Callable, NamedTuple
 
+from .capture_stats import compute_quarantine_stats, format_quarantine_line
 from .config import load_config
 from .sync_health import derive_health, load_facts
 
@@ -327,6 +328,15 @@ def run_doctor() -> int:
             fail_count += 1
         elif result.severity == "warn":
             warn_count += 1
+
+    try:
+        q_line = format_quarantine_line(
+            compute_quarantine_stats(load_config().captures_dir)
+        )
+    except Exception:
+        q_line = None
+    if q_line:
+        print(q_line)
 
     print()
     print(f"doctor: {len(checks)} checks, {fail_count} failed, {warn_count} warnings")

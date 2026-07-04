@@ -92,6 +92,11 @@ def _set_all_checks(
             or doctor.CheckResult("appindicator ext (soft)", "ok", "")
         ),
     )
+    monkeypatch.setattr(
+        doctor,
+        "load_config",
+        lambda: Config(base_dir=Path("/__solstone_linux_missing_test_base__")),
+    )
 
 
 def test_run_doctor_all_pass_returns_zero(monkeypatch, capsys):
@@ -102,6 +107,33 @@ def test_run_doctor_all_pass_returns_zero(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "python version" in captured.out
     assert "gtk4 typelib" in captured.out
+    assert "doctor: 12 checks, 0 failed, 0 warnings" in captured.out
+
+
+def test_run_doctor_prints_quarantine_line(monkeypatch, tmp_path: Path, capsys):
+    _set_all_checks(monkeypatch)
+    config = Config(base_dir=tmp_path)
+    config.ensure_dirs()
+    failed_dir = config.captures_dir / "20260101" / "archon" / "120000_300.failed"
+    failed_dir.mkdir(parents=True)
+    monkeypatch.setattr(doctor, "load_config", lambda: config)
+
+    assert doctor.run_doctor() == 0
+
+    captured = capsys.readouterr()
+    assert "Quarantine:" in captured.out
+    assert "doctor: 12 checks, 0 failed, 0 warnings" in captured.out
+
+
+def test_run_doctor_omits_empty_quarantine_line(monkeypatch, tmp_path: Path, capsys):
+    _set_all_checks(monkeypatch)
+    config = Config(base_dir=tmp_path)
+    monkeypatch.setattr(doctor, "load_config", lambda: config)
+
+    assert doctor.run_doctor() == 0
+
+    captured = capsys.readouterr()
+    assert "Quarantine:" not in captured.out
     assert "doctor: 12 checks, 0 failed, 0 warnings" in captured.out
 
 
