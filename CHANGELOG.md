@@ -4,6 +4,11 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
+## [0.4.4] - 2026-07-04
+
+### Fixed
+- stopping or restarting sol now shuts down promptly, even with an upload mid-retry. that upload used to wait out its full retry delay first; now it ends the moment you quit sol or the machine powers off. a bad retry setting in your config no longer leaves the uploader stuck, either.
+
 ## [0.4.3] - 2026-07-03
 
 ### Changed
