@@ -1050,6 +1050,100 @@ class TestReconcilePredicate:
         assert _segment_proven_held(segment, item)
 
     @pytest.mark.asyncio
+    async def test_processed_status_sha_match_skips_and_cleanup_deletes(
+        self, tmp_path: Path
+    ):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item("120000_300", segment, status="processed")
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        assert _segment_proven_held(segment, item)
+
+        with patch.object(sync, "_upload_segment", new_callable=AsyncMock) as upload:
+            await sync._sync()
+
+        upload.assert_not_called()
+        assert not segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_processed_status_with_mismatched_sha_uploads_and_cleanup_keeps(
+        self, tmp_path: Path
+    ):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item(
+            "120000_300",
+            segment,
+            files=[
+                _server_file(
+                    segment / "screen.webm", status="processed", sha256="0" * 64
+                )
+            ],
+        )
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        assert not _segment_proven_held(segment, item)
+
+        with patch.object(
+            sync, "_upload_segment", new_callable=AsyncMock, return_value=True
+        ) as upload:
+            await sync._sync()
+
+        upload.assert_called_once()
+        sync._synced_days.add(day)
+        await sync._cleanup_synced_segments()
+
+        assert segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_processed_status_with_mismatched_name_uploads_and_cleanup_keeps(
+        self, tmp_path: Path
+    ):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item(
+            "120000_300",
+            segment,
+            files=[
+                _server_file(
+                    segment / "screen.webm",
+                    name="something-else.webm",
+                    status="processed",
+                )
+            ],
+        )
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        assert not _segment_proven_held(segment, item)
+
+        with patch.object(
+            sync, "_upload_segment", new_callable=AsyncMock, return_value=True
+        ) as upload:
+            await sync._sync()
+
+        upload.assert_called_once()
+        sync._synced_days.add(day)
+        await sync._cleanup_synced_segments()
+
+        assert segment.exists()
+
+    @pytest.mark.asyncio
     async def test_missing_status_uploads_and_cleanup_keeps(self, tmp_path: Path):
         sync = self._make_sync(tmp_path)
         day = "20260101"
@@ -1060,6 +1154,33 @@ class TestReconcilePredicate:
         sync._client.get_server_segments = MagicMock(
             side_effect=self._query_for(day, [item])
         )
+
+        assert not _segment_proven_held(segment, item)
+
+        with patch.object(
+            sync, "_upload_segment", new_callable=AsyncMock, return_value=True
+        ) as upload:
+            await sync._sync()
+
+        upload.assert_called_once()
+        sync._synced_days.add(day)
+        await sync._cleanup_synced_segments()
+
+        assert segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_unknown_status_uploads_and_cleanup_keeps(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        item = _server_item("120000_300", segment, status="unknown")
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        assert not _segment_proven_held(segment, item)
 
         with patch.object(
             sync, "_upload_segment", new_callable=AsyncMock, return_value=True
@@ -1085,6 +1206,37 @@ class TestReconcilePredicate:
         sync._client.get_server_segments = MagicMock(
             side_effect=self._query_for(day, [item])
         )
+
+        with patch.object(sync, "_upload_segment", new_callable=AsyncMock) as upload:
+            await sync._sync()
+
+        upload.assert_not_called()
+        assert not segment.exists()
+
+    @pytest.mark.asyncio
+    async def test_mixed_present_and_processed_files_skip_and_cleanup_deletes(
+        self, tmp_path: Path
+    ):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
+        segment = self._create_segment(
+            sync._config.captures_dir, day, "archon", "120000_300"
+        )
+        audio = segment / "audio.flac"
+        audio.write_bytes(b"audio")
+        item = _server_item(
+            "120000_300",
+            segment,
+            files=[
+                _server_file(segment / "screen.webm", status="present"),
+                _server_file(audio, status="processed"),
+            ],
+        )
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
+
+        assert _segment_proven_held(segment, item)
 
         with patch.object(sync, "_upload_segment", new_callable=AsyncMock) as upload:
             await sync._sync()

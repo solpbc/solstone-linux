@@ -4,6 +4,11 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
+## [0.4.5] - 2026-07-13
+
+### Fixed
+- local cleanup now recognizes segments your journal has already finished processing. when your journal takes a segment in and finishes with it, it no longer keeps the original file on hand. sol used to read that as the file having gone missing, so it re-sent the segment and never released its local copy. sol now takes it as done — after confirming the file name and fingerprint still match, so nothing leaves your machine unconfirmed.
+
 ## [0.4.4] - 2026-07-04
 
 ### Fixed

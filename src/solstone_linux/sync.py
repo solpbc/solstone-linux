@@ -62,6 +62,13 @@ CONTACT_FLUSH_INTERVAL = 30
 
 SERVER_KEY_FILENAME = ".server_key"
 
+# Per-file statuses that prove reconcile convergence after name and SHA match.
+# "processed" means the journal intentionally consumed the raw byte after
+# verified processing and deliberately does not keep that raw file on journal
+# disk; it makes the segment eligible for configured local cache cleanup, but
+# does not mean the raw byte is still stored.
+TERMINAL_HELD_STATUSES = ("present", "relocated", "processed")
+
 
 def _eligible_files(segment_dir: Path) -> list[Path]:
     """Files eligible for upload and reconcile."""
@@ -82,6 +89,14 @@ def _sha256_file(path: Path) -> str | None:
 
 
 def _segment_proven_held(segment_dir: Path, entry: dict) -> bool:
+    """Return True only when every local file has terminal journal proof.
+
+    Each local file must match a listing entry by submitted_name (else name),
+    carry a status in TERMINAL_HELD_STATUSES, and match its SHA-256 exactly.
+    All three are required: a terminal status alone is never proof for this byte.
+    Anything else -- absent entry, unknown status, hash mismatch, unreadable file
+    -- needs upload and is never deletable.
+    """
     local_files = _eligible_files(segment_dir)
     if not local_files:
         return False
@@ -96,7 +111,7 @@ def _segment_proven_held(segment_dir: Path, entry: dict) -> bool:
         remote_file = remote_by_name.get(local_file.name)
         if remote_file is None:
             return False
-        if remote_file.get("status") not in ("present", "relocated"):
+        if remote_file.get("status") not in TERMINAL_HELD_STATUSES:
             return False
         local_sha = _sha256_file(local_file)
         if local_sha is None or local_sha != remote_file.get("sha256"):
