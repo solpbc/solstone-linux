@@ -67,7 +67,7 @@ SERVER_KEY_FILENAME = ".server_key"
 # verified processing and deliberately does not keep that raw file on journal
 # disk; it makes the segment eligible for configured local cache cleanup, but
 # does not mean the raw byte is still stored.
-TERMINAL_HELD_STATUSES = ("present", "relocated", "processed")
+TERMINAL_HELD_STATUSES = ("present", "processed")
 
 
 def _eligible_files(segment_dir: Path) -> list[Path]:

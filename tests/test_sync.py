@@ -1022,13 +1022,30 @@ class TestReconcilePredicate:
 
         assert not _segment_proven_held(segment, item)
 
-    def test_relocated_matching_sha_is_held(self, tmp_path: Path):
+    @pytest.mark.asyncio
+    async def test_relocated_status_uploads_and_cleanup_keeps(self, tmp_path: Path):
+        sync = self._make_sync(tmp_path)
+        day = "20260101"
         segment = self._create_segment(
-            tmp_path / "captures", "20260101", "archon", "120000_300"
+            sync._config.captures_dir, day, "archon", "120000_300"
         )
         item = _server_item("120000_300", segment, status="relocated")
+        sync._client.get_server_segments = MagicMock(
+            side_effect=self._query_for(day, [item])
+        )
 
-        assert _segment_proven_held(segment, item)
+        assert not _segment_proven_held(segment, item)
+
+        with patch.object(
+            sync, "_upload_segment", new_callable=AsyncMock, return_value=True
+        ) as upload:
+            await sync._sync()
+
+        upload.assert_called_once()
+        sync._synced_days.add(day)
+        await sync._cleanup_synced_segments()
+
+        assert segment.exists()
 
     def test_submitted_name_matches_local_filename(self, tmp_path: Path):
         segment = tmp_path / "captures" / "20260101" / "archon" / "120000_300"
