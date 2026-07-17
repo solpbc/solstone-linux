@@ -627,6 +627,12 @@ where
     recover(&config.captures_dir(), config.segment_interval);
     let run_result = run();
     let cleanup_result = cleanup();
+    if let Err(error) = &run_result {
+        tracing::error!(?error, "observer run failed");
+    }
+    if let Err(error) = &cleanup_result {
+        tracing::error!(?error, "observer cleanup failed");
+    }
     if run_result.is_err() || cleanup_result.is_err() || audio_fatal() {
         1
     } else {
