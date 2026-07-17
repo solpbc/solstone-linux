@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod encoding;
 pub mod matching;
+pub mod observer;
 pub mod pipeline;
 pub mod positions;
 pub mod recovery;
