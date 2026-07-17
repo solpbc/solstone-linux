@@ -22,7 +22,7 @@ struct State {
     stopping: bool,
 }
 
-pub struct EventSender {
+pub(crate) struct EventSender {
     state: Arc<Mutex<State>>,
     notify: Arc<Notify>,
     handle: Option<JoinHandle<()>>,

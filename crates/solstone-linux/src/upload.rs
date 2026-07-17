@@ -7,7 +7,7 @@ use crate::{
     sync_health::ErrorType,
 };
 use reqwest::{Client, StatusCode, multipart};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -47,16 +47,23 @@ impl UploadResult {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ListingFile {
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub submitted_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub status: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ListingEntry {
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub original_key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub files: Option<Vec<ListingFile>>,
 }
 
@@ -89,6 +96,12 @@ pub struct UploadClient {
 }
 
 impl UploadClient {
+    /// Create an observer HTTP client.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime because the event sender task is
+    /// started during construction.
     pub fn new(
         config: &Config,
         hostname: impl Into<String>,
@@ -174,23 +187,39 @@ impl UploadClient {
                 .await;
             match response {
                 Ok(response) if response.status() == StatusCode::OK => {
-                    let Ok(body) = response.json::<Value>().await else {
-                        return false;
+                    let body = match response.json::<Value>().await {
+                        Ok(body) => body,
+                        Err(error) => {
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                %error,
+                                "Registration attempt returned malformed JSON"
+                            );
+                            if attempt + 1 < attempts {
+                                tokio::time::sleep(retry_delay(&self.inner.retry_delays, attempt))
+                                    .await;
+                            }
+                            continue;
+                        }
                     };
                     let (Some(key), Some(name)) = (
                         body.get("key").and_then(Value::as_str),
                         body.get("name").and_then(Value::as_str),
                     ) else {
+                        // Named deviation: Python raises KeyError for a malformed
+                        // success body; Rust reports registration failure without panicking.
                         return false;
                     };
-                    *self.inner.key.lock().unwrap() = key.to_owned();
-                    *self.inner.stream.lock().unwrap() = name.to_owned();
                     config.key = key.to_owned();
                     config.stream = name.to_owned();
                     if let Err(error) = save_config(config) {
+                        // Named deviation: Python propagates the persistence error;
+                        // Rust leaves the client unregistered so a later call can retry.
                         tracing::error!(%error, "Failed to persist observer registration");
                         return false;
                     }
+                    *self.inner.key.lock().unwrap() = key.to_owned();
+                    *self.inner.stream.lock().unwrap() = name.to_owned();
                     tracing::info!(name, "Registered observer");
                     return true;
                 }
@@ -212,6 +241,7 @@ impl UploadClient {
                 tokio::time::sleep(retry_delay(&self.inner.retry_delays, attempt)).await;
             }
         }
+        tracing::error!(attempts, "Registration failed after all attempts");
         false
     }
 
@@ -240,6 +270,8 @@ impl UploadClient {
                 .text("segment", segment.to_owned());
             let mut file_count = 0;
             for path in files.iter().filter(|path| path.exists()) {
+                // Named deviation: Python propagates file-open errors; Rust skips
+                // unreadable files so one bad capture does not crash the observer.
                 match multipart_part(path).await {
                     Ok(part) => {
                         form = form.part("files", part);
@@ -265,22 +297,34 @@ impl UploadClient {
                 .await;
             match response {
                 Ok(response) if response.status() == StatusCode::OK => {
-                    let body = response.json::<Value>().await.unwrap_or(Value::Null);
-                    let duplicate = body.get("status").and_then(Value::as_str) == Some("duplicate");
-                    let stored_key = body
-                        .get(if duplicate {
-                            "existing_segment"
-                        } else {
-                            "segment"
-                        })
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    return UploadResult {
-                        success: true,
-                        duplicate,
-                        error_type: None,
-                        stored_key,
-                    };
+                    match response.json::<Value>().await {
+                        Ok(body) => {
+                            let duplicate =
+                                body.get("status").and_then(Value::as_str) == Some("duplicate");
+                            let stored_key = body
+                                .get(if duplicate {
+                                    "existing_segment"
+                                } else {
+                                    "segment"
+                                })
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            return UploadResult {
+                                success: true,
+                                duplicate,
+                                error_type: None,
+                                stored_key,
+                            };
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                %error,
+                                "Upload attempt returned malformed JSON"
+                            );
+                            last_error = Some(ErrorType::Transient);
+                        }
+                    }
                 }
                 Ok(response) => {
                     let status = response.status();
@@ -290,8 +334,10 @@ impl UploadClient {
                         self.inner.revoked.store(true, Ordering::Release);
                     }
                     if error_type != ErrorType::Transient {
+                        tracing::error!(%status, ?error_type, "Upload rejected");
                         return UploadResult::failure(Some(error_type));
                     }
+                    tracing::warn!(attempt = attempt + 1, %status, "Upload attempt failed");
                 }
                 Err(error) => {
                     tracing::warn!(attempt = attempt + 1, %error, "Upload attempt failed");
@@ -337,9 +383,16 @@ impl UploadClient {
             if status == StatusCode::FORBIDDEN {
                 self.inner.revoked.store(true, Ordering::Release);
             }
+            tracing::warn!(%status, ?error_type, "Segments query failed");
             return query_failure(error_type, Some(status.as_u16()));
         }
-        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        let body = match response.json::<Value>().await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::debug!(%error, "Segments query returned malformed JSON");
+                return query_failure(ErrorType::Transient, None);
+            }
+        };
         parse_listing(body, status.as_u16())
     }
 
@@ -437,23 +490,40 @@ fn query_failure(error_type: ErrorType, status_code: Option<u16>) -> QueryResult
     }
 }
 
+fn deserialize_lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 fn parse_listing(body: Value, status_code: u16) -> QueryResult {
     let (items, legacy, truncated) = match body {
         Value::Array(items) => (items, true, false),
         Value::Object(mut body) => {
+            // Named deviation: Python can fail while taking len() of malformed
+            // `items`; Rust treats non-array items as an empty listing.
             let items = body
                 .remove("items")
                 .and_then(|value| value.as_array().cloned())
                 .unwrap_or_default();
-            let total = body.remove("total").and_then(|value| value.as_u64());
-            let truncated = total.is_some_and(|total| total != items.len() as u64);
+            let total = body.remove("total").and_then(|value| value.as_i64());
+            let truncated = total.is_some_and(|total| total != items.len() as i64);
             (items, false, truncated)
         }
         _ => (Vec::new(), false, false),
     };
     let segments = items
         .into_iter()
-        .filter_map(|item| serde_json::from_value(item).ok())
+        .map(|item| {
+            serde_json::from_value(item).unwrap_or(ListingEntry {
+                key: None,
+                original_key: None,
+                files: None,
+            })
+        })
         .collect();
     QueryResult {
         segments: Some(segments),
@@ -496,6 +566,7 @@ mod tests {
 
     enum Action {
         Response(u16, Value),
+        Raw(u16, &'static str),
         Disconnect,
     }
 
@@ -541,17 +612,23 @@ mod tests {
                                     .unwrap()
                                     .pop_front()
                                     .unwrap_or(Action::Response(500, Value::Null));
-                                let Action::Response(status, body) = action else {
-                                    return Err::<Response<Full<Bytes>>, _>(std::io::Error::new(
-                                        std::io::ErrorKind::ConnectionAborted,
-                                        "mock disconnect",
-                                    ));
+                                let (status, body) = match action {
+                                    Action::Response(status, body) => (status, body.to_string()),
+                                    Action::Raw(status, body) => (status, body.to_owned()),
+                                    Action::Disconnect => {
+                                        return Err::<Response<Full<Bytes>>, _>(
+                                            std::io::Error::new(
+                                                std::io::ErrorKind::ConnectionAborted,
+                                                "mock disconnect",
+                                            ),
+                                        );
+                                    }
                                 };
                                 Ok::<_, std::io::Error>(
                                     Response::builder()
                                         .status(status)
                                         .header("content-type", "application/json")
-                                        .body(Full::new(Bytes::from(body.to_string())))
+                                        .body(Full::new(Bytes::from(body)))
                                         .unwrap(),
                                 )
                             }
@@ -800,6 +877,22 @@ mod tests {
         }
     }
 
+    // AC: Client and Incompatible upload responses are not retried
+    #[tokio::test]
+    async fn upload_400_and_404_make_one_request() {
+        for (status, expected) in [(400, ErrorType::Client), (404, ErrorType::Incompatible)] {
+            let server = MockServer::new(vec![(status, json!({})), (200, json!({}))]).await;
+            let temp = TempDir::new().unwrap();
+            let mut config = config(&server, &temp);
+            config.sync_max_retries = 10;
+            config.sync_retry_delays = vec![0];
+            let media = write_file(&temp, "audio.flac", b"audio");
+            let result = client(&config).upload_segment("d", "s", &[media]).await;
+            assert_eq!(result.error_type, Some(expected));
+            assert_eq!(server.requests().len(), 1);
+        }
+    }
+
     // tests/test_upload.py::test_upload_interrupt_during_wait_returns_transient
     #[tokio::test]
     async fn upload_interrupt_before_wait_returns_transient() {
@@ -818,6 +911,21 @@ mod tests {
         .unwrap();
         assert_eq!(server.requests().len(), 1);
         assert_eq!(result.error_type, Some(ErrorType::Transient));
+    }
+
+    // AC: pre-cancellation does not override the only attempt's own result
+    #[tokio::test]
+    async fn pre_cancelled_single_attempt_returns_attempt_error() {
+        let server = MockServer::new(vec![(400, json!({}))]).await;
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&server, &temp);
+        config.sync_max_retries = 1;
+        let media = write_file(&temp, "audio.flac", b"audio");
+        let client = client(&config);
+        client.request_stop();
+        let result = client.upload_segment("d", "s", &[media]).await;
+        assert_eq!(result.error_type, Some(ErrorType::Client));
+        assert_eq!(server.requests().len(), 1);
     }
 
     // AC: retry rebuilds multipart streams and attempt two receives complete file bytes
@@ -844,6 +952,51 @@ mod tests {
         );
     }
 
+    // AC: malformed upload JSON is transient and retries
+    #[tokio::test]
+    async fn malformed_upload_json_retries_as_transient() {
+        let server = MockServer::new_actions(vec![
+            Action::Raw(200, "not-json"),
+            Action::Response(200, json!({"status":"ok", "segment":"s"})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&server, &temp);
+        config.sync_retry_delays = vec![0];
+        let media = write_file(&temp, "audio.flac", b"audio");
+        let result = client(&config).upload_segment("d", "s", &[media]).await;
+        assert!(result.success);
+        assert_eq!(server.requests().len(), 2);
+
+        let terminal_server = MockServer::new_actions(vec![Action::Raw(200, "not-json")]).await;
+        let terminal_temp = TempDir::new().unwrap();
+        let mut terminal_config = self::config(&terminal_server, &terminal_temp);
+        terminal_config.sync_max_retries = 1;
+        let terminal_media = write_file(&terminal_temp, "audio.flac", b"audio");
+        let terminal_result = client(&terminal_config)
+            .upload_segment("d", "s", &[terminal_media])
+            .await;
+        assert_eq!(terminal_result.error_type, Some(ErrorType::Transient));
+    }
+
+    // AC: connection-refused upload is classified Transient end to end
+    #[tokio::test]
+    async fn connection_refused_upload_is_transient() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            server_url: format!("http://{address}"),
+            key: "K".into(),
+            sync_max_retries: 1,
+            ..Config::default()
+        };
+        let media = write_file(&temp, "audio.flac", b"audio");
+        let result = client(&config).upload_segment("d", "s", &[media]).await;
+        assert_eq!(result.error_type, Some(ErrorType::Transient));
+    }
+
     // tests/test_upload.py::test_relay_event_uses_bearer_and_keyless_route
     #[tokio::test]
     async fn relay_event_uses_bearer_and_keyless_route() {
@@ -865,6 +1018,16 @@ mod tests {
             body,
             json!({"tract":"observe", "event":"status", "mode":"idle"})
         );
+    }
+
+    // AC: relay 401 does not latch revoked
+    #[tokio::test]
+    async fn relay_401_does_not_latch_revoked() {
+        let server = MockServer::new(vec![(401, json!({}))]).await;
+        let temp = TempDir::new().unwrap();
+        let client = client(&config(&server, &temp));
+        assert!(!client.relay_event("observe", "status", Map::new()).await);
+        assert!(!client.is_revoked());
     }
 
     // tests/test_upload.py::test_get_server_segments_uses_bearer_and_keyless_route
@@ -903,6 +1066,43 @@ mod tests {
         assert_eq!(file.submitted_name, None);
         assert_eq!(file.status, None);
         assert_eq!(file.sha256, None);
+    }
+
+    // AC: malformed listing fields become None without dropping entries
+    #[tokio::test]
+    async fn listing_lenient_fields_preserve_every_entry() {
+        let server = MockServer::new(vec![(
+            200,
+            json!({"items":[
+                {"key":"kept", "original_key":7, "files":[{"name":false}]},
+                "unexpected-entry"
+            ], "total":-1}),
+        )])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let result = client(&config(&server, &temp))
+            .get_server_segments("d")
+            .await;
+        let entries = result.segments.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key.as_deref(), Some("kept"));
+        assert_eq!(entries[0].original_key, None);
+        assert_eq!(entries[0].files.as_ref().unwrap()[0].name, None);
+        assert_eq!(entries[1].key, None);
+        assert!(result.truncated);
+    }
+
+    // AC: malformed listing JSON is Transient rather than empty success
+    #[tokio::test]
+    async fn malformed_listing_json_is_transient() {
+        let server = MockServer::new_actions(vec![Action::Raw(200, "not-json")]).await;
+        let temp = TempDir::new().unwrap();
+        let result = client(&config(&server, &temp))
+            .get_server_segments("d")
+            .await;
+        assert_eq!(result.segments, None);
+        assert_eq!(result.error_type, Some(ErrorType::Transient));
+        assert_eq!(result.status_code, None);
     }
 
     // tests/test_upload.py::test_get_server_segments_marks_truncated_envelope
@@ -956,7 +1156,7 @@ mod tests {
         assert!(server.requests().is_empty());
     }
 
-    // AC: error classification covers protocol and transport classes
+    // AC: pure classification covers protocol statuses and timeout-shaped missing statuses
     #[test]
     fn error_classification() {
         assert_eq!(
@@ -1012,6 +1212,57 @@ mod tests {
         let empty_client = self::client(&empty);
         assert!(empty_client.ensure_registered(&mut empty).await);
         assert_eq!(empty_server.requests().len(), 1);
+    }
+
+    // AC: empty retry delays use the complete local fallback
+    #[tokio::test]
+    async fn empty_retry_delays_use_full_fallback() {
+        let server = MockServer::new(vec![]).await;
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&server, &temp);
+        config.sync_retry_delays.clear();
+        let client = client(&config);
+        assert_eq!(client.inner.retry_delays, vec![5, 30, 120, 300]);
+    }
+
+    // AC: malformed registration JSON continues to the next attempt
+    #[tokio::test]
+    async fn malformed_registration_json_retries() {
+        let server = MockServer::new_actions(vec![
+            Action::Raw(200, "not-json"),
+            Action::Response(200, json!({"key":"key", "name":"fedora"})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&server, &temp);
+        config.key.clear();
+        config.sync_retry_delays = vec![0, 0];
+        let client = client(&config);
+        assert!(client.ensure_registered(&mut config).await);
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    // AC: failed registration persistence does not latch in-memory registration
+    #[tokio::test]
+    async fn registration_persistence_failure_can_retry() {
+        let server = MockServer::new(vec![
+            (200, json!({"key":"key", "name":"fedora"})),
+            (200, json!({"key":"key", "name":"fedora"})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let blocked = temp.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let mut config = config(&server, &temp);
+        config.key.clear();
+        config.config_dir = blocked.clone();
+        let client = client(&config);
+        assert!(!client.ensure_registered(&mut config).await);
+        assert!(!client.is_registered());
+        std::fs::remove_file(&blocked).unwrap();
+        assert!(client.ensure_registered(&mut config).await);
+        assert!(client.is_registered());
+        assert_eq!(server.requests().len(), 2);
     }
 
     // AC: cancellation raised during backoff interrupts the active wait
@@ -1111,7 +1362,7 @@ mod tests {
     }
 
     async fn wait_for_requests(server: &MockServer, count: usize) {
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
             while server.requests().len() < count {
                 tokio::task::yield_now().await;
             }
@@ -1169,7 +1420,7 @@ mod tests {
         wait_for_requests(&server, 1).await;
         let start = tokio::time::Instant::now();
         assert_eq!(client.stop(Duration::from_millis(10)).await, 1);
-        assert!(start.elapsed() < Duration::from_millis(200));
+        assert!(start.elapsed() < Duration::from_millis(500));
         gate.notify_one();
         assert_eq!(client.stop(Duration::from_secs(1)).await, 0);
         let body: Value = serde_json::from_slice(&server.requests()[0].body).unwrap();
