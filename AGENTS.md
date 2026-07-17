@@ -78,7 +78,7 @@ make versions       # Show installed package versions
 
 ## Rust rebuild
 
-The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains the portable, unit-tested logic and a stub CLI, while `crates/spike-screencast/` is a disposable portal/PipeWire/GStreamer validation binary. Run `make rust-fmt-check`, `make rust-lint`, `make rust-test`, and `make rust-deny` individually, or use `make ci` as the combined Python and Rust gate. Python remains the shipped pipx observer until an explicit cutover; Rust crates are not installed or released with it. To remove the spike, delete `crates/spike-screencast/` and its workspace member line.
+The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains the portable observer logic and Linux video-capture backends, plus a stub CLI. Run `make rust-fmt-check`, `make rust-lint`, `make rust-test`, and `make rust-deny` individually, or use `make ci` as the combined Python and Rust gate. Python remains the shipped pipx observer until an explicit cutover; Rust crates are not installed or released with it.
 
 ## Releasing
 

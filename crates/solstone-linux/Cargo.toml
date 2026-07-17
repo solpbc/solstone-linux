@@ -17,6 +17,11 @@ rustix = { version = "1", features = ["process"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
+ashpd = { version = "=0.13.12", features = ["screencast"] }
+gstreamer = "=0.25.3"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+x11rb = { version = "0.13", default-features = false, features = ["randr"] }
 
 [dev-dependencies]
 tempfile = "3"

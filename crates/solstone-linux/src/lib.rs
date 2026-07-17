@@ -21,3 +21,4 @@ pub mod streams;
 pub mod subscription;
 pub mod sync_health;
 pub mod upload;
+pub mod video;
