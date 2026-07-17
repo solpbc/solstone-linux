@@ -11,7 +11,11 @@ use std::sync::{Arc, Mutex};
 use zbus::interface;
 
 pub fn clamp_pause(duration_seconds: i32) -> Option<u64> {
-    (duration_seconds > 0).then_some(duration_seconds as u64)
+    if duration_seconds > 0 {
+        Some(duration_seconds as u64)
+    } else {
+        None
+    }
 }
 
 pub trait ObserverCommands: Send + Sync {
@@ -43,15 +47,7 @@ impl<C: Clock, O: ObserverCommands> Observer1<C, O> {
 impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<C, O> {
     #[zbus(property(emits_changed_signal = "false"), name = "Status")]
     fn current_status(&self) -> String {
-        self.with_snapshot(|s| {
-            match tray_model::status(s) {
-                tray_model::TrayStatus::Recording => "recording",
-                tray_model::TrayStatus::Idle => "idle",
-                tray_model::TrayStatus::Paused => "paused",
-                tray_model::TrayStatus::Stopped => "stopped",
-            }
-            .into()
-        })
+        self.with_snapshot(|s| tray_model::status_name(tray_model::status(s)).into())
     }
     #[zbus(property)]
     fn sync_status(&self) -> String {
@@ -142,31 +138,48 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     ) -> zbus::Result<()>;
 }
 
-// Python Observer1 provenance (25/25): all ported.
-// test_status_recording, test_status_idle, test_status_paused -> status property tests.
-// test_pause_calls_observer, test_pause_indefinite_calls_observer, test_resume_calls_observer -> command/clamp tests.
-// test_auto_resume_expiry -> observer auto-resume plus desktop signal-state tests.
-// test_segment_timer_while_recording, test_segment_timer_zero_when_paused,
-// test_segment_timer_zero_when_no_segment, test_pause_remaining_during_timed_pause,
-// test_pause_remaining_zero_when_not_paused, test_pause_remaining_zero_for_indefinite_pause
-//   -> read-time countdown tests.
-// test_returns_walk_counts, test_empty_captures (capture-stats class), test_returns_cached_stats_dict,
-// test_empty_captures (GetStats class), test_uses_cached_today_count -> GetStats/snapshot tests.
-// test_initial_status, test_progress_drives_syncing_status, test_progress_change_emits_signal
-//   -> sync properties and desktop_component::SignalState tests.
-// test_capture_dir, test_server_url, test_stream, test_segment_interval -> config property tests.
+// Python Observer1 provenance (25/25):
+// TestObserverServiceStatus::test_status_recording -> dbus_service::tests::status_recording.
+// TestObserverServiceStatus::test_status_idle -> dbus_service::tests::status_idle.
+// TestObserverServiceStatus::test_status_paused -> dbus_service::tests::status_paused.
+// TestPauseResume::test_pause_calls_observer -> dbus_service::tests::pause_calls_observer.
+// TestPauseResume::test_pause_indefinite_calls_observer -> dbus_service::tests::pause_indefinite_calls_observer.
+// TestPauseResume::test_resume_calls_observer -> dbus_service::tests::resume_calls_observer.
+// TestAutoResume::test_auto_resume_expiry -> observer::tests::paused_finalize_saves_three_hits_clamps_and_timed_pause_resumes.
+// TestSegmentTimerAndPauseRemaining::test_segment_timer_while_recording -> dbus_service::tests::segment_timer_while_recording.
+// TestSegmentTimerAndPauseRemaining::test_segment_timer_zero_when_paused -> dbus_service::tests::segment_timer_zero_when_paused.
+// TestSegmentTimerAndPauseRemaining::test_segment_timer_zero_when_no_segment -> dbus_service::tests::segment_timer_zero_when_no_segment.
+// TestSegmentTimerAndPauseRemaining::test_pause_remaining_during_timed_pause -> dbus_service::tests::pause_remaining_during_timed_pause.
+// TestSegmentTimerAndPauseRemaining::test_pause_remaining_zero_when_not_paused -> dbus_service::tests::pause_remaining_zero_when_not_paused.
+// TestSegmentTimerAndPauseRemaining::test_pause_remaining_zero_for_indefinite_pause -> dbus_service::tests::pause_remaining_zero_for_indefinite_pause.
+// TestComputeCaptureStats::test_returns_walk_counts -> capture_stats::tests::capture_walk_counts.
+// TestComputeCaptureStats::test_empty_captures -> capture_stats::tests::capture_empty.
+// TestGetStats::test_returns_cached_stats_dict -> dbus_service::tests::get_stats_returns_cached_shape.
+// TestGetStats::test_empty_captures -> dbus_service::tests::get_stats_empty_captures.
+// TestGetStats::test_uses_cached_today_count -> dbus_service::tests::get_stats_uses_cached_today_count.
+// TestSyncStatusTracking::test_initial_status -> dbus_service::tests::fresh_sync_properties_are_unknown_and_empty.
+// TestSyncStatusTracking::test_progress_drives_syncing_status -> dbus_service::tests::in_progress_sync_properties_pass_through.
+// TestSyncStatusTracking::test_progress_change_emits_signal -> desktop_component::tests::progress_change_emits_syncing_composite.
+// TestObserverServiceConfig::test_capture_dir -> dbus_service::tests::config_properties_match_config.
+// TestObserverServiceConfig::test_server_url -> dbus_service::tests::config_properties_match_config.
+// TestObserverServiceConfig::test_stream -> dbus_service::tests::config_properties_match_config.
+// TestObserverServiceConfig::test_segment_interval -> dbus_service::tests::config_properties_match_config.
 
 // Python introspection provenance (2/2):
 // test_hyphenated_portal_property_names_parse_without_monkeypatch: retired-by-dependency;
 //   it tests dbus-fast portal XML parsing, not Observer1.
-// test_served_introspection_matches_legacy_baseline: Observer1 ports below; SNI and DBusMenu
-//   cases are retired-by-dependency because ksni owns those interfaces.
-// Python DBusMenu provenance (8/8): test_default_emits_enabled_and_visible_true,
-// test_explicit_false_emits_false, test_toggle_true_after_false_still_emits,
-// test_other_keys_still_conditional, test_update_properties_emits_items_properties_updated,
-// test_update_properties_noop_when_no_names, test_about_to_show_uses_optional_hook,
-// test_about_to_show_group_uses_optional_hook are retired-by-dependency: ksni owns DBusMenu
-// layout, property diffing, and wire behavior.
+// test_served_introspection_matches_legacy_baseline
+//   -> dbus_service::tests::introspection_matches_authoritative_fixture for Observer1; SNI and
+//      DBusMenu cases are retired-by-dependency because ksni owns those interfaces.
+// Python DBusMenu provenance (8/8):
+// test_default_emits_enabled_and_visible_true: retired-by-dependency; ksni owns DBusMenu properties.
+// test_explicit_false_emits_false: retired-by-dependency; ksni owns DBusMenu properties.
+// test_toggle_true_after_false_still_emits: retired-by-dependency; ksni owns DBusMenu properties.
+// test_other_keys_still_conditional: retired-by-dependency; ksni owns DBusMenu properties.
+// test_update_properties_emits_items_properties_updated: retired-by-dependency; ksni owns property diffing.
+// test_update_properties_noop_when_no_names: retired-by-dependency; ksni owns property diffing.
+// test_about_to_show_uses_optional_hook: retired-by-dependency; ksni exposes no AboutToShow hook.
+// test_about_to_show_group_uses_optional_hook: retired-by-dependency; ksni exposes no AboutToShowGroup hook.
 
 #[cfg(test)]
 mod tests {
@@ -176,6 +189,7 @@ mod tests {
     #[test]
     fn clamp_never_wraps() {
         assert_eq!(clamp_pause(-1), None);
+        assert_eq!(clamp_pause(i32::MIN), None);
         assert_eq!(clamp_pause(0), None);
         assert_eq!(clamp_pause(1), Some(1));
         assert_eq!(clamp_pause(i32::MAX), Some(i32::MAX as u64));
@@ -190,10 +204,67 @@ mod tests {
             self.0.load(std::sync::atomic::Ordering::Acquire) as f64
         }
     }
-    struct Commands;
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum RecordedCommand {
+        Pause(Option<u64>),
+        Resume,
+    }
+    #[derive(Clone, Default)]
+    struct Commands(Arc<Mutex<Vec<RecordedCommand>>>);
     impl ObserverCommands for Commands {
-        fn pause(&self, _: Option<u64>) {}
-        fn resume(&self) {}
+        fn pause(&self, duration: Option<u64>) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(RecordedCommand::Pause(duration));
+        }
+        fn resume(&self) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(RecordedCommand::Resume);
+        }
+    }
+    fn snapshot(mode: crate::observer::Mode, paused: bool) -> StateSnapshot {
+        StateSnapshot {
+            mode,
+            paused,
+            segment_open: false,
+            captures_today: 0,
+            total_size_mb: 0,
+            pause_until: None,
+            segment_start_mono: None,
+            process_start_mono: 0.0,
+        }
+    }
+    fn unknown_health() -> SyncHealth {
+        crate::sync_health::derive_health(&Default::default(), 0.0, 600.0)
+    }
+    fn service(
+        snapshot: StateSnapshot,
+        config: Config,
+        health: SyncHealth,
+        progress: &str,
+        now: u64,
+    ) -> (
+        Observer1<TestClock, Commands>,
+        Commands,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        let commands = Commands::default();
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(now));
+        (
+            Observer1 {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                health: Arc::new(Mutex::new(health)),
+                progress: Arc::new(Mutex::new(progress.into())),
+                config,
+                clock: TestClock(clock.clone()),
+                commands: commands.clone(),
+            },
+            commands,
+            clock,
+        )
     }
     type Normalized = (
         BTreeMap<String, Vec<(String, String)>>,
@@ -272,7 +343,7 @@ mod tests {
             progress: Arc::new(Mutex::new(String::new())),
             config,
             clock: TestClock(Arc::new(std::sync::atomic::AtomicU64::new(0))),
-            commands: Commands,
+            commands: Commands::default(),
         };
         let mut xml = String::new();
         service.introspect_to_writer(&mut xml, 0);
@@ -306,11 +377,274 @@ mod tests {
             progress: Arc::new(Mutex::new(String::new())),
             config: Config::default(),
             clock: TestClock(now.clone()),
-            commands: Commands,
+            commands: Commands::default(),
         };
         let first = service.segment_timer();
         now.store(101, std::sync::atomic::Ordering::Release);
         let second = service.segment_timer();
         assert!(second < first, "{second} must be less than {first}");
+    }
+    #[test]
+    fn status_recording() {
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Screencast, false),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        assert_eq!(s.current_status(), "recording");
+    }
+    #[test]
+    fn status_idle() {
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Idle, false),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        assert_eq!(s.current_status(), "idle");
+    }
+    #[test]
+    fn status_paused() {
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Screencast, true),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        assert_eq!(s.current_status(), "paused");
+    }
+    #[test]
+    fn pause_calls_observer() {
+        let (s, c, _) = service(
+            snapshot(crate::observer::Mode::Idle, false),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        assert_eq!(s.pause(30), "ok");
+        assert_eq!(
+            *c.0.lock().unwrap_or_else(|e| e.into_inner()),
+            [RecordedCommand::Pause(Some(30))]
+        );
+    }
+    #[test]
+    fn pause_indefinite_calls_observer() {
+        let (s, c, _) = service(
+            snapshot(crate::observer::Mode::Idle, false),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        s.pause(0);
+        assert_eq!(
+            *c.0.lock().unwrap_or_else(|e| e.into_inner()),
+            [RecordedCommand::Pause(None)]
+        );
+    }
+    #[test]
+    fn resume_calls_observer() {
+        let (s, c, _) = service(
+            snapshot(crate::observer::Mode::Idle, true),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        assert_eq!(s.resume(), "ok");
+        assert_eq!(
+            *c.0.lock().unwrap_or_else(|e| e.into_inner()),
+            [RecordedCommand::Resume]
+        );
+    }
+    #[test]
+    fn segment_timer_while_recording() {
+        let mut v = snapshot(crate::observer::Mode::Screencast, false);
+        v.segment_open = true;
+        v.segment_start_mono = Some(100.0);
+        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 160);
+        assert_eq!(s.segment_timer(), 240);
+    }
+    #[test]
+    fn segment_timer_zero_when_paused() {
+        let mut v = snapshot(crate::observer::Mode::Screencast, true);
+        v.segment_start_mono = Some(100.0);
+        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 160);
+        assert_eq!(s.segment_timer(), 0);
+    }
+    #[test]
+    fn segment_timer_zero_when_no_segment() {
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Screencast, false),
+            Config::default(),
+            unknown_health(),
+            "",
+            160,
+        );
+        assert_eq!(s.segment_timer(), 0);
+    }
+    #[test]
+    fn pause_remaining_during_timed_pause() {
+        let mut v = snapshot(crate::observer::Mode::Idle, true);
+        v.pause_until = Some(220.0);
+        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 100);
+        assert_eq!(s.pause_remaining(), 120);
+    }
+    #[test]
+    fn pause_remaining_zero_when_not_paused() {
+        let mut v = snapshot(crate::observer::Mode::Idle, false);
+        v.pause_until = Some(220.0);
+        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 100);
+        assert_eq!(s.pause_remaining(), 0);
+    }
+    #[test]
+    fn pause_remaining_zero_for_indefinite_pause() {
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Idle, true),
+            Config::default(),
+            unknown_health(),
+            "",
+            100,
+        );
+        assert_eq!(s.pause_remaining(), 0);
+    }
+    #[test]
+    fn pause_remaining_decreases_between_property_reads() {
+        let mut v = snapshot(crate::observer::Mode::Idle, true);
+        v.pause_until = Some(220.0);
+        let (s, _, clock) = service(v, Config::default(), unknown_health(), "", 100);
+        let first = s.pause_remaining();
+        clock.store(101, std::sync::atomic::Ordering::Release);
+        assert!(s.pause_remaining() < first);
+    }
+    #[test]
+    fn get_stats_returns_cached_shape() {
+        let mut v = snapshot(crate::observer::Mode::Idle, false);
+        v.captures_today = 7;
+        v.total_size_mb = 42;
+        v.process_start_mono = 50.0;
+        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 100);
+        let stats = s.get_stats();
+        assert_eq!(stats.len(), 3);
+        assert_eq!(
+            stats.get("captures_today"),
+            Some(&zbus::zvariant::OwnedValue::from(7i32))
+        );
+        assert_eq!(
+            stats.get("total_size_mb"),
+            Some(&zbus::zvariant::OwnedValue::from(42i32))
+        );
+        assert_eq!(
+            stats.get("uptime_seconds"),
+            Some(&zbus::zvariant::OwnedValue::from(50i32))
+        );
+    }
+    #[test]
+    fn get_stats_empty_captures() {
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Idle, false),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        let stats = s.get_stats();
+        assert_eq!(
+            stats.get("captures_today"),
+            Some(&zbus::zvariant::OwnedValue::from(0i32))
+        );
+        assert_eq!(
+            stats.get("total_size_mb"),
+            Some(&zbus::zvariant::OwnedValue::from(0i32))
+        );
+    }
+    #[test]
+    fn get_stats_uses_cached_today_count() {
+        let mut v = snapshot(crate::observer::Mode::Idle, false);
+        v.captures_today = 1;
+        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 0);
+        assert_eq!(
+            s.get_stats().get("captures_today"),
+            Some(&zbus::zvariant::OwnedValue::from(1i32))
+        );
+    }
+    #[test]
+    fn get_stats_uptime_increases_between_reads() {
+        let mut v = snapshot(crate::observer::Mode::Idle, false);
+        v.process_start_mono = 50.0;
+        let (s, _, clock) = service(v, Config::default(), unknown_health(), "", 100);
+        let first = i32::try_from(
+            s.get_stats()
+                .remove("uptime_seconds")
+                .unwrap_or_else(|| panic!("uptime missing")),
+        )
+        .unwrap_or_else(|e| panic!("invalid uptime: {e}"));
+        clock.store(101, std::sync::atomic::Ordering::Release);
+        let second = i32::try_from(
+            s.get_stats()
+                .remove("uptime_seconds")
+                .unwrap_or_else(|| panic!("uptime missing")),
+        )
+        .unwrap_or_else(|e| panic!("invalid uptime: {e}"));
+        assert!(second > first);
+    }
+    #[test]
+    fn fresh_sync_properties_are_unknown_and_empty() {
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Idle, false),
+            Config::default(),
+            unknown_health(),
+            "",
+            0,
+        );
+        assert_eq!(s.sync_status(), "unknown");
+        assert_eq!(s.current_sync_progress(), "");
+    }
+    #[test]
+    fn in_progress_sync_properties_pass_through() {
+        let h = crate::sync_health::derive_health(
+            &crate::sync_health::SyncFacts {
+                in_progress: true,
+                progress: "uploading 120000_300".into(),
+                ..Default::default()
+            },
+            0.0,
+            600.0,
+        );
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Idle, false),
+            Config::default(),
+            h,
+            "uploading 120000_300",
+            0,
+        );
+        assert_eq!(s.sync_status(), "syncing");
+        assert_eq!(s.current_sync_progress(), "uploading 120000_300");
+    }
+    #[test]
+    fn config_properties_match_config() {
+        let config = Config {
+            base_dir: std::path::PathBuf::from("/tmp/observer1"),
+            server_url: "https://test.example.com".into(),
+            stream: "test-stream".into(),
+            segment_interval: 300,
+            ..Default::default()
+        };
+        let (s, _, _) = service(
+            snapshot(crate::observer::Mode::Idle, false),
+            config,
+            unknown_health(),
+            "",
+            0,
+        );
+        assert_eq!(s.capture_dir(), "/tmp/observer1/captures");
+        assert_eq!(s.server_url(), "https://test.example.com");
+        assert_eq!(s.stream(), "test-stream");
+        assert_eq!(s.segment_interval(), 300);
     }
 }

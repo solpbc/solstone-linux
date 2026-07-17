@@ -166,6 +166,8 @@ pub trait EventSink {
 pub struct StateSnapshot {
     pub mode: Mode,
     pub paused: bool,
+    // `segment_open` is the legacy boolean; desktop readers use `segment_start_mono` as the
+    // authoritative active-segment fact. Publishers must keep the pair consistent.
     pub segment_open: bool,
     pub captures_today: u64,
     pub total_size_mb: u64,

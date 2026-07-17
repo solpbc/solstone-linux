@@ -7,6 +7,17 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+pub const OBSERVER_BUS_NAME: &str = "org.solpbc.solstone.Observer1";
+pub const ALREADY_RUNNING_MESSAGE: &str = "Another solstone-linux observer is already running (owns org.solpbc.solstone.Observer1). Check: systemctl --user status solstone-linux";
+
+pub trait BusNameRequester {
+    fn request_name(
+        &self,
+        name: &str,
+        flag: zbus::fdo::RequestNameFlags,
+    ) -> Result<zbus::fdo::RequestNameReply, String>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComponentSignal {
     StatusChanged(String),
@@ -18,26 +29,14 @@ pub struct SignalState {
 }
 impl SignalState {
     pub fn new(snapshot: &StateSnapshot, health: &SyncHealth, progress: &str) -> Self {
-        let last_status = match tray_model::status(snapshot) {
-            tray_model::TrayStatus::Paused => "paused",
-            tray_model::TrayStatus::Recording => "recording",
-            tray_model::TrayStatus::Idle => "idle",
-            tray_model::TrayStatus::Stopped => "stopped",
-        }
-        .to_owned();
+        let last_status = tray_model::status_name(tray_model::status(snapshot)).to_owned();
         Self {
             last_status,
             last_sync: format!("{}:{}", health.dbus, progress),
         }
     }
     pub fn snapshot_changed(&mut self, s: &StateSnapshot) -> Option<ComponentSignal> {
-        let value = match tray_model::status(s) {
-            tray_model::TrayStatus::Paused => "paused",
-            tray_model::TrayStatus::Recording => "recording",
-            tray_model::TrayStatus::Idle => "idle",
-            tray_model::TrayStatus::Stopped => "stopped",
-        }
-        .to_owned();
+        let value = tray_model::status_name(tray_model::status(s)).to_owned();
         if value == self.last_status {
             return None;
         }
@@ -68,15 +67,40 @@ impl DesktopComponent {
     pub fn disabled(&self) -> bool {
         self.disabled.load(Ordering::Acquire)
     }
-    /// Setup must be called from `observer::lifecycle`'s Setup closure, before recovery.
-    pub fn setup(&self, mut register: impl FnMut() -> bool, mut wait: impl FnMut()) -> bool {
+    /// Acquire this singleton before capture, registration, export, recovery, or any other side
+    /// effect. The wire-up lode must call this from `observer::lifecycle`'s Setup closure.
+    pub fn acquire_singleton(
+        &self,
+        bus: &impl BusNameRequester,
+        mut log: impl FnMut(&str),
+    ) -> bool {
+        match bus.request_name(OBSERVER_BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue) {
+            Ok(
+                zbus::fdo::RequestNameReply::PrimaryOwner
+                | zbus::fdo::RequestNameReply::AlreadyOwner,
+            ) => true,
+            Ok(_) => {
+                log(ALREADY_RUNNING_MESSAGE);
+                false
+            }
+            Err(error) => {
+                tracing::error!(%error, "Failed to acquire Observer1 bus name");
+                false
+            }
+        }
+    }
+    pub fn setup(
+        &self,
+        mut register: impl FnMut() -> bool,
+        mut wait: impl FnMut(std::time::Duration),
+    ) -> bool {
         for attempt in 0..3 {
             if register() {
                 return true;
             }
             if attempt < 2 {
                 tracing::info!("SNI watcher retry {}/2...", attempt + 1);
-                wait();
+                wait(std::time::Duration::from_secs(1));
             }
         }
         tracing::info!("No StatusNotifierWatcher available");
@@ -104,10 +128,20 @@ impl DesktopComponent {
             &self.config.server_url
         }
     }
+    pub fn command_url<'a>(&'a self, command: &'a crate::tray::TrayCommand) -> Option<&'a str> {
+        match command {
+            crate::tray::TrayCommand::OpenJournal => Some(self.journal_url()),
+            crate::tray::TrayCommand::OpenUrl(url) => Some(url),
+            _ => None,
+        }
+    }
     pub fn perform_desktop_command(&self, command: crate::tray::TrayCommand) -> Result<(), String> {
         match command {
             crate::tray::TrayCommand::OpenJournal => {
                 open::that_detached(self.journal_url()).map_err(|e| e.to_string())
+            }
+            crate::tray::TrayCommand::OpenUrl(url) => {
+                open::that_detached(url).map_err(|e| e.to_string())
             }
             crate::tray::TrayCommand::OpenConfig => {
                 open::that_detached(self.config.config_path()).map_err(|e| e.to_string())
@@ -117,8 +151,10 @@ impl DesktopComponent {
                     &self.config.config_path().display().to_string(),
                     &self.config.captures_dir().display().to_string(),
                 );
-                let wayland = std::env::var_os("XDG_SESSION_TYPE").is_some_and(|v| v == "wayland")
-                    || std::env::var_os("WAYLAND_DISPLAY").is_some();
+                let session_type = std::env::var_os("XDG_SESSION_TYPE");
+                let display = std::env::var_os("WAYLAND_DISPLAY");
+                let wayland =
+                    crate::clipboard::is_wayland(session_type.as_deref(), display.as_deref());
                 crate::clipboard::copy(&text, wayland)
                     .map_err(|e| e.to_string())
                     .and_then(|ok| {
@@ -158,10 +194,16 @@ mod tests {
     fn component_uses_config() {
         let c = Config {
             server_url: "x".into(),
+            base_dir: "/tmp/solstone-test".into(),
             ..Default::default()
         };
         let d = DesktopComponent::new(c.clone());
-        assert_eq!(d.config, c)
+        assert_eq!(d.config, c);
+        assert_eq!(
+            d.config.captures_dir(),
+            std::path::PathBuf::from("/tmp/solstone-test/captures")
+        );
+        assert_eq!(d.config.config_path(), c.config_path());
     }
     #[test]
     fn setup_retries_three_times() {
@@ -173,7 +215,10 @@ mod tests {
                 calls += 1;
                 false
             },
-            || waits += 1
+            |duration| {
+                assert_eq!(duration, std::time::Duration::from_secs(1));
+                waits += 1
+            }
         ));
         assert_eq!((calls, waits), (3, 2));
     }
@@ -183,6 +228,31 @@ mod tests {
             DesktopComponent::new(Config::default()).journal_url(),
             "https://solstone.app"
         )
+    }
+    #[test]
+    fn four_url_targets_remain_distinct() {
+        let component = DesktopComponent::new(Config::default());
+        let commands = [
+            (
+                crate::tray::TrayCommand::OpenJournal,
+                "https://solstone.app",
+            ),
+            (
+                crate::tray::TrayCommand::OpenUrl("https://solstone.app/observers"),
+                "https://solstone.app/observers",
+            ),
+            (
+                crate::tray::TrayCommand::OpenUrl("https://github.com/solpbc/solstone-linux"),
+                "https://github.com/solpbc/solstone-linux",
+            ),
+            (
+                crate::tray::TrayCommand::OpenUrl("https://solpbc.org/privacy"),
+                "https://solpbc.org/privacy",
+            ),
+        ];
+        for (command, expected) in &commands {
+            assert_eq!(component.command_url(command), Some(*expected));
+        }
     }
     #[test]
     fn no_transition_means_no_signal() {
@@ -204,6 +274,81 @@ mod tests {
             Some(ComponentSignal::SyncProgressChanged("unknown:3/10".into()))
         );
         assert_eq!(s.sync_changed(&h, "3/10"), None)
+    }
+    #[test]
+    fn pause_emits_paused_status() {
+        let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
+        let initial = snap();
+        let mut state = SignalState::new(&initial, &health, "");
+        let mut paused = initial;
+        paused.paused = true;
+        assert_eq!(
+            state.snapshot_changed(&paused),
+            Some(ComponentSignal::StatusChanged("paused".into()))
+        );
+    }
+    #[test]
+    fn resume_emits_status_for_current_mode() {
+        let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
+        for (mode, expected) in [(Mode::Screencast, "recording"), (Mode::Idle, "idle")] {
+            let mut paused = snap();
+            paused.mode = mode;
+            paused.paused = true;
+            let mut state = SignalState::new(&paused, &health, "");
+            let mut resumed = paused;
+            resumed.paused = false;
+            assert_eq!(
+                state.snapshot_changed(&resumed),
+                Some(ComponentSignal::StatusChanged(expected.into()))
+            );
+        }
+    }
+    #[test]
+    fn auto_resume_emits_current_mode_status() {
+        let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
+        let mut paused = snap();
+        paused.mode = Mode::Screencast;
+        paused.paused = true;
+        paused.pause_until = Some(1.0);
+        let mut state = SignalState::new(&paused, &health, "");
+        paused.paused = false;
+        paused.pause_until = None;
+        assert_eq!(
+            state.snapshot_changed(&paused),
+            Some(ComponentSignal::StatusChanged("recording".into()))
+        );
+    }
+    #[test]
+    fn mode_boundary_emits_new_status() {
+        let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
+        let initial = snap();
+        let mut state = SignalState::new(&initial, &health, "");
+        let mut recording = initial;
+        recording.mode = Mode::Screencast;
+        assert_eq!(
+            state.snapshot_changed(&recording),
+            Some(ComponentSignal::StatusChanged("recording".into()))
+        );
+    }
+    #[test]
+    fn progress_change_emits_syncing_composite() {
+        let health = crate::sync_health::derive_health(
+            &crate::sync_health::SyncFacts {
+                in_progress: true,
+                progress: "30s until probe".into(),
+                ..Default::default()
+            },
+            0.0,
+            600.0,
+        );
+        let initial = snap();
+        let mut state = SignalState::new(&initial, &health, "");
+        assert_eq!(
+            state.sync_changed(&health, "30s until probe"),
+            Some(ComponentSignal::SyncProgressChanged(
+                "syncing:30s until probe".into()
+            ))
+        );
     }
     #[tokio::test]
     async fn sender_drop_disables_without_panic() {
@@ -268,5 +413,74 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert_eq!(*order.borrow(), ["setup", "recovery"]);
+    }
+    struct NameBus {
+        reply: zbus::fdo::RequestNameReply,
+        requested: std::cell::RefCell<Vec<(String, zbus::fdo::RequestNameFlags)>>,
+    }
+    impl BusNameRequester for NameBus {
+        fn request_name(
+            &self,
+            name: &str,
+            flag: zbus::fdo::RequestNameFlags,
+        ) -> Result<zbus::fdo::RequestNameReply, String> {
+            self.requested.borrow_mut().push((name.to_owned(), flag));
+            Ok(match self.reply {
+                zbus::fdo::RequestNameReply::PrimaryOwner => {
+                    zbus::fdo::RequestNameReply::PrimaryOwner
+                }
+                zbus::fdo::RequestNameReply::InQueue => zbus::fdo::RequestNameReply::InQueue,
+                zbus::fdo::RequestNameReply::Exists => zbus::fdo::RequestNameReply::Exists,
+                zbus::fdo::RequestNameReply::AlreadyOwner => {
+                    zbus::fdo::RequestNameReply::AlreadyOwner
+                }
+            })
+        }
+    }
+    #[test]
+    fn singleton_name_taken_logs_and_lifecycle_exits_one_before_recovery() {
+        let bus = NameBus {
+            reply: zbus::fdo::RequestNameReply::Exists,
+            requested: Default::default(),
+        };
+        let component = DesktopComponent::new(Config::default());
+        let messages = std::cell::RefCell::new(Vec::new());
+        let recovered = std::cell::Cell::new(false);
+        let config = Config::default();
+        let code = crate::observer::lifecycle(
+            &config,
+            || {
+                component.acquire_singleton(&bus, |message| {
+                    messages.borrow_mut().push(message.to_owned())
+                })
+            },
+            |_, _| recovered.set(true),
+            || Ok(()),
+            || Ok(()),
+            || false,
+        );
+        assert_eq!(code, 1);
+        assert!(!recovered.get());
+        assert_eq!(*messages.borrow(), [ALREADY_RUNNING_MESSAGE]);
+        assert_eq!(
+            *bus.requested.borrow(),
+            [(
+                OBSERVER_BUS_NAME.to_owned(),
+                zbus::fdo::RequestNameFlags::DoNotQueue
+            )]
+        );
+    }
+    #[test]
+    fn singleton_accepts_primary_and_already_owner() {
+        for reply in [
+            zbus::fdo::RequestNameReply::PrimaryOwner,
+            zbus::fdo::RequestNameReply::AlreadyOwner,
+        ] {
+            let bus = NameBus {
+                reply,
+                requested: Default::default(),
+            };
+            assert!(DesktopComponent::new(Config::default()).acquire_singleton(&bus, |_| {}));
+        }
     }
 }

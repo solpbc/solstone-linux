@@ -16,6 +16,7 @@ pub enum TrayCommand {
     PauseIndefinite,
     Resume,
     OpenJournal,
+    OpenUrl(&'static str),
     OpenConfig,
     CopyInstructions,
 }
@@ -61,9 +62,9 @@ impl Tray for KsniTray {
     }
     fn icon_pixmap(&self) -> Vec<Icon> {
         let data = match self.model.icon.as_str() {
-            "error" => generated::ERROR,
+            "error" | "stopped" => generated::ERROR,
             "syncing" => generated::SYNCING,
-            "paused" => generated::PAUSED,
+            "paused" | "idle" => generated::PAUSED,
             _ => generated::RECORDING,
         };
         vec![Icon {
@@ -130,9 +131,21 @@ impl Tray for KsniTray {
                 label: "about".into(),
                 submenu: vec![
                     item(format!("sol v{}", env!("CARGO_PKG_VERSION")), false),
-                    action("solstone.app", TrayCommand::OpenJournal).into(),
-                    item("source code", true),
-                    item("privacy policy", true),
+                    action(
+                        "solstone.app",
+                        TrayCommand::OpenUrl("https://solstone.app/observers"),
+                    )
+                    .into(),
+                    action(
+                        "source code",
+                        TrayCommand::OpenUrl("https://github.com/solpbc/solstone-linux"),
+                    )
+                    .into(),
+                    action(
+                        "privacy policy",
+                        TrayCommand::OpenUrl("https://solpbc.org/privacy"),
+                    )
+                    .into(),
                     action(
                         "copy help agent instructions",
                         TrayCommand::CopyInstructions,
@@ -195,28 +208,111 @@ mod tests {
     }
     #[test]
     fn menu_contains_reference_top_level_structure() {
-        assert_eq!(tray().menu().len(), 11);
+        let mut tray = tray();
+        let menu = tray.menu();
+        assert_eq!(menu.len(), 11);
+        let labels: Vec<&str> = menu
+            .iter()
+            .map(|item| match item {
+                MenuItem::Standard(v) => v.label.as_str(),
+                MenuItem::SubMenu(v) => v.label.as_str(),
+                MenuItem::Separator => "<separator>",
+                _ => "<other>",
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                tray.model.header.as_str(),
+                "<separator>",
+                "pause",
+                "resume",
+                "<separator>",
+                "status",
+                "open journal",
+                "settings",
+                "about",
+                "<separator>",
+                "managed via systemctl"
+            ]
+        );
+        let status = match &menu[5] {
+            MenuItem::SubMenu(value) => value,
+            _ => panic!("status submenu missing"),
+        };
+        assert_eq!(status.submenu.len(), 7);
+        assert_eq!(
+            match &status.submenu[0] {
+                MenuItem::Standard(value) => value.label.as_str(),
+                _ => "",
+            },
+            tray.model.header
+        );
+        let pause = match &menu[2] {
+            MenuItem::SubMenu(value) => value,
+            _ => panic!("pause submenu missing"),
+        };
+        assert_eq!(pause.submenu.len(), 4);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        tray.commands = sender;
+        let mut actions = Vec::new();
+        for item in &pause.submenu {
+            if let MenuItem::Standard(value) = item {
+                (value.activate)(&mut tray);
+                if let Ok(command) = receiver.try_recv() {
+                    actions.push(command);
+                }
+            }
+        }
+        assert_eq!(
+            actions,
+            [
+                TrayCommand::Pause(900),
+                TrayCommand::Pause(1800),
+                TrayCommand::Pause(3600),
+                TrayCommand::PauseIndefinite
+            ]
+        );
+        if let MenuItem::Standard(value) = &menu[6] {
+            (value.activate)(&mut tray);
+        }
+        assert_eq!(receiver.try_recv(), Ok(TrayCommand::OpenJournal));
+        let about = match &menu[8] {
+            MenuItem::SubMenu(value) => value,
+            _ => panic!("about submenu missing"),
+        };
+        let expected = [
+            TrayCommand::OpenUrl("https://solstone.app/observers"),
+            TrayCommand::OpenUrl("https://github.com/solpbc/solstone-linux"),
+            TrayCommand::OpenUrl("https://solpbc.org/privacy"),
+        ];
+        for (item, expected) in about.submenu[1..4].iter().zip(expected) {
+            if let MenuItem::Standard(value) = item {
+                (value.activate)(&mut tray);
+            }
+            assert_eq!(receiver.try_recv(), Ok(expected));
+        }
     }
 }
 
 // Python tray provenance (35/35):
 // test_resolve_icon_theme_path_prefers_installed: retired-by-dependency; build-generated pixmaps replace icon-theme filesystem lookup.
 // test_resolve_icon_theme_path_contrib_fallback: retired-by-dependency; build-generated pixmaps replace icon-theme filesystem lookup.
-// test_make_app_uses_observer_config -> desktop_component::tests::component_uses_config.
+// test_make_app_uses_observer_config: retired-by-wiring; Rust components are constructed separately until the sibling run-loop lode.
 // test_build_menu_creates_expected_items -> tray::tests::menu_contains_reference_top_level_structure.
 // test_update_status_paused -> tray_model::tests::paused_and_idle_snapshots_select_typed_status.
 // test_update_status_idle -> tray_model::tests::paused_and_idle_snapshots_select_typed_status.
 // test_update_status_stopped_sets_attention -> tray_model::tests::stopped_status_requests_attention.
 // test_update_status_recording_uses_error_icon_when_error_set: retired; the Python error field has no production writer.
-// test_update_sync_signals_label_change_only_once -> tray_model::tests::identical_inputs_produce_an_identical_model.
-// test_update_sync_synced -> tray_model::tests::recording_and_idle_headers_cover_complete_health_axis_from_surfaces.
-// test_update_sync_syncing -> tray_model::tests::recording_and_idle_headers_cover_complete_health_axis_from_surfaces.
-// test_update_sync_offline -> tray_model::tests::recording_and_idle_headers_cover_complete_health_axis_from_surfaces.
+// test_update_sync_signals_label_change_only_once: retired-by-dependency; ksni owns property diffing.
+// test_update_sync_synced -> tray_model::tests::sync_labels_follow_resolved_health_surfaces.
+// test_update_sync_syncing -> tray_model::tests::sync_labels_follow_resolved_health_surfaces.
+// test_update_sync_offline -> tray_model::tests::sync_labels_follow_resolved_health_surfaces.
 // test_update_sync_update_needed_sets_attention -> tray_model::tests::update_needed_uses_live_error_icon_and_attention.
 // test_update_live_stats_updates_labels -> tray_model::tests::live_stats_and_tooltip_are_rendered_from_snapshot_and_health.
-// test_update_live_stats_skips_unchanged_menu_updates -> tray_model::tests::identical_inputs_produce_an_identical_model.
-// test_update_live_stats_signals_resume_countdown_change_only_once -> tray_model::tests::pause_countdown_changes_resume_label.
-// test_update_header_emits_label_property_update -> tray_model::tests::header_matrix_all_ten_typed_rows_byte_exact.
+// test_update_live_stats_skips_unchanged_menu_updates: retired-by-dependency; ksni owns property diffing.
+// test_update_live_stats_signals_resume_countdown_change_only_once: retired-by-dependency; ksni owns property diffing.
+// test_update_header_emits_label_property_update: retired-by-dependency; ksni owns property diffing.
 // test_header_recording_connected -> tray_model::tests::header_matrix_all_ten_typed_rows_byte_exact.
 // test_header_paused_with_timer -> tray_model::tests::header_matrix_all_ten_typed_rows_byte_exact.
 // test_header_recording_offline -> tray_model::tests::header_matrix_all_ten_typed_rows_byte_exact.

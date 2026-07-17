@@ -11,6 +11,7 @@ pub enum TrayStatus {
     Recording,
     Idle,
     Paused,
+    // Not produced by `status()`: retained as a real rung in the reference icon/status ladder.
     Stopped,
 }
 
@@ -38,6 +39,15 @@ pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
         TrayStatus::Recording
     } else {
         TrayStatus::Idle
+    }
+}
+
+pub fn status_name(status: TrayStatus) -> &'static str {
+    match status {
+        TrayStatus::Recording => "recording",
+        TrayStatus::Idle => "idle",
+        TrayStatus::Paused => "paused",
+        TrayStatus::Stopped => "stopped",
     }
 }
 
@@ -91,28 +101,39 @@ pub fn sni_status(status: TrayStatus, health: &SyncHealth) -> String {
     }
 }
 
+pub fn icon_name(status: TrayStatus, health: &SyncHealth) -> String {
+    if health.icon == "error" {
+        "error"
+    } else if status == TrayStatus::Stopped {
+        "stopped"
+    } else if status == TrayStatus::Paused {
+        "paused"
+    } else if health.icon == "syncing" {
+        "syncing"
+    } else if status == TrayStatus::Idle
+        && health.state == crate::sync_health::HealthState::Connected
+    {
+        "idle"
+    } else {
+        match health.icon.as_str() {
+            "recording" | "paused" | "idle" | "stopped" | "syncing" | "error" => &health.icon,
+            _ => "recording",
+        }
+    }
+    .to_owned()
+}
+
 pub fn build(snapshot: &StateSnapshot, interval: i64, now: f64, health: &SyncHealth) -> TrayModel {
     let status = status(snapshot);
     let segment = segment_remaining(snapshot, interval, now);
     let pause = pause_remaining(snapshot, now);
     let up = uptime(snapshot, now);
-    let icon = if health.icon == "error" {
-        "error"
-    } else {
-        match status {
-            TrayStatus::Paused | TrayStatus::Idle => "paused",
-            TrayStatus::Stopped => "error",
-            TrayStatus::Recording if health.icon == "syncing" => "syncing",
-            TrayStatus::Recording => &health.icon,
-        }
-    }
-    .to_owned();
     TrayModel {
         status,
         header: header_label(status, health, pause),
         sync: health.sync_line.clone(),
         tooltip: tooltip(status, health),
-        icon,
+        icon: icon_name(status, health),
         sni_status: sni_status(status, health),
         segment: format!("segment: {}:{:02} remaining", segment / 60, segment % 60),
         cache: format!("cache: {} MB", snapshot.total_size_mb),
@@ -287,6 +308,10 @@ mod tests {
         value.paused = false;
         value.mode = Mode::Idle;
         assert_eq!(status(&value), TrayStatus::Idle);
+        value.paused = true;
+        let model = build(&value, 300, 100.0, &connected_health());
+        assert!(!model.pause_visible);
+        assert!(model.resume_visible);
     }
     #[test]
     fn live_stats_and_tooltip_are_rendered_from_snapshot_and_health() {
@@ -294,6 +319,7 @@ mod tests {
         assert_eq!(model.cache, "cache: 3 MB");
         assert_eq!(model.captures, "today: 2 segments");
         assert_eq!(model.uptime, "uptime: 0h 0m");
+        assert_eq!(model.segment, "segment: 5:00 remaining");
         assert_eq!(model.tooltip, "on\nsync: up to date");
     }
     #[test]
@@ -352,5 +378,98 @@ mod tests {
         let m = build(&snapshot(), 300, 100.0, &h);
         assert_eq!(m.icon, "error");
         assert_eq!(m.sni_status, "NeedsAttention");
+    }
+    #[test]
+    fn sync_labels_follow_resolved_health_surfaces() {
+        let facts = [
+            SyncFacts {
+                pending_confirmed: Some(0),
+                ..Default::default()
+            },
+            SyncFacts {
+                in_progress: true,
+                progress: "3/10 segments".into(),
+                ..Default::default()
+            },
+            SyncFacts {
+                last_error_class: Some(ErrorType::Transient),
+                ..Default::default()
+            },
+        ];
+        for facts in facts {
+            let health = derive_health(&facts, 100.0, 600.0);
+            assert_eq!(
+                build(&snapshot(), 300, 100.0, &health).sync,
+                health.sync_line
+            );
+        }
+    }
+    #[test]
+    fn icon_ladder_covers_four_statuses_by_seven_health_states() {
+        let cases = [
+            (
+                SyncFacts {
+                    pending_confirmed: Some(0),
+                    ..Default::default()
+                },
+                ["recording", "idle", "paused", "stopped"],
+            ),
+            (
+                SyncFacts {
+                    in_progress: true,
+                    ..Default::default()
+                },
+                ["syncing", "syncing", "paused", "stopped"],
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Transient),
+                    ..Default::default()
+                },
+                ["syncing", "syncing", "paused", "stopped"],
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Incompatible),
+                    ..Default::default()
+                },
+                ["error", "error", "error", "error"],
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Auth),
+                    ..Default::default()
+                },
+                ["error", "error", "error", "error"],
+            ),
+            (
+                SyncFacts {
+                    last_successful_contact: Some(0.0),
+                    ..Default::default()
+                },
+                ["error", "error", "error", "error"],
+            ),
+            (
+                SyncFacts::default(),
+                ["syncing", "syncing", "paused", "stopped"],
+            ),
+        ];
+        let statuses = [
+            TrayStatus::Recording,
+            TrayStatus::Idle,
+            TrayStatus::Paused,
+            TrayStatus::Stopped,
+        ];
+        for (facts, expected) in cases {
+            let health = derive_health(&facts, 1_000.0, 600.0);
+            for (status, expected_icon) in statuses.into_iter().zip(expected) {
+                assert_eq!(
+                    icon_name(status, &health),
+                    expected_icon,
+                    "status={status:?}, health={:?}",
+                    health.state
+                );
+            }
+        }
     }
 }
