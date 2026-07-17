@@ -61,6 +61,7 @@ pub(crate) struct MockServer {
 pub(crate) enum Action {
     Response(u16, Value),
     Raw(u16, &'static str),
+    OwnedRaw(u16, String),
     Disconnect,
     Stream(u16, mpsc::Receiver<Result<Bytes, std::io::Error>>),
 }
@@ -118,6 +119,12 @@ impl MockServer {
                                         .boxed(),
                                 ),
                                 Action::Raw(status, body) => (
+                                    status,
+                                    Full::new(Bytes::from(body))
+                                        .map_err(|never| match never {})
+                                        .boxed(),
+                                ),
+                                Action::OwnedRaw(status, body) => (
                                     status,
                                     Full::new(Bytes::from(body))
                                         .map_err(|never| match never {})

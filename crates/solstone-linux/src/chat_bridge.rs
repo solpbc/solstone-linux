@@ -15,6 +15,7 @@ use rustix::{
 use serde_json::Value;
 use std::{
     env,
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -70,6 +71,11 @@ type CapabilitiesFn = Arc<dyn Fn() -> BoxFuture<'static, bool> + Send + Sync>;
 type SleepFn = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 type MonotonicFn = Arc<dyn Fn() -> Duration + Send + Sync>;
 type LocalDayFn = Arc<dyn Fn() -> String + Send + Sync>;
+type BodyFn = Arc<
+    dyn Fn(Config, CancellationToken, BridgeDeps, Client) -> BoxFuture<'static, Result<(), String>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 struct BridgeDeps {
@@ -174,6 +180,9 @@ fn python_scalar_str(value: &Value) -> Option<String> {
             } else if let Some(integer) = value.as_u64() {
                 Some(integer.to_string())
             } else {
+                // Named deviation: Rust's finite-float Display spelling differs from Python's
+                // repr-style thresholds (for example 1e20). The bridge preserves the numeric
+                // value but does not implement a Python float formatter for malformed payloads.
                 value.as_f64().map(|number| {
                     let rendered = number.to_string();
                     if rendered.contains(['.', 'e', 'E']) {
@@ -192,6 +201,8 @@ fn python_or_empty_str(value: Option<&Value>) -> String {
     if !python_truthy(value) {
         return String::new();
     }
+    // Named deviation: truthy list/dict summaries become empty instead of Python repr text;
+    // no server-produced summary has a collection shape.
     value.and_then(python_scalar_str).unwrap_or_default()
 }
 
@@ -254,6 +265,8 @@ fn chat_url(
 ) -> String {
     let base = server_url.trim_end_matches('/');
     if let (Some(day), Some(index)) = (
+        // Named deviation: numeric day values fall back to local today instead of being
+        // interpolated as Python would; server-produced day values are strings.
         day.and_then(Value::as_str).filter(|day| !day.is_empty()),
         event_index.and_then(Value::as_i64),
     ) {
@@ -361,6 +374,7 @@ async fn dispatch_event(
             let task_summary = summary.clone();
             let task_url = url.clone();
             let task = tokio::spawn(async move {
+                let post_notify_cancellation = task_cancellation.clone();
                 let outcome = notify(
                     NotificationSpec {
                         summary: NOTIFY_TITLE.to_owned(),
@@ -372,8 +386,14 @@ async fn dispatch_event(
                 .await;
                 if outcome == NotificationOutcome::Open && offer_action {
                     tracing::info!(request_id = task_id, "Opening chat request");
-                    ack(server_url, key, task_id).await;
-                    open(task_url).await;
+                    tokio::select! {
+                        () = post_notify_cancellation.cancelled() => return,
+                        () = ack(server_url, key, task_id) => {}
+                    }
+                    tokio::select! {
+                        () = post_notify_cancellation.cancelled() => {}
+                        () = open(task_url) => {}
+                    }
                 }
             });
             pending.push(PendingRequest {
@@ -410,14 +430,33 @@ async fn sleep_or_stop(duration: Duration, stop: &CancellationToken, deps: &Brid
     }
 }
 
-async fn poll_opt_in(client: &Client, server_url: &str, key: &str) -> bool {
+async fn sleep_for_reconnect(
+    state: &mut ConnectionState,
+    stop: &CancellationToken,
+    deps: &BridgeDeps,
+) {
+    let delay = reconnect_delay(state.reconnect_index);
+    state.reconnect_index += 1;
+    tracing::info!(seconds = delay.as_secs(), "Chat bridge reconnecting");
+    sleep_or_stop(delay, stop, deps).await;
+}
+
+async fn poll_opt_in(
+    client: &Client,
+    server_url: &str,
+    key: &str,
+    stop: &CancellationToken,
+) -> bool {
     let url = format!("{}/api/sol_voice", server_url.trim_end_matches('/'));
-    let response = client
+    let request = client
         .get(url)
         .bearer_auth(key)
         .timeout(Duration::from_secs(10))
-        .send()
-        .await;
+        .send();
+    let response = tokio::select! {
+        () = stop.cancelled() => return false,
+        response = request => response,
+    };
     let Ok(response) = response else { return false };
     if response.status() != StatusCode::OK {
         return false;
@@ -440,7 +479,7 @@ async fn opt_in_loop(
 ) {
     while !stop.is_cancelled() {
         value.store(
-            poll_opt_in(&client, &server_url, &key).await,
+            poll_opt_in(&client, &server_url, &key, &stop).await,
             Ordering::Release,
         );
         sleep_or_stop(OPT_IN_POLL, &stop, &deps).await;
@@ -503,13 +542,13 @@ async fn consume_connection(
     let mut parser = SseParseState::default();
     let mut last_frame_at = (deps.monotonic_now)();
     let fifo = fifo_path();
+    let mut poll = (deps.sleep)(BRIDGE_POLL_INTERVAL);
     loop {
-        let poll = (deps.sleep)(BRIDGE_POLL_INTERVAL);
-        tokio::pin!(poll);
         let next = tokio::select! {
             () = stop.cancelled() => return ConnectionEnd::Stopped,
-            () = &mut poll => {
+            () = poll.as_mut() => {
                 mark_stale_if_needed(last_frame_at, (deps.monotonic_now)(), &mut state.is_stale);
+                poll = (deps.sleep)(BRIDGE_POLL_INTERVAL);
                 continue;
             }
             next = stream.next() => next,
@@ -518,7 +557,7 @@ async fn consume_connection(
             // Python observes clean worker EOF only when its active five-second queue poll expires.
             tokio::select! {
                 () = stop.cancelled() => return ConnectionEnd::Stopped,
-                () = &mut poll => return ConnectionEnd::Reconnect,
+                () = poll.as_mut() => return ConnectionEnd::Reconnect,
             }
         };
         let bytes = match next {
@@ -530,6 +569,9 @@ async fn consume_connection(
         };
         let (next_parser, items) = parse_sse_chunk(parser, &bytes);
         parser = next_parser;
+        if !items.is_empty() {
+            poll = (deps.sleep)(BRIDGE_POLL_INTERVAL);
+        }
         for item in items {
             last_frame_at = (deps.monotonic_now)();
             state.reconnect_index = 0;
@@ -567,9 +609,8 @@ async fn run_bridge_body(
     config: &Config,
     stop: &CancellationToken,
     deps: &BridgeDeps,
+    client: &Client,
 ) -> Result<(), String> {
-    let client = build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT)
-        .map_err(|error| error.to_string())?;
     let opt_in = Arc::new(AtomicBool::new(false));
     let poll_stop = stop.child_token();
     let poll_task = tokio::spawn(opt_in_loop(
@@ -584,7 +625,7 @@ async fn run_bridge_body(
     let mut state = ConnectionState::default();
     let result = loop {
         match consume_connection(
-            &client,
+            client,
             config,
             stop,
             deps,
@@ -597,10 +638,7 @@ async fn run_bridge_body(
             ConnectionEnd::Terminal => break Ok(()),
             ConnectionEnd::Stopped => break Ok(()),
             ConnectionEnd::Reconnect => {
-                let delay = reconnect_delay(state.reconnect_index);
-                state.reconnect_index += 1;
-                tracing::info!(seconds = delay.as_secs(), "Chat bridge reconnecting");
-                sleep_or_stop(delay, stop, deps).await;
+                sleep_for_reconnect(&mut state, stop, deps).await;
                 if stop.is_cancelled() {
                     break Ok(());
                 }
@@ -625,6 +663,9 @@ async fn production_notification(
     if spec.offer_action {
         notification.action(NOTIFY_ACTION_KEY, "Open");
     }
+    // notify-rust does not document cancellation safety after the D-Bus request is sent but
+    // before a handle is returned. If cancellation wins in that narrow window there is no id
+    // available to close; once a handle exists, the cancellation branch below always closes it.
     let handle = tokio::select! {
         () = cancellation.cancelled() => return NotificationOutcome::Cancelled,
         result = notification.show_async() => match result {
@@ -717,6 +758,35 @@ fn production_deps(client: Client) -> BridgeDeps {
     }
 }
 
+async fn run_chat_bridge_with_deps(
+    config: &Config,
+    stop: CancellationToken,
+    deps: BridgeDeps,
+    client: Client,
+    body: BodyFn,
+) {
+    let mut supervise_index = 0;
+    while !stop.is_cancelled() {
+        let started = (deps.monotonic_now)();
+        let run = body(config.clone(), stop.clone(), deps.clone(), client.clone());
+        match AssertUnwindSafe(run).catch_unwind().await {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => tracing::error!(%error, "Chat bridge crashed"),
+            Err(_) => tracing::error!("Chat bridge crashed"),
+        }
+        if stop.is_cancelled() {
+            break;
+        }
+        if (deps.monotonic_now)().saturating_sub(started) >= HEALTHY_RUN {
+            supervise_index = 0;
+        }
+        let delay = reconnect_delay(supervise_index);
+        supervise_index += 1;
+        tracing::info!(seconds = delay.as_secs(), "Chat bridge restarting");
+        sleep_or_stop(delay, &stop, &deps).await;
+    }
+}
+
 /// Run the Linux chat bridge until stopped or authorization is rejected.
 pub async fn run_chat_bridge(config: &Config, stop: CancellationToken) {
     if !config.chat_bridge_enabled {
@@ -733,25 +803,11 @@ pub async fn run_chat_bridge(config: &Config, stop: CancellationToken) {
             return;
         }
     };
-    let deps = production_deps(client);
-    let mut supervise_index = 0;
-    while !stop.is_cancelled() {
-        let started = (deps.monotonic_now)();
-        match run_bridge_body(config, &stop, &deps).await {
-            Ok(()) => return,
-            Err(error) => tracing::error!(%error, "Chat bridge crashed"),
-        }
-        if stop.is_cancelled() {
-            break;
-        }
-        if (deps.monotonic_now)().saturating_sub(started) >= HEALTHY_RUN {
-            supervise_index = 0;
-        }
-        let delay = reconnect_delay(supervise_index);
-        supervise_index += 1;
-        tracing::info!(seconds = delay.as_secs(), "Chat bridge restarting");
-        sleep_or_stop(delay, &stop, &deps).await;
-    }
+    let deps = production_deps(client.clone());
+    let body: BodyFn = Arc::new(|config, stop, deps, client| {
+        async move { run_bridge_body(&config, &stop, &deps, &client).await }.boxed()
+    });
+    run_chat_bridge_with_deps(config, stop, deps, client, body).await;
 }
 
 // Python chat bridge provenance (45/45):
@@ -804,9 +860,13 @@ pub async fn run_chat_bridge(config: &Config, stop: CancellationToken) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{Action, MockServer};
+    use crate::test_support::{Action, MockServer, wait_for_requests};
     use serde_json::json;
-    use std::{fs, io, sync::Mutex};
+    use std::{
+        collections::VecDeque,
+        fs, io,
+        sync::{Mutex, atomic::AtomicUsize},
+    };
     use tokio::sync::Notify;
     use tracing::instrument::WithSubscriber;
 
@@ -1168,102 +1228,228 @@ mod tests {
     // tests/test_chat_bridge.py::test_heartbeat_staleness_marks_stale_and_logs_once_after_60s
     #[test]
     fn heartbeat_stale_after_strictly_more_than_sixty_seconds() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogBuffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
         let mut stale = false;
-        mark_stale_if_needed(Duration::ZERO, HEARTBEAT_STALE, &mut stale);
-        assert!(!stale);
-        mark_stale_if_needed(
-            Duration::ZERO,
-            HEARTBEAT_STALE + Duration::from_secs(1),
-            &mut stale,
-        );
+        tracing::subscriber::with_default(subscriber, || {
+            mark_stale_if_needed(
+                Duration::ZERO,
+                HEARTBEAT_STALE + Duration::from_secs(1),
+                &mut stale,
+            );
+            mark_stale_if_needed(
+                Duration::ZERO,
+                HEARTBEAT_STALE + Duration::from_secs(2),
+                &mut stale,
+            );
+        });
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(stale);
+        assert_eq!(log.matches("Chat bridge heartbeat stale").count(), 1);
     }
 
     // tests/test_chat_bridge.py::test_heartbeat_new_frame_recovers_from_stale
     #[test]
     fn live_frame_recovers_stale_state() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogBuffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
         let mut stale = true;
-        mark_live_frame(&mut stale);
+        tracing::subscriber::with_default(subscriber, || {
+            mark_live_frame(&mut stale);
+            mark_live_frame(&mut stale);
+        });
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(!stale);
+        assert_eq!(log.matches("Chat bridge heartbeat recovered").count(), 1);
+        assert!(log.contains(" INFO "));
     }
 
     // tests/test_chat_bridge.py::test_reconnect_transport_error_backoff_sequence
-    #[test]
-    fn transport_reconnect_ladder_is_exact() {
+    #[tokio::test]
+    async fn transport_reconnect_ladder_is_exact() {
+        let server = MockServer::new_actions((0..7).map(|_| Action::Disconnect).collect()).await;
+        let (deps, delays) = delay_deps();
+        let mut cfg = config();
+        cfg.server_url = server.url.clone();
+        let client = build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap();
+        let mut pending = Vec::new();
+        let mut state = ConnectionState::default();
+        for _ in 0..7 {
+            assert!(matches!(
+                consume_connection(
+                    &client,
+                    &cfg,
+                    &CancellationToken::new(),
+                    &deps,
+                    &mut pending,
+                    &AtomicBool::new(false),
+                    &mut state
+                )
+                .await,
+                ConnectionEnd::Reconnect
+            ));
+            sleep_for_reconnect(&mut state, &CancellationToken::new(), &deps).await;
+        }
         assert_eq!(
-            (0..7)
-                .map(|i| reconnect_delay(i).as_secs())
-                .collect::<Vec<_>>(),
-            [1, 2, 4, 8, 16, 30, 30]
+            *delays.lock().unwrap(),
+            [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs)
         );
     }
 
     // tests/test_chat_bridge.py::test_read_timeout_reconnects_and_clears_stale
-    #[test]
-    fn read_timeout_reconnect_then_heartbeat_resets_ladder() {
-        assert_eq!(reconnect_delay(0), Duration::from_secs(1));
+    #[tokio::test]
+    async fn read_timeout_reconnect_then_heartbeat_resets_ladder() {
+        heartbeat_resets_existing_backoff().await;
     }
     // tests/test_chat_bridge.py::test_reconnect_successful_frame_resets_backoff_index
-    #[test]
-    fn any_frame_resets_reconnect_index() {
-        let mut index = std::hint::black_box(4);
-        assert_eq!(index, 4);
-        index = 0;
-        assert_eq!(index, 0);
+    #[tokio::test]
+    async fn any_frame_resets_reconnect_index() {
+        heartbeat_resets_existing_backoff().await;
     }
 
     // tests/test_chat_bridge.py::test_terminal_401_exits_without_reconnect
-    #[test]
-    fn unauthorized_exits_without_reconnect() {
-        assert_eq!(StatusCode::UNAUTHORIZED.as_u16(), 401);
+    #[tokio::test]
+    async fn unauthorized_exits_without_reconnect() {
+        terminal_status_exits_without_sleep(401).await;
     }
     // tests/test_chat_bridge.py::test_terminal_403_exits_without_reconnect
-    #[test]
-    fn forbidden_exits_without_reconnect() {
-        assert_eq!(StatusCode::FORBIDDEN.as_u16(), 403);
+    #[tokio::test]
+    async fn forbidden_exits_without_reconnect() {
+        terminal_status_exits_without_sleep(403).await;
     }
 
     // tests/test_chat_bridge.py::test_dismissal_empty_stdout_no_ack_no_open
-    #[test]
-    fn dismissal_does_not_ack_or_open() {
-        assert_ne!(NotificationOutcome::Dismissed, NotificationOutcome::Open);
+    #[tokio::test]
+    async fn dismissal_does_not_ack_or_open() {
+        outcome_has_no_click_effects(NotificationOutcome::Dismissed).await;
     }
     // tests/test_chat_bridge.py::test_nonaction_stdout_treated_as_dismissal
-    #[test]
-    fn non_open_actions_are_dismissals() {
-        for value in ["nope", "op"] {
-            assert_ne!(value, NOTIFY_ACTION_KEY);
-        }
+    #[tokio::test]
+    async fn non_open_actions_are_dismissals() {
+        outcome_has_no_click_effects(NotificationOutcome::Dismissed).await;
+        outcome_has_no_click_effects(NotificationOutcome::Dismissed).await;
     }
     // tests/test_chat_bridge.py::test_click_notify_nonzero_does_not_xdg_open
-    #[test]
-    fn notification_failure_does_not_ack_or_open() {
-        assert_ne!(NotificationOutcome::Failed, NotificationOutcome::Open);
+    #[tokio::test]
+    async fn notification_failure_does_not_ack_or_open() {
+        outcome_has_no_click_effects(NotificationOutcome::Failed).await;
     }
 
     // tests/test_chat_bridge.py::test_supervision_backoff_climbs_then_healthy_reset
-    #[test]
-    fn supervisor_ladder_climbs_then_healthy_reset() {
-        let mut values = (0..7)
-            .map(|i| reconnect_delay(i).as_secs())
-            .collect::<Vec<_>>();
-        values.push(reconnect_delay(0).as_secs());
-        assert_eq!(values, [1, 2, 4, 8, 16, 30, 30, 1]);
+    #[tokio::test]
+    async fn supervisor_ladder_climbs_then_healthy_reset() {
+        let stop = CancellationToken::new();
+        let (mut deps, delays) = delay_deps();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let clock = Arc::new(Mutex::new(VecDeque::from(
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 74].map(Duration::from_secs),
+        )));
+        deps.monotonic_now = {
+            let clock = Arc::clone(&clock);
+            Arc::new(move || clock.lock().unwrap().pop_front().unwrap())
+        };
+        let body: BodyFn = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _, _, _| {
+                calls.fetch_add(1, Ordering::AcqRel);
+                async move { panic!("boom") }.boxed()
+            })
+        };
+        let stop_after = stop.clone();
+        let seen = Arc::clone(&delays);
+        deps.sleep = Arc::new(move |delay| {
+            seen.lock().unwrap().push(delay);
+            if seen.lock().unwrap().len() == 8 {
+                stop_after.cancel();
+            }
+            async {}.boxed()
+        });
+        run_chat_bridge_with_deps(
+            &config(),
+            stop,
+            deps,
+            build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap(),
+            body,
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::Acquire), 8);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            [1, 2, 4, 8, 16, 30, 30, 1].map(Duration::from_secs)
+        );
     }
 
     // tests/test_chat_bridge.py::test_bridge_crash_restarts_after_backoff
-    #[test]
-    fn body_crash_restarts_after_backoff() {
-        assert_eq!(reconnect_delay(0), Duration::from_secs(1));
+    #[tokio::test]
+    async fn body_crash_restarts_after_backoff() {
+        let stop = CancellationToken::new();
+        let (mut deps, delays) = delay_deps();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let body: BodyFn = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _, _, _| {
+                let call = calls.fetch_add(1, Ordering::AcqRel);
+                async move {
+                    if call == 0 {
+                        panic!("boom")
+                    }
+                    Ok(())
+                }
+                .boxed()
+            })
+        };
+        deps.monotonic_now = Arc::new(|| Duration::ZERO);
+        run_chat_bridge_with_deps(
+            &config(),
+            stop,
+            deps,
+            build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap(),
+            body,
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+        assert_eq!(*delays.lock().unwrap(), [Duration::from_secs(1)]);
     }
 
     // tests/test_chat_bridge.py::test_stop_during_supervision_backoff_no_restart
     #[tokio::test]
     async fn stop_during_supervision_backoff_prevents_restart() {
         let stop = CancellationToken::new();
-        stop.cancel();
-        sleep_or_stop(Duration::from_secs(30), &stop, &test_deps()).await;
-        assert!(stop.is_cancelled());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut deps = test_deps();
+        let stop_on_sleep = stop.clone();
+        deps.sleep = Arc::new(move |_| {
+            stop_on_sleep.cancel();
+            async {}.boxed()
+        });
+        let body: BodyFn = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _, _, _| {
+                calls.fetch_add(1, Ordering::AcqRel);
+                async { panic!("boom") }.boxed()
+            })
+        };
+        run_chat_bridge_with_deps(
+            &config(),
+            stop,
+            deps,
+            build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap(),
+            body,
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::Acquire), 1);
     }
 
     // tests/test_chat_bridge.py::test_chat_bridge_enabled_false_no_sse_attempt
@@ -1275,11 +1461,31 @@ mod tests {
     }
 
     // tests/test_chat_bridge.py::test_chat_bridge_uses_keyless_callosum_url_with_bearer
-    #[test]
-    fn callosum_url_is_keyless_and_uses_bearer() {
-        let url = callosum_url("https://server.test/");
-        assert_eq!(url, "https://server.test/app/observer/callosum");
-        assert!(!url.contains("key-123"));
+    #[tokio::test]
+    async fn callosum_url_is_keyless_and_uses_bearer() {
+        let server = MockServer::new(vec![(401, json!({}))]).await;
+        let mut cfg = config();
+        cfg.server_url = server.url.clone();
+        let _ = consume_connection(
+            &build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap(),
+            &cfg,
+            &CancellationToken::new(),
+            &test_deps(),
+            &mut Vec::new(),
+            &AtomicBool::new(false),
+            &mut ConnectionState::default(),
+        )
+        .await;
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].uri, "/app/observer/callosum");
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer key-123")
+        );
     }
 
     // tests/test_chat_bridge.py::test_pending_cap_33rd_entry_evicts_oldest_and_cancels_task
@@ -1365,6 +1571,13 @@ mod tests {
             &temp.path().join("missing"),
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while events.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         cancel_all_pending(&mut pending).await;
         assert_eq!(*events.lock().unwrap(), ["ack", "open"]);
     }
@@ -1392,6 +1605,13 @@ mod tests {
             &temp.path().join("missing"),
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !opened.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         cancel_all_pending(&mut pending).await;
         assert!(opened.load(Ordering::Acquire));
     }
@@ -1427,8 +1647,8 @@ mod tests {
         assert!(cancelled.load(Ordering::Acquire));
     }
 
-    async fn consume_mock_body(body: &'static str) -> (ConnectionEnd, usize) {
-        let server = MockServer::new_actions(vec![Action::Raw(200, body)]).await;
+    async fn consume_mock_body(body: String) -> (ConnectionEnd, usize) {
+        let server = MockServer::new_actions(vec![Action::OwnedRaw(200, body)]).await;
         let mut cfg = config();
         cfg.server_url = server.url.clone();
         let client = build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap();
@@ -1457,7 +1677,7 @@ mod tests {
             "data: not-json\n\n",
             "data: {\"tract\":\"chat\",\"event\":\"sol_chat_request\",\"request_id\":\"req-1\"}\n\n"
         );
-        let (result, pending) = consume_mock_body(body).await;
+        let (result, pending) = consume_mock_body(body.into()).await;
         assert!(matches!(result, ConnectionEnd::Reconnect));
         assert_eq!(pending, 1);
     }
@@ -1469,8 +1689,7 @@ mod tests {
             let body = format!(
                 "data: {malformed}\n\ndata: {{\"tract\":\"chat\",\"event\":\"sol_chat_request\",\"request_id\":\"req-1\"}}\n\n"
             );
-            let leaked: &'static str = Box::leak(body.into_boxed_str());
-            let (_, pending) = consume_mock_body(leaked).await;
+            let (_, pending) = consume_mock_body(body).await;
             assert_eq!(pending, 1);
         }
     }
@@ -1677,11 +1896,11 @@ mod tests {
     async fn opt_in_failures_are_closed() {
         let client = build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap();
         let status = MockServer::new(vec![(500, json!({}))]).await;
-        assert!(!poll_opt_in(&client, &status.url, "key").await);
+        assert!(!poll_opt_in(&client, &status.url, "key", &CancellationToken::new()).await);
         let malformed = MockServer::new_actions(vec![Action::Raw(200, "not-json")]).await;
-        assert!(!poll_opt_in(&client, &malformed.url, "key").await);
+        assert!(!poll_opt_in(&client, &malformed.url, "key", &CancellationToken::new()).await);
         let disconnected = MockServer::new_actions(vec![Action::Disconnect]).await;
-        assert!(!poll_opt_in(&client, &disconnected.url, "key").await);
+        assert!(!poll_opt_in(&client, &disconnected.url, "key", &CancellationToken::new()).await);
     }
 
     // AC: FIFO non-tolerated errors are warning-class, never debug-class.
@@ -1767,6 +1986,136 @@ mod tests {
         assert!(cancelled.load(Ordering::Acquire));
     }
 
+    // AC: partial byte chunks do not reset the logical-frame stale deadline.
+    #[tokio::test]
+    async fn partial_chunks_cannot_postpone_staleness() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        let server = MockServer::new_actions(vec![Action::Stream(200, receiver)]).await;
+        let gate = Arc::new(Notify::new());
+        let sleeps = Arc::new(AtomicUsize::new(0));
+        let mut deps = test_deps();
+        let wait = Arc::clone(&gate);
+        let sleep_count = Arc::clone(&sleeps);
+        deps.sleep = Arc::new(move |_| {
+            sleep_count.fetch_add(1, Ordering::AcqRel);
+            let wait = Arc::clone(&wait);
+            async move { wait.notified().await }.boxed()
+        });
+        let times = Arc::new(Mutex::new(VecDeque::from([
+            Duration::ZERO,
+            HEARTBEAT_STALE + Duration::from_secs(1),
+        ])));
+        deps.monotonic_now = {
+            let times = Arc::clone(&times);
+            Arc::new(move || {
+                times
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(HEARTBEAT_STALE + Duration::from_secs(1))
+            })
+        };
+        let mut cfg = config();
+        cfg.server_url = server.url.clone();
+        let client = build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap();
+        let task = tokio::spawn(async move {
+            let mut state = ConnectionState::default();
+            let end = consume_connection(
+                &client,
+                &cfg,
+                &CancellationToken::new(),
+                &deps,
+                &mut Vec::new(),
+                &AtomicBool::new(false),
+                &mut state,
+            )
+            .await;
+            (end, state)
+        });
+        while sleeps.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+        for bytes in [b"da".as_slice(), b"ta: par".as_slice(), b"tial".as_slice()] {
+            sender
+                .send(Ok(hyper::body::Bytes::copy_from_slice(bytes)))
+                .await
+                .unwrap();
+        }
+        gate.notify_waiters();
+        tokio::task::yield_now().await;
+        sender
+            .send(Err(io::Error::new(io::ErrorKind::ConnectionReset, "stop")))
+            .await
+            .unwrap();
+        let (_, state) = task.await.unwrap();
+        assert!(state.is_stale);
+    }
+
+    // AC: cancellation during a hung ack drains promptly and never opens the browser.
+    #[tokio::test]
+    async fn cancellation_during_ack_prevents_browser_open() {
+        let ack_started = Arc::new(Notify::new());
+        let opened = Arc::new(AtomicBool::new(false));
+        let mut deps = test_deps();
+        deps.notify = Arc::new(|_, _| async { NotificationOutcome::Open }.boxed());
+        deps.ack_open = {
+            let started = Arc::clone(&ack_started);
+            Arc::new(move |_, _, _| {
+                let started = Arc::clone(&started);
+                async move {
+                    started.notify_waiters();
+                    std::future::pending::<()>().await
+                }
+                .boxed()
+            })
+        };
+        deps.open_browser = {
+            let opened = Arc::clone(&opened);
+            Arc::new(move |_| {
+                opened.store(true, Ordering::Release);
+                async {}.boxed()
+            })
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut pending = Vec::new();
+        dispatch_event(
+            &payload(EVENT_SOL_CHAT_REQUEST),
+            &mut pending,
+            true,
+            false,
+            &config(),
+            &deps,
+            &temp.path().join("missing"),
+        )
+        .await;
+        ack_started.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), cancel_all_pending(&mut pending))
+            .await
+            .unwrap();
+        assert!(!opened.load(Ordering::Acquire));
+    }
+
+    // AC: stop interrupts an in-flight opt-in HTTP request.
+    #[tokio::test]
+    async fn stop_interrupts_in_flight_opt_in_request() {
+        let (server, _gate) = MockServer::gated().await;
+        let stop = CancellationToken::new();
+        let client = build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap();
+        let task = tokio::spawn({
+            let stop = stop.clone();
+            let url = server.url.clone();
+            async move { poll_opt_in(&client, &url, "key", &stop).await }
+        });
+        wait_for_requests(&server, 1).await;
+        stop.cancel();
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+    }
+
     // AC: Python bool event_index is intentionally not treated as an integer.
     #[test]
     fn boolean_event_index_uses_today() {
@@ -1827,6 +2176,122 @@ mod tests {
             1
         );
         assert_eq!(production.matches("SURFACE: &str = \"linux\"").count(), 1);
+    }
+
+    fn delay_deps() -> (BridgeDeps, Arc<Mutex<Vec<Duration>>>) {
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&delays);
+        let mut deps = test_deps();
+        deps.sleep = Arc::new(move |delay| {
+            seen.lock().unwrap().push(delay);
+            async {}.boxed()
+        });
+        (deps, delays)
+    }
+
+    async fn heartbeat_resets_existing_backoff() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Ok(hyper::body::Bytes::from_static(b": heartbeat\n")))
+            .await
+            .unwrap();
+        drop(sender);
+        let server = MockServer::new_actions(vec![Action::Stream(200, receiver)]).await;
+        let gate = Arc::new(Notify::new());
+        let sleep_count = Arc::new(AtomicUsize::new(0));
+        let mut deps = test_deps();
+        let wait = Arc::clone(&gate);
+        let count = Arc::clone(&sleep_count);
+        deps.sleep = Arc::new(move |_| {
+            count.fetch_add(1, Ordering::AcqRel);
+            let wait = Arc::clone(&wait);
+            async move { wait.notified().await }.boxed()
+        });
+        let mut cfg = config();
+        cfg.server_url = server.url.clone();
+        let task = tokio::spawn(async move {
+            let mut state = ConnectionState {
+                reconnect_index: 4,
+                is_stale: true,
+            };
+            let result = consume_connection(
+                &build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap(),
+                &cfg,
+                &CancellationToken::new(),
+                &deps,
+                &mut Vec::new(),
+                &AtomicBool::new(false),
+                &mut state,
+            )
+            .await;
+            (result, state)
+        });
+        while sleep_count.load(Ordering::Acquire) < 2 {
+            tokio::task::yield_now().await;
+        }
+        gate.notify_waiters();
+        let (result, mut state) = task.await.unwrap();
+        assert!(matches!(result, ConnectionEnd::Reconnect));
+        assert_eq!(state.reconnect_index, 0);
+        assert!(!state.is_stale);
+        let (delay_deps, delays) = delay_deps();
+        sleep_for_reconnect(&mut state, &CancellationToken::new(), &delay_deps).await;
+        assert_eq!(*delays.lock().unwrap(), [Duration::from_secs(1)]);
+    }
+
+    async fn terminal_status_exits_without_sleep(status: u16) {
+        let server = MockServer::new(vec![(status, json!({}))]).await;
+        let (deps, delays) = delay_deps();
+        let mut cfg = config();
+        cfg.server_url = server.url.clone();
+        let result = consume_connection(
+            &build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap(),
+            &cfg,
+            &CancellationToken::new(),
+            &deps,
+            &mut Vec::new(),
+            &AtomicBool::new(false),
+            &mut ConnectionState::default(),
+        )
+        .await;
+        assert!(matches!(result, ConnectionEnd::Terminal));
+        assert!(delays.lock().unwrap().is_empty());
+    }
+
+    async fn outcome_has_no_click_effects(outcome: NotificationOutcome) {
+        let ack = Arc::new(AtomicUsize::new(0));
+        let opened = Arc::new(AtomicUsize::new(0));
+        let mut deps = test_deps();
+        deps.notify = Arc::new(move |_, _| async move { outcome }.boxed());
+        deps.ack_open = {
+            let ack = Arc::clone(&ack);
+            Arc::new(move |_, _, _| {
+                ack.fetch_add(1, Ordering::AcqRel);
+                async {}.boxed()
+            })
+        };
+        deps.open_browser = {
+            let opened = Arc::clone(&opened);
+            Arc::new(move |_| {
+                opened.fetch_add(1, Ordering::AcqRel);
+                async {}.boxed()
+            })
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut pending = Vec::new();
+        dispatch_event(
+            &payload(EVENT_SOL_CHAT_REQUEST),
+            &mut pending,
+            true,
+            false,
+            &config(),
+            &deps,
+            &temp.path().join("missing"),
+        )
+        .await;
+        cancel_all_pending(&mut pending).await;
+        assert_eq!(ack.load(Ordering::Acquire), 0);
+        assert_eq!(opened.load(Ordering::Acquire), 0);
     }
 
     fn test_deps() -> BridgeDeps {
