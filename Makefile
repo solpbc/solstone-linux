@@ -12,6 +12,7 @@ VENV_BIN := $(VENV)/bin
 PYTHON := $(VENV_BIN)/python
 CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 CARGO_DENY ?= $(shell command -v cargo-deny 2>/dev/null || { [ -x $(HOME)/.cargo/bin/cargo-deny ] && echo $(HOME)/.cargo/bin/cargo-deny; })
+CARGO_BIN_DIR := $(patsubst %/,%,$(dir $(CARGO)))
 
 # Require uv
 UV := $(shell command -v uv 2>/dev/null)
@@ -123,6 +124,8 @@ format: .installed
 	@$(RUFF) check . || { echo ""; echo "Issues above need manual fixes."; exit 1; }
 	@echo ""
 	@echo "All clean!"
+
+rust-fmt-check rust-lint rust-test rust-deny: export PATH := $(CARGO_BIN_DIR):$(PATH)
 
 rust-fmt-check:
 	$(CARGO) fmt --check

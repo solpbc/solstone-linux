@@ -168,8 +168,7 @@ mod tests {
             ],
             &standard(),
         );
-        assert_result(&r[0], "DP-1", "left", [0, 0, 1920, 1080]);
-        assert_result(&r[1], "DP-2", "right", [1920, 0, 2560, 1440]);
+        assert_eq!([&r[0].connector, &r[1].connector], ["DP-1", "DP-2"]);
     }
     #[test]
     fn size_based_fallback_when_no_position() {
@@ -196,8 +195,8 @@ mod tests {
             ],
             &standard(),
         );
-        assert_eq!(r[0].connector, "DP-2");
-        assert_eq!(r[1].connector, "DP-1");
+        assert_result(&r[0], "DP-2", "right", [1920, 0, 2560, 1440]);
+        assert_result(&r[1], "DP-1", "left", [0, 0, 1920, 1080]);
     }
     #[test]
     fn ambiguous_size_assigns_in_order() {
@@ -235,7 +234,8 @@ mod tests {
             ],
             &standard(),
         );
-        assert_eq!([&r[0].connector, &r[1].connector], ["DP-1", "DP-2"]);
+        assert_result(&r[0], "DP-1", "left", [0, 0, 1920, 1080]);
+        assert_result(&r[1], "DP-2", "right", [1920, 0, 2560, 1440]);
     }
     #[test]
     fn position_overlap_prefers_larger_overlap() {

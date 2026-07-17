@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-pub const MIN_HEALTHY_WEBM_BYTES: u64 = 2048;
+const MIN_HEALTHY_WEBM_BYTES: u64 = 2048;
 
 pub fn stream_filename(position: &str, connector: &str) -> String {
     format!("{position}_{connector}_screen.webm")
