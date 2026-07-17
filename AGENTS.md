@@ -66,7 +66,7 @@ make install        # Create venv, install package + dev tools (pytest, ruff) vi
 make test           # Run all tests
 make test-only TEST=tests/test_config.py  # Run specific test
 make format         # Auto-format with ruff
-make ci             # Lint + format check + tests
+make ci             # Python + Rust lint, format, dependency, and test checks
 make install-service  # Smart install-or-upgrade: guards against cross-repo contamination; runs CI in upgrade mode
 make service-restart  # systemctl restart wrapper
 make service-status   # systemctl status wrapper
@@ -75,6 +75,10 @@ make uninstall-service  # Disable + remove unit + pipx uninstall
 make clean          # Remove build artifacts and caches
 make versions       # Show installed package versions
 ```
+
+## Rust rebuild
+
+The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains the portable, unit-tested logic and a stub CLI, while `crates/spike-screencast/` is a disposable portal/PipeWire/GStreamer validation binary. Run `make rust-fmt-check`, `make rust-lint`, `make rust-test`, and `make rust-deny` individually, or use `make ci` as the combined Python and Rust gate. Python remains the shipped pipx observer until an explicit cutover; Rust crates are not installed or released with it. To remove the spike, delete `crates/spike-screencast/` and its workspace member line.
 
 ## Releasing
 

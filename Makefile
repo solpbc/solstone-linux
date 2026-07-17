@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: install test test-only format ci clean clean-install versions all bootstrap install-service service-restart service-status service-logs uninstall-service release release-test
+.PHONY: install test test-only format ci rust-fmt-check rust-lint rust-test rust-deny clean clean-install versions all bootstrap install-service service-restart service-status service-logs uninstall-service release release-test
 
 # Default target
 all: install
@@ -10,6 +10,8 @@ all: install
 VENV := .venv
 VENV_BIN := $(VENV)/bin
 PYTHON := $(VENV_BIN)/python
+CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
+CARGO_DENY ?= $(shell command -v cargo-deny 2>/dev/null || { [ -x $(HOME)/.cargo/bin/cargo-deny ] && echo $(HOME)/.cargo/bin/cargo-deny; })
 
 # Require uv
 UV := $(shell command -v uv 2>/dev/null)
@@ -122,6 +124,23 @@ format: .installed
 	@echo ""
 	@echo "All clean!"
 
+rust-fmt-check:
+	$(CARGO) fmt --check
+
+rust-lint:
+	$(CARGO) clippy --all-targets -- -D warnings
+
+rust-test:
+	$(CARGO) test
+
+rust-deny:
+	@if [ -n "$(CARGO_DENY)" ] && [ -x "$(CARGO_DENY)" ]; then \
+		echo "Running cargo deny check with $(CARGO_DENY)..."; \
+		"$(CARGO_DENY)" check; \
+	else \
+		echo "NOTICE: cargo-deny not found on PATH or at $(HOME)/.cargo/bin/cargo-deny; skipping cargo deny check"; \
+	fi
+
 # Run CI checks (what CI would run)
 ci: .installed
 	@echo "Running CI checks..."
@@ -134,12 +153,25 @@ ci: .installed
 	@echo "=== Running tests ==="
 	@$(MAKE) test
 	@echo ""
+	@echo "=== Checking Rust formatting ==="
+	@$(MAKE) rust-fmt-check
+	@echo ""
+	@echo "=== Running Rust clippy ==="
+	@$(MAKE) rust-lint
+	@echo ""
+	@echo "=== Running Rust tests ==="
+	@$(MAKE) rust-test
+	@echo ""
+	@echo "=== Checking Rust dependencies ==="
+	@$(MAKE) rust-deny
+	@echo ""
 	@echo "All CI checks passed!"
 
 # Clean build artifacts and cache files
 clean:
 	@echo "Cleaning build artifacts and cache files..."
 	rm -rf build/ dist/ *.egg-info/
+	rm -rf target/
 	rm -rf .pytest_cache/ .mypy_cache/
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
