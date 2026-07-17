@@ -94,12 +94,6 @@ mod tests {
         assert!(is_healthy_file_size(Some(4096)));
     }
 
-    #[test]
-    fn silent_stream_log_message_matches_python_prefix() {
-        // tests/test_screencast_stop_filters_silent_streams.py::test_stop_logs_silent_stream_dropped_prefix
-        assert_eq!(SILENT_STREAM_LOG_MESSAGE, "silent stream dropped");
-    }
-
     // tests/test_streams.py::TestStripHostname::test_simple
     #[test]
     fn strip_simple() {

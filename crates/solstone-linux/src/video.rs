@@ -83,9 +83,12 @@ pub fn select_backend(
 // tests/test_screencast.py::test_wayland_immediate_exit_decodes_stderr_and_closes_fd
 //   retired-by-dependency: Rust uses in-process GStreamer, not gst-launch stderr.
 // tests/test_screencast.py::test_wayland_command_keeps_spaced_location_as_one_token
-//   retired-by-dependency: programmatic properties have no argv quoting; pipeline tests pin the value.
+//   retired-by-dependency: programmatic properties have no argv token splitting; no spaced-path
+//   regression fixture is present in Rust.
 // tests/test_screencast.py::test_wayland_closes_pw_fd_on_spawn_failure_once
-//   -> portal::tests::pipeline_construction_failure_closes_pipewire_remote_once.
+//   Rust uses OwnedFd RAII rather than explicit os.close. portal::tests::pipeline_construction_failure_closes_portal_session_once
+//   verifies the construction-error cleanup path closes the portal session once, but does not
+//   directly observe the OwnedFd drop or its once-ness.
 // tests/test_screencast.py::TestX11Screencaster::test_connect_fails_without_display
 //   retired-by-dependency: x11rb connect reports the display error directly; there is no preflight method.
 // tests/test_screencast.py::TestX11Screencaster::test_connect_fails_without_gst_launch
@@ -101,7 +104,8 @@ pub fn select_backend(
 // tests/test_screencast.py::TestX11Screencaster::test_immediate_exit_decodes_non_utf8_stderr
 //   retired-by-dependency: Rust uses GStreamer bus errors, not subprocess stderr.
 // tests/test_screencast.py::TestX11Screencaster::test_command_keeps_spaced_location_as_one_token
-//   retired-by-dependency: programmatic properties have no argv quoting.
+//   retired-by-dependency: programmatic properties have no argv token splitting; no spaced-path
+//   regression fixture is present in Rust.
 // tests/test_screencast.py::TestX11Screencaster::test_stderr_drain_threads_join_after_stop
 //   retired-by-dependency: no subprocess stderr-drain thread exists.
 // tests/test_screencast.py::TestX11Screencaster::test_stop_filters_silent_streams
@@ -117,9 +121,12 @@ pub fn select_backend(
 // tests/test_screencast_stop_filters_silent_streams.py::test_stop_treats_missing_file_as_silent
 //   -> x11::tests::stop_reports_missing_and_unlink_error_streams.
 // tests/test_screencast_stop_filters_silent_streams.py::test_stop_logs_silent_stream_dropped_prefix
-//   -> streams::tests::silent_stream_log_message_matches_python_prefix plus both backend stop paths.
+//   Both Rust stop paths emit the shared "silent stream dropped" tracing message with structured
+//   connector/position/file_bytes/path fields. The Python colon is a format-string artifact;
+//   Rust has no log-capture assertion for the rendered prefix or fields.
 // tests/test_screencast_stop_filters_silent_streams.py::test_stop_handles_unlink_oserror
-//   -> x11::tests::stop_reports_missing_and_unlink_error_streams.
+//   x11::tests::stop_reports_missing_and_unlink_error_streams verifies the non-NotFound error
+//   is tolerated and the stream is still reported, but does not capture the warning.
 
 #[cfg(test)]
 mod tests {

@@ -39,10 +39,12 @@ pub struct StoppingPipeline<'a> {
 }
 
 pub fn stop_pipelines(pipelines: &mut [StoppingPipeline<'_>], timeout: Duration) {
+    // This drives only rotation.rs's Stop half. Membership in `awaiting` is the
+    // persisted per-stream state; AwaitingEos(Stop) is reconstructed for each
+    // terminal event. Rotate is unreachable under D2 because rotation is a
+    // stop followed by a new start/session.
     let mut awaiting = Vec::new();
     for (index, record) in pipelines.iter_mut().enumerate() {
-        // D2 makes Rotate unreachable here: the observer rotates with stop+start,
-        // so rotation.rs remains the single authority for the Stop half only.
         let transition = rotation::transition(RotationState::Running, RotationEvent::StopRequested);
         if transition.actions.contains(&RotationAction::SendEos)
             && record.pipeline.as_mut().send_eos()
@@ -200,7 +202,7 @@ impl CapturePipeline for GstreamerPipeline {
     }
 }
 
-pub fn build_pipeline(description: &PipelineDescription) -> Result<gst::Pipeline, AnyError> {
+fn build_pipeline(description: &PipelineDescription) -> Result<gst::Pipeline, AnyError> {
     let pipeline = gst::Pipeline::new();
     let mut elements = Vec::with_capacity(description.elements.len());
     for spec in &description.elements {

@@ -832,8 +832,10 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_construction_failure_closes_pipewire_remote_once() {
+    fn pipeline_construction_failure_closes_portal_session_once() {
         // tests/test_screencast.py::test_wayland_closes_pw_fd_on_spawn_failure_once
+        // Rust's OwnedFd drop is RAII and is not observed here; this test covers
+        // the associated portal-session cleanup trigger only.
         let calls = Arc::new(Mutex::new(vec![]));
         let ops = FakeOps {
             calls: calls.clone(),
