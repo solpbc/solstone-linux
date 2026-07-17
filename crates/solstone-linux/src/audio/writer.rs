@@ -12,7 +12,7 @@ use crate::{
 };
 
 #[derive(Default)]
-pub struct FlacAudioWriter;
+pub(crate) struct FlacAudioWriter;
 
 impl AudioWriter for FlacAudioWriter {
     fn write(

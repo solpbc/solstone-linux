@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::{
+    audio::backend::FailureCounter,
     chunking::{AudioLeg, LegBlock, SAMPLE_RATE},
     sources::{SourceDescriptor, SourceSelection, classify_sources},
     subscription::{
@@ -64,6 +65,45 @@ impl RedetectSchedule {
     }
 }
 
+enum DriverEvent {
+    Subscription(Option<Facility>, Option<Operation>, u32),
+    Backstop,
+    Idle,
+    Disconnected,
+}
+
+trait SubscriptionEventSource {
+    fn receive(&mut self, timeout: Duration) -> DriverEvent;
+}
+
+trait DriverClock {
+    fn elapsed(&self) -> Duration;
+}
+
+fn next_driver_event(
+    events: &mut dyn SubscriptionEventSource,
+    clock: &dyn DriverClock,
+    schedule: RedetectSchedule,
+) -> DriverEvent {
+    let wait = schedule
+        .remaining(clock.elapsed())
+        .min(Duration::from_millis(100));
+    match events.receive(wait) {
+        DriverEvent::Idle if schedule.due(clock.elapsed()) => DriverEvent::Backstop,
+        event => event,
+    }
+}
+
+fn driver_subscription_event(event: &DriverEvent) -> Option<SubscriptionEvent> {
+    match event {
+        DriverEvent::Subscription(facility, operation, index) => {
+            map_subscription_event(*facility, *operation, *index)
+        }
+        DriverEvent::Backstop => Some(SubscriptionEvent::Started),
+        DriverEvent::Idle | DriverEvent::Disconnected => None,
+    }
+}
+
 pub(crate) enum PulseMessage {
     Ready {
         muted: bool,
@@ -74,6 +114,7 @@ pub(crate) enum PulseMessage {
         mute_failure: Option<String>,
     },
     Block(LegBlock),
+    SuccessfulRecord,
     Failed(String),
 }
 
@@ -182,6 +223,7 @@ fn mute_result(status: &MuteStatus) -> (bool, Option<String>) {
 pub(crate) fn run_pulse(
     sender: mpsc::Sender<PulseMessage>,
     stopped: Arc<AtomicBool>,
+    failures: Arc<FailureCounter>,
 ) -> Result<(), AnyError> {
     let mut mainloop = Mainloop::new().ok_or("failed to create PulseAudio threaded mainloop")?;
     let mut context =
@@ -206,38 +248,40 @@ pub(crate) fn run_pulse(
                 .unwrap_or("source selection was not resolved")
         )
     })?;
-    let (muted, mute_failure) = mute_result(&state.mute_status);
-    sender.send(PulseMessage::Ready {
-        muted,
-        mute_failure,
-    })?;
-
     // Pulse streams are long-lived; Python's 1000-block rebuild is soundcard-library hygiene.
     let restart = Arc::new(AtomicBool::new(false));
-    let microphone = start_stream(
-        &mut mainloop,
-        &mut context,
-        selection
-            .microphone
-            .name
-            .as_deref()
-            .ok_or("microphone has no name")?,
-        AudioLeg::Microphone,
-        sender.clone(),
-        Arc::clone(&restart),
-    )?;
-    let system = start_stream(
-        &mut mainloop,
-        &mut context,
-        selection
-            .monitor
-            .name
-            .as_deref()
-            .ok_or("monitor has no name")?,
-        AudioLeg::System,
-        sender.clone(),
-        Arc::clone(&restart),
-    )?;
+    let microphone_name = selection
+        .microphone
+        .name
+        .as_deref()
+        .ok_or("microphone has no name")?;
+    let system_name = selection
+        .monitor
+        .name
+        .as_deref()
+        .ok_or("monitor has no name")?;
+    let (muted, mute_failure) = mute_result(&state.mute_status);
+    let (microphone, system) = initialize_streams(&sender, &failures, muted, mute_failure, || {
+        let microphone = start_stream(
+            &mut mainloop,
+            &mut context,
+            microphone_name,
+            AudioLeg::Microphone,
+            sender.clone(),
+            Arc::clone(&restart),
+            Arc::clone(&failures),
+        )?;
+        let system = start_stream(
+            &mut mainloop,
+            &mut context,
+            system_name,
+            AudioLeg::System,
+            sender.clone(),
+            Arc::clone(&restart),
+            Arc::clone(&failures),
+        )?;
+        Ok((microphone, system))
+    })?;
     info!(default_sink = ?state.default_sink, "PulseAudio capture ready");
 
     let (event_tx, event_rx) = mpsc::channel();
@@ -252,14 +296,33 @@ pub(crate) fn run_pulse(
     mainloop.unlock();
     let mut state = state;
     let schedule_started = Instant::now();
-    let mut redetect = RedetectSchedule::new(schedule_started.elapsed());
+    struct RealDriverClock(Instant);
+    impl DriverClock for RealDriverClock {
+        fn elapsed(&self) -> Duration {
+            self.0.elapsed()
+        }
+    }
+    struct ChannelSubscriptionEvents(mpsc::Receiver<(Option<Facility>, Option<Operation>, u32)>);
+    impl SubscriptionEventSource for ChannelSubscriptionEvents {
+        fn receive(&mut self, timeout: Duration) -> DriverEvent {
+            match self.0.recv_timeout(timeout) {
+                Ok((facility, operation, index)) => {
+                    DriverEvent::Subscription(facility, operation, index)
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => DriverEvent::Idle,
+                Err(mpsc::RecvTimeoutError::Disconnected) => DriverEvent::Disconnected,
+            }
+        }
+    }
+    let clock = RealDriverClock(schedule_started);
+    let mut events = ChannelSubscriptionEvents(event_rx);
+    let mut redetect = RedetectSchedule::new(clock.elapsed());
     while !stopped.load(Ordering::SeqCst) && !restart.load(Ordering::Acquire) {
-        let wait = redetect
-            .remaining(schedule_started.elapsed())
-            .min(Duration::from_millis(100));
-        match event_rx.recv_timeout(wait) {
-            Ok((facility, operation, index)) => {
-                let Some(event) = map_subscription_event(facility, operation, index) else {
+        let driver_event = next_driver_event(&mut events, &clock, redetect);
+        match driver_event {
+            DriverEvent::Subscription(..) | DriverEvent::Backstop => {
+                let is_backstop = matches!(driver_event, DriverEvent::Backstop);
+                let Some(event) = driver_subscription_event(&driver_event) else {
                     continue;
                 };
                 let outcome = drive_subscription(&mut mainloop, &context, state, event)?;
@@ -275,26 +338,12 @@ pub(crate) fn run_pulse(
                 if source_changed {
                     restart.store(true, Ordering::Release);
                 }
+                if is_backstop {
+                    redetect.reset(clock.elapsed());
+                }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        if redetect.due(schedule_started.elapsed()) {
-            let outcome =
-                drive_subscription(&mut mainloop, &context, state, SubscriptionEvent::Started)?;
-            let source_changed = outcome.source_changed;
-            state = outcome.state;
-            for status in outcome.mute_changes {
-                let (muted, mute_failure) = mute_result(&status);
-                sender.send(PulseMessage::MuteChanged {
-                    muted,
-                    mute_failure,
-                })?;
-            }
-            if source_changed {
-                restart.store(true, Ordering::Release);
-            }
-            redetect.reset(schedule_started.elapsed());
+            DriverEvent::Idle => {}
+            DriverEvent::Disconnected => break,
         }
     }
     drop(subscription);
@@ -308,6 +357,39 @@ pub(crate) fn run_pulse(
     mainloop.unlock();
     mainloop.stop();
     Ok(())
+}
+
+fn retry_stream_setup<T>(
+    sender: &mpsc::Sender<PulseMessage>,
+    failures: &FailureCounter,
+    mut setup: impl FnMut() -> Result<T, AnyError>,
+) -> Result<T, AnyError> {
+    loop {
+        match setup() {
+            Ok(value) => return Ok(value),
+            Err(error) if failures.count() >= 2 => return Err(error),
+            Err(error) => {
+                failures.failed();
+                let _ = sender.send(PulseMessage::Failed(error.to_string()));
+            }
+        }
+    }
+}
+
+fn initialize_streams<T>(
+    sender: &mpsc::Sender<PulseMessage>,
+    failures: &FailureCounter,
+    muted: bool,
+    mute_failure: Option<String>,
+    setup: impl FnMut() -> Result<T, AnyError>,
+) -> Result<T, AnyError> {
+    let streams = retry_stream_setup(sender, failures, setup)?;
+    failures.streams_ready();
+    sender.send(PulseMessage::Ready {
+        muted,
+        mute_failure,
+    })?;
+    Ok(streams)
 }
 
 fn wait_for_context(mainloop: &mut Mainloop, context: &Context) -> Result<(), AnyError> {
@@ -484,6 +566,7 @@ fn start_stream(
     leg: AudioLeg,
     sender: mpsc::Sender<PulseMessage>,
     restart: Arc<AtomicBool>,
+    failures: Arc<FailureCounter>,
 ) -> Result<Arc<Mutex<Stream>>, AnyError> {
     let spec = Spec {
         format: Format::F32le,
@@ -499,7 +582,7 @@ fn start_stream(
         .lock()
         .expect("stream lock")
         .set_read_callback(Some(Box::new(move |_| {
-            read_stream(&weak, leg, &sender, &restart)
+            read_stream(&weak, leg, &sender, &restart, &failures)
         })));
     mainloop.lock();
     let connect_result = stream.lock().expect("stream lock").connect_record(
@@ -541,6 +624,7 @@ fn read_stream(
     leg: AudioLeg,
     sender: &mpsc::Sender<PulseMessage>,
     restart: &AtomicBool,
+    failures: &FailureCounter,
 ) {
     let Some(stream) = weak.upgrade() else { return };
     let mut stream = stream.lock().expect("stream callback lock");
@@ -553,7 +637,9 @@ fn read_stream(
         Ok(PeekResult::Empty) => return,
         Err(error) => {
             let _ = sender.send(PulseMessage::Failed(format!("record peek failed: {error}")));
-            restart.store(true, Ordering::Release);
+            if failures.failed() {
+                restart.store(true, Ordering::Release);
+            }
             return;
         }
     };
@@ -561,11 +647,14 @@ fn read_stream(
         let _ = sender.send(PulseMessage::Failed(format!(
             "record discard failed: {error}"
         )));
-        restart.store(true, Ordering::Release);
+        if failures.failed() {
+            restart.store(true, Ordering::Release);
+        }
         return;
     }
     drop(stream);
     if let Some(bytes) = bytes {
+        let successful_record = failures.block_succeeded(leg);
         let remainder = bytes.len() % size_of::<f32>();
         if remainder != 0 {
             warn!(?leg, remainder, "float32 record buffer has trailing bytes");
@@ -575,6 +664,9 @@ fn read_stream(
             .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte float")))
             .collect();
         let _ = sender.send(PulseMessage::Block(LegBlock::new(leg, samples)));
+        if successful_record {
+            let _ = sender.send(PulseMessage::SuccessfulRecord);
+        }
     }
 }
 
@@ -585,9 +677,19 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct FakeClock(Rc<Cell<Duration>>);
+    impl FakeClock {
+        fn now(&self) -> Duration {
+            self.0.get()
+        }
+    }
     impl MetadataClock for FakeClock {
         fn elapsed(&self) -> Duration {
-            self.0.get()
+            self.now()
+        }
+    }
+    impl DriverClock for FakeClock {
+        fn elapsed(&self) -> Duration {
+            self.now()
         }
     }
 
@@ -600,7 +702,7 @@ mod tests {
             if let Some(source) = self.ready.pop_front() {
                 return SourceEvent::Item(source);
             }
-            self.clock.0.set(self.clock.elapsed() + timeout);
+            self.clock.0.set(self.clock.now() + timeout);
             SourceEvent::Pending
         }
     }
@@ -627,28 +729,103 @@ mod tests {
             ]),
         };
         let sources = collect_source_metadata(&mut events, &clock).unwrap();
-        assert_eq!(clock.elapsed(), Duration::from_secs(3));
+        assert_eq!(clock.now(), Duration::from_secs(3));
         let selection = classify_sources(&sources, Some("sink"), None).unwrap();
         assert_eq!(selection.microphone.name.as_deref(), Some("mic"));
         assert_eq!(selection.monitor.name.as_deref(), Some("sink.monitor"));
     }
 
     #[test]
-    fn fake_clock_drives_five_second_backstop() {
-        let clock = FakeClock::default();
-        let mut schedule = RedetectSchedule::new(clock.elapsed());
-        clock.0.set(Duration::from_secs(4));
-        assert!(!schedule.due(clock.elapsed()));
-        clock.0.set(Duration::from_secs(5));
-        assert!(schedule.due(clock.elapsed()));
-        schedule.reset(clock.elapsed());
-        assert_eq!(schedule.remaining(clock.elapsed()), Duration::from_secs(5));
+    fn stream_setup_retries_twice_before_redetecting() {
+        // tests/test_audio_recorder.py::test_record_both_setup_failures_trigger_redetect
+        let failures = FailureCounter::default();
+        let (sender, receiver) = mpsc::channel();
+        let attempts = Cell::new(0);
+        let result: Result<(), AnyError> = retry_stream_setup(&sender, &failures, || {
+            attempts.set(attempts.get() + 1);
+            Err("stream start failed".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(receiver.try_iter().count(), 2);
+        assert_eq!(failures.count(), 2);
     }
 
     #[test]
-    fn fake_subscription_event_triggers_existing_redetect_transition() {
-        let event = map_subscription_event(Some(Facility::Source), Some(Operation::Changed), 9)
-            .expect("source event");
+    fn failed_stream_setup_never_publishes_ready() {
+        let failures = FailureCounter::default();
+        let (sender, receiver) = mpsc::channel();
+        let result: Result<(), AnyError> =
+            initialize_streams(&sender, &failures, false, None, || {
+                Err("stream start failed".into())
+            });
+        assert!(result.is_err());
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|message| matches!(message, PulseMessage::Failed(_)))
+        );
+    }
+
+    struct FakeSubscriptions {
+        clock: FakeClock,
+        event: Option<(Duration, Option<Facility>, Option<Operation>, u32)>,
+    }
+    impl SubscriptionEventSource for FakeSubscriptions {
+        fn receive(&mut self, timeout: Duration) -> DriverEvent {
+            let end = self.clock.now() + timeout;
+            if let Some((at, facility, operation, index)) = self.event
+                && at <= end
+            {
+                self.clock.0.set(at);
+                self.event = None;
+                return DriverEvent::Subscription(facility, operation, index);
+            }
+            self.clock.0.set(end);
+            DriverEvent::Idle
+        }
+    }
+
+    #[test]
+    fn driver_synthesizes_started_at_five_second_backstop() {
+        let clock = FakeClock::default();
+        let schedule = RedetectSchedule::new(clock.now());
+        let mut events = FakeSubscriptions {
+            clock: clock.clone(),
+            event: None,
+        };
+        let mut driver_event = DriverEvent::Idle;
+        while !matches!(&driver_event, DriverEvent::Backstop) {
+            driver_event = next_driver_event(&mut events, &clock, schedule);
+        }
+        assert_eq!(clock.now(), Duration::from_secs(5));
+        assert_eq!(
+            driver_subscription_event(&driver_event),
+            Some(SubscriptionEvent::Started)
+        );
+    }
+
+    #[test]
+    fn driver_consumes_subscription_before_backstop() {
+        let clock = FakeClock::default();
+        let schedule = RedetectSchedule::new(clock.now());
+        let mut events = FakeSubscriptions {
+            clock: clock.clone(),
+            event: Some((
+                Duration::from_secs(2),
+                Some(Facility::Source),
+                Some(Operation::Changed),
+                9,
+            )),
+        };
+        let mut driver_event = DriverEvent::Idle;
+        while matches!(&driver_event, DriverEvent::Idle) {
+            driver_event = next_driver_event(&mut events, &clock, schedule);
+        }
+        assert_eq!(clock.now(), Duration::from_secs(2));
+        let event = driver_subscription_event(&driver_event).expect("source event");
         let outcome = transition(SubscriptionState::default(), event);
         assert_eq!(outcome.actions, vec![SubscriptionAction::QuerySources]);
     }

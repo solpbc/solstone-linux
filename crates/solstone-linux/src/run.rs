@@ -118,7 +118,7 @@ fn run_capture(
     host: String,
 ) -> Result<(), ObserverError> {
     let stopped = Arc::new(AtomicBool::new(false));
-    spawn_signal_task(Arc::clone(&stopped));
+    spawn_signal_task(Arc::clone(&stopped)).map_err(ObserverError::Io)?;
     let (audio, mute) = PulseAudioCapture::spawn().map_err(ObserverError::Io)?;
     let video = VideoBackend::new(&config).map_err(ObserverError::VideoStart)?;
     let upload = UploadClient::new(&config, host.clone(), "linux", env!("CARGO_PKG_VERSION"));
@@ -134,7 +134,11 @@ fn run_capture(
         states: NoopStateSink,
     };
     let mut observer = Observer::new(config, backends, host, "linux".into());
-    let mut run_result = observer.initialize();
+    let mut run_result = if stopped.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        observer.initialize()
+    };
     while run_result.is_ok() && !stopped.load(Ordering::Acquire) {
         thread::park_timeout(TICK_INTERVAL);
         run_result = observer.tick();
@@ -144,23 +148,11 @@ fn run_capture(
     run_result.and(shutdown)
 }
 
-fn spawn_signal_task(stopped: Arc<AtomicBool>) {
+fn spawn_signal_task(stopped: Arc<AtomicBool>) -> Result<(), String> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(|error| error.to_string())?;
+    let mut terminate = signal(SignalKind::terminate()).map_err(|error| error.to_string())?;
     tokio::spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut interrupt = match signal(SignalKind::interrupt()) {
-            Ok(signal) => signal,
-            Err(error) => {
-                tracing::error!(%error, "Failed to install SIGINT handler");
-                return;
-            }
-        };
-        let mut terminate = match signal(SignalKind::terminate()) {
-            Ok(signal) => signal,
-            Err(error) => {
-                tracing::error!(%error, "Failed to install SIGTERM handler");
-                return;
-            }
-        };
         tokio::select! {
             _ = interrupt.recv() => {}
             _ = terminate.recv() => {}
@@ -168,6 +160,7 @@ fn spawn_signal_task(stopped: Arc<AtomicBool>) {
         tracing::info!("Received shutdown signal");
         stopped.store(true, Ordering::Release);
     });
+    Ok(())
 }
 
 enum VideoBackend {
