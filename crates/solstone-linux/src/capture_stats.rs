@@ -43,26 +43,38 @@ pub struct StatusCaptureStats {
 
 fn walk_segments(
     root: &Path,
+    day: impl FnMut(&OsStr),
+    segment: impl FnMut(&OsStr, SegmentClass),
+    accepted_bytes: impl FnMut(u64),
+) {
+    walk_segments_with(root, day, segment, accepted_bytes, &|path| {
+        fs::read_dir(path)
+    })
+}
+
+fn walk_segments_with(
+    root: &Path,
     mut day: impl FnMut(&OsStr),
     mut segment: impl FnMut(&OsStr, SegmentClass),
     mut accepted_bytes: impl FnMut(u64),
+    read_dir: &dyn Fn(&Path) -> std::io::Result<fs::ReadDir>,
 ) {
     let _ = (|| -> std::io::Result<()> {
         if !root.exists() {
             return Ok(());
         }
-        for day_entry in fs::read_dir(root)? {
+        for day_entry in read_dir(root)? {
             let day_entry = day_entry?;
             if !day_entry.path().is_dir() {
                 continue;
             }
             day(&day_entry.file_name());
-            for stream in fs::read_dir(day_entry.path())? {
+            for stream in read_dir(&day_entry.path())? {
                 let stream = stream?;
                 if !stream.path().is_dir() {
                     continue;
                 }
-                for segment_entry in fs::read_dir(stream.path())? {
+                for segment_entry in read_dir(&stream.path())? {
                     let segment_entry = segment_entry?;
                     if !segment_entry.path().is_dir() {
                         continue;
@@ -71,7 +83,7 @@ fn walk_segments(
                     segment(&day_entry.file_name(), class);
                     let mut bytes = 0;
                     if class == SegmentClass::Accepted {
-                        for file in fs::read_dir(segment_entry.path())? {
+                        for file in read_dir(&segment_entry.path())? {
                             let file = file?;
                             if file.path().is_file() {
                                 bytes += file.metadata()?.len();
@@ -198,7 +210,6 @@ mod tests {
     use super::*;
     use std::{
         fs::{File, FileTimes},
-        os::unix::fs::PermissionsExt,
         time::{Duration, SystemTime},
     };
 
@@ -336,25 +347,30 @@ mod tests {
     fn os_error_degrades_to_partial() {
         let t = tempfile::tempdir().unwrap();
         let unreadable = segment(t.path(), "20260101", "120000_300");
-        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
-        if fs::read_dir(&unreadable).is_ok() {
-            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
-            eprintln!("skipped: current user can read chmod 000 directories");
-            return;
-        }
-        let stats = compute_capture_stats(t.path(), "20260101");
-        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
-        println!(
-            "real traversal error partial stats: captures_today={} total_size_mb={}",
-            stats.captures_today, stats.total_size_mb
+        let mut captures_today = 0;
+        let mut total_size = 0;
+        walk_segments_with(
+            t.path(),
+            |_| {},
+            |day, class| {
+                if class == SegmentClass::Accepted && day == OsStr::new("20260101") {
+                    captures_today += 1;
+                }
+            },
+            |bytes| total_size += bytes,
+            &|path| {
+                if path == unreadable {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected traversal error",
+                    ))
+                } else {
+                    fs::read_dir(path)
+                }
+            },
         );
-        assert_eq!(
-            stats,
-            CaptureStats {
-                captures_today: 1,
-                total_size_mb: 0
-            }
-        );
+        assert_eq!(captures_today, 1);
+        assert_eq!(total_size, 0);
     }
 
     // Python Path.is_dir follows symlinked capture hierarchy directories.

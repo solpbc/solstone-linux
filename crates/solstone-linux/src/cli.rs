@@ -272,6 +272,7 @@ fn cmd_setup(
 ) -> i32 {
     // Setup deliberately takes no PromptIo; only settings can reach stdin by construction.
     let cli_token = options.token.filter(|value| !value.is_empty());
+    let env_token = env_token.filter(|value| !value.is_empty());
     let token = cli_token.clone().or(env_token);
     if cli_token.is_some()
         && write_line(
@@ -947,6 +948,33 @@ mod tests {
         );
         assert_eq!(load_config(paths(&t)).config.key, "clitok");
         assert!(String::from_utf8(err).unwrap().contains("shared computers"));
+    }
+
+    // AC: an empty SOLSTONE_TOKEN is absent and registration still runs.
+    #[test]
+    fn setup_empty_env_token_registers() {
+        let t = tempfile::tempdir().unwrap();
+        let mut registrar = FakeRegistrar {
+            result: true,
+            calls: 0,
+        };
+        let mut output = Vec::new();
+        assert_eq!(
+            cmd_setup(
+                setup_options(None, true),
+                paths(&t),
+                Some(String::new()),
+                &mut registrar,
+                &mut output,
+                &mut Vec::new()
+            ),
+            0
+        );
+        assert_eq!(registrar.calls, 1);
+        assert_eq!(load_config(paths(&t)).config.key, "newkey00");
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Registering with your journal..."));
+        assert!(!output.contains("Using provided token"));
     }
 
     // tests/test_cli.py::test_cmd_setup_registers_via_http_when_no_token

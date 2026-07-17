@@ -281,6 +281,10 @@ impl SyncWorker {
         self.running.load(Ordering::Acquire)
     }
 
+    fn is_active(&self) -> bool {
+        self.is_running() || self.draining_shutdown
+    }
+
     async fn try_probe(&mut self) -> bool {
         if self.circuit_open_permanent {
             self.clear_progress();
@@ -349,7 +353,7 @@ impl SyncWorker {
         let mut legacy_logged = false;
 
         for day in days {
-            if (!self.is_running() && !self.draining_shutdown) || self.circuit_open {
+            if !self.is_active() || self.circuit_open {
                 pass_success = false;
                 break;
             }
@@ -384,7 +388,7 @@ impl SyncWorker {
             }
             let mut any_needed_upload = false;
             for segment_dir in segments_by_day.get(&day).into_iter().flatten() {
-                if (!self.is_running() && !self.draining_shutdown) || self.circuit_open {
+                if !self.is_active() || self.circuit_open {
                     break;
                 }
                 let segment_key = segment_dir.file_name().unwrap().to_string_lossy();
@@ -446,7 +450,7 @@ impl SyncWorker {
             }
         }
 
-        if pass_success && !self.circuit_open && self.is_running() {
+        if pass_success && !self.circuit_open && self.is_active() {
             self.commit_pass_result(true, None, None);
         } else {
             let facts = self.facts.lock().unwrap().clone();
@@ -456,10 +460,12 @@ impl SyncWorker {
                 pass_error_code.or(facts.last_error_code),
             );
         }
-        if !self.circuit_open && self.is_running() {
+        // A final drain is a complete reconciliation pass. Running cleanup here preserves the
+        // same successful-pass semantics; the outer shutdown timeout still bounds all work.
+        if !self.circuit_open && self.is_active() {
             self.cleanup_synced_segments().await;
         }
-        if self.is_running() {
+        if self.is_active() {
             self.sweep_expired_quarantine();
         }
     }
@@ -510,7 +516,7 @@ impl SyncWorker {
             return;
         };
         for day_dir in day_entries {
-            if !self.is_running() && !self.draining_shutdown {
+            if !self.is_active() {
                 break;
             }
             let day = day_dir.file_name().unwrap().to_string_lossy().into_owned();
@@ -3002,7 +3008,13 @@ mod tests {
     #[tokio::test]
     async fn final_completion_trigger_drains_before_shutdown_returns() {
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, json!({"items": [], "total": 0}))]).await;
+        create_segment(&temp, "120000_300", b"final screen");
+        let server = MockServer::new(vec![
+            (200, json!({"items": [], "total": 0})),
+            (200, json!({"items": [], "total": 0})),
+            (200, json!({"status": "ok", "segment": "120000_300"})),
+        ])
+        .await;
         let config = Config {
             server_url: server.url.clone(),
             key: "K".into(),
@@ -3010,9 +3022,18 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
+        save_facts(
+            &config.state_dir(),
+            &SyncFacts {
+                pending_confirmed: Some(7),
+                last_error_class: Some(ErrorType::Transient),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
         let service = SyncService::start(
-            config,
+            config.clone(),
             client,
             Arc::new(FixedClock {
                 wall: 1_800_000_000.0,
@@ -3021,6 +3042,15 @@ mod tests {
         );
         service.trigger();
         service.shutdown(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(server.requests().len(), 1);
+        assert_eq!(upload_hits(&server), 1);
+        let upload = server
+            .requests()
+            .into_iter()
+            .find(|request| request.uri == "/app/observer/ingest")
+            .expect("final segment upload");
+        assert!(String::from_utf8_lossy(&upload.body).contains("final screen"));
+        let facts = load_facts(&config.state_dir());
+        assert_eq!(facts.pending_confirmed, Some(0));
+        assert_eq!(facts.last_error_class, None);
     }
 }

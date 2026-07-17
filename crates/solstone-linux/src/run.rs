@@ -161,6 +161,25 @@ where
     (observer_result, sync_result, sender_result)
 }
 
+async fn stop_upload_sender(
+    upload: Arc<UploadClient>,
+    timeout: Duration,
+) -> Result<(), ObserverError> {
+    match Arc::try_unwrap(upload) {
+        Ok(mut client) => {
+            client.stop(timeout).await;
+            Ok(())
+        }
+        Err(client) => {
+            client.request_stop();
+            tracing::error!("UploadClient still shared after sync shutdown");
+            Err(ObserverError::Io(
+                "UploadClient still shared after sync shutdown".into(),
+            ))
+        }
+    }
+}
+
 // Runtime order is a safety contract:
 // 1. CLI session readiness gate completes before this module is entered.
 // 2. lifecycle setup acquires the singleton bus name and performs no capture work.
@@ -285,20 +304,7 @@ fn run_capture(
         observer,
         Observer::shutdown,
         sync.shutdown(SHUTDOWN_TIMEOUT),
-        || async move {
-            match Arc::try_unwrap(upload) {
-                Ok(mut client) => {
-                    client.stop(SHUTDOWN_TIMEOUT).await;
-                    Ok(())
-                }
-                Err(_) => {
-                    tracing::error!("UploadClient still shared after sync shutdown");
-                    Err(ObserverError::Io(
-                        "UploadClient still shared after sync shutdown".into(),
-                    ))
-                }
-            }
-        },
+        || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
         &mut |_| {},
     ));
     run_result
@@ -505,20 +511,13 @@ mod tests {
     #[test]
     fn tick_once_watchdog_contract() {
         let notifier = RecordingNotifier::default();
-        for _state in [
-            "paused-timed",
-            "paused-indefinite",
-            "idle",
-            "screencast-unhealthy",
-        ] {
-            assert!(tick_once(&notifier, || Ok(())).is_ok());
-        }
-        assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 4);
+        assert!(tick_once(&notifier, || Ok(())).is_ok());
+        assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 1);
         let failure = tick_once(&notifier, || {
             Err(ObserverError::VideoStart("failed".into()))
         });
         assert!(failure.is_err());
-        assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 4);
+        assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 1);
     }
 
     struct CountingWake(Arc<AtomicUsize>);
@@ -601,6 +600,23 @@ mod tests {
                 "sender_stopped",
             ]
         );
+    }
+
+    // AC: an unexpected shared UploadClient is still cancelled before shutdown reports the bug.
+    #[tokio::test]
+    async fn shared_upload_client_requests_stop() {
+        let t = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: t.path().into(),
+            config_dir: t.path().join("config"),
+            ..Config::default()
+        };
+        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let extra_owner = Arc::clone(&client);
+        let result = stop_upload_sender(client, Duration::from_millis(1)).await;
+        assert!(result.is_err());
+        assert!(extra_owner.stop_requested());
+        drop(extra_owner);
     }
 
     #[test]

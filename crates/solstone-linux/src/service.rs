@@ -4,7 +4,9 @@
 use crate::session_env::{Output, Runner};
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, io,
+    env,
+    ffi::OsString,
+    fs, io,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -31,11 +33,27 @@ pub struct ServicePaths {
 
 impl ServicePaths {
     pub fn production() -> io::Result<Self> {
-        Ok(Self {
-            home: env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
-            binary: env::current_exe()?,
-            path: env::var("PATH").ok(),
-        })
+        Self::from_environment(
+            env::var_os("HOME"),
+            env::current_exe()?,
+            env::var("PATH").ok(),
+        )
+    }
+    fn from_environment(
+        home: Option<OsString>,
+        binary: PathBuf,
+        path: Option<String>,
+    ) -> io::Result<Self> {
+        let home = home
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "HOME is not set; cannot locate user service files",
+                )
+            })?;
+        Ok(Self { home, binary, path })
     }
     fn unit(&self) -> PathBuf {
         self.home
@@ -69,6 +87,29 @@ fn systemctl(runner: &dyn Runner, args: &[&str]) -> io::Result<Output> {
     runner.run(&program, args, SYSTEMCTL_TIMEOUT, &HashMap::new())
 }
 
+fn systemctl_nonfatal(
+    runner: &dyn Runner,
+    args: &[&str],
+    operation: &str,
+    output: &mut dyn io::Write,
+) {
+    match systemctl(runner, args) {
+        Ok(result) if result.success => {}
+        Ok(_) => {
+            let _ = writeln!(
+                output,
+                "Warning: systemctl {operation} failed; run 'systemctl --user {operation}' to inspect the error"
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(
+                output,
+                "Warning: systemctl {operation} failed: {error}; run 'systemctl --user {operation}' after systemd is available"
+            );
+        }
+    }
+}
+
 pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::Write) -> i32 {
     let path = match service_path(&paths.binary, paths.path.as_deref()) {
         Ok(path) => path,
@@ -96,39 +137,38 @@ pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::W
         let _ = writeln!(output, "Error writing service files: {error}");
         return 1;
     }
-    for args in [
-        &["--user", "daemon-reload"][..],
-        &["--user", "enable", "--now", "solstone-linux.service"][..],
-        &["--user", "restart", "solstone-linux.service"][..],
-        &["--user", "--no-pager", "status", "solstone-linux.service"][..],
+    for (args, operation) in [
+        (&["--user", "daemon-reload"][..], "daemon-reload"),
+        (
+            &["--user", "enable", "--now", "solstone-linux.service"][..],
+            "enable --now solstone-linux.service",
+        ),
+        (
+            &["--user", "restart", "solstone-linux.service"][..],
+            "restart solstone-linux.service",
+        ),
+        (
+            &["--user", "--no-pager", "status", "solstone-linux.service"][..],
+            "--no-pager status solstone-linux.service",
+        ),
     ] {
-        match systemctl(runner, args) {
-            Ok(result) if result.success => {}
-            Ok(_) => {
-                let _ = writeln!(output, "Warning: systemctl command failed");
-            }
-            Err(error) => {
-                let _ = writeln!(output, "Warning: systemctl command failed: {error}");
-            }
-        }
+        systemctl_nonfatal(runner, args, operation, output);
     }
     0
 }
 
 pub fn uninstall(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::Write) -> i32 {
-    for args in [
-        &["--user", "stop", "solstone-linux.service"][..],
-        &["--user", "disable", "solstone-linux.service"][..],
+    for (args, operation) in [
+        (
+            &["--user", "stop", "solstone-linux.service"][..],
+            "stop solstone-linux.service",
+        ),
+        (
+            &["--user", "disable", "solstone-linux.service"][..],
+            "disable solstone-linux.service",
+        ),
     ] {
-        match systemctl(runner, args) {
-            Ok(result) if result.success => {}
-            Ok(_) => {
-                let _ = writeln!(output, "Warning: systemctl command failed");
-            }
-            Err(error) => {
-                let _ = writeln!(output, "Warning: systemctl command failed: {error}");
-            }
-        }
+        systemctl_nonfatal(runner, args, operation, output);
     }
     for path in [paths.unit(), paths.desktop()] {
         if let Err(error) = fs::remove_file(&path)
@@ -138,15 +178,12 @@ pub fn uninstall(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io:
             return 1;
         }
     }
-    match systemctl(runner, &["--user", "daemon-reload"]) {
-        Ok(result) if result.success => {}
-        Ok(_) => {
-            let _ = writeln!(output, "Warning: systemctl command failed");
-        }
-        Err(error) => {
-            let _ = writeln!(output, "Warning: systemctl command failed: {error}");
-        }
-    }
+    systemctl_nonfatal(
+        runner,
+        &["--user", "daemon-reload"],
+        "daemon-reload",
+        output,
+    );
     0
 }
 
@@ -265,18 +302,51 @@ mod tests {
             assert!(value.contains(expected));
         }
     }
-    // AC: missing or failing systemctl is non-fatal after files are written.
+    // AC: missing systemctl is non-fatal after files are written.
     #[test]
-    fn systemctl_failure_is_nonfatal() {
+    fn systemctl_missing_is_nonfatal() {
         let t = tempfile::tempdir().unwrap();
         let paths = fixture(&t, None);
         let runner = FakeRunner {
             found: false,
+            success: true,
+            calls: RefCell::new(Vec::new()),
+        };
+        let mut output = Vec::new();
+        assert_eq!(install(&paths, &runner, &mut output), 0);
+        assert!(paths.unit().exists() && paths.desktop().exists());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("systemctl daemon-reload failed"));
+        assert!(output.contains("after systemd is available"));
+        assert!(runner.calls.borrow().is_empty());
+    }
+    // AC: present but failing systemctl is non-fatal after files are written.
+    #[test]
+    fn systemctl_nonzero_is_nonfatal() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = fixture(&t, None);
+        let runner = FakeRunner {
+            found: true,
             success: false,
             calls: RefCell::new(Vec::new()),
         };
-        assert_eq!(install(&paths, &runner, &mut Vec::new()), 0);
+        let mut output = Vec::new();
+        assert_eq!(install(&paths, &runner, &mut output), 0);
         assert!(paths.unit().exists() && paths.desktop().exists());
+        assert_eq!(runner.calls.borrow().len(), 4);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("systemctl enable --now solstone-linux.service failed"));
+        assert!(output.contains("to inspect the error"));
+    }
+    // AC: missing HOME cannot redirect service writes or removals into the current directory.
+    #[test]
+    fn production_paths_require_home() {
+        let error =
+            ServicePaths::from_environment(None, PathBuf::from("/usr/bin/solstone-linux"), None)
+                .err()
+                .expect("missing HOME must fail");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("HOME is not set"));
     }
     // AC: uninstall is ordered, idempotent, and preserves all owner data.
     #[test]

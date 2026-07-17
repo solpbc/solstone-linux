@@ -3,9 +3,9 @@
 
 //! Native prerequisite checks. The Python doctor had 12 checks; Rust has eight.
 //! Retired Python-install checks are `check_python_version`, `check_gtk4_typelib`,
-//! `check_cairo`, and `check_pipx`. The `xrandr` executable and `gst-inspect-1.0`
-//! sub-probes of `check_x11_capture` are also retired: Rust uses x11rb RandR and
-//! the in-process GStreamer registry.
+//! `check_cairo`, and `check_pipx`. The external `xrandr` binary mechanism is
+//! retired, while its "cannot query RandR" failure behavior is ported through
+//! x11rb. The `gst-inspect-1.0` probe is retired in favor of the in-process registry.
 
 use crate::{
     audio::pulse,
@@ -277,6 +277,32 @@ fn gstreamer_result(missing: Result<Vec<String>, String>) -> CheckResult {
     }
 }
 
+fn pulse_result(result: Result<(), String>) -> CheckResult {
+    match result {
+        Ok(()) => CheckResult::ok("pipewire (pulse)", "PulseAudio-compatible server reachable"),
+        Err(error) => CheckResult::fail(
+            "pipewire (pulse)",
+            format!(
+                "PulseAudio-compatible server unreachable: {error}; start PipeWire Pulse or PulseAudio"
+            ),
+        ),
+    }
+}
+
+fn systemd_result(result: Result<Option<String>, String>) -> CheckResult {
+    match result {
+        Ok(Some(detail)) => CheckResult::ok("systemd --user", detail),
+        Ok(None) => CheckResult::fail(
+            "systemd --user",
+            "systemctl --user not reachable; run inside a systemd user session",
+        ),
+        Err(error) => CheckResult::fail(
+            "systemd --user",
+            format!("systemctl --user not reachable: {error}; run inside a systemd user session"),
+        ),
+    }
+}
+
 fn x11_result(
     session: &str,
     display: Option<&str>,
@@ -318,6 +344,10 @@ fn x11_result(
     }
 }
 
+fn display_value(value: Option<String>) -> Option<String> {
+    value.filter(|display| !display.is_empty())
+}
+
 impl DoctorChecks for RealDoctor<'_> {
     fn session_type(&mut self) -> CheckResult {
         session_type_result(env::var("XDG_SESSION_TYPE").ok().as_deref())
@@ -349,15 +379,7 @@ impl DoctorChecks for RealDoctor<'_> {
         }
     }
     fn pulse(&mut self) -> CheckResult {
-        match pulse::probe_server() {
-            Ok(()) => CheckResult::ok("pipewire (pulse)", "PulseAudio-compatible server reachable"),
-            Err(error) => CheckResult::fail(
-                "pipewire (pulse)",
-                format!(
-                    "PulseAudio-compatible server unreachable: {error}; start PipeWire Pulse or PulseAudio"
-                ),
-            ),
-        }
+        pulse_result(pulse::probe_server())
     }
     fn gstreamer(&mut self) -> CheckResult {
         gstreamer_result(element_check(&["pipewiresrc", "vp8enc", "webmmux"]))
@@ -366,7 +388,7 @@ impl DoctorChecks for RealDoctor<'_> {
         let session = env::var("XDG_SESSION_TYPE")
             .unwrap_or_default()
             .to_lowercase();
-        let display = env::var("DISPLAY").ok();
+        let display = display_value(env::var("DISPLAY").ok());
         let applicable = session != "wayland" && display.is_some();
         let randr = if applicable {
             RandrOutputProvider.outputs().map(|_| ())
@@ -382,31 +404,24 @@ impl DoctorChecks for RealDoctor<'_> {
     }
     fn systemd(&mut self) -> CheckResult {
         let Some(program) = self.runner.which("systemctl") else {
-            return CheckResult::fail(
-                "systemd --user",
-                "systemctl --user not reachable; run inside a systemd user session",
-            );
+            return systemd_result(Ok(None));
         };
-        match self.runner.run(
+        let result = self.runner.run(
             &program,
             &["--user", "is-system-running"],
             Duration::from_secs(5),
             &HashMap::new(),
-        ) {
-            Ok(Output { stdout, .. }) if !stdout.trim().is_empty() => {
-                CheckResult::ok("systemd --user", stdout.lines().next().unwrap_or_default())
-            }
-            Ok(_) => CheckResult::fail(
-                "systemd --user",
-                "systemctl --user not reachable; run inside a systemd user session",
-            ),
-            Err(error) => CheckResult::fail(
-                "systemd --user",
-                format!(
-                    "systemctl --user not reachable: {error}; run inside a systemd user session"
-                ),
-            ),
-        }
+        );
+        systemd_result(match result {
+            Ok(output) => Ok(output
+                .stdout
+                .trim()
+                .lines()
+                .next()
+                .filter(|detail| !detail.is_empty())
+                .map(str::to_owned)),
+            Err(error) => Err(error.to_string()),
+        })
     }
     fn appindicator(&mut self) -> CheckResult {
         let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
@@ -541,7 +556,8 @@ mod tests {
             );
         }
     }
-    // AC: every warn-capable native check is exercised in warning and non-warning forms.
+    // AC: aggregation keeps warnings non-fatal and failures fatal for each warn-capable slot.
+    // The decision-core tests below exercise the native warning branches themselves.
     #[test]
     fn warn_capable_matrix() {
         for index in [0, 1, 6, 7] {
@@ -646,6 +662,45 @@ mod tests {
         assert_eq!(init.severity, Severity::Fail);
         assert!(init.detail.contains("registry unavailable"));
         assert!(init.detail.contains("install GStreamer 1.x"));
+    }
+    // AC: the native Pulse decision reports both reachability outcomes with a remedy.
+    #[test]
+    fn pulse_decision_matrix() {
+        let reachable = pulse_result(Ok(()));
+        assert_eq!(reachable.severity, Severity::Ok);
+        assert!(reachable.detail.contains("server reachable"));
+
+        let unreachable = pulse_result(Err("connection refused".into()));
+        assert_eq!(unreachable.severity, Severity::Fail);
+        assert!(unreachable.detail.contains("connection refused"));
+        assert!(
+            unreachable
+                .detail
+                .contains("start PipeWire Pulse or PulseAudio")
+        );
+    }
+    // AC: the native systemd decision covers success, empty output, and runner errors.
+    #[test]
+    fn systemd_decision_matrix() {
+        let running = systemd_result(Ok(Some("running".into())));
+        assert_eq!(running.severity, Severity::Ok);
+        assert_eq!(running.detail, "running");
+
+        let empty = systemd_result(Ok(None));
+        assert_eq!(empty.severity, Severity::Fail);
+        assert!(empty.detail.contains("run inside a systemd user session"));
+
+        let failed = systemd_result(Err("timed out".into()));
+        assert_eq!(failed.severity, Severity::Fail);
+        assert!(failed.detail.contains("timed out"));
+        assert!(failed.detail.contains("run inside a systemd user session"));
+    }
+    // tests/test_doctor.py::TestCheckX11Capture::test_no_display_no_x11_session_not_applicable
+    // AC: Python treats an empty DISPLAY value as absent.
+    #[test]
+    fn empty_display_is_absent() {
+        assert_eq!(display_value(Some(String::new())), None);
+        assert_eq!(display_value(Some(":0".into())).as_deref(), Some(":0"));
     }
     // tests/test_doctor.py::test_check_portal_registered_returns_ok
     // tests/test_doctor.py::test_check_portal_x11_not_registered_returns_warn

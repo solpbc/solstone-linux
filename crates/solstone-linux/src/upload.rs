@@ -157,6 +157,11 @@ impl UploadClient {
         self.inner.cancellation.cancel();
     }
 
+    #[cfg(test)]
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.inner.cancellation.is_cancelled()
+    }
+
     pub async fn ensure_registered(&self, config: &mut Config) -> bool {
         if self.is_registered() {
             return true;
