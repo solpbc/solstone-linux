@@ -59,8 +59,14 @@ pub fn pipeline_description(
                 "pipewiresrc",
                 vec![
                     property("fd", PropertyValue::I32(pipewire_fd)),
-                    // `path` is deprecated; target-object is a String on pipewiresrc.
-                    property("target-object", PropertyValue::String(node_id.to_string())),
+                    // Empirical (KDE Plasma Wayland, GStreamer 1.26 + PipeWire 1.x, live
+                    // portal run): `target-object={node_id}` fails to reach Playing on a
+                    // portal-restricted remote -- target-object matches the object *serial*,
+                    // while the portal hands out the *node id*. The deprecated `path`
+                    // property matches node ids and works; it is also what the shipping
+                    // Python observer uses. Keep `path` until pipewiresrc grows a
+                    // node-id-typed replacement.
+                    property("path", PropertyValue::String(node_id.to_string())),
                 ],
                 None,
             ),
@@ -126,14 +132,18 @@ mod tests {
             pipeline_description(7, 42, 1, Path::new("/tmp/unknown_monitor-0_screen.webm"));
         assert_eq!(
             render_gst_launch(&description),
-            "pipewiresrc fd=7 target-object=42 ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 keyframe-max-dist=30 static-threshold=100 ! webmmux ! filesink location=/tmp/unknown_monitor-0_screen.webm"
+            "pipewiresrc fd=7 path=42 ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 keyframe-max-dist=30 static-threshold=100 ! webmmux ! filesink location=/tmp/unknown_monitor-0_screen.webm"
         );
     }
 
     #[test]
-    fn target_object_is_string_and_path_is_absent() {
+    fn path_carries_node_id_and_target_object_is_absent() {
+        // Empirical contract from a live KDE Plasma portal run: the portal hands
+        // out node ids; pipewiresrc `target-object` matches object serials and
+        // fails to reach Playing, while the deprecated `path` matches node ids.
         let description = pipeline_description(7, 42, 10, Path::new("out.webm"));
         let source = &description.elements[0];
+        assert_eq!(source.properties[1].name, "path");
         assert_eq!(
             source.properties[1].value,
             PropertyValue::String("42".into())
@@ -142,7 +152,7 @@ mod tests {
             source
                 .properties
                 .iter()
-                .all(|property| property.name != "path")
+                .all(|property| property.name != "target-object")
         );
         assert_eq!(
             description.elements[2].caps.as_deref(),
