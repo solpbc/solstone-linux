@@ -4,6 +4,7 @@
 use std::{
     error::Error,
     str::FromStr,
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -12,6 +13,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 
 use crate::pipeline::{PipelineDescription, PropertyValue};
+use crate::rotation::{self, RotationAction, RotationEvent, RotationState};
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -20,6 +22,7 @@ pub trait CapturePipeline: Send {
     fn is_healthy(&self) -> bool;
     fn send_eos(&mut self) -> bool;
     fn poll_terminal(&mut self) -> Option<Result<(), String>>;
+    fn state_label(&self) -> String;
     fn force_stop(&mut self);
 }
 
@@ -30,23 +33,49 @@ pub trait PipelineFactory: Send {
     ) -> Result<Box<dyn CapturePipeline>, String>;
 }
 
-pub fn stop_pipelines(pipelines: &mut [&mut Box<dyn CapturePipeline>], timeout: Duration) {
+pub struct StoppingPipeline<'a> {
+    pub identity: String,
+    pub pipeline: &'a mut Box<dyn CapturePipeline>,
+}
+
+pub fn stop_pipelines(pipelines: &mut [StoppingPipeline<'_>], timeout: Duration) {
     let mut awaiting = Vec::new();
-    for (index, pipeline) in pipelines.iter_mut().enumerate() {
-        if pipeline.as_mut().send_eos() {
+    for (index, record) in pipelines.iter_mut().enumerate() {
+        // D2 makes Rotate unreachable here: the observer rotates with stop+start,
+        // so rotation.rs remains the single authority for the Stop half only.
+        let transition = rotation::transition(RotationState::Running, RotationEvent::StopRequested);
+        if transition.actions.contains(&RotationAction::SendEos)
+            && record.pipeline.as_mut().send_eos()
+        {
             awaiting.push(index);
         } else {
-            pipeline.as_mut().force_stop();
+            let transition = rotation::transition(
+                transition.state,
+                RotationEvent::Error("pipeline rejected EOS".into()),
+            );
+            execute_stop_actions(record, transition.actions);
         }
     }
     let deadline = Instant::now() + timeout;
     while !awaiting.is_empty() && Instant::now() < deadline {
         awaiting.retain(|index| {
-            let pipeline = &mut pipelines[*index];
-            match pipeline.as_mut().poll_terminal() {
+            let record = &mut pipelines[*index];
+            match record.pipeline.as_mut().poll_terminal() {
                 None => true,
-                Some(_) => {
-                    pipeline.as_mut().force_stop();
+                Some(Ok(())) => {
+                    let transition = rotation::transition(
+                        RotationState::AwaitingEos(rotation::RotationIntent::Stop),
+                        RotationEvent::EosReceived,
+                    );
+                    execute_stop_actions(record, transition.actions);
+                    false
+                }
+                Some(Err(error)) => {
+                    let transition = rotation::transition(
+                        RotationState::AwaitingEos(rotation::RotationIntent::Stop),
+                        RotationEvent::Error(error),
+                    );
+                    execute_stop_actions(record, transition.actions);
                     false
                 }
             }
@@ -56,12 +85,49 @@ pub fn stop_pipelines(pipelines: &mut [&mut Box<dyn CapturePipeline>], timeout: 
         }
     }
     for index in awaiting {
-        pipelines[index].as_mut().force_stop();
+        let record = &mut pipelines[index];
+        let transition = rotation::transition(
+            RotationState::AwaitingEos(rotation::RotationIntent::Stop),
+            RotationEvent::TimeoutElapsed {
+                stream_identity: record.identity.clone(),
+                last_pipeline_state: record.pipeline.state_label(),
+            },
+        );
+        execute_stop_actions(record, transition.actions);
     }
 }
 
-#[derive(Default)]
-pub struct GstreamerPipelineFactory;
+fn execute_stop_actions(record: &mut StoppingPipeline<'_>, actions: Vec<RotationAction>) {
+    for action in actions {
+        match action {
+            RotationAction::ForcePipelineNull => record.pipeline.force_stop(),
+            RotationAction::ReportNotCleanlyFinalized {
+                stream_identity,
+                last_pipeline_state,
+            } => {
+                tracing::error!(stream = %stream_identity, %last_pipeline_state, "EOS timeout: stream not cleanly finalized");
+            }
+            RotationAction::ReportError(error) => {
+                tracing::error!(stream = %record.identity, %error, "pipeline bus error while stopping");
+            }
+            RotationAction::StopCleanly => {}
+            RotationAction::SendEos
+            | RotationAction::FinalizeCleanlyAndRestart
+            | RotationAction::RestartAfterUncleanFinalization => {}
+        }
+    }
+}
+
+pub struct GstreamerPipelineFactory {
+    _private: (),
+}
+
+impl GstreamerPipelineFactory {
+    pub fn new() -> Result<Self, String> {
+        gst::init().map_err(|error| format!("failed to initialize GStreamer: {error}"))?;
+        Ok(Self { _private: () })
+    }
+}
 
 impl PipelineFactory for GstreamerPipelineFactory {
     fn build(
@@ -69,13 +135,19 @@ impl PipelineFactory for GstreamerPipelineFactory {
         description: &PipelineDescription,
     ) -> Result<Box<dyn CapturePipeline>, String> {
         build_pipeline(description)
-            .map(|pipeline| Box::new(GstreamerPipeline { pipeline }) as Box<dyn CapturePipeline>)
+            .map(|pipeline| {
+                Box::new(GstreamerPipeline {
+                    pipeline,
+                    failed: AtomicBool::new(false),
+                }) as Box<dyn CapturePipeline>
+            })
             .map_err(|error| error.to_string())
     }
 }
 
 struct GstreamerPipeline {
     pipeline: gst::Pipeline,
+    failed: AtomicBool,
 }
 
 impl CapturePipeline for GstreamerPipeline {
@@ -87,10 +159,18 @@ impl CapturePipeline for GstreamerPipeline {
     }
 
     fn is_healthy(&self) -> bool {
+        if self.failed.load(Ordering::Acquire) {
+            return false;
+        }
         let Some(bus) = self.pipeline.bus() else {
+            self.failed.store(true, Ordering::Release);
             return false;
         };
-        bus.pop_filtered(&[gst::MessageType::Error]).is_none()
+        if bus.pop_filtered(&[gst::MessageType::Error]).is_some() {
+            self.failed.store(true, Ordering::Release);
+            return false;
+        }
+        true
     }
 
     fn send_eos(&mut self) -> bool {
@@ -109,6 +189,10 @@ impl CapturePipeline for GstreamerPipeline {
             }
             _ => None,
         }
+    }
+
+    fn state_label(&self) -> String {
+        format!("{:?}", self.pipeline.current_state())
     }
 
     fn force_stop(&mut self) {
@@ -268,6 +352,8 @@ fn ensure_property_type(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
 
     struct FakePipeline;
@@ -285,6 +371,9 @@ mod tests {
         fn poll_terminal(&mut self) -> Option<Result<(), String>> {
             Some(Ok(()))
         }
+        fn state_label(&self) -> String {
+            "Playing".into()
+        }
         fn force_stop(&mut self) {}
     }
 
@@ -295,5 +384,81 @@ mod tests {
         assert!(pipeline.is_healthy());
         assert!(pipeline.send_eos());
         assert_eq!(pipeline.poll_terminal(), Some(Ok(())));
+    }
+
+    struct StoppingFake {
+        accept_eos: bool,
+        terminal: Option<Result<(), String>>,
+        forced: Arc<Mutex<bool>>,
+    }
+
+    impl CapturePipeline for StoppingFake {
+        fn start(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn is_healthy(&self) -> bool {
+            true
+        }
+        fn send_eos(&mut self) -> bool {
+            self.accept_eos
+        }
+        fn poll_terminal(&mut self) -> Option<Result<(), String>> {
+            self.terminal.clone()
+        }
+        fn state_label(&self) -> String {
+            "Playing".into()
+        }
+        fn force_stop(&mut self) {
+            *self.forced.lock().unwrap() = true;
+        }
+    }
+
+    #[test]
+    fn rejected_eos_forces_null_without_burning_timeout() {
+        let forced = Arc::new(Mutex::new(false));
+        let mut pipeline: Box<dyn CapturePipeline> = Box::new(StoppingFake {
+            accept_eos: false,
+            terminal: None,
+            forced: forced.clone(),
+        });
+        let mut pipelines = [StoppingPipeline {
+            identity: "DP-1".into(),
+            pipeline: &mut pipeline,
+        }];
+        let started = Instant::now();
+        stop_pipelines(&mut pipelines, Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert!(*forced.lock().unwrap());
+    }
+
+    #[test]
+    fn all_streams_share_one_eos_deadline() {
+        let first = Arc::new(Mutex::new(false));
+        let second = Arc::new(Mutex::new(false));
+        let mut a: Box<dyn CapturePipeline> = Box::new(StoppingFake {
+            accept_eos: true,
+            terminal: None,
+            forced: first.clone(),
+        });
+        let mut b: Box<dyn CapturePipeline> = Box::new(StoppingFake {
+            accept_eos: true,
+            terminal: None,
+            forced: second.clone(),
+        });
+        let mut pipelines = [
+            StoppingPipeline {
+                identity: "DP-1".into(),
+                pipeline: &mut a,
+            },
+            StoppingPipeline {
+                identity: "DP-2".into(),
+                pipeline: &mut b,
+            },
+        ];
+        let started = Instant::now();
+        stop_pipelines(&mut pipelines, Duration::from_millis(60));
+        assert!(started.elapsed() < Duration::from_millis(110));
+        assert!(*first.lock().unwrap());
+        assert!(*second.lock().unwrap());
     }
 }

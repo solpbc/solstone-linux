@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use std::{sync::mpsc, thread, time::Duration};
+use std::time::{Duration, Instant};
+
+use rustix::{
+    event::{PollFd, PollFlags, poll},
+    time::Timespec,
+};
 
 use wayland_client::{
     Connection, Dispatch, QueueHandle, delegate_noop,
-    protocol::{wl_output, wl_registry},
+    protocol::{wl_callback, wl_output, wl_registry},
 };
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 
@@ -82,29 +87,9 @@ pub struct NativeWaylandGeometry;
 
 impl NativeWaylandGeometry {
     pub fn monitors(&mut self) -> Result<Vec<Monitor>, String> {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("solstone-wayland-geometry".into())
-            .spawn(move || {
-                let _ = sender.send(enumerate_native_outputs().and_then(|outputs| {
-                    if outputs.iter().any(|output| !output.complete) {
-                        return Err("Wayland output enumeration completed without done".into());
-                    }
-                    let outputs: Vec<_> = outputs.into_iter().map(|output| output.output).collect();
-                    outputs_to_monitors(&outputs)
-                }));
-            })
-            .map_err(|error| format!("could not start Wayland geometry worker: {error}"))?;
-        receiver
-            .recv_timeout(WAYLAND_ENUMERATION_TIMEOUT)
-            .map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => {
-                    String::from("Wayland output enumeration timed out")
-                }
-                mpsc::RecvTimeoutError::Disconnected => {
-                    String::from("Wayland output enumeration worker disconnected")
-                }
-            })?
+        let outputs = enumerate_native_outputs(WAYLAND_ENUMERATION_TIMEOUT)?;
+        let outputs: Vec<_> = outputs.into_iter().map(|output| output.output).collect();
+        outputs_to_monitors(&outputs)
     }
 }
 
@@ -118,26 +103,62 @@ struct NativeOutput {
 struct NativeState {
     outputs: Vec<NativeOutput>,
     manager: Option<(zxdg_output_manager_v1::ZxdgOutputManagerV1, u32)>,
+    registry_done: bool,
 }
 
-fn enumerate_native_outputs() -> Result<Vec<NativeOutput>, String> {
+fn enumerate_native_outputs(timeout: Duration) -> Result<Vec<NativeOutput>, String> {
     let connection = Connection::connect_to_env().map_err(|error| error.to_string())?;
     let mut queue = connection.new_event_queue();
     let handle = queue.handle();
     connection.display().get_registry(&handle, ());
+    connection.display().sync(&handle, ());
     let mut state = NativeState::default();
-    // The first roundtrip discovers globals; the second delivers initial output
-    // state and done events. The outer worker timeout bounds either roundtrip.
-    queue
-        .roundtrip(&mut state)
-        .map_err(|error| error.to_string())?;
-    queue
-        .roundtrip(&mut state)
-        .map_err(|error| error.to_string())?;
-    if state.outputs.is_empty() {
-        return Err("Wayland compositor advertised no outputs".into());
+    let deadline = Instant::now() + timeout;
+    loop {
+        queue
+            .dispatch_pending(&mut state)
+            .map_err(|error| error.to_string())?;
+        if state.registry_done && state.manager.is_none() {
+            return Err("Wayland compositor lacks xdg-output logical geometry support".into());
+        }
+        if state.registry_done
+            && !state.outputs.is_empty()
+            && state.outputs.iter().all(|output| output.complete)
+        {
+            return Ok(state.outputs);
+        }
+        if state.registry_done && state.outputs.is_empty() {
+            return Err("Wayland compositor advertised no outputs".into());
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| "Wayland output enumeration timed out".to_owned())?;
+        queue.flush().map_err(|error| error.to_string())?;
+        let Some(guard) = queue.prepare_read() else {
+            continue;
+        };
+        let connection_fd = guard.connection_fd();
+        let mut fds = [PollFd::new(&connection_fd, PollFlags::IN)];
+        let poll_timeout = Timespec::try_from(remaining)
+            .map_err(|_| "Wayland output enumeration timeout is out of range".to_owned())?;
+        if poll(&mut fds, Some(&poll_timeout)).map_err(|error| error.to_string())? == 0 {
+            return Err("Wayland output enumeration timed out".into());
+        }
+        guard.read().map_err(|error| error.to_string())?;
     }
-    Ok(state.outputs)
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for NativeState {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        state.registry_done = true;
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for NativeState {
@@ -180,15 +201,19 @@ impl Dispatch<wl_registry::WlRegistry, ()> for NativeState {
                     complete: false,
                 });
                 if let Some((manager, manager_version)) = &state.manager {
-                    let xdg_version = bound_versions(version, Some(*manager_version))
-                        .xdg_output
-                        .unwrap();
+                    let Some(xdg_version) =
+                        bound_versions(version, Some(*manager_version)).xdg_output
+                    else {
+                        return;
+                    };
                     state.outputs[index].output.versions.xdg_output = Some(xdg_version);
                     manager.get_xdg_output(&proxy, handle, index);
                 }
             }
             "zxdg_output_manager_v1" => {
-                let manager_version = bound_versions(1, Some(version)).xdg_output.unwrap();
+                let Some(manager_version) = bound_versions(1, Some(version)).xdg_output else {
+                    return;
+                };
                 let manager = registry.bind::<zxdg_output_manager_v1::ZxdgOutputManagerV1, _, _>(
                     name,
                     manager_version,

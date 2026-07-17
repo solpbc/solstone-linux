@@ -71,7 +71,9 @@ pub fn select_backend(
 // tests/test_screencast.py::TestStreamMatching::test_mixed_position_and_size_matching
 //   -> matching::tests::position_based_matching plus size_based_fallback_when_no_position.
 // tests/test_screencast.py::test_close_session_call_close_failure_logs_and_clears_handle
-//   -> portal::tests::close_failure_preserves_original_error_and_clears_session.
+//   dbus-fast handle plumbing is retired-by-dependency; AshpdPortalOps::close takes its
+//   session before awaiting Close. portal::tests::close_failure_preserves_original_error_and_attempts_close
+//   covers the portable original-error/secondary-context policy.
 // tests/test_screencast.py::test_start_times_out_unresolved_response_and_removes_handler
 //   retired-by-dependency: ashpd owns dbus request-handler registration/removal.
 // tests/test_screencast.py::test_start_times_out_method_call_and_removes_handler
@@ -83,7 +85,7 @@ pub fn select_backend(
 // tests/test_screencast.py::test_wayland_command_keeps_spaced_location_as_one_token
 //   retired-by-dependency: programmatic properties have no argv quoting; pipeline tests pin the value.
 // tests/test_screencast.py::test_wayland_closes_pw_fd_on_spawn_failure_once
-//   -> portal::tests::one_pipeline_teardown_does_not_invalidate_sibling_state.
+//   -> portal::tests::pipeline_construction_failure_closes_pipewire_remote_once.
 // tests/test_screencast.py::TestX11Screencaster::test_connect_fails_without_display
 //   retired-by-dependency: x11rb connect reports the display error directly; there is no preflight method.
 // tests/test_screencast.py::TestX11Screencaster::test_connect_fails_without_gst_launch
@@ -111,10 +113,13 @@ pub fn select_backend(
 // tests/test_screencast.py::TestX11Screencaster::test_is_healthy_true_when_running
 //   -> x11::tests::partial_pipeline_failure_keeps_sibling_and_health_matches_python.
 // tests/test_screencast_stop_filters_silent_streams.py::test_stop_partitions_healthy_and_silent
-// tests/test_screencast_stop_filters_silent_streams.py::test_stop_treats_missing_file_as_silent
-// tests/test_screencast_stop_filters_silent_streams.py::test_stop_logs_silent_stream_dropped_prefix
-// tests/test_screencast_stop_filters_silent_streams.py::test_stop_handles_unlink_oserror
 //   -> x11::tests::stop_reports_all_tracked_streams_and_unlinks_silent.
+// tests/test_screencast_stop_filters_silent_streams.py::test_stop_treats_missing_file_as_silent
+//   -> x11::tests::stop_reports_missing_and_unlink_error_streams.
+// tests/test_screencast_stop_filters_silent_streams.py::test_stop_logs_silent_stream_dropped_prefix
+//   -> streams::tests::silent_stream_log_message_matches_python_prefix plus both backend stop paths.
+// tests/test_screencast_stop_filters_silent_streams.py::test_stop_handles_unlink_oserror
+//   -> x11::tests::stop_reports_missing_and_unlink_error_streams.
 
 #[cfg(test)]
 mod tests {

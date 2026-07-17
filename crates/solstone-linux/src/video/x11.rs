@@ -14,10 +14,13 @@ use crate::{
     observer::{StoppedStream, VideoCapture, VideoStream},
     pipeline::ximagesrc_pipeline_description,
     positions::{BoxGeometry, Monitor, assign_monitor_positions},
-    streams::{is_healthy_file_size, stream_filename},
+    streams::{SILENT_STREAM_LOG_MESSAGE, is_healthy_file_size, stream_filename},
     video::{
         clamp_framerate,
-        gstreamer::{CapturePipeline, GstreamerPipelineFactory, PipelineFactory, stop_pipelines},
+        gstreamer::{
+            CapturePipeline, GstreamerPipelineFactory, PipelineFactory, StoppingPipeline,
+            stop_pipelines,
+        },
     },
 };
 
@@ -97,13 +100,13 @@ fn display_name(value: Option<String>) -> String {
     value.unwrap_or_else(|| ":0".into())
 }
 
-impl Default for X11VideoCapture {
-    fn default() -> Self {
-        Self::with_dependencies(
+impl X11VideoCapture {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self::with_dependencies(
             display_name(std::env::var("DISPLAY").ok()),
             RandrOutputProvider,
-            GstreamerPipelineFactory,
-        )
+            GstreamerPipelineFactory::new()?,
+        ))
     }
 }
 
@@ -126,6 +129,11 @@ impl<P: X11OutputProvider, F: PipelineFactory> VideoCapture for X11VideoCapture<
         framerate: i64,
         draw_cursor: bool,
     ) -> Result<Vec<VideoStream>, String> {
+        if self.started || !self.tracked.is_empty() {
+            return Err(
+                "X11 video capture is already active; stop it before starting again".into(),
+            );
+        }
         let monitors: Vec<_> = self.outputs.outputs()?.into_iter().filter(|monitor| {
             let usable = monitor.bounds.x1 >= 0 && monitor.bounds.y1 >= 0;
             if !usable {
@@ -182,10 +190,13 @@ impl<P: X11OutputProvider, F: PipelineFactory> VideoCapture for X11VideoCapture<
     }
 
     fn stop(&mut self) -> Result<Vec<StoppedStream>, String> {
-        let mut pipelines: Vec<&mut Box<dyn CapturePipeline>> = self
+        let mut pipelines: Vec<StoppingPipeline<'_>> = self
             .tracked
             .iter_mut()
-            .map(|record| &mut record.pipeline)
+            .map(|record| StoppingPipeline {
+                identity: format!("{} ({})", record.connector, record.node_id),
+                pipeline: &mut record.pipeline,
+            })
             .collect();
         stop_pipelines(&mut pipelines, EOS_TIMEOUT);
         drop(pipelines);
@@ -201,11 +212,13 @@ impl<P: X11OutputProvider, F: PipelineFactory> VideoCapture for X11VideoCapture<
                     0
                 }
             };
-            if !is_healthy_file_size(Some(file_bytes))
-                && let Err(error) = fs::remove_file(&record.output)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                warn!(path = %record.output.display(), %error, "could not unlink silent stream file");
+            if !is_healthy_file_size(Some(file_bytes)) {
+                warn!(connector = %record.connector, position = %record.position, file_bytes, path = %record.output.display(), "{SILENT_STREAM_LOG_MESSAGE}");
+                if let Err(error) = fs::remove_file(&record.output)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    warn!(path = %record.output.display(), %error, "could not unlink silent stream file");
+                }
             }
             stopped.push(StoppedStream {
                 node_id: record.node_id,
@@ -261,6 +274,9 @@ mod tests {
         }
         fn poll_terminal(&mut self) -> Option<Result<(), String>> {
             Some(Ok(()))
+        }
+        fn state_label(&self) -> String {
+            "Playing".into()
         }
         fn force_stop(&mut self) {
             self.0.lock().unwrap().stopped = true;
@@ -383,6 +399,24 @@ mod tests {
         assert!(capture.is_healthy());
         capture.pipelines.states[0].lock().unwrap().healthy = false;
         assert!(!capture.is_healthy());
+        assert!(!capture.is_healthy());
+    }
+
+    #[test]
+    fn start_rejects_an_already_active_capture() {
+        let mut capture = X11VideoCapture::with_dependencies(
+            ":0",
+            FakeOutputs(Ok(vec![monitor("DP-1", [0, 0, 1920, 1080])])),
+            FakeFactory::default(),
+        );
+        capture.start(Path::new("/tmp"), 1, true).unwrap();
+        assert!(
+            capture
+                .start(Path::new("/tmp"), 1, true)
+                .unwrap_err()
+                .contains("already active")
+        );
+        capture.stop().unwrap();
     }
 
     #[test]

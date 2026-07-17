@@ -4,6 +4,7 @@
 use std::{
     future::Future,
     os::fd::{AsRawFd, OwnedFd},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -31,18 +32,31 @@ use crate::{
     pipeline::pipeline_description,
     positions::Monitor,
     restore_token::{load_restore_token, save_restore_token},
-    streams::{is_healthy_file_size, stream_filename},
+    streams::{SILENT_STREAM_LOG_MESSAGE, is_healthy_file_size, stream_filename},
     video::{
-        clamp_framerate,
-        gstreamer::{CapturePipeline, PipelineFactory, stop_pipelines},
-        wayland_geometry::NativeWaylandGeometry,
+        ReconnectStrategy, clamp_framerate,
+        gstreamer::{CapturePipeline, PipelineFactory, StoppingPipeline, stop_pipelines},
+        reconnect_strategy,
+        wayland_geometry::{NativeWaylandGeometry, WAYLAND_ENUMERATION_TIMEOUT},
     },
 };
 
 type PortalFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
-// Start can consume both independent interactive budgets plus the short calls.
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(1_270);
+const DISPATCH_MARGIN: Duration = Duration::from_secs(10);
+
+// A start can consume both interactive budgets plus every short operation. Keep
+// this derived from the operation table so the synchronous bridge cannot drift
+// below a legitimate worker execution time.
+const START_OPERATION_BUDGET: Duration = Duration::from_secs(
+    portal_timeout(PortalOperation::CreateSession).as_secs() * 2
+        + portal_timeout(PortalOperation::SelectSources).as_secs()
+        + portal_timeout(PortalOperation::Start).as_secs()
+        + portal_timeout(PortalOperation::OpenPipeWireRemote).as_secs()
+        + WAYLAND_ENUMERATION_TIMEOUT.as_secs(),
+);
+const COMMAND_TIMEOUT: Duration =
+    Duration::from_secs(START_OPERATION_BUDGET.as_secs() + DISPATCH_MARGIN.as_secs());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortalOperation {
@@ -53,7 +67,7 @@ pub enum PortalOperation {
     Close,
 }
 
-pub fn portal_timeout(operation: PortalOperation) -> Duration {
+pub const fn portal_timeout(operation: PortalOperation) -> Duration {
     match operation {
         PortalOperation::SelectSources | PortalOperation::Start => Duration::from_secs(600),
         PortalOperation::CreateSession
@@ -344,11 +358,22 @@ pub struct PortalVideoCapture {
 }
 
 impl PortalVideoCapture {
-    pub fn spawn<O, T, G, F>(
+    pub fn spawn<O, T, G, F>(ops: O, tokens: T, geometry: G, factory: F) -> Result<Self, String>
+    where
+        O: PortalOps,
+        T: TokenStore,
+        G: PortalGeometry,
+        F: PipelineFactory + 'static,
+    {
+        Self::spawn_with_strategy(ops, tokens, geometry, factory, reconnect_strategy(false))
+    }
+
+    fn spawn_with_strategy<O, T, G, F>(
         mut ops: O,
         tokens: T,
         mut geometry: G,
         mut factory: F,
+        strategy: ReconnectStrategy,
     ) -> Result<Self, String>
     where
         O: PortalOps,
@@ -365,6 +390,7 @@ impl PortalVideoCapture {
                 Err(_) => { worker_health.store(false, Ordering::Release); return; }
             };
             let mut tracked: Vec<PortalPipeline> = Vec::new();
+            let mut portal_session: Option<PortalSession> = None;
             loop {
                 let command = match receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(command) => command,
@@ -377,7 +403,15 @@ impl PortalVideoCapture {
                 };
                 match command {
                     Command::Start { directory, framerate, draw_cursor, reply } => {
-                        let result = runtime.block_on(open_session(&mut ops, &tokens, &mut geometry, draw_cursor)).and_then(|session| {
+                        if !tracked.is_empty() {
+                            let _ = reply.send(Err("portal capture is already active".into()));
+                            continue;
+                        }
+                        let attempt = catch_unwind(AssertUnwindSafe(|| {
+                            if portal_session.is_none() {
+                                portal_session = Some(runtime.block_on(open_session(&mut ops, &tokens, &mut geometry, draw_cursor))?);
+                            }
+                            let session = portal_session.as_ref().ok_or_else(|| "portal session was not established".to_owned())?;
                             let matched = match_streams_to_monitors(&session.streams.streams, &session.monitors);
                             let mut streams = Vec::new();
                             for stream in matched {
@@ -390,25 +424,56 @@ impl PortalVideoCapture {
                                 tracked.push(PortalPipeline { node_id: stream.node_id, connector: stream.connector, position: stream.position_label, output, _remote: remote, pipeline });
                             }
                             if streams.is_empty() { Err("No portal stream pipelines could be started".into()) } else { Ok(streams) }
-                        });
+                        }));
+                        let result = match attempt {
+                            Ok(result) => result,
+                            Err(payload) => {
+                                let _ = runtime.block_on(ops.close());
+                                tracked.clear();
+                                worker_health.store(false, Ordering::Release);
+                                drop(reply);
+                                resume_unwind(payload);
+                            }
+                        };
                         if result.is_err() {
                             let _ = runtime.block_on(ops.close());
+                            portal_session = None;
                             tracked.clear();
                         }
                         worker_health.store(result.is_ok(), Ordering::Release);
-                        let _ = reply.send(result);
+                        let started = result.is_ok();
+                        if reply.send(result).is_err() && started {
+                            for record in &mut tracked { record.pipeline.force_stop(); }
+                            tracked.clear();
+                            let _ = runtime.block_on(ops.close());
+                            portal_session = None;
+                            worker_health.store(false, Ordering::Release);
+                        }
                     }
                     Command::Stop { reply } => {
-                        let mut pipelines: Vec<&mut Box<dyn CapturePipeline>> = tracked.iter_mut().map(|record| &mut record.pipeline).collect();
+                        let mut pipelines: Vec<StoppingPipeline<'_>> = tracked.iter_mut().map(|record| StoppingPipeline { identity: format!("{} ({})", record.connector, record.node_id), pipeline: &mut record.pipeline }).collect();
                         stop_pipelines(&mut pipelines, Duration::from_secs(5));
                         drop(pipelines);
                         let stopped = tracked.drain(..).map(|record| {
                             let bytes = match std::fs::metadata(&record.output) { Ok(metadata) => metadata.len(), Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0, Err(error) => { warn!(path = %record.output.display(), %error, "could not stat portal stream file"); 0 } };
-                            if !is_healthy_file_size(Some(bytes)) && let Err(error) = std::fs::remove_file(&record.output) && error.kind() != std::io::ErrorKind::NotFound { warn!(path = %record.output.display(), %error, "could not unlink silent portal stream file"); }
+                            if !is_healthy_file_size(Some(bytes)) { warn!(connector = %record.connector, position = %record.position, file_bytes = bytes, path = %record.output.display(), "{SILENT_STREAM_LOG_MESSAGE}"); if let Err(error) = std::fs::remove_file(&record.output) && error.kind() != std::io::ErrorKind::NotFound { warn!(path = %record.output.display(), %error, "could not unlink silent portal stream file"); } }
                             StoppedStream { node_id: record.node_id, connector: record.connector, position: record.position, file_bytes: bytes }
                         }).collect();
-                        let close = runtime.block_on(ops.close());
-                        if let Err(error) = close { warn!(%error, "failed to close portal session during stop"); }
+                        match strategy {
+                            ReconnectStrategy::NewPortalSession => {
+                                // D2: each five-minute stop/start tears down and rebuilds the
+                                // portal session. Restore normally avoids UI, but an invalid
+                                // restore token can therefore re-prompt at every boundary.
+                                let close = runtime.block_on(ops.close());
+                                portal_session = None;
+                                if let Err(error) = close { warn!(%error, "failed to close portal session during stop"); }
+                            }
+                            ReconnectStrategy::ReusePortalSession => {
+                                // D5: v1 never selects reuse, making the wlroots same-node
+                                // reconnect quirk unreachable. This real branch is the swap
+                                // point required before session reuse can safely be enabled.
+                            }
+                        }
                         worker_health.store(false, Ordering::Release);
                         let _ = reply.send(Ok(stopped));
                     }
@@ -568,6 +633,9 @@ mod tests {
         fn poll_terminal(&mut self) -> Option<Result<(), String>> {
             Some(Ok(()))
         }
+        fn state_label(&self) -> String {
+            "Playing".into()
+        }
         fn force_stop(&mut self) {
             self.0.lock().unwrap().stopped = true;
         }
@@ -576,6 +644,7 @@ mod tests {
     struct FakeFactory {
         states: Arc<Mutex<Vec<Arc<Mutex<PipelineState>>>>>,
         descriptions: Arc<Mutex<Vec<PipelineDescription>>>,
+        fail: bool,
     }
     impl PipelineFactory for FakeFactory {
         fn build(
@@ -583,6 +652,9 @@ mod tests {
             description: &PipelineDescription,
         ) -> Result<Box<dyn CapturePipeline>, String> {
             self.descriptions.lock().unwrap().push(description.clone());
+            if self.fail {
+                return Err("pipeline construction failed".into());
+            }
             let state = Arc::new(Mutex::new(PipelineState {
                 healthy: true,
                 stopped: false,
@@ -630,6 +702,7 @@ mod tests {
                 Duration::from_secs(600)
             );
         }
+        assert!(COMMAND_TIMEOUT > START_OPERATION_BUDGET);
     }
     #[test]
     fn failures_after_create_always_close() {
@@ -652,7 +725,7 @@ mod tests {
         }
     }
     #[test]
-    fn close_failure_preserves_original_error_and_clears_session() {
+    fn close_failure_preserves_original_error_and_attempts_close() {
         // tests/test_screencast.py::test_close_session_call_close_failure_logs_and_clears_handle
         let calls = Arc::new(Mutex::new(vec![]));
         let mut ops = FakeOps {
@@ -744,6 +817,7 @@ mod tests {
         states.lock().unwrap()[0].lock().unwrap().healthy = false;
         thread::sleep(Duration::from_millis(150));
         assert!(!capture.is_healthy());
+        assert!(!capture.is_healthy());
         let stopped = capture.stop().unwrap();
         assert_eq!(stopped.len(), 2);
     }
@@ -757,6 +831,44 @@ mod tests {
         assert!(sibling.try_clone().is_ok());
     }
 
+    #[test]
+    fn pipeline_construction_failure_closes_pipewire_remote_once() {
+        // tests/test_screencast.py::test_wayland_closes_pw_fd_on_spawn_failure_once
+        let calls = Arc::new(Mutex::new(vec![]));
+        let ops = FakeOps {
+            calls: calls.clone(),
+            fail: None,
+            token: None,
+            streams: vec![PortalStream {
+                index: 0,
+                node_id: 10,
+                position: Some((0, 0)),
+                size: Some((1920, 1080)),
+            }],
+        };
+        let mut capture = PortalVideoCapture::spawn(
+            ops,
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory {
+                fail: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        assert!(capture.start(directory.path(), 1, true).is_err());
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == "close")
+                .count(),
+            1
+        );
+    }
+
     struct PanicGeometry;
     impl PortalGeometry for PanicGeometry {
         fn monitors(&mut self) -> Result<Vec<Monitor>, String> {
@@ -765,8 +877,9 @@ mod tests {
     }
     #[test]
     fn worker_panic_is_a_disconnect_not_an_observer_unwind() {
+        let calls = Arc::new(Mutex::new(vec![]));
         let ops = FakeOps {
-            calls: Arc::new(Mutex::new(vec![])),
+            calls: calls.clone(),
             fail: None,
             token: None,
             streams: vec![],
@@ -777,5 +890,84 @@ mod tests {
         let error = capture.start(Path::new("/tmp"), 1, true).unwrap_err();
         assert!(error.contains("disconnected"));
         assert!(!capture.is_healthy());
+        assert_eq!(calls.lock().unwrap().last(), Some(&"close"));
+    }
+
+    #[test]
+    fn start_rejects_an_already_active_capture() {
+        let ops = FakeOps {
+            calls: Arc::new(Mutex::new(vec![])),
+            fail: None,
+            token: None,
+            streams: vec![PortalStream {
+                index: 0,
+                node_id: 10,
+                position: Some((0, 0)),
+                size: Some((1920, 1080)),
+            }],
+        };
+        let mut capture = PortalVideoCapture::spawn(
+            ops,
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        capture.start(directory.path(), 1, true).unwrap();
+        assert!(
+            capture
+                .start(directory.path(), 1, true)
+                .unwrap_err()
+                .contains("already active")
+        );
+        capture.stop().unwrap();
+    }
+
+    #[test]
+    fn reconnect_strategy_controls_real_session_teardown_branch() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let ops = FakeOps {
+            calls: calls.clone(),
+            fail: None,
+            token: None,
+            streams: vec![PortalStream {
+                index: 0,
+                node_id: 10,
+                position: Some((0, 0)),
+                size: Some((1920, 1080)),
+            }],
+        };
+        let mut capture = PortalVideoCapture::spawn_with_strategy(
+            ops,
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+            ReconnectStrategy::ReusePortalSession,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        capture.start(directory.path(), 1, true).unwrap();
+        capture.stop().unwrap();
+        capture.start(directory.path(), 1, true).unwrap();
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == "create")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == "close")
+                .count(),
+            0
+        );
+        capture.stop().unwrap();
     }
 }
