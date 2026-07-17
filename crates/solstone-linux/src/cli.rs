@@ -232,10 +232,7 @@ fn cmd_run(interval: Option<i64>) -> i32 {
         }
         return 1;
     }
-    tracing::info!("Rust observer stub running");
-    loop {
-        thread::park_timeout(Duration::from_secs(3600));
-    }
+    crate::run::run_observer(config, hostname().unwrap_or_else(|_| "linux".into()))
 }
 
 #[cfg(test)]

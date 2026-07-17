@@ -13,6 +13,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    chunking::{AudioLeg, LegBlock, SAMPLE_RATE},
+    sources::{SourceDescriptor, SourceSelection, classify_sources},
+    subscription::{
+        MuteStatus, SubscriptionAction, SubscriptionEvent, SubscriptionOperation,
+        SubscriptionState, transition,
+    },
+};
 use libpulse_binding as pulse;
 use pulse::{
     callbacks::ListResult,
@@ -24,18 +32,37 @@ use pulse::{
     sample::{Format, Spec},
     stream::{FlagSet as StreamFlagSet, PeekResult, State as StreamState, Stream},
 };
-use solstone_linux::{
-    chunking::{AudioLeg, LegBlock, SAMPLE_RATE},
-    sources::{SourceDescriptor, SourceSelection, classify_sources},
-    subscription::{
-        MuteStatus, SubscriptionAction, SubscriptionEvent, SubscriptionOperation,
-        SubscriptionState, transition,
-    },
-};
 use tracing::{info, warn};
 
 type AnyError = Box<dyn Error + Send + Sync>;
 const PULSE_TIMEOUT: Duration = Duration::from_secs(5);
+const SOURCE_METADATA_TIMEOUT: Duration = Duration::from_secs(3);
+const REDETECT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+struct RedetectSchedule {
+    deadline: Duration,
+}
+
+impl RedetectSchedule {
+    fn new(now: Duration) -> Self {
+        Self {
+            deadline: now + REDETECT_INTERVAL,
+        }
+    }
+
+    fn remaining(self, now: Duration) -> Duration {
+        self.deadline.saturating_sub(now)
+    }
+
+    fn due(self, now: Duration) -> bool {
+        now >= self.deadline
+    }
+
+    fn reset(&mut self, now: Duration) {
+        self.deadline = now + REDETECT_INTERVAL;
+    }
+}
 
 pub(crate) enum PulseMessage {
     Ready {
@@ -66,15 +93,16 @@ fn report_selection(selection: &SourceSelection) {
 struct SubscriptionOutcome {
     state: SubscriptionState,
     mute_changes: Vec<MuteStatus>,
+    source_changed: bool,
 }
 
 fn drive_subscription(
     mainloop: &mut Mainloop,
     context: &Context,
-    device_override: &Option<String>,
     mut state: SubscriptionState,
     event: SubscriptionEvent,
 ) -> Result<SubscriptionOutcome, AnyError> {
+    let previous_selection = state.source_selection.clone();
     let mut events = VecDeque::from([event]);
     let mut mute_changes = Vec::new();
     while let Some(event) = events.pop_front() {
@@ -87,13 +115,11 @@ fn drive_subscription(
                         Ok(sources) => classify_sources(
                             &sources,
                             state.default_sink.as_ref().map(|sink| sink.name.as_str()),
-                            device_override.as_deref(),
+                            None,
                         ),
-                        Err(error) => Err(
-                            solstone_linux::sources::SourceSelectionError::EnumerationFailed(
-                                error.to_string(),
-                            ),
-                        ),
+                        Err(error) => Err(crate::sources::SourceSelectionError::EnumerationFailed(
+                            error.to_string(),
+                        )),
                     };
                     events.push_back(SubscriptionEvent::SourcesResolved(result));
                 }
@@ -116,6 +142,7 @@ fn drive_subscription(
         }
     }
     Ok(SubscriptionOutcome {
+        source_changed: previous_selection != state.source_selection,
         state,
         mute_changes,
     })
@@ -155,11 +182,10 @@ fn mute_result(status: &MuteStatus) -> (bool, Option<String>) {
 pub(crate) fn run_pulse(
     sender: mpsc::Sender<PulseMessage>,
     stopped: Arc<AtomicBool>,
-    device_override: Option<String>,
 ) -> Result<(), AnyError> {
     let mut mainloop = Mainloop::new().ok_or("failed to create PulseAudio threaded mainloop")?;
-    let mut context = Context::new(&mainloop, "solstone audio spike")
-        .ok_or("failed to create PulseAudio context")?;
+    let mut context =
+        Context::new(&mainloop, "solstone-linux").ok_or("failed to create PulseAudio context")?;
     context.connect(None, ContextFlagSet::NOFLAGS, None)?;
     mainloop.start()?;
     wait_for_context(&mut mainloop, &context)?;
@@ -167,7 +193,6 @@ pub(crate) fn run_pulse(
     let outcome = drive_subscription(
         &mut mainloop,
         &context,
-        &device_override,
         SubscriptionState::default(),
         SubscriptionEvent::Started,
     )?;
@@ -188,6 +213,7 @@ pub(crate) fn run_pulse(
     })?;
 
     // Pulse streams are long-lived; Python's 1000-block rebuild is soundcard-library hygiene.
+    let restart = Arc::new(AtomicBool::new(false));
     let microphone = start_stream(
         &mut mainloop,
         &mut context,
@@ -198,6 +224,7 @@ pub(crate) fn run_pulse(
             .ok_or("microphone has no name")?,
         AudioLeg::Microphone,
         sender.clone(),
+        Arc::clone(&restart),
     )?;
     let system = start_stream(
         &mut mainloop,
@@ -209,6 +236,7 @@ pub(crate) fn run_pulse(
             .ok_or("monitor has no name")?,
         AudioLeg::System,
         sender.clone(),
+        Arc::clone(&restart),
     )?;
     info!(default_sink = ?state.default_sink, "PulseAudio capture ready");
 
@@ -223,14 +251,19 @@ pub(crate) fn run_pulse(
     );
     mainloop.unlock();
     let mut state = state;
-    while !stopped.load(Ordering::SeqCst) {
-        match event_rx.recv_timeout(Duration::from_millis(100)) {
+    let schedule_started = Instant::now();
+    let mut redetect = RedetectSchedule::new(schedule_started.elapsed());
+    while !stopped.load(Ordering::SeqCst) && !restart.load(Ordering::Acquire) {
+        let wait = redetect
+            .remaining(schedule_started.elapsed())
+            .min(Duration::from_millis(100));
+        match event_rx.recv_timeout(wait) {
             Ok((facility, operation, index)) => {
                 let Some(event) = map_subscription_event(facility, operation, index) else {
                     continue;
                 };
-                let outcome =
-                    drive_subscription(&mut mainloop, &context, &device_override, state, event)?;
+                let outcome = drive_subscription(&mut mainloop, &context, state, event)?;
+                let source_changed = outcome.source_changed;
                 state = outcome.state;
                 for status in outcome.mute_changes {
                     let (muted, mute_failure) = mute_result(&status);
@@ -239,9 +272,29 @@ pub(crate) fn run_pulse(
                         mute_failure,
                     })?;
                 }
+                if source_changed {
+                    restart.store(true, Ordering::Release);
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if redetect.due(schedule_started.elapsed()) {
+            let outcome =
+                drive_subscription(&mut mainloop, &context, state, SubscriptionEvent::Started)?;
+            let source_changed = outcome.source_changed;
+            state = outcome.state;
+            for status in outcome.mute_changes {
+                let (muted, mute_failure) = mute_result(&status);
+                sender.send(PulseMessage::MuteChanged {
+                    muted,
+                    mute_failure,
+                })?;
+            }
+            if source_changed {
+                restart.store(true, Ordering::Release);
+            }
+            redetect.reset(schedule_started.elapsed());
         }
     }
     drop(subscription);
@@ -296,22 +349,75 @@ fn query_sources(
         let _ = tx.send(mapped);
     });
     mainloop.unlock();
-    let mut sources = Vec::new();
-    loop {
-        match rx.recv_timeout(PULSE_TIMEOUT)? {
-            Ok(Some(source)) => sources.push(source),
-            Ok(None) => break,
-            Err(reason) => return Err(reason.into()),
+    struct ChannelEvents(mpsc::Receiver<Result<Option<SourceDescriptor>, &'static str>>);
+    impl SourceEventSource for ChannelEvents {
+        fn next(&mut self, timeout: Duration) -> SourceEvent {
+            match self.0.recv_timeout(timeout) {
+                Ok(Ok(Some(source))) => SourceEvent::Item(source),
+                Ok(Ok(None)) => SourceEvent::End,
+                Ok(Err(reason)) => SourceEvent::Failed(reason.into()),
+                Err(mpsc::RecvTimeoutError::Timeout) => SourceEvent::Pending,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    SourceEvent::Failed("PulseAudio source enumeration disconnected".into())
+                }
+            }
         }
     }
+    struct RealClock(Instant);
+    impl MetadataClock for RealClock {
+        fn elapsed(&self) -> Duration {
+            self.0.elapsed()
+        }
+    }
+    let mut events = ChannelEvents(rx);
+    let clock = RealClock(Instant::now());
+    let sources = collect_source_metadata(&mut events, &clock)?;
     drop(operation);
+    Ok(sources)
+}
+
+enum SourceEvent {
+    Item(SourceDescriptor),
+    End,
+    Pending,
+    Failed(String),
+}
+
+trait SourceEventSource {
+    fn next(&mut self, timeout: Duration) -> SourceEvent;
+}
+
+trait MetadataClock {
+    fn elapsed(&self) -> Duration;
+}
+
+fn collect_source_metadata(
+    events: &mut dyn SourceEventSource,
+    clock: &dyn MetadataClock,
+) -> Result<Vec<SourceDescriptor>, AnyError> {
+    let mut sources = Vec::new();
+    // Pulse emits one callback per source and then End. Preserve descriptors that
+    // arrived before a wedged operation omits End; the fixed three-second deadline
+    // is the native analogue of abandoning one hung Python device-metadata call.
+    while clock.elapsed() < SOURCE_METADATA_TIMEOUT {
+        let remaining = SOURCE_METADATA_TIMEOUT.saturating_sub(clock.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        match events.next(remaining) {
+            SourceEvent::Item(source) => sources.push(source),
+            SourceEvent::End => break,
+            SourceEvent::Pending => continue,
+            SourceEvent::Failed(reason) => return Err(reason.into()),
+        }
+    }
     Ok(sources)
 }
 
 fn query_default_sink(
     mainloop: &mut Mainloop,
     context: &Context,
-) -> Result<solstone_linux::subscription::DefaultSink, String> {
+) -> Result<crate::subscription::DefaultSink, String> {
     let (tx, rx) = mpsc::channel();
     mainloop.lock();
     let operation = context.introspect().get_server_info(move |server| {
@@ -339,7 +445,7 @@ fn query_default_sink(
     let result = rx.recv_timeout(PULSE_TIMEOUT);
     drop(operation);
     match result {
-        Ok(Some(index)) => Ok(solstone_linux::subscription::DefaultSink { index, name }),
+        Ok(Some(index)) => Ok(crate::subscription::DefaultSink { index, name }),
         Ok(None) => Err("default sink lookup failed".into()),
         Err(error) => Err(format!("default sink lookup failed: {error}")),
     }
@@ -377,6 +483,7 @@ fn start_stream(
     source_name: &str,
     leg: AudioLeg,
     sender: mpsc::Sender<PulseMessage>,
+    restart: Arc<AtomicBool>,
 ) -> Result<Arc<Mutex<Stream>>, AnyError> {
     let spec = Spec {
         format: Format::F32le,
@@ -391,7 +498,9 @@ fn start_stream(
     stream
         .lock()
         .expect("stream lock")
-        .set_read_callback(Some(Box::new(move |_| read_stream(&weak, leg, &sender))));
+        .set_read_callback(Some(Box::new(move |_| {
+            read_stream(&weak, leg, &sender, &restart)
+        })));
     mainloop.lock();
     let connect_result = stream.lock().expect("stream lock").connect_record(
         Some(source_name),
@@ -427,7 +536,12 @@ fn start_stream(
     Ok(stream)
 }
 
-fn read_stream(weak: &Weak<Mutex<Stream>>, leg: AudioLeg, sender: &mpsc::Sender<PulseMessage>) {
+fn read_stream(
+    weak: &Weak<Mutex<Stream>>,
+    leg: AudioLeg,
+    sender: &mpsc::Sender<PulseMessage>,
+    restart: &AtomicBool,
+) {
     let Some(stream) = weak.upgrade() else { return };
     let mut stream = stream.lock().expect("stream callback lock");
     let bytes = match stream.peek() {
@@ -439,6 +553,7 @@ fn read_stream(weak: &Weak<Mutex<Stream>>, leg: AudioLeg, sender: &mpsc::Sender<
         Ok(PeekResult::Empty) => return,
         Err(error) => {
             let _ = sender.send(PulseMessage::Failed(format!("record peek failed: {error}")));
+            restart.store(true, Ordering::Release);
             return;
         }
     };
@@ -446,6 +561,7 @@ fn read_stream(weak: &Weak<Mutex<Stream>>, leg: AudioLeg, sender: &mpsc::Sender<
         let _ = sender.send(PulseMessage::Failed(format!(
             "record discard failed: {error}"
         )));
+        restart.store(true, Ordering::Release);
         return;
     }
     drop(stream);
@@ -459,5 +575,81 @@ fn read_stream(weak: &Weak<Mutex<Stream>>, leg: AudioLeg, sender: &mpsc::Sender<
             .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte float")))
             .collect();
         let _ = sender.send(PulseMessage::Block(LegBlock::new(leg, samples)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, collections::VecDeque, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct FakeClock(Rc<Cell<Duration>>);
+    impl MetadataClock for FakeClock {
+        fn elapsed(&self) -> Duration {
+            self.0.get()
+        }
+    }
+
+    struct FakeEvents {
+        clock: FakeClock,
+        ready: VecDeque<SourceDescriptor>,
+    }
+    impl SourceEventSource for FakeEvents {
+        fn next(&mut self, timeout: Duration) -> SourceEvent {
+            if let Some(source) = self.ready.pop_front() {
+                return SourceEvent::Item(source);
+            }
+            self.clock.0.set(self.clock.elapsed() + timeout);
+            SourceEvent::Pending
+        }
+    }
+
+    #[test]
+    fn metadata_deadline_keeps_earlier_sources() {
+        // tests/test_audio_detect.py::test_input_detect_hung_device_treated_absent_within_bound
+        let clock = FakeClock::default();
+        let mut events = FakeEvents {
+            clock: clock.clone(),
+            ready: VecDeque::from([
+                SourceDescriptor {
+                    index: 1,
+                    name: Some("mic".into()),
+                    monitor_of_sink: None,
+                    monitor_of_sink_name: None,
+                },
+                SourceDescriptor {
+                    index: 2,
+                    name: Some("sink.monitor".into()),
+                    monitor_of_sink: Some(7),
+                    monitor_of_sink_name: Some("sink".into()),
+                },
+            ]),
+        };
+        let sources = collect_source_metadata(&mut events, &clock).unwrap();
+        assert_eq!(clock.elapsed(), Duration::from_secs(3));
+        let selection = classify_sources(&sources, Some("sink"), None).unwrap();
+        assert_eq!(selection.microphone.name.as_deref(), Some("mic"));
+        assert_eq!(selection.monitor.name.as_deref(), Some("sink.monitor"));
+    }
+
+    #[test]
+    fn fake_clock_drives_five_second_backstop() {
+        let clock = FakeClock::default();
+        let mut schedule = RedetectSchedule::new(clock.elapsed());
+        clock.0.set(Duration::from_secs(4));
+        assert!(!schedule.due(clock.elapsed()));
+        clock.0.set(Duration::from_secs(5));
+        assert!(schedule.due(clock.elapsed()));
+        schedule.reset(clock.elapsed());
+        assert_eq!(schedule.remaining(clock.elapsed()), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn fake_subscription_event_triggers_existing_redetect_transition() {
+        let event = map_subscription_event(Some(Facility::Source), Some(Operation::Changed), 9)
+            .expect("source event");
+        let outcome = transition(SubscriptionState::default(), event);
+        assert_eq!(outcome.actions, vec![SubscriptionAction::QuerySources]);
     }
 }

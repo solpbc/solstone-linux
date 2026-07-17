@@ -13,10 +13,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 claxon = "0.4.3"
+flac-bound = { version = "0.5.0", default-features = false, features = ["libflac-nobuild"] }
+libpulse-binding = "2.30.1"
 chrono = "0.4"
 rustix = { version = "1", features = ["event", "process", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["signal", "sync"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 ashpd = { version = "=0.13.12", features = ["screencast"] }
 gstreamer = "=0.25.3"

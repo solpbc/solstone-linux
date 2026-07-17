@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/solstone-linux",
-    "crates/spike-audio",
 ]
 resolver = "3"
 
