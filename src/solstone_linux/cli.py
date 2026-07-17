@@ -114,8 +114,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
-    if args.interval:
-        config.segment_interval = args.interval
+    interval = getattr(args, "interval", None)
+    if interval:
+        config.segment_interval = interval
 
     try:
         return asyncio.run(async_run(config))
