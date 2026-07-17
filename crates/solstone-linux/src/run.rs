@@ -41,6 +41,13 @@ use crate::{
 };
 
 const BUS_NAME: &str = "org.solpbc.solstone.Observer1";
+
+/// Side-by-side soak scaffolding (delete at cutover): the Python observer owns
+/// the well-known name on a box where both run, so the soak instance overrides
+/// it via SOLSTONE_LINUX_BUS_NAME. Production never sets this.
+fn bus_name() -> String {
+    std::env::var("SOLSTONE_LINUX_BUS_NAME").unwrap_or_else(|_| BUS_NAME.to_owned())
+}
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
 const CONSTRUCTION_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -241,13 +248,13 @@ async fn acquire_singleton() -> Result<Connection, String> {
         .await
         .map_err(|error| error.to_string())?;
     let reply = connection
-        .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
+        .request_name_with_flags(bus_name().as_str(), RequestNameFlags::DoNotQueue.into())
         .await
         .map_err(|error| error.to_string())?;
     match reply {
         RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => Ok(connection),
         RequestNameReply::Exists | RequestNameReply::InQueue => {
-            Err(format!("{BUS_NAME} is already owned"))
+            Err(format!("{} is already owned", bus_name()))
         }
     }
 }

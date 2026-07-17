@@ -74,7 +74,13 @@ impl DesktopComponent {
         bus: &impl BusNameRequester,
         mut log: impl FnMut(&str),
     ) -> bool {
-        match bus.request_name(OBSERVER_BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue) {
+        match bus.request_name(
+            // Soak scaffolding (delete at cutover): see run.rs bus_name().
+            std::env::var("SOLSTONE_LINUX_BUS_NAME")
+                .unwrap_or_else(|_| OBSERVER_BUS_NAME.to_owned())
+                .as_str(),
+            zbus::fdo::RequestNameFlags::DoNotQueue,
+        ) {
             Ok(
                 zbus::fdo::RequestNameReply::PrimaryOwner
                 | zbus::fdo::RequestNameReply::AlreadyOwner,
