@@ -31,6 +31,8 @@ pub enum MuteStatus {
 pub struct SubscriptionState {
     pub default_sink: Option<DefaultSink>,
     pub mute_status: MuteStatus,
+    pub source_selection: Option<SourceSelection>,
+    pub degraded_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,36 +70,38 @@ pub struct Transition {
 pub fn transition(mut state: SubscriptionState, event: SubscriptionEvent) -> Transition {
     use SubscriptionAction::*;
     let actions = match event {
-        SubscriptionEvent::Started => vec![QuerySources, QueryDefaultSink],
+        SubscriptionEvent::Started => vec![QueryDefaultSink],
         SubscriptionEvent::SourceSubscription { .. } => vec![QuerySources],
-        SubscriptionEvent::SinkSubscriptionChanged { index }
-            if state
-                .default_sink
-                .as_ref()
-                .is_some_and(|sink| sink.index == index) =>
-        {
-            vec![QueryMute {
-                sink_name: state.default_sink.as_ref().unwrap().name.clone(),
-            }]
-        }
-        SubscriptionEvent::SinkSubscriptionChanged { .. } => vec![],
+        SubscriptionEvent::SinkSubscriptionChanged { index } => state
+            .default_sink
+            .as_ref()
+            .filter(|sink| sink.index == index)
+            .map_or_else(Vec::new, |sink| {
+                vec![QueryMute {
+                    sink_name: sink.name.clone(),
+                }]
+            }),
         SubscriptionEvent::ServerSubscriptionChanged => vec![QueryDefaultSink],
         SubscriptionEvent::SourcesResolved(Ok(selection)) => {
+            state.source_selection = Some(selection.clone());
+            state.degraded_reason = None;
             vec![ApplySourceSelection(selection)]
         }
-        SubscriptionEvent::SourcesResolved(Err(error)) => vec![EnterDegraded {
-            reason: error.to_string(),
-        }],
+        SubscriptionEvent::SourcesResolved(Err(error)) => {
+            let reason = error.to_string();
+            state.degraded_reason = Some(reason.clone());
+            vec![EnterDegraded { reason }]
+        }
         SubscriptionEvent::DefaultSinkResolved(Ok(sink)) => {
             let sink_name = sink.name.clone();
             state.default_sink = Some(sink);
-            vec![QueryMute { sink_name }]
+            vec![QueryMute { sink_name }, QuerySources]
         }
         SubscriptionEvent::DefaultSinkResolved(Err(reason)) => {
             state.default_sink = None;
             let status = MuteStatus::UnmutedQueryFailed { reason };
             state.mute_status = status.clone();
-            vec![ApplyMuteBoundary { status }]
+            vec![ApplyMuteBoundary { status }, QuerySources]
         }
         SubscriptionEvent::MuteQueryResolved(result) => {
             let status = match result {
@@ -105,8 +109,12 @@ pub fn transition(mut state: SubscriptionState, event: SubscriptionEvent) -> Tra
                 Ok(false) => MuteStatus::Unmuted,
                 Err(reason) => MuteStatus::UnmutedQueryFailed { reason },
             };
-            state.mute_status = status.clone();
-            vec![ApplyMuteBoundary { status }]
+            if state.mute_status == status {
+                vec![]
+            } else {
+                state.mute_status = status.clone();
+                vec![ApplyMuteBoundary { status }]
+            }
         }
     };
     Transition { state, actions }
@@ -115,6 +123,7 @@ pub fn transition(mut state: SubscriptionState, event: SubscriptionEvent) -> Tra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::SourceDescriptor;
 
     fn state_with_sink() -> SubscriptionState {
         SubscriptionState {
@@ -123,6 +132,26 @@ mod tests {
                 name: "default-sink".into(),
             }),
             mute_status: MuteStatus::Unknown,
+            source_selection: None,
+            degraded_reason: None,
+        }
+    }
+
+    fn selection() -> SourceSelection {
+        SourceSelection {
+            microphone: SourceDescriptor {
+                index: 1,
+                name: Some("mic".into()),
+                monitor_of_sink: None,
+                monitor_of_sink_name: None,
+            },
+            monitor: SourceDescriptor {
+                index: 2,
+                name: Some("monitor".into()),
+                monitor_of_sink: Some(7),
+                monitor_of_sink_name: Some("default-sink".into()),
+            },
+            monitor_matches_default_sink: Some(true),
         }
     }
 
@@ -176,6 +205,70 @@ mod tests {
             .actions,
             vec![SubscriptionAction::QueryDefaultSink]
         );
+    }
+
+    #[test]
+    fn resolved_server_change_replaces_default_sink_identity() {
+        let requested = transition(
+            state_with_sink(),
+            SubscriptionEvent::ServerSubscriptionChanged,
+        );
+        let resolved = transition(
+            requested.state,
+            SubscriptionEvent::DefaultSinkResolved(Ok(DefaultSink {
+                index: 9,
+                name: "replacement-sink".into(),
+            })),
+        );
+        assert_eq!(resolved.state.default_sink.as_ref().unwrap().index, 9);
+        assert_eq!(
+            resolved.actions,
+            vec![
+                SubscriptionAction::QueryMute {
+                    sink_name: "replacement-sink".into()
+                },
+                SubscriptionAction::QuerySources,
+            ]
+        );
+        assert!(
+            transition(
+                resolved.state.clone(),
+                SubscriptionEvent::SinkSubscriptionChanged { index: 7 }
+            )
+            .actions
+            .is_empty()
+        );
+        assert_eq!(
+            transition(
+                resolved.state,
+                SubscriptionEvent::SinkSubscriptionChanged { index: 9 }
+            )
+            .actions,
+            vec![SubscriptionAction::QueryMute {
+                sink_name: "replacement-sink".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn source_resolution_after_mute_change_preserves_mute_status() {
+        let muted = transition(
+            state_with_sink(),
+            SubscriptionEvent::MuteQueryResolved(Ok(true)),
+        );
+        let source_event = transition(
+            muted.state,
+            SubscriptionEvent::SourceSubscription {
+                operation: SubscriptionOperation::Changed,
+                index: 2,
+            },
+        );
+        let resolved = transition(
+            source_event.state,
+            SubscriptionEvent::SourcesResolved(Ok(selection())),
+        );
+        assert_eq!(resolved.state.mute_status, MuteStatus::Muted);
+        assert_eq!(resolved.state.source_selection, Some(selection()));
     }
 
     #[test]

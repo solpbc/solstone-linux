@@ -23,6 +23,7 @@ pub enum SourceSelectionError {
     MissingBoth,
     OverrideNotFound(String),
     OverrideIsMonitor(String),
+    EnumerationFailed(String),
 }
 
 impl std::fmt::Display for SourceSelectionError {
@@ -38,6 +39,9 @@ impl std::fmt::Display for SourceSelectionError {
             }
             Self::OverrideIsMonitor(name) => {
                 write!(formatter, "microphone override is a monitor source: {name}")
+            }
+            Self::EnumerationFailed(reason) => {
+                write!(formatter, "audio source enumeration failed: {reason}")
             }
         }
     }

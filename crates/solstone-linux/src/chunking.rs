@@ -4,7 +4,6 @@
 use std::collections::VecDeque;
 
 pub const SAMPLE_RATE: u32 = 16_000;
-pub const BLOCK_SIZE: usize = 1_024;
 pub const RMS_THRESHOLD: f32 = 0.01;
 pub const MIN_HITS_FOR_SAVE: usize = 3;
 const MAX_RETAINED_SAMPLES: usize = SAMPLE_RATE as usize * 5;
@@ -241,10 +240,14 @@ mod tests {
 
     #[test]
     fn multi_block_chunk_counts_as_one_hit() {
+        const TEST_BLOCK_SIZE: usize = 1_024;
         let mut accumulator = StereoAccumulator::default();
         for _ in 0..4 {
-            accumulator.push(LegBlock::new(AudioLeg::Microphone, vec![0.5; BLOCK_SIZE]));
-            accumulator.push(LegBlock::new(AudioLeg::System, vec![0.0; BLOCK_SIZE]));
+            accumulator.push(LegBlock::new(
+                AudioLeg::Microphone,
+                vec![0.5; TEST_BLOCK_SIZE],
+            ));
+            accumulator.push(LegBlock::new(AudioLeg::System, vec![0.0; TEST_BLOCK_SIZE]));
         }
         let mut gate = HitGate::default();
         assert!(gate.observe(&accumulator.drain()));
