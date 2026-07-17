@@ -38,7 +38,6 @@ pub struct StoppedStream {
     pub node_id: u32,
     pub connector: String,
     pub position: String,
-    pub file_path: PathBuf,
     pub file_bytes: u64,
 }
 
@@ -76,11 +75,58 @@ pub trait AudioWriter {
         frames: &[f32],
         plan: &AudioOutputPlan,
         directory: &Path,
-    ) -> Result<Vec<PathBuf>, String>;
+    ) -> Result<(), String>;
 }
 pub trait Clock {
     fn wall_seconds(&self) -> f64;
     fn monotonic_seconds(&self) -> f64;
+}
+pub trait CaptureStatsSource {
+    /// Returns a cached value without performing filesystem work on the tick thread.
+    fn snapshot(&mut self, root: &Path, today: &str) -> CaptureStats;
+}
+pub struct BackgroundCaptureStats {
+    requests: std::sync::mpsc::SyncSender<(PathBuf, String)>,
+    results: std::sync::mpsc::Receiver<CaptureStats>,
+    latest: CaptureStats,
+}
+impl BackgroundCaptureStats {
+    pub fn new() -> Self {
+        let (request_tx, request_rx) = std::sync::mpsc::sync_channel::<(PathBuf, String)>(1);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            while let Ok((root, today)) = request_rx.recv() {
+                let _ = result_tx.send(compute_capture_stats(&root, &today));
+            }
+        });
+        Self {
+            requests: request_tx,
+            results: result_rx,
+            latest: CaptureStats {
+                captures_today: 0,
+                total_size_mb: 0,
+            },
+        }
+    }
+}
+impl Default for BackgroundCaptureStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl CaptureStatsSource for BackgroundCaptureStats {
+    fn snapshot(&mut self, root: &Path, today: &str) -> CaptureStats {
+        if let Ok(value) = self.results.try_recv() {
+            self.latest = value;
+        }
+        let _ = self
+            .requests
+            .try_send((root.to_path_buf(), today.to_owned()));
+        CaptureStats {
+            captures_today: self.latest.captures_today,
+            total_size_mb: self.latest.total_size_mb,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HealthBeacon {
@@ -110,7 +156,6 @@ pub struct StreamSilentEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentCompletedEvent {
     pub key: String,
-    pub directory: PathBuf,
 }
 pub trait EventSink {
     fn status(&mut self, fields: Map<String, Value>);
@@ -142,7 +187,7 @@ impl From<io::Error> for ObserverError {
     }
 }
 
-pub struct Backends<V, A, P, M, W, E, C, N> {
+pub struct Backends<V, A, P, M, W, E, C, Q, N> {
     pub video: V,
     pub audio: A,
     pub activity: P,
@@ -150,6 +195,7 @@ pub struct Backends<V, A, P, M, W, E, C, N> {
     pub writer: W,
     pub events: E,
     pub clock: C,
+    pub stats: Q,
     pub states: N,
 }
 
@@ -171,16 +217,16 @@ pub struct ObserverState {
     pub last_stats_refresh: f64,
 }
 
-pub struct Observer<V, A, P, M, W, E, C, N> {
+pub struct Observer<V, A, P, M, W, E, C, Q, N> {
     pub config: Config,
     pub state: ObserverState,
-    pub backends: Backends<V, A, P, M, W, E, C, N>,
+    pub backends: Backends<V, A, P, M, W, E, C, Q, N>,
     pub registration: Registration,
     pub host: String,
     pub platform: String,
 }
 
-impl<V, A, P, M, W, E, C, N> Observer<V, A, P, M, W, E, C, N>
+impl<V, A, P, M, W, E, C, Q, N> Observer<V, A, P, M, W, E, C, Q, N>
 where
     V: VideoCapture,
     A: AudioCapture,
@@ -189,11 +235,12 @@ where
     W: AudioWriter,
     E: EventSink,
     C: Clock,
+    Q: CaptureStatsSource,
     N: StateSink,
 {
     pub fn new(
         config: Config,
-        backends: Backends<V, A, P, M, W, E, C, N>,
+        backends: Backends<V, A, P, M, W, E, C, Q, N>,
         host: String,
         platform: String,
     ) -> Self {
@@ -230,16 +277,7 @@ where
     }
 
     pub fn initialize(&mut self) -> Result<(), ObserverError> {
-        let target = self
-            .backends
-            .activity
-            .probe()
-            .map(|a| {
-                self.state.cached_activity = a;
-                mode(a)
-            })
-            .unwrap_or(Mode::Screencast);
-        self.state.cached_is_muted = self.backends.mute.probe_muted().unwrap_or(false);
+        let target = self.probe_status().unwrap_or(Mode::Screencast);
         self.state.segment_is_muted = self.state.cached_is_muted;
         self.state.cached_is_active = target == Mode::Screencast;
         self.state.mode = target;
@@ -286,47 +324,22 @@ where
         }
         if self.state.segment_dir.is_none() {
             // Deliberate reference parity: resume-reopen ticks do not drain audio.
-            let target = self
-                .backends
-                .activity
-                .probe()
-                .map(|a| {
-                    self.state.cached_activity = a;
-                    mode(a)
-                })
-                .unwrap_or(self.state.mode);
-            self.state.cached_is_muted = self
-                .backends
-                .mute
-                .probe_muted()
-                .unwrap_or(self.state.cached_is_muted);
+            let target = self.probe_status().unwrap_or(self.state.mode);
             self.state.segment_is_muted = self.state.cached_is_muted;
             self.state.mode = target;
-            if let Err(ObserverError::VideoStart(_)) = self.start_capture(target) {
-                // Deliberate reference parity: failed resume start leaves its first .incomplete orphan for recovery.
-                self.start_segment()?;
+            match self.start_capture(target) {
+                Err(ObserverError::VideoStart(_)) => {
+                    // Deliberate reference parity: failed resume start leaves its first .incomplete potentially orphaned for recovery.
+                    self.start_segment()?;
+                }
+                Err(error) => return Err(error),
+                Ok(()) => {}
             }
             self.emit_status();
             self.publish();
             return Ok(());
         }
-        let target = self
-            .backends
-            .activity
-            .probe()
-            .map(|a| {
-                self.state.cached_activity = a;
-                mode(a)
-            })
-            .unwrap_or(self.state.mode);
-        // Deliberate reference parity: activity.active observes hits from before this tick drains.
-        self.state.cached_is_active =
-            target == Mode::Screencast || self.state.hit_gate.should_save();
-        self.state.cached_is_muted = self
-            .backends
-            .mute
-            .probe_muted()
-            .unwrap_or(self.state.cached_is_muted);
+        let target = self.probe_status().unwrap_or(self.state.mode);
         if self.state.mode == Mode::Screencast && !self.backends.video.is_healthy() {
             self.stop_video()?;
             self.state.mode = Mode::Idle;
@@ -404,11 +417,15 @@ where
     fn start_capture(&mut self, target: Mode) -> Result<(), ObserverError> {
         let dir = self.start_segment()?;
         if target == Mode::Screencast && !self.state.cached_activity.screen_locked {
-            self.state.current_streams = self
+            let streams = self
                 .backends
                 .video
                 .start(&dir, self.config.capture_framerate, self.config.draw_cursor)
                 .map_err(ObserverError::VideoStart)?;
+            if streams.is_empty() {
+                return Err(ObserverError::VideoStart("no streams available".into()));
+            }
+            self.state.current_streams = streams;
         }
         Ok(())
     }
@@ -435,7 +452,7 @@ where
         let _ = fs::remove_file(dir.join(".metadata"));
         let nonempty = fs::read_dir(&dir)?.any(|e| e.is_ok_and(|x| x.path().is_file()));
         if !nonempty {
-            fs::remove_dir(&dir)?;
+            let _ = fs::remove_dir(&dir);
             return Ok(());
         }
         let (_, time) = timestamp_parts(self.state.segment_start_wall);
@@ -444,13 +461,10 @@ where
             self.config.segment_interval.max(1) as u64,
         );
         let key = segment_key(&time, duration);
-        let final_dir = finalize_segment_dir(&dir, &key)?;
+        let _final_dir = finalize_segment_dir(&dir, &key)?;
         self.backends
             .events
-            .segment_completed(SegmentCompletedEvent {
-                key,
-                directory: final_dir,
-            });
+            .segment_completed(SegmentCompletedEvent { key });
         Ok(())
     }
     fn stop_video(&mut self) -> Result<(), ObserverError> {
@@ -492,7 +506,21 @@ where
     }
     fn refresh_stats(&mut self) {
         let (today, _) = timestamp_parts(self.backends.clock.wall_seconds());
-        self.state.capture_stats = compute_capture_stats(&self.config.captures_dir(), &today);
+        self.state.capture_stats = self
+            .backends
+            .stats
+            .snapshot(&self.config.captures_dir(), &today);
+    }
+    fn probe_status(&mut self) -> Result<Mode, String> {
+        let activity = self.backends.activity.probe()?;
+        let muted = self.backends.mute.probe_muted()?;
+        self.state.cached_activity = activity;
+        self.state.cached_is_muted = muted;
+        let target = mode(activity);
+        // Deliberate reference parity: activity.active observes hits from before this tick drains.
+        self.state.cached_is_active =
+            target == Mode::Screencast || self.state.hit_gate.should_save();
+        Ok(target)
     }
     fn emit_status(&mut self) {
         let hits = self.state.hit_gate.hits();
@@ -506,9 +534,42 @@ where
                 Mode::Screencast => "screencast",
             }),
         );
-        m.insert("screencast".into(),json!({"recording":self.state.mode==Mode::Screencast&&!self.state.current_streams.is_empty()}));
-        m.insert("audio".into(),json!({"threshold_hits":hits,"will_save":self.state.hit_gate.should_save(),"available":self.backends.audio.audio_available()}));
-        m.insert("activity".into(),json!({"active":self.state.cached_is_active,"screen_locked":self.state.cached_activity.screen_locked,"sink_muted":self.state.cached_is_muted,"power_save":self.state.cached_activity.power_save}));
+        let screencast =
+            if self.state.mode == Mode::Screencast && !self.state.current_streams.is_empty() {
+                let streams: Vec<_> = self
+                    .state
+                    .current_streams
+                    .iter()
+                    .map(|stream| {
+                        json!({
+                            "position": stream.position,
+                            "connector": stream.connector,
+                            "file": stream.file_path,
+                        })
+                    })
+                    .collect();
+                json!({"recording": true, "streams": streams, "window_elapsed_seconds": elapsed})
+            } else {
+                json!({"recording": false})
+            };
+        m.insert("screencast".into(), screencast);
+        m.insert(
+            "audio".into(),
+            json!({
+                "threshold_hits": hits,
+                "will_save": self.state.hit_gate.should_save(),
+                "available": self.backends.audio.audio_available(),
+            }),
+        );
+        m.insert(
+            "activity".into(),
+            json!({
+                "active": self.state.cached_is_active,
+                "screen_locked": self.state.cached_activity.screen_locked,
+                "sink_muted": self.state.cached_is_muted,
+                "power_save": self.state.cached_activity.power_save,
+            }),
+        );
         m.insert("host".into(), json!(self.host));
         m.insert("platform".into(), json!(self.platform));
         m.insert("paused".into(), json!(self.state.paused));
@@ -544,22 +605,33 @@ fn mode(a: ActivityState) -> Mode {
     }
 }
 
-/// Runs recovery only after setup succeeds; backend construction remains a later lode.
-pub fn recover_after_setup(
+/// Reference lifecycle policy. Session readiness (exit 75) remains owned by `cli`.
+pub fn lifecycle<Setup, Recover, Run, Clean, Fatal>(
     config: &Config,
-    setup_ok: bool,
-    now: f64,
-    probe: &dyn crate::recovery::MediaDurationProbe,
-) -> u64 {
-    if !setup_ok {
-        return 0;
+    setup: Setup,
+    mut recover: Recover,
+    run: Run,
+    cleanup: Clean,
+    audio_fatal: Fatal,
+) -> i32
+where
+    Setup: FnOnce() -> bool,
+    Recover: FnMut(&Path, i64),
+    Run: FnOnce() -> Result<(), ObserverError>,
+    Clean: FnOnce() -> Result<(), ObserverError>,
+    Fatal: FnOnce() -> bool,
+{
+    if !setup() {
+        return 1;
     }
-    crate::recovery::recover_incomplete_segments(
-        &config.captures_dir(),
-        config.segment_interval.max(1) as u64,
-        now,
-        probe,
-    )
+    recover(&config.captures_dir(), config.segment_interval);
+    let run_result = run();
+    let cleanup_result = cleanup();
+    if run_result.is_err() || cleanup_result.is_err() || audio_fatal() {
+        1
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -577,10 +649,13 @@ mod tests {
     struct FakeClock {
         wall: Rc<Cell<f64>>,
         mono: Rc<Cell<f64>>,
+        wall_step: Rc<Cell<f64>>,
     }
     impl Clock for FakeClock {
         fn wall_seconds(&self) -> f64 {
-            self.wall.get()
+            let value = self.wall.get();
+            self.wall.set(value + self.wall_step.get());
+            value
         }
         fn monotonic_seconds(&self) -> f64 {
             self.mono.get()
@@ -591,6 +666,8 @@ mod tests {
         starts: Rc<Cell<usize>>,
         stops: Rc<Cell<usize>>,
         fail_start: bool,
+        empty_start: bool,
+        fail_stop: bool,
         stopped: Vec<StoppedStream>,
     }
     impl VideoCapture for FakeVideo {
@@ -598,6 +675,9 @@ mod tests {
             self.starts.set(self.starts.get() + 1);
             if self.fail_start {
                 return Err("start".into());
+            }
+            if self.empty_start {
+                return Ok(vec![]);
             }
             fs::write(d.join("screen.webm"), b"video").unwrap();
             Ok(vec![VideoStream {
@@ -607,6 +687,9 @@ mod tests {
             }])
         }
         fn stop(&mut self) -> Result<Vec<StoppedStream>, String> {
+            if self.fail_stop {
+                return Err("stop".into());
+            }
             self.stops.set(self.stops.get() + 1);
             Ok(std::mem::take(&mut self.stopped))
         }
@@ -620,6 +703,20 @@ mod tests {
         available: bool,
         fatal: Option<String>,
         stopped: Rc<Cell<bool>>,
+        probe_release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        probe_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl FakeAudio {
+        fn start_hanging_probe(&self) -> std::thread::JoinHandle<()> {
+            let release = self.probe_release.clone();
+            let started = self.probe_started.clone();
+            std::thread::spawn(move || {
+                started.store(true, std::sync::atomic::Ordering::Release);
+                while !release.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            })
+        }
     }
     impl AudioCapture for FakeAudio {
         fn drain(&mut self) -> DrainedChunk {
@@ -649,22 +746,29 @@ mod tests {
         }
     }
     #[derive(Clone, Default)]
-    struct Writes(Rc<RefCell<Vec<AudioOutputPlan>>>);
+    struct Writes(Rc<RefCell<Vec<AudioOutputPlan>>>, Rc<Cell<bool>>);
     impl AudioWriter for Writes {
-        fn write(
-            &mut self,
-            _: &[f32],
-            p: &AudioOutputPlan,
-            d: &Path,
-        ) -> Result<Vec<PathBuf>, String> {
+        fn write(&mut self, _: &[f32], p: &AudioOutputPlan, d: &Path) -> Result<(), String> {
+            if self.1.get() {
+                return Err("write".into());
+            }
             self.0.borrow_mut().push(p.clone());
-            let mut out = vec![];
             for f in &p.files {
                 let path = d.join(f.filename);
                 fs::write(&path, b"flac").unwrap();
-                out.push(path)
             }
-            Ok(out)
+            Ok(())
+        }
+    }
+    #[derive(Clone, Default)]
+    struct FakeStats(Rc<Cell<usize>>);
+    impl CaptureStatsSource for FakeStats {
+        fn snapshot(&mut self, _: &Path, _: &str) -> CaptureStats {
+            self.0.set(self.0.get() + 1);
+            CaptureStats {
+                captures_today: self.0.get() as u64,
+                total_size_mb: 7,
+            }
         }
     }
     #[derive(Clone, Default)]
@@ -672,15 +776,19 @@ mod tests {
         statuses: Rc<RefCell<Vec<Map<String, Value>>>>,
         silent: Rc<RefCell<Vec<StreamSilentEvent>>>,
         completed: Rc<RefCell<Vec<SegmentCompletedEvent>>>,
+        order: Rc<RefCell<Vec<&'static str>>>,
     }
     impl EventSink for Events {
         fn status(&mut self, v: Map<String, Value>) {
+            self.order.borrow_mut().push("status");
             self.statuses.borrow_mut().push(v)
         }
         fn stream_silent(&mut self, v: StreamSilentEvent) {
+            self.order.borrow_mut().push("silent");
             self.silent.borrow_mut().push(v)
         }
         fn segment_completed(&mut self, v: SegmentCompletedEvent) {
+            self.order.borrow_mut().push("completed");
             self.completed.borrow_mut().push(v)
         }
     }
@@ -691,13 +799,23 @@ mod tests {
             self.0.borrow_mut().push(s)
         }
     }
-    type TestObserver =
-        Observer<FakeVideo, FakeAudio, FakeActivity, FakeMute, Writes, Events, FakeClock, States>;
+    type TestObserver = Observer<
+        FakeVideo,
+        FakeAudio,
+        FakeActivity,
+        FakeMute,
+        Writes,
+        Events,
+        FakeClock,
+        FakeStats,
+        States,
+    >;
     struct Fixture {
         _temp: tempfile::TempDir,
         observer: TestObserver,
         wall: Rc<Cell<f64>>,
         mono: Rc<Cell<f64>>,
+        wall_step: Rc<Cell<f64>>,
         starts: Rc<Cell<usize>>,
         stops: Rc<Cell<usize>>,
         drains: Rc<Cell<usize>>,
@@ -705,6 +823,7 @@ mod tests {
         writes: Writes,
         events: Events,
         states: States,
+        stats: FakeStats,
     }
     fn active() -> ActivityState {
         ActivityState {
@@ -731,6 +850,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let wall = Rc::new(Cell::new(1_700_000_000.0));
         let mono = Rc::new(Cell::new(0.0));
+        let wall_step = Rc::new(Cell::new(0.0));
         let starts = Rc::new(Cell::new(0));
         let stops = Rc::new(Cell::new(0));
         let drains = Rc::new(Cell::new(0));
@@ -738,6 +858,7 @@ mod tests {
         let writes = Writes::default();
         let events = Events::default();
         let states = States::default();
+        let stats = FakeStats::default();
         let mut config = Config {
             base_dir: temp.path().into(),
             stream: "desk".into(),
@@ -751,6 +872,8 @@ mod tests {
                 starts: starts.clone(),
                 stops: stops.clone(),
                 fail_start: false,
+                empty_start: false,
+                fail_stop: false,
                 stopped: vec![],
             },
             audio: FakeAudio {
@@ -759,6 +882,8 @@ mod tests {
                 available: true,
                 fatal: None,
                 stopped: audio_stopped.clone(),
+                probe_release: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                probe_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             activity: FakeActivity(VecDeque::new()),
             mute: FakeMute(VecDeque::new()),
@@ -767,7 +892,9 @@ mod tests {
             clock: FakeClock {
                 wall: wall.clone(),
                 mono: mono.clone(),
+                wall_step: wall_step.clone(),
             },
+            stats: stats.clone(),
             states: states.clone(),
         };
         Fixture {
@@ -775,6 +902,7 @@ mod tests {
             observer: Observer::new(config, backends, "host".into(), "linux".into()),
             wall,
             mono,
+            wall_step,
             starts,
             stops,
             drains,
@@ -782,6 +910,7 @@ mod tests {
             writes,
             events,
             states,
+            stats,
         }
     }
     fn initialize(f: &mut Fixture) {
@@ -805,7 +934,9 @@ mod tests {
         assert!(g.observe(&a.drain()));
     }
 
-    // No 1:1 Python ancestor: AC2 interval boundary and wall/monotonic separation.
+    // tests/test_observer.py::test_finalize_segment_clamps_duration_to_interval
+    // tests/test_observer.py::test_finalize_segment_floor_is_one
+    // No 1:1 Python ancestor: AC2 wall/monotonic separation.
     #[test]
     fn interval_uses_monotonic_and_wall_jump_does_not_rotate() {
         let mut f = fixture(false);
@@ -826,8 +957,10 @@ mod tests {
         f.observer.backends.mute.0.push_back(Ok(true));
         f.observer.tick().unwrap();
         assert_eq!(f.events.completed.borrow().len(), 1);
-        assert_eq!(f.events.statuses.borrow().len(), 1)
+        assert_eq!(f.events.statuses.borrow().len(), 1);
+        assert_eq!(&*f.events.order.borrow(), &["completed", "status"])
     }
+    // tests/test_observer.py::test_start_paused_false_starts_capture
     // No 1:1 Python ancestor: AC2 screencast entry and exit triggers.
     #[test]
     fn screencast_entry_and_exit_rotate() {
@@ -839,7 +972,8 @@ mod tests {
         assert_eq!(f.starts.get(), 1);
         f.observer.backends.activity.0.push_back(Ok(idle()));
         f.observer.tick().unwrap();
-        assert_eq!(f.stops.get(), 1)
+        assert_eq!(f.stops.get(), 1);
+        assert_eq!(f.events.completed.borrow().len(), 1)
     }
     // tests/test_observer.py::test_save_audio_segment_unmuted_writes_combined
     #[test]
@@ -852,6 +986,7 @@ mod tests {
         }
         f.observer.handle_boundary(Mode::Screencast).unwrap();
         assert!(f.writes.0.borrow().is_empty());
+        assert_eq!(f.observer.state.hit_gate.hits(), 0);
         f.wall.set(f.wall.get() + 2.0);
         for _ in 0..3 {
             f.observer.backends.audio.chunks.push_back(chunk(0.02));
@@ -878,7 +1013,8 @@ mod tests {
         drop(w);
         assert!(f.observer.state.segment_is_muted)
     }
-    // tests/test_observer.py::test_observer_init_not_paused; test_start_paused_true_skips_initial_capture
+    // tests/test_observer.py::test_observer_init_not_paused
+    // tests/test_observer.py::test_start_paused_true_skips_initial_capture
     #[test]
     fn start_paused_is_observable_and_has_no_segment() {
         let mut f = fixture(true);
@@ -953,14 +1089,12 @@ mod tests {
                 node_id: 1,
                 connector: "x".into(),
                 position: "left".into(),
-                file_path: "x".into(),
                 file_bytes: 2047,
             },
             StoppedStream {
                 node_id: 2,
                 connector: "y".into(),
                 position: "right".into(),
-                file_path: "y".into(),
                 file_bytes: 2048,
             },
         ];
@@ -968,6 +1102,10 @@ mod tests {
         f.observer.handle_boundary(Mode::Idle).unwrap();
         let s = f.events.silent.borrow();
         assert_eq!(s.len(), 1);
+        assert_eq!(s[0].connector, "x");
+        assert_eq!(s[0].position, "left");
+        assert_eq!(s[0].node_id, 1);
+        assert_eq!(s[0].file_bytes, 2047);
         assert!(s[0].segment_dir.ends_with(".incomplete"));
         assert_eq!(s[0].duration_seconds, 400);
         assert_eq!(
@@ -975,7 +1113,7 @@ mod tests {
             (&"host".into(), &"linux".into())
         )
     }
-    // tests/test_observer.py::test_initial_screencast_failure_runs_shutdown_and_propagates
+    // No 1:1 Python ancestor: startup activity failure defaults to screencast.
     #[test]
     fn startup_activity_failure_defaults_screencast_and_start_failure_is_fatal() {
         let mut f = fixture(false);
@@ -990,26 +1128,48 @@ mod tests {
             Err(ObserverError::VideoStart(_))
         ))
     }
+    // No 1:1 Python ancestor: empty stream lists follow initialize_screencast's RuntimeError policy.
+    #[test]
+    fn empty_streams_are_fatal_at_boundary_and_fall_back_on_resume() {
+        let mut fatal = fixture(false);
+        initialize(&mut fatal);
+        fatal.observer.backends.video.empty_start = true;
+        assert!(matches!(
+            fatal.observer.handle_boundary(Mode::Screencast),
+            Err(ObserverError::VideoStart(_))
+        ));
+        let mut resume = fixture(true);
+        initialize(&mut resume);
+        resume.observer.resume();
+        resume.observer.backends.video.empty_start = true;
+        resume.observer.tick().unwrap();
+        assert!(resume.observer.state.segment_dir.is_some());
+    }
     // No 1:1 Python ancestor: AC7 regular and resume activity failures keep mode.
     #[test]
     fn activity_failure_regular_and_resume_keep_mode() {
         let mut f = fixture(false);
         initialize(&mut f);
         f.observer.backends.activity.0.push_back(Err("x".into()));
+        f.observer.backends.mute.0.push_back(Ok(true));
         f.observer.tick().unwrap();
         assert_eq!(f.observer.state.mode, Mode::Screencast);
+        assert!(!f.observer.state.cached_is_muted);
+        assert_eq!(f.observer.backends.mute.0.len(), 1);
         f.observer.state.segment_dir = None;
         f.observer.backends.activity.0.push_back(Err("x".into()));
         f.observer.tick().unwrap();
-        assert_eq!(f.observer.state.mode, Mode::Screencast)
+        assert_eq!(f.observer.state.mode, Mode::Screencast);
+        assert!(!f.observer.state.cached_is_muted)
     }
-    // No 1:1 Python ancestor: AC7 resume start failure is audio-only double-start fallback.
+    // No 1:1 Python ancestor: AC7 resume failure calls start_segment twice, potentially orphaning the first directory.
     #[test]
     fn resume_reopen_failure_falls_back_and_double_starts() {
         let mut f = fixture(true);
         initialize(&mut f);
         f.observer.resume();
         f.observer.backends.video.fail_start = true;
+        f.wall_step.set(1.0);
         f.observer.tick().unwrap();
         assert_eq!(f.starts.get(), 1);
         assert!(f.observer.state.segment_dir.is_some());
@@ -1025,7 +1185,7 @@ mod tests {
             )
             .unwrap()
             .count(),
-            1
+            2
         )
     }
     // tests/test_observer.py::test_async_run_returns_1_when_audio_recorder_has_fatal_error
@@ -1041,6 +1201,84 @@ mod tests {
         assert!(f.audio_stopped.get());
         assert!(f.observer.state.segment_dir.is_none())
     }
+    // tests/test_observer.py::test_async_run_returns_1_when_main_loop_runtime_error
+    // tests/test_observer.py::test_async_run_returns_0_on_normal_main_loop_return
+    // tests/test_observer.py::test_async_run_returns_0_when_audio_degraded_no_fatal
+    #[test]
+    fn lifecycle_maps_outcomes_and_always_cleans_after_run() {
+        let f = fixture(false);
+        let cleaned = Rc::new(Cell::new(false));
+        let clean = cleaned.clone();
+        assert_eq!(
+            lifecycle(
+                &f.observer.config,
+                || true,
+                |_, _| {},
+                || Err(ObserverError::VideoStart("x".into())),
+                move || {
+                    clean.set(true);
+                    Ok(())
+                },
+                || false
+            ),
+            1
+        );
+        assert!(cleaned.get());
+        assert_eq!(
+            lifecycle(
+                &f.observer.config,
+                || true,
+                |_, _| {},
+                || Ok(()),
+                || Ok(()),
+                || false
+            ),
+            0
+        );
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let cleaned = order.clone();
+        let checked = order.clone();
+        assert_eq!(
+            lifecycle(
+                &f.observer.config,
+                || true,
+                |_, _| {},
+                || Ok(()),
+                move || {
+                    cleaned.borrow_mut().push("cleanup");
+                    Ok(())
+                },
+                move || {
+                    checked.borrow_mut().push("fatal");
+                    true
+                }
+            ),
+            1
+        );
+        assert_eq!(&*order.borrow(), &["cleanup", "fatal"]);
+    }
+    // tests/test_observer.py::test_initial_screencast_failure_runs_shutdown_and_propagates
+    #[test]
+    fn lifecycle_initial_capture_failure_runs_cleanup() {
+        let f = fixture(false);
+        let cleaned = Rc::new(Cell::new(false));
+        let seen = cleaned.clone();
+        let code = lifecycle(
+            &f.observer.config,
+            || true,
+            |_, _| {},
+            || Err(ObserverError::VideoStart("portal".into())),
+            move || {
+                seen.set(true);
+                Ok(())
+            },
+            || false,
+        );
+        assert_eq!(code, 1);
+        assert!(cleaned.get());
+    }
+    // tests/test_observer_health_beacon.py::test_registered_first_emit_includes_all_health_fields_top_level
+    // tests/test_observer_health_beacon.py::test_periodic_reemit_carries_same_health_fields
     // tests/test_observer_health_beacon.py::test_health_fields_exclude_captured_content_and_extra_health_keys
     #[test]
     fn registered_status_has_exact_flat_health_set() {
@@ -1080,9 +1318,23 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             health
         );
-        assert!(!keys.contains("health"))
+        assert!(!keys.contains("health"));
+        let status = s.last().unwrap();
+        assert_eq!(status["name"], "desk");
+        assert_eq!(status["stream_type"], "computer");
+        assert_eq!(status["version"], "1");
+        assert!(status["uptime"].is_i64());
+        assert_eq!(status["screencast"]["recording"], true);
+        assert_eq!(status["screencast"]["streams"][0]["connector"], "HDMI-1");
+        assert_eq!(status["screencast"]["streams"][0]["position"], "left");
+        assert_eq!(status["screencast"]["streams"][0]["file"], "screen.webm");
+        assert!(status["screencast"]["window_elapsed_seconds"].is_i64());
+        assert!(status["last_successful_sync"].is_null());
+        assert_eq!(status["recent_error_count"], 0)
     }
+    // tests/test_observer.py::test_emit_status_audio_available_reflects_recorder
     // tests/test_observer_health_beacon.py::test_unregistered_observer_emits_base_status_without_health_fields
+    // tests/test_observer_health_beacon.py::test_status_includes_paused_state
     #[test]
     fn status_every_tick_including_paused_and_resume_and_active_uses_stale_hits() {
         let mut f = fixture(false);
@@ -1096,11 +1348,20 @@ mod tests {
         let s = f.events.statuses.borrow();
         assert_eq!(s[2]["activity"]["active"], false);
         drop(s);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.backends.audio.available = false;
+        f.observer.tick().unwrap();
+        let s = f.events.statuses.borrow();
+        assert_eq!(s[3]["activity"]["active"], true);
+        assert_eq!(s[3]["audio"]["available"], false);
+        drop(s);
         f.observer.pause(0);
         f.observer.tick().unwrap();
+        assert_eq!(f.events.statuses.borrow().last().unwrap()["paused"], true);
         f.observer.resume();
         f.observer.tick().unwrap();
-        assert_eq!(f.events.statuses.borrow().len(), 5)
+        assert_eq!(f.events.statuses.borrow().last().unwrap()["paused"], false);
+        assert_eq!(f.events.statuses.borrow().len(), 6)
     }
     // tests/test_observer_emits_stream_silent_event.py::test_segment_dir_empty_when_none
     #[test]
@@ -1112,7 +1373,6 @@ mod tests {
             node_id: 1,
             connector: "x".into(),
             position: "p".into(),
-            file_path: "x".into(),
             file_bytes: 1,
         });
         let s = f.events.silent.borrow();
@@ -1131,22 +1391,49 @@ mod tests {
         assert!(!dir.exists());
         assert_eq!(f.events.completed.borrow().len(), 1)
     }
+    // No 1:1 Python ancestor: empty cleanup races are nonfatal like observer.py:322-330.
+    #[test]
+    fn empty_segment_rmdir_failure_is_nonfatal() {
+        let mut f = fixture(true);
+        initialize(&mut f);
+        f.observer.resume();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
+        fs::create_dir(
+            f.observer
+                .state
+                .segment_dir
+                .as_ref()
+                .unwrap()
+                .join("racing-child"),
+        )
+        .unwrap();
+        f.observer.finalize_segment().unwrap();
+        assert!(f.events.completed.borrow().is_empty())
+    }
     // tests/test_observer.py::test_hanging_redetect_does_not_block_tick
     #[test]
     fn hung_audio_probe_does_not_block_tick() {
-        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let worker_release = release.clone();
-        let handle = std::thread::spawn(move || {
-            while !worker_release.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::yield_now()
-            }
-        });
         let mut f = fixture(false);
         initialize(&mut f);
+        let handle = f.observer.backends.audio.start_hanging_probe();
+        while !f
+            .observer
+            .backends
+            .audio
+            .probe_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            std::thread::yield_now();
+        }
         let began = Instant::now();
         f.observer.tick().unwrap();
         assert!(began.elapsed().as_millis() < 200);
-        release.store(true, std::sync::atomic::Ordering::Relaxed);
+        f.observer
+            .backends
+            .audio
+            .probe_release
+            .store(true, std::sync::atomic::Ordering::Release);
         handle.join().unwrap()
     }
     // No 1:1 Python ancestor: AC12 Observer::shutdown() is the deterministic seam a signal handler will call.
@@ -1162,6 +1449,33 @@ mod tests {
         assert_eq!(f.writes.0.borrow().len(), 1);
         assert_eq!(f.events.completed.borrow().len(), 1)
     }
+    // No 1:1 Python ancestor: typed backend/filesystem failures remain distinguishable.
+    #[test]
+    fn typed_stop_write_and_io_errors_propagate() {
+        let mut stop = fixture(false);
+        initialize(&mut stop);
+        stop.observer.backends.video.fail_stop = true;
+        assert!(matches!(
+            stop.observer.shutdown(),
+            Err(ObserverError::VideoStop(_))
+        ));
+        let mut write = fixture(false);
+        initialize(&mut write);
+        for _ in 0..3 {
+            write.observer.backends.audio.chunks.push_back(chunk(0.02));
+            write.observer.tick().unwrap();
+        }
+        write.observer.backends.writer.1.set(true);
+        assert!(matches!(
+            write.observer.shutdown(),
+            Err(ObserverError::AudioWrite(_))
+        ));
+        let mut io = fixture(true);
+        io.observer.resume();
+        fs::write(io.observer.config.captures_dir(), b"blocker").unwrap();
+        let result = io.observer.tick();
+        assert!(matches!(result, Err(ObserverError::Io(_))), "{result:?}");
+    }
     // No 1:1 Python ancestor: AC14 first/60s/paused stats and snapshot.
     #[test]
     fn stats_first_tick_then_sixty_seconds_and_while_paused() {
@@ -1170,16 +1484,16 @@ mod tests {
         f.observer.pause(0);
         f.observer.tick().unwrap();
         assert_eq!(f.observer.state.last_stats_refresh, 0.0);
+        assert_eq!(f.stats.0.get(), 1);
         f.mono.set(59.0);
         f.observer.tick().unwrap();
         assert_eq!(f.observer.state.last_stats_refresh, 0.0);
+        assert_eq!(f.stats.0.get(), 1);
         f.mono.set(60.0);
         f.observer.tick().unwrap();
         assert_eq!(f.observer.state.last_stats_refresh, 60.0);
-        assert_eq!(
-            f.states.0.borrow().last().unwrap().captures_today,
-            f.observer.state.capture_stats.captures_today
-        )
+        assert_eq!(f.stats.0.get(), 2);
+        assert_eq!(f.states.0.borrow().last().unwrap().captures_today, 2)
     }
     // tests/test_observer.py::test_pause_state_fields_exist; AC15 ordered subscription.
     #[test]
@@ -1188,52 +1502,84 @@ mod tests {
         initialize(&mut f);
         f.observer.pause(0);
         f.observer.resume();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
         let states = f.states.0.borrow();
         assert_eq!(
-            states.iter().map(|s| s.paused).collect::<Vec<_>>(),
-            vec![false, true, false]
-        )
+            states
+                .iter()
+                .map(|s| (s.mode, s.paused, s.segment_open))
+                .collect::<Vec<_>>(),
+            vec![
+                (Mode::Screencast, false, true),
+                (Mode::Screencast, true, true),
+                (Mode::Screencast, false, true),
+                (Mode::Idle, false, true)
+            ]
+        );
+        assert_eq!(states.last().unwrap().total_size_mb, 7)
     }
-    // tests/test_observer.py::test_async_run_returns_0_on_normal_main_loop_return; test_async_run_returns_1_and_skips_recovery_when_setup_fails
+    // tests/test_observer.py::test_async_run_returns_0_on_normal_main_loop_return
+    // tests/test_observer.py::test_async_run_returns_1_and_skips_recovery_when_setup_fails
     #[test]
     fn recovery_runs_once_with_interval_and_skips_setup_failure() {
-        struct Probe;
-        impl crate::recovery::MediaDurationProbe for Probe {
-            fn duration(&self, _: &Path) -> Option<f64> {
-                None
-            }
-        }
         let f = fixture(false);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let recorded = calls.clone();
         assert_eq!(
-            recover_after_setup(&f.observer.config, false, f.wall.get(), &Probe),
+            lifecycle(
+                &f.observer.config,
+                || true,
+                move |path, ceiling| recorded.borrow_mut().push((path.to_path_buf(), ceiling)),
+                || Ok(()),
+                || Ok(()),
+                || false
+            ),
             0
         );
+        assert_eq!(&*calls.borrow(), &[(f.observer.config.captures_dir(), 300)]);
+        let skipped = Rc::new(Cell::new(0));
+        let seen = skipped.clone();
         assert_eq!(
-            recover_after_setup(&f.observer.config, true, f.wall.get(), &Probe),
-            0
-        )
+            lifecycle(
+                &f.observer.config,
+                || false,
+                move |_, _| seen.set(seen.get() + 1),
+                || Ok(()),
+                || Ok(()),
+                || false
+            ),
+            1
+        );
+        assert_eq!(skipped.get(), 0)
     }
     // AC 11: audit imports rather than prose, so comments cannot false-positive.
     #[test]
     fn observer_dependency_surface_contains_no_network_backend() {
         let source = include_str!("observer.rs");
-        let uses: Vec<_> = source
-            .lines()
-            .filter(|line| line.trim_start().starts_with("use "))
-            .collect();
+        let mut uses = Vec::new();
+        let mut current = String::new();
+        for line in source.lines().map(str::trim) {
+            if !current.is_empty() || line.starts_with("use ") {
+                current.push_str(line);
+            }
+            if !current.is_empty() && line.ends_with(';') {
+                uses.push(std::mem::take(&mut current));
+            }
+        }
         for forbidden in ["reqwest", "hyper", "socket", "upload", "sync"] {
             assert!(
-                !uses.iter().any(|line| line.contains(forbidden)),
+                !uses.iter().any(|statement| statement.contains(forbidden)),
                 "{forbidden}"
             );
         }
         let manifest = include_str!("../Cargo.toml");
+        let manifest_code: String = manifest
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or(""))
+            .collect();
         for forbidden in ["reqwest", "hyper", "ureq", "curl"] {
-            assert!(
-                !manifest
-                    .lines()
-                    .any(|line| line.trim_start().starts_with(forbidden))
-            );
+            assert!(!manifest_code.contains(forbidden));
         }
     }
 }
