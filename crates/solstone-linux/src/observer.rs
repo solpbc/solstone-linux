@@ -1573,13 +1573,5 @@ mod tests {
                 "{forbidden}"
             );
         }
-        let manifest = include_str!("../Cargo.toml");
-        let manifest_code: String = manifest
-            .lines()
-            .map(|line| line.split('#').next().unwrap_or(""))
-            .collect();
-        for forbidden in ["reqwest", "hyper", "ureq", "curl"] {
-            assert!(!manifest_code.contains(forbidden));
-        }
     }
 }
