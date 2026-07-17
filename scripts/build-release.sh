@@ -36,6 +36,17 @@ if [[ "$ARCH" != "x86_64" ]]; then
   exit 2
 fi
 
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "error: run this script from a solstone-linux Git checkout" >&2
+  exit 1
+}
+cd "$REPO_ROOT"
+
+if ! git diff --quiet HEAD || [[ -n "$(git status --porcelain)" ]]; then
+  echo "error: working tree dirty; commit or stash changes before building release artifacts" >&2
+  exit 1
+fi
+
 if command -v podman >/dev/null 2>&1; then
   ENGINE="podman"
 elif command -v docker >/dev/null 2>&1; then
@@ -44,12 +55,6 @@ else
   echo "error: podman or docker is required to build Rust release artifacts" >&2
   exit 1
 fi
-
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
-  echo "error: run this script from a solstone-linux Git checkout" >&2
-  exit 1
-}
-cd "$REPO_ROOT"
 
 OUTPUT_TMP=$(mktemp -d)
 trap 'rm -rf "$OUTPUT_TMP"' EXIT
@@ -78,12 +83,35 @@ fi
 
 TARBALL_VERSION=${TARBALLS[0]##*/solstone-linux-}
 TARBALL_VERSION=${TARBALL_VERSION%-linux-x86_64.tar.gz}
-if [[ "${PACKAGES[0]##*/}" != *"$TARBALL_VERSION"* ]]; then
+case "$FORMAT" in
+  deb) EXPECTED_PACKAGE="solstone-linux_${TARBALL_VERSION}-1_amd64.deb" ;;
+  rpm) EXPECTED_PACKAGE="solstone-linux-${TARBALL_VERSION}-1.x86_64.rpm" ;;
+esac
+if [[ "${PACKAGES[0]##*/}" != "$EXPECTED_PACKAGE" ]]; then
   echo "error: package and tarball versions do not match" >&2
   exit 1
 fi
 
+check_artifact() {
+  local source="$1"
+  local destination="dist/rust/${source##*/}"
+  if [[ -e "$destination" ]] && ! cmp -s "$source" "$destination"; then
+    echo "error: refusing to overwrite existing artifact with different bytes: $destination" >&2
+    exit 1
+  fi
+}
+
 mkdir -p dist/rust
-install -m 0644 "${TARBALLS[0]}" "dist/rust/${TARBALLS[0]##*/}"
-install -m 0644 "${PACKAGES[0]}" "dist/rust/${PACKAGES[0]##*/}"
+ARTIFACTS=("${TARBALLS[0]}" "${PACKAGES[0]}")
+for ARTIFACT in "${ARTIFACTS[@]}"; do
+  check_artifact "$ARTIFACT"
+done
+for ARTIFACT in "${ARTIFACTS[@]}"; do
+  DESTINATION="dist/rust/${ARTIFACT##*/}"
+  if [[ -e "$DESTINATION" ]]; then
+    echo "keeping byte-identical existing artifact: $DESTINATION"
+  else
+    install -m 0644 "$ARTIFACT" "$DESTINATION"
+  fi
+done
 echo "built Rust $FORMAT artifacts for version $TARBALL_VERSION in dist/rust/"

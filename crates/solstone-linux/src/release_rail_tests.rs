@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 
 use toml::Value;
 
-const VERSION: &str = "0.1.0";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -118,6 +118,29 @@ fn package_metadata_and_resolved_licenses() {
     let rpm = &member["package"]["metadata"]["generate-rpm"];
     assert_eq!(rpm["license"].as_str(), Some("AGPL-3.0-only"));
     assert_eq!(rpm["auto-req"].as_str(), Some("auto"));
+
+    let flac = &member["dependencies"]["flac-bound"];
+    assert_eq!(flac["default-features"].as_bool(), Some(false));
+    assert_eq!(
+        flac["features"].as_array().unwrap(),
+        &[Value::String("libflac-noogg".into())]
+    );
+}
+
+// AC: both supported container engines share one ignore policy that excludes
+// host build products without hiding the canonical icon sources.
+#[test]
+fn container_context_excludes_host_outputs() {
+    let root = workspace_root();
+    assert_eq!(
+        fs::read_link(root.join(".dockerignore")).unwrap(),
+        PathBuf::from(".containerignore")
+    );
+    let ignore = fs::read_to_string(root.join(".containerignore")).unwrap();
+    for excluded in ["target/", "dist/", ".venv/", "**/__pycache__/"] {
+        assert!(ignore.lines().any(|line| line == excluded));
+    }
+    assert!(!ignore.lines().any(|line| line.contains("contrib")));
 }
 
 // AC: each tool's asset dialect resolves to the same committed files plus the

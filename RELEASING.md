@@ -2,8 +2,7 @@
 
 The Rust release rail is operator-run and separate from the Python/PyPI rail.
 It produces portable, Debian, and RPM artifacts; it does not publish, tag, or
-create a hosted release. Releases remain manual by policy—do not add CI/CD
-publishing for this repository.
+create a hosted release. Releases remain an operator-run process.
 
 ## 1. Host prerequisites
 
@@ -21,9 +20,9 @@ The Rust version comes from `[workspace.package].version` and the member's
 `version.workspace = true`. It is independent of the Python package version.
 Every artifact is written below `dist/rust/` and contains the Rust version:
 
-- `solstone-linux-0.1.0-linux-x86_64.tar.gz`
-- `solstone-linux_0.1.0-1_amd64.deb`
-- `solstone-linux-0.1.0-1.x86_64.rpm`
+- `solstone-linux-<VERSION>-linux-x86_64.tar.gz`
+- `solstone-linux_<VERSION>-1_amd64.deb`
+- `solstone-linux-<VERSION>-1.x86_64.rpm`
 
 ## 3. Build commands
 
@@ -57,18 +56,18 @@ rpm -qpl dist/rust/solstone-linux-*-1.x86_64.rpm
 sha256sum dist/rust/*
 ```
 
-Confirm that each artifact contains the binary, LICENSE, INSTALL-NOTES, and all
-13 icons. It must contain no systemd unit and no desktop file.
+Confirm that each artifact contains the binary, LICENSE, INSTALL-NOTES, and the
+icon set declared in the member package manifest. It must contain no systemd
+unit and no desktop file.
 
 ## 5. Blocking first-release FLAC validation
 
 This checkpoint is mandatory. Do not release based only on a successful link.
 
-`flac-bound` 0.5 documents system libFLAC 1.4 or newer for its
-`libflac-nobuild` feature. Ubuntu 22.04 supplies libFLAC 1.3.3 with soname 8.
-The code uses a small encoder surface, but an ABI mismatch could still crash at
-runtime. The pre-release soak must therefore exercise real output through the
-shipped binary:
+The release binary statically links the bundled libFLAC, so it has no direct
+cross-distribution libFLAC runtime dependency. A distro's PulseAudio stack may
+independently load its own libFLAC through libsndfile. The pre-release soak must
+still exercise real encoded output through the shipped binary:
 
 1. Install the produced artifact on a test Linux desktop with the runtime
    dependencies from `packaging/INSTALL-NOTES`.
@@ -78,22 +77,20 @@ shipped binary:
    `flac -t path/to/new/audio.flac` (or each split mono FLAC).
 4. Treat any encoder crash or decode failure as a release blocker.
 
-If the checkpoint fails, stop. The follow-up is a source-built libFLAC >=1.4
-layer in `packaging/Containerfile`; changing the crate feature or raising the
-Ubuntu baseline is not part of this rail.
+If the checkpoint fails, stop and diagnose the bundled encoder before release.
 
 ## 6. Portable installer
 
 Preview a local tarball installation without writes:
 
 ```bash
-scripts/install.sh --dry-run dist/rust/solstone-linux-0.1.0-linux-x86_64.tar.gz
+scripts/install.sh --dry-run "dist/rust/solstone-linux-<VERSION>-linux-x86_64.tar.gz"
 ```
 
 Install to the default `$HOME/.local` prefix:
 
 ```bash
-scripts/install.sh dist/rust/solstone-linux-0.1.0-linux-x86_64.tar.gz
+scripts/install.sh "dist/rust/solstone-linux-<VERSION>-linux-x86_64.tar.gz"
 ```
 
 The script reports when `$HOME/.local/bin` is not on PATH. A different prefix
@@ -115,6 +112,10 @@ After both builds, artifact inspection, checksums, and the blocking FLAC soak
 succeed, upload the three versioned files and checksum list through the chosen
 manual release surface. Do not reuse the Python version, Python tag/publish
 script, or PyPI release artifacts.
+
+Release-note bodies come only from the matching `CHANGELOG.md` block. Extract
+that block with `scripts/extract_changelog.sh <VERSION>`; do not create a
+separate engineering-tone release-note template here.
 
 ## 9. Known constraints
 
