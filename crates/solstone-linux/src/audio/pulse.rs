@@ -115,7 +115,15 @@ pub(crate) enum PulseMessage {
     },
     Block(LegBlock),
     SuccessfulRecord,
+    Detected,
+    Degraded(String),
     Failed(String),
+}
+
+#[derive(Debug)]
+pub(crate) enum PulseRunError {
+    Degraded(String),
+    Setup(String),
 }
 
 fn report_selection(selection: &SourceSelection) {
@@ -224,51 +232,71 @@ pub(crate) fn run_pulse(
     sender: mpsc::Sender<PulseMessage>,
     stopped: Arc<AtomicBool>,
     failures: Arc<FailureCounter>,
-) -> Result<(), AnyError> {
-    let mut mainloop = Mainloop::new().ok_or("failed to create PulseAudio threaded mainloop")?;
-    let mut context =
-        Context::new(&mainloop, "solstone-linux").ok_or("failed to create PulseAudio context")?;
-    context.connect(None, ContextFlagSet::NOFLAGS, None)?;
-    mainloop.start()?;
-    wait_for_context(&mut mainloop, &context)?;
+    reset_on_detection: bool,
+) -> Result<bool, PulseRunError> {
+    let mut mainloop = Mainloop::new().ok_or_else(|| {
+        PulseRunError::Degraded("failed to create PulseAudio threaded mainloop".into())
+    })?;
+    let mut context = Context::new(&mainloop, "solstone-linux")
+        .ok_or("failed to create PulseAudio context")
+        .map_err(|error| PulseRunError::Degraded(error.into()))?;
+    context
+        .connect(None, ContextFlagSet::NOFLAGS, None)
+        .map_err(|error| PulseRunError::Degraded(format!("{error:?}")))?;
+    mainloop
+        .start()
+        .map_err(|error| PulseRunError::Degraded(format!("{error:?}")))?;
+    wait_for_context(&mut mainloop, &context)
+        .map_err(|error| PulseRunError::Degraded(error.to_string()))?;
 
     let outcome = drive_subscription(
         &mut mainloop,
         &context,
         SubscriptionState::default(),
         SubscriptionEvent::Started,
-    )?;
+    )
+    .map_err(|error| PulseRunError::Degraded(error.to_string()))?;
     let state = outcome.state;
-    let selection = state.source_selection.clone().ok_or_else(|| {
-        format!(
-            "audio degraded: {}",
-            state
-                .degraded_reason
-                .as_deref()
-                .unwrap_or("source selection was not resolved")
-        )
-    })?;
+    let selection = state
+        .source_selection
+        .clone()
+        .ok_or_else(|| {
+            format!(
+                "audio degraded: {}",
+                state
+                    .degraded_reason
+                    .as_deref()
+                    .unwrap_or("source selection was not resolved")
+            )
+        })
+        .map_err(PulseRunError::Degraded)?;
+    if reset_on_detection {
+        failures.detected();
+    }
     // Pulse streams are long-lived; Python's 1000-block rebuild is soundcard-library hygiene.
+    // Python's 0.5-second read-error sleep paces blocking soundcard.record(); Pulse read
+    // callbacks do not spin, so no equivalent delay is needed here.
     let restart = Arc::new(AtomicBool::new(false));
+    let threshold_reached = Arc::new(AtomicBool::new(false));
     let microphone_name = selection
         .microphone
         .name
         .as_deref()
-        .ok_or("microphone has no name")?;
+        .ok_or_else(|| PulseRunError::Degraded("microphone has no name".into()))?;
     let system_name = selection
         .monitor
         .name
         .as_deref()
-        .ok_or("monitor has no name")?;
+        .ok_or_else(|| PulseRunError::Degraded("monitor has no name".into()))?;
     let (muted, mute_failure) = mute_result(&state.mute_status);
-    let (microphone, system) = initialize_streams(&sender, &failures, muted, mute_failure, || {
+    let (microphone, system) = initialize_streams(&sender, muted, mute_failure, || {
         let microphone = start_stream(
             &mut mainloop,
             &mut context,
             microphone_name,
             AudioLeg::Microphone,
             sender.clone(),
-            Arc::clone(&restart),
+            Arc::clone(&threshold_reached),
             Arc::clone(&failures),
         )?;
         let system = start_stream(
@@ -277,11 +305,12 @@ pub(crate) fn run_pulse(
             system_name,
             AudioLeg::System,
             sender.clone(),
-            Arc::clone(&restart),
+            Arc::clone(&threshold_reached),
             Arc::clone(&failures),
         )?;
         Ok((microphone, system))
-    })?;
+    })
+    .map_err(|error| PulseRunError::Setup(error.to_string()))?;
     info!(default_sink = ?state.default_sink, "PulseAudio capture ready");
 
     let (event_tx, event_rx) = mpsc::channel();
@@ -317,7 +346,10 @@ pub(crate) fn run_pulse(
     let clock = RealDriverClock(schedule_started);
     let mut events = ChannelSubscriptionEvents(event_rx);
     let mut redetect = RedetectSchedule::new(clock.elapsed());
-    while !stopped.load(Ordering::SeqCst) && !restart.load(Ordering::Acquire) {
+    while !stopped.load(Ordering::SeqCst)
+        && !restart.load(Ordering::Acquire)
+        && !threshold_reached.load(Ordering::Acquire)
+    {
         let driver_event = next_driver_event(&mut events, &clock, redetect);
         match driver_event {
             DriverEvent::Subscription(..) | DriverEvent::Backstop => {
@@ -325,15 +357,24 @@ pub(crate) fn run_pulse(
                 let Some(event) = driver_subscription_event(&driver_event) else {
                     continue;
                 };
-                let outcome = drive_subscription(&mut mainloop, &context, state, event)?;
+                let outcome = drive_subscription(&mut mainloop, &context, state, event)
+                    .map_err(|error| PulseRunError::Degraded(error.to_string()))?;
                 let source_changed = outcome.source_changed;
                 state = outcome.state;
+                if let Some(reason) = state.degraded_reason.clone() {
+                    let _ = sender.send(PulseMessage::Degraded(reason));
+                } else {
+                    failures.detected();
+                    let _ = sender.send(PulseMessage::Detected);
+                }
                 for status in outcome.mute_changes {
                     let (muted, mute_failure) = mute_result(&status);
-                    sender.send(PulseMessage::MuteChanged {
-                        muted,
-                        mute_failure,
-                    })?;
+                    sender
+                        .send(PulseMessage::MuteChanged {
+                            muted,
+                            mute_failure,
+                        })
+                        .map_err(|error| PulseRunError::Degraded(error.to_string()))?;
                 }
                 if source_changed {
                     restart.store(true, Ordering::Release);
@@ -356,35 +397,16 @@ pub(crate) fn run_pulse(
     context.disconnect();
     mainloop.unlock();
     mainloop.stop();
-    Ok(())
-}
-
-fn retry_stream_setup<T>(
-    sender: &mpsc::Sender<PulseMessage>,
-    failures: &FailureCounter,
-    mut setup: impl FnMut() -> Result<T, AnyError>,
-) -> Result<T, AnyError> {
-    loop {
-        match setup() {
-            Ok(value) => return Ok(value),
-            Err(error) if failures.count() >= 2 => return Err(error),
-            Err(error) => {
-                failures.failed();
-                let _ = sender.send(PulseMessage::Failed(error.to_string()));
-            }
-        }
-    }
+    Ok(threshold_reached.load(Ordering::Acquire))
 }
 
 fn initialize_streams<T>(
     sender: &mpsc::Sender<PulseMessage>,
-    failures: &FailureCounter,
     muted: bool,
     mute_failure: Option<String>,
-    setup: impl FnMut() -> Result<T, AnyError>,
+    mut setup: impl FnMut() -> Result<T, AnyError>,
 ) -> Result<T, AnyError> {
-    let streams = retry_stream_setup(sender, failures, setup)?;
-    failures.streams_ready();
+    let streams = setup()?;
     sender.send(PulseMessage::Ready {
         muted,
         mute_failure,
@@ -636,20 +658,22 @@ fn read_stream(
         }
         Ok(PeekResult::Empty) => return,
         Err(error) => {
-            let _ = sender.send(PulseMessage::Failed(format!("record peek failed: {error}")));
-            if failures.failed() {
-                restart.store(true, Ordering::Release);
-            }
+            report_read_failure(
+                sender,
+                restart,
+                failures,
+                format!("record peek failed: {error}"),
+            );
             return;
         }
     };
     if let Err(error) = stream.discard() {
-        let _ = sender.send(PulseMessage::Failed(format!(
-            "record discard failed: {error}"
-        )));
-        if failures.failed() {
-            restart.store(true, Ordering::Release);
-        }
+        report_read_failure(
+            sender,
+            restart,
+            failures,
+            format!("record discard failed: {error}"),
+        );
         return;
     }
     drop(stream);
@@ -667,6 +691,18 @@ fn read_stream(
         if successful_record {
             let _ = sender.send(PulseMessage::SuccessfulRecord);
         }
+    }
+}
+
+fn report_read_failure(
+    sender: &mpsc::Sender<PulseMessage>,
+    restart: &AtomicBool,
+    failures: &FailureCounter,
+    reason: String,
+) {
+    let _ = sender.send(PulseMessage::Failed(reason));
+    if failures.failed() {
+        restart.store(true, Ordering::Release);
     }
 }
 
@@ -736,37 +772,48 @@ mod tests {
     }
 
     #[test]
-    fn stream_setup_retries_twice_before_redetecting() {
-        // tests/test_audio_recorder.py::test_record_both_setup_failures_trigger_redetect
-        let failures = FailureCounter::default();
+    fn failed_stream_setup_never_publishes_ready() {
         let (sender, receiver) = mpsc::channel();
-        let attempts = Cell::new(0);
-        let result: Result<(), AnyError> = retry_stream_setup(&sender, &failures, || {
-            attempts.set(attempts.get() + 1);
-            Err("stream start failed".into())
-        });
+        let result: Result<(), AnyError> =
+            initialize_streams(&sender, false, None, || Err("stream start failed".into()));
         assert!(result.is_err());
-        assert_eq!(attempts.get(), 3);
-        assert_eq!(receiver.try_iter().count(), 2);
-        assert_eq!(failures.count(), 2);
+        assert_eq!(receiver.try_iter().count(), 0);
     }
 
     #[test]
-    fn failed_stream_setup_never_publishes_ready() {
+    fn third_read_failure_requests_reconstruction() {
+        // tests/test_audio_recorder.py::test_record_both_inner_record_failures_trigger_redetect
         let failures = FailureCounter::default();
+        let restart = AtomicBool::new(false);
         let (sender, receiver) = mpsc::channel();
-        let result: Result<(), AnyError> =
-            initialize_streams(&sender, &failures, false, None, || {
-                Err("stream start failed".into())
-            });
-        assert!(result.is_err());
-        let messages: Vec<_> = receiver.try_iter().collect();
-        assert_eq!(messages.len(), 2);
-        assert!(
-            messages
-                .iter()
-                .all(|message| matches!(message, PulseMessage::Failed(_)))
-        );
+        report_read_failure(&sender, &restart, &failures, "one".into());
+        assert!(!restart.load(Ordering::Acquire));
+        report_read_failure(&sender, &restart, &failures, "two".into());
+        assert!(!restart.load(Ordering::Acquire));
+        report_read_failure(&sender, &restart, &failures, "three".into());
+        assert!(restart.load(Ordering::Acquire));
+        assert_eq!(receiver.try_iter().count(), 3);
+    }
+
+    #[test]
+    fn stream_setup_success_does_not_reset_failures() {
+        // tests/test_audio_recorder.py::test_record_both_success_resets_counter
+        let failures = FailureCounter::default();
+        assert!(!failures.failed());
+        assert!(!failures.failed());
+        let (sender, _receiver) = mpsc::channel();
+        initialize_streams(&sender, false, None, || Ok(())).unwrap();
+        assert_eq!(failures.count(), 2);
+        let restart = AtomicBool::new(false);
+        report_read_failure(&sender, &restart, &failures, "three".into());
+        assert!(restart.load(Ordering::Acquire));
+
+        failures.detected();
+        assert_eq!(failures.count(), 0);
+        assert!(!failures.failed());
+        assert!(!failures.block_succeeded(AudioLeg::Microphone));
+        assert!(failures.block_succeeded(AudioLeg::System));
+        assert_eq!(failures.count(), 0);
     }
 
     struct FakeSubscriptions {

@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    audio::pulse::{PulseMessage, run_pulse},
+    audio::pulse::{PulseMessage, PulseRunError, run_pulse},
     chunking::{AudioLeg, DrainedChunk, StereoAccumulator},
     observer::{AudioCapture, MuteProbe},
 };
@@ -36,7 +36,7 @@ impl FailureCounter {
         self.consecutive.fetch_add(1, Ordering::AcqRel) + 1 >= MAX_CONSECUTIVE_FAILURES
     }
 
-    pub(crate) fn streams_ready(&self) {
+    pub(crate) fn detected(&self) {
         self.consecutive.store(0, Ordering::Release);
         self.successful_legs.store(0, Ordering::Release);
     }
@@ -48,12 +48,18 @@ impl FailureCounter {
         };
         let previous = self.successful_legs.fetch_or(bit, Ordering::AcqRel);
         if previous | bit == 3 {
-            self.streams_ready();
+            self.detected();
             true
         } else {
             false
         }
     }
+}
+
+fn prepare_redetect(failures: &FailureCounter) {
+    let count = failures.count();
+    tracing::info!("Re-detecting audio devices after {count} consecutive recorder failures");
+    failures.detected();
 }
 
 struct CaptureState {
@@ -67,6 +73,8 @@ impl Default for CaptureState {
     fn default() -> Self {
         Self {
             accumulator: StereoAccumulator::default(),
+            // audio_recorder.py:47 seeds this true so an initial detection failure is
+            // an unavailable edge, while a successful startup does not log recovery.
             available: true,
             muted: false,
             failures: 0,
@@ -85,7 +93,6 @@ impl CaptureState {
                     tracing::warn!(%reason, "unmuted (query failed)");
                 }
                 self.muted = muted;
-                self.failures = 0;
                 self.set_available(true);
             }
             PulseMessage::MuteChanged {
@@ -102,6 +109,14 @@ impl CaptureState {
             }
             PulseMessage::SuccessfulRecord => {
                 self.failures = 0;
+            }
+            PulseMessage::Detected => {
+                self.failures = 0;
+                self.set_available(true);
+            }
+            PulseMessage::Degraded(reason) => {
+                tracing::debug!(%reason, "audio source detection degraded");
+                self.set_available(false);
             }
             PulseMessage::Failed(reason) => {
                 tracing::debug!(%reason, "recoverable audio capture failure");
@@ -161,8 +176,8 @@ impl PulseAudioCapture {
                 supervise(
                     &worker_stopped,
                     &sender,
-                    |sender, stopped, failures| {
-                        run_pulse(sender, stopped, failures).map_err(|error| error.to_string())
+                    |sender, stopped, failures, reset_on_detection| {
+                        run_pulse(sender, stopped, failures, reset_on_detection)
                     },
                     wait_interruptibly,
                     failures,
@@ -195,16 +210,49 @@ fn supervise<Run, Wait>(
         mpsc::Sender<PulseMessage>,
         Arc<AtomicBool>,
         Arc<FailureCounter>,
-    ) -> Result<(), String>,
+        bool,
+    ) -> Result<bool, PulseRunError>,
     Wait: FnMut(&AtomicBool, Duration) -> bool,
 {
+    let mut reset_on_detection = true;
     while !stopped.load(Ordering::Acquire) {
-        if let Err(reason) = run(sender.clone(), Arc::clone(stopped), Arc::clone(&failures)) {
-            failures.failed();
-            let _ = sender.send(PulseMessage::Failed(reason));
-        }
-        if !wait(stopped, REDETECT_INTERVAL) {
-            break;
+        match run(
+            sender.clone(),
+            Arc::clone(stopped),
+            Arc::clone(&failures),
+            reset_on_detection,
+        ) {
+            Ok(restart_for_failures) => {
+                reset_on_detection = true;
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                if restart_for_failures {
+                    prepare_redetect(&failures);
+                }
+            }
+            Err(PulseRunError::Degraded(reason)) => {
+                reset_on_detection = true;
+                let _ = sender.send(PulseMessage::Degraded(reason));
+                if !wait(stopped, REDETECT_INTERVAL) {
+                    break;
+                }
+            }
+            Err(PulseRunError::Setup(reason)) => {
+                let threshold = failures.failed();
+                let _ = sender.send(PulseMessage::Failed(reason));
+                if !wait(stopped, Duration::from_secs(1)) {
+                    break;
+                }
+                if threshold {
+                    prepare_redetect(&failures);
+                    reset_on_detection = true;
+                } else {
+                    // Rebuilding Pulse after setup failure remains the same logical
+                    // detect cycle as Python's record_both setup retry.
+                    reset_on_detection = false;
+                }
+            }
         }
     }
 }
@@ -350,57 +398,65 @@ mod tests {
     }
 
     #[test]
-    fn third_consecutive_read_failure_requests_reconstruction() {
-        // tests/test_audio_recorder.py::test_record_both_inner_record_failures_trigger_redetect
-        let failures = FailureCounter::default();
-        assert!(!failures.failed());
-        assert!(!failures.failed());
-        assert!(failures.failed());
-        failures.streams_ready();
-        assert!(!failures.failed());
-    }
-
-    #[test]
     fn repeated_start_failures_reconstruct_and_reach_degraded() {
         // tests/test_audio_recorder.py::test_record_both_setup_failures_trigger_redetect
         let stopped = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::channel();
         let attempts = Arc::new(AtomicUsize::new(0));
         let waits = Arc::new(AtomicUsize::new(0));
-        supervise(
-            &stopped,
-            &sender,
-            {
-                let attempts = Arc::clone(&attempts);
-                move |_, _, _| {
-                    attempts.fetch_add(1, Ordering::AcqRel);
-                    Err("stream start failed".into())
-                }
-            },
-            {
-                let waits = Arc::clone(&waits);
-                let stopped = Arc::clone(&stopped);
-                move |_, duration| {
-                    assert_eq!(duration, Duration::from_secs(5));
-                    let count = waits.fetch_add(1, Ordering::AcqRel) + 1;
-                    if count == 3 {
-                        stopped.store(true, Ordering::Release);
-                        false
-                    } else {
+        let output = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(output.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            supervise(
+                &stopped,
+                &sender,
+                {
+                    let attempts = Arc::clone(&attempts);
+                    let stopped = Arc::clone(&stopped);
+                    move |_, _, failures, reset_on_detection| {
+                        if reset_on_detection {
+                            failures.detected();
+                        }
+                        attempts.fetch_add(1, Ordering::AcqRel);
+                        if attempts.load(Ordering::Acquire) == 4 {
+                            stopped.store(true, Ordering::Release);
+                            Ok(false)
+                        } else {
+                            Err(PulseRunError::Setup("stream start failed".into()))
+                        }
+                    }
+                },
+                {
+                    let waits = Arc::clone(&waits);
+                    move |_, duration| {
+                        assert_eq!(duration, Duration::from_secs(1));
+                        waits.fetch_add(1, Ordering::AcqRel);
                         true
                     }
-                }
-            },
-            Arc::new(FailureCounter::default()),
-        );
+                },
+                Arc::new(FailureCounter::default()),
+            );
+        });
         let mut shared = Shared {
             receiver,
             state: CaptureState::default(),
         };
         shared.pump();
-        assert_eq!(attempts.load(Ordering::Acquire), 3);
+        assert_eq!(attempts.load(Ordering::Acquire), 4);
         assert_eq!(waits.load(Ordering::Acquire), 3);
         assert!(!shared.state.available);
+        let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output
+                .matches("Re-detecting audio devices after 3 consecutive recorder failures")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -415,23 +471,21 @@ mod tests {
             {
                 let attempts = Arc::clone(&attempts);
                 let stopped = Arc::clone(&stopped);
-                move |sender, _, _| {
+                move |sender, _, _, _| {
                     let attempt = attempts.fetch_add(1, Ordering::AcqRel) + 1;
-                    if attempt <= 3 {
-                        Err("unavailable".into())
+                    if attempt == 1 {
+                        Err(PulseRunError::Degraded("unavailable".into()))
                     } else {
-                        sender
-                            .send(PulseMessage::Ready {
-                                muted: false,
-                                mute_failure: None,
-                            })
-                            .unwrap();
+                        sender.send(PulseMessage::Detected).unwrap();
                         stopped.store(true, Ordering::Release);
-                        Ok(())
+                        Ok(false)
                     }
                 }
             },
-            |stopped, _| !stopped.load(Ordering::Acquire),
+            |stopped, duration| {
+                assert_eq!(duration, Duration::from_secs(5));
+                !stopped.load(Ordering::Acquire)
+            },
             Arc::new(FailureCounter::default()),
         );
         let mut shared = Shared {
@@ -439,27 +493,58 @@ mod tests {
             state: CaptureState::default(),
         };
         shared.pump();
-        assert_eq!(attempts.load(Ordering::Acquire), 4);
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
         assert!(shared.state.available);
         assert_eq!(shared.state.failures, 0);
     }
 
     #[test]
-    fn ready_resets_failure_counter() {
+    fn successful_record_resets_failure_counter() {
         // tests/test_audio_recorder.py::test_record_both_success_resets_counter
         let mut state = CaptureState::default();
         state.apply(PulseMessage::Failed("one".into()));
-        state.apply(PulseMessage::Ready {
-            muted: true,
-            mute_failure: None,
-        });
         state.apply(PulseMessage::Block(LegBlock::new(
             AudioLeg::Microphone,
             vec![0.1],
         )));
         state.apply(PulseMessage::SuccessfulRecord);
         assert_eq!(state.failures, 0);
-        assert!(state.muted);
+    }
+
+    #[test]
+    fn classification_failure_is_immediately_unavailable() {
+        // tests/test_audio_recorder.py::test_detect_degrades_when_only_mic
+        // tests/test_audio_recorder.py::test_detect_degrades_when_only_loopback
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+        let waits = Arc::new(AtomicUsize::new(0));
+        supervise(
+            &stopped,
+            &sender,
+            {
+                let stopped = Arc::clone(&stopped);
+                move |_, _, _, _| {
+                    stopped.store(true, Ordering::Release);
+                    Err(PulseRunError::Degraded("missing audio leg".into()))
+                }
+            },
+            {
+                let waits = Arc::clone(&waits);
+                move |_, duration| {
+                    assert_eq!(duration, Duration::from_secs(5));
+                    waits.fetch_add(1, Ordering::AcqRel);
+                    false
+                }
+            },
+            Arc::new(FailureCounter::default()),
+        );
+        let mut shared = Shared {
+            receiver,
+            state: CaptureState::default(),
+        };
+        shared.pump();
+        assert!(!shared.state.available);
+        assert_eq!(waits.load(Ordering::Acquire), 1);
     }
 
     #[test]

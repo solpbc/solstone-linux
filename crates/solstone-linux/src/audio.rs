@@ -17,15 +17,17 @@ pub(crate) mod writer;
 //   -> audio::backend::tests::degraded_supervisor_recovers_without_process_restart.
 // tests/test_audio_recorder.py::test_detect_degrades_when_only_mic
 // tests/test_audio_recorder.py::test_detect_degrades_when_only_loopback
-//   -> sources::tests::missing_legs_are_explicit (classification), with the shared downstream
-//      degraded edge covered by availability_logs_once_per_transition_with_exact_copy.
+//   -> sources::tests::missing_legs_are_explicit (classification) and
+//      audio::backend::tests::classification_failure_is_immediately_unavailable.
 // tests/test_audio_recorder.py::test_record_both_setup_failures_trigger_redetect
-//   -> audio::pulse::tests::stream_setup_retries_twice_before_redetecting and
+//   -> audio::pulse::tests::failed_stream_setup_never_publishes_ready and
 //      audio::backend::tests::repeated_start_failures_reconstruct_and_reach_degraded.
 // tests/test_audio_recorder.py::test_record_both_inner_record_failures_trigger_redetect
-//   -> audio::backend::tests::third_consecutive_read_failure_requests_reconstruction.
+//   -> audio::pulse::tests::third_read_failure_requests_reconstruction. Python's
+//      0.5-second retry sleep is retired-by-dependency: Pulse callbacks do not hot-spin.
 // tests/test_audio_recorder.py::test_record_both_success_resets_counter
-//   -> audio::backend::tests::ready_resets_failure_counter.
+//   -> audio::backend::tests::successful_record_resets_failure_counter and
+//      audio::pulse::tests::stream_setup_success_does_not_reset_failures.
 // tests/test_audio_recorder.py::test_sleep_interruptibly_exits_when_stopped
 //   -> audio::backend::tests::production_interruptible_wait_observes_stop.
 // tests/test_audio_recorder.py::test_fatal_format_error_untouched_by_counter
