@@ -11,38 +11,78 @@ use futures_util::StreamExt;
 use zbus::{Connection, Proxy, fdo::PropertiesProxy};
 
 use super::{
-    ActivityOps, BackendOutcome, BoundBackends, CacheState, DBUS_TIMEOUT, LockSignal,
-    ScreenSaverSpec, SessionBusOps, SystemBusOps, resolve, wayland_idle::NativeWaylandIdle,
-    x11::NativeX11,
+    ActivityLogLevel, ActivityOps, BackendOutcome, BoundBackends, CacheState, DBUS_TIMEOUT,
+    LockSignal, ScreenSaverSpec, SessionBusOps, SystemBusOps, probe_backends, resolve,
+    wayland_idle::NativeWaylandIdle, x11::NativeX11,
 };
 use crate::observer::ActivityState;
 
-struct NativeSessionBus {
-    runtime: Arc<tokio::runtime::Runtime>,
-    connection: Option<Connection>,
-    proxies: HashMap<&'static str, Proxy<'static>>,
+trait ScreenSaverProxyOps {
+    type Proxy: Clone;
+    fn construct(&mut self, spec: &ScreenSaverSpec) -> BackendOutcome<Self::Proxy>;
+    fn get_active(&mut self, proxy: &Self::Proxy) -> BackendOutcome<bool>;
 }
 
-impl NativeSessionBus {
-    fn get_proxy(&mut self, spec: &ScreenSaverSpec) -> BackendOutcome<Proxy<'static>> {
-        if let Some(proxy) = self.proxies.get(spec.key) {
-            return BackendOutcome::Available(proxy.clone());
+struct CachedScreenSavers<O: ScreenSaverProxyOps> {
+    ops: O,
+    proxies: HashMap<&'static str, O::Proxy>,
+}
+
+impl<O: ScreenSaverProxyOps> CachedScreenSavers<O> {
+    fn get_active(&mut self, spec: &ScreenSaverSpec) -> BackendOutcome<bool> {
+        let proxy = if let Some(proxy) = self.proxies.get(spec.key) {
+            proxy.clone()
+        } else {
+            match self.ops.construct(spec) {
+                BackendOutcome::Available(proxy) => {
+                    self.proxies.insert(spec.key, proxy.clone());
+                    proxy
+                }
+                BackendOutcome::Absent => return BackendOutcome::Absent,
+                BackendOutcome::Broken(error) => return BackendOutcome::Broken(error),
+            }
+        };
+        let result = self.ops.get_active(&proxy);
+        if matches!(result, BackendOutcome::Absent | BackendOutcome::Broken(_)) {
+            self.proxies.remove(spec.key);
         }
+        result
+    }
+}
+
+struct NativeScreenSaverProxyOps {
+    runtime: Arc<tokio::runtime::Runtime>,
+    connection: Option<Connection>,
+}
+
+impl ScreenSaverProxyOps for NativeScreenSaverProxyOps {
+    type Proxy = Proxy<'static>;
+
+    fn construct(&mut self, spec: &ScreenSaverSpec) -> BackendOutcome<Self::Proxy> {
         let Some(connection) = &self.connection else {
             return BackendOutcome::Absent;
         };
-        let result = self.runtime.block_on(timeout(Proxy::new_owned(
+        self.runtime.block_on(timeout(Proxy::new_owned(
             connection.clone(),
             spec.bus,
             spec.path,
             spec.bus,
-        )));
-        if let BackendOutcome::Available(proxy) = &result {
-            self.proxies.insert(spec.key, proxy.clone());
-        }
-        result
+        )))
     }
 
+    fn get_active(&mut self, proxy: &Self::Proxy) -> BackendOutcome<bool> {
+        self.runtime
+            .block_on(timeout(proxy.call::<_, _, bool>("GetActive", &())))
+    }
+}
+
+struct NativeSessionBus {
+    runtime: Arc<tokio::runtime::Runtime>,
+    connection: Option<Connection>,
+    screensavers: CachedScreenSavers<NativeScreenSaverProxyOps>,
+}
+
+impl NativeSessionBus {
     fn property_i32(
         &self,
         destination: &'static str,
@@ -68,18 +108,20 @@ impl NativeSessionBus {
 
 impl SessionBusOps for NativeSessionBus {
     fn get_active(&mut self, spec: &ScreenSaverSpec) -> BackendOutcome<bool> {
-        let proxy = match self.get_proxy(spec) {
-            BackendOutcome::Available(proxy) => proxy,
-            BackendOutcome::Absent => return BackendOutcome::Absent,
-            BackendOutcome::Broken(error) => return BackendOutcome::Broken(error),
+        self.screensavers.get_active(spec)
+    }
+
+    fn name_has_owner(&mut self, bus: &'static str) -> BackendOutcome<bool> {
+        let Some(connection) = &self.connection else {
+            return BackendOutcome::Absent;
         };
-        let result = self
-            .runtime
-            .block_on(timeout(proxy.call::<_, _, bool>("GetActive", &())));
-        if matches!(result, BackendOutcome::Absent | BackendOutcome::Broken(_)) {
-            self.proxies.remove(spec.key);
-        }
-        result
+        self.runtime.block_on(timeout(async {
+            let proxy = zbus::fdo::DBusProxy::new(connection).await?;
+            proxy
+                .name_has_owner(zbus::names::BusName::try_from(bus)?)
+                .await
+                .map_err(Into::into)
+        }))
     }
 
     fn mutter_power_mode(&mut self) -> BackendOutcome<i32> {
@@ -205,7 +247,7 @@ impl SystemBusOps for NativeSystemBus {
     }
 }
 
-pub struct NativeActivityOps {
+pub struct NativeActivitySources {
     desktop: String,
     session_type: String,
     session: NativeSessionBus,
@@ -213,10 +255,10 @@ pub struct NativeActivityOps {
     wayland: NativeWaylandIdle,
     x11: NativeX11,
     cache: CacheState,
-    emitted_warnings: usize,
+    inventory: Option<BoundBackends>,
 }
 
-impl NativeActivityOps {
+impl NativeActivitySources {
     pub fn new(desktop: String, session_type: String) -> Self {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -232,8 +274,14 @@ impl NativeActivityOps {
             session_type,
             session: NativeSessionBus {
                 runtime: Arc::clone(&runtime),
-                connection: session_connection,
-                proxies: HashMap::new(),
+                connection: session_connection.clone(),
+                screensavers: CachedScreenSavers {
+                    ops: NativeScreenSaverProxyOps {
+                        runtime: Arc::clone(&runtime),
+                        connection: session_connection,
+                    },
+                    proxies: HashMap::new(),
+                },
             },
             system: NativeSystemBus {
                 runtime,
@@ -245,13 +293,28 @@ impl NativeActivityOps {
             wayland: NativeWaylandIdle::new(),
             x11: NativeX11::new(),
             cache: CacheState::default(),
-            emitted_warnings: 0,
+            inventory: None,
         }
     }
 }
 
-impl ActivityOps for NativeActivityOps {
+impl ActivityOps for NativeActivitySources {
     fn probe_once(&mut self) -> (ActivityState, BoundBackends) {
+        if self.inventory.is_none() {
+            let (inventory, warnings) = probe_backends(
+                &self.desktop,
+                &self.session_type,
+                &mut self.session,
+                &mut self.system,
+                &mut self.wayland,
+                &mut self.x11,
+            );
+            for warning in warnings {
+                tracing::warn!("{warning}");
+            }
+            self.inventory = Some(inventory);
+        }
+        let inventory = self.inventory.expect("inventory initialized above");
         let result = resolve(
             &self.desktop,
             &self.session_type,
@@ -261,15 +324,24 @@ impl ActivityOps for NativeActivityOps {
             &mut self.x11,
             &mut self.cache,
         );
-        for warning in &self.cache.warnings[self.emitted_warnings..] {
-            if warning.starts_with("DEBUG:") {
-                tracing::debug!("{warning}");
-            } else {
-                tracing::warn!("{warning}");
-            }
+        for warning in self.cache.take_warnings() {
+            emit_activity_log(warning);
         }
-        self.emitted_warnings = self.cache.warnings.len();
-        result
+        (result.0, inventory)
+    }
+}
+
+fn emit_activity_log(entry: super::ActivityLog) {
+    match activity_log_level(&entry) {
+        tracing::Level::DEBUG => tracing::debug!("{}", entry.message),
+        _ => tracing::warn!("{}", entry.message),
+    }
+}
+
+fn activity_log_level(entry: &super::ActivityLog) -> tracing::Level {
+    match entry.level {
+        ActivityLogLevel::Debug => tracing::Level::DEBUG,
+        ActivityLogLevel::Warning => tracing::Level::WARN,
     }
 }
 
@@ -283,7 +355,106 @@ async fn timeout<T>(future: impl Future<Output = zbus::Result<T>>) -> BackendOut
 }
 
 fn service_missing(error: &zbus::Error) -> bool {
-    let text = error.to_string();
-    text.contains("org.freedesktop.DBus.Error.ServiceUnknown")
-        || text.contains("org.freedesktop.DBus.Error.NameHasNoOwner")
+    match error {
+        zbus::Error::MethodError(name, _, _) => matches!(
+            name.as_str(),
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+                | "org.freedesktop.DBus.Error.NameHasNoOwner"
+        ),
+        zbus::Error::FDO(error) => matches!(
+            error.as_ref(),
+            zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_)
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, collections::VecDeque, rc::Rc};
+
+    struct FakeProxyOps {
+        constructions: Rc<Cell<usize>>,
+        calls: VecDeque<BackendOutcome<bool>>,
+    }
+
+    impl ScreenSaverProxyOps for FakeProxyOps {
+        type Proxy = ();
+        fn construct(&mut self, _: &ScreenSaverSpec) -> BackendOutcome<Self::Proxy> {
+            self.constructions.set(self.constructions.get() + 1);
+            BackendOutcome::Available(())
+        }
+        fn get_active(&mut self, _: &Self::Proxy) -> BackendOutcome<bool> {
+            self.calls.pop_front().expect("scripted proxy call")
+        }
+    }
+
+    #[test]
+    fn native_cache_layer_reuses_and_invalidates_proxy() {
+        // tests/test_activity.py::TestIsScreenLocked::test_is_screen_locked_caches_and_invalidates_same_bus
+        let constructions = Rc::new(Cell::new(0));
+        let mut cache = CachedScreenSavers {
+            ops: FakeProxyOps {
+                constructions: Rc::clone(&constructions),
+                calls: [
+                    BackendOutcome::Available(false),
+                    BackendOutcome::Available(false),
+                    BackendOutcome::Broken("NoReply".into()),
+                    BackendOutcome::Available(false),
+                ]
+                .into(),
+            },
+            proxies: HashMap::new(),
+        };
+        assert!(matches!(
+            cache.get_active(&super::super::FDO),
+            BackendOutcome::Available(false)
+        ));
+        assert!(matches!(
+            cache.get_active(&super::super::FDO),
+            BackendOutcome::Available(false)
+        ));
+        assert_eq!(constructions.get(), 1);
+        assert!(matches!(
+            cache.get_active(&super::super::FDO),
+            BackendOutcome::Broken(_)
+        ));
+        assert!(matches!(
+            cache.get_active(&super::super::FDO),
+            BackendOutcome::Available(false)
+        ));
+        assert_eq!(constructions.get(), 2);
+    }
+
+    #[test]
+    fn service_missing_uses_structured_error_names() {
+        assert!(service_missing(&zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::ServiceUnknown("missing".into()),
+        ))));
+        assert!(service_missing(&zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::NameHasNoOwner("missing".into()),
+        ))));
+        assert!(!service_missing(&zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::NoReply("broken".into()),
+        ))));
+    }
+
+    #[test]
+    fn repeated_power_failure_uses_debug_after_warning() {
+        assert_eq!(
+            activity_log_level(&super::super::ActivityLog {
+                level: ActivityLogLevel::Warning,
+                message: "first".into()
+            }),
+            tracing::Level::WARN
+        );
+        assert_eq!(
+            activity_log_level(&super::super::ActivityLog {
+                level: ActivityLogLevel::Debug,
+                message: "repeat".into()
+            }),
+            tracing::Level::DEBUG
+        );
+    }
 }

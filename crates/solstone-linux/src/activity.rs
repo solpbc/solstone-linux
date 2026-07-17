@@ -102,6 +102,7 @@ pub enum DpmsPower {
 
 pub trait SessionBusOps {
     fn get_active(&mut self, spec: &ScreenSaverSpec) -> BackendOutcome<bool>;
+    fn name_has_owner(&mut self, bus: &'static str) -> BackendOutcome<bool>;
     fn mutter_power_mode(&mut self) -> BackendOutcome<i32>;
     fn mutter_idletime_ms(&mut self) -> BackendOutcome<u64>;
 }
@@ -120,17 +121,37 @@ pub trait WaylandIdleOps {
 pub trait XActivityOps {
     fn dpms_state(&mut self) -> BackendOutcome<DpmsPower>;
     fn screensaver_idle_ms(&mut self) -> BackendOutcome<u64>;
+    fn dpms_available(&mut self) -> bool;
+    fn screensaver_available(&mut self) -> bool;
 }
 
 #[derive(Default)]
 pub struct CacheState {
     pub lock_signal: SignalCache<bool>,
     pub subscription_attempted: bool,
-    pub subscription_warning_logged: bool,
     pub wayland_idle: bool,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ActivityLog>,
     mutter_warned: bool,
     dpms_warned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActivityLogLevel {
+    Warning,
+    Debug,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityLog {
+    pub level: ActivityLogLevel,
+    pub message: String,
+}
+
+fn warning(message: String) -> ActivityLog {
+    ActivityLog {
+        level: ActivityLogLevel::Warning,
+        message,
+    }
 }
 
 pub fn resolve(
@@ -142,17 +163,19 @@ pub fn resolve(
     x: &mut impl XActivityOps,
     cache: &mut CacheState,
 ) -> (ActivityState, BoundBackends) {
-    if !cache.subscription_attempted {
+    let logind_allowed = desktop_has_token(desktop, "gnome") || desktop_has_token(desktop, "kde");
+    if logind_allowed && !cache.subscription_attempted {
         cache.subscription_attempted = true;
         if let Err(error) = system.subscribe() {
-            cache.subscription_warning_logged = true;
             cache
                 .warnings
-                .push(format!("logind lock subscription failed: {error}"));
+                .push(warning(format!("logind lock subscription failed: {error}")));
         }
     }
-    for signal in system.drain_lock_signals() {
-        cache.lock_signal.warm(matches!(signal, LockSignal::Lock));
+    if logind_allowed {
+        for signal in system.drain_lock_signals() {
+            cache.lock_signal.warm(matches!(signal, LockSignal::Lock));
+        }
     }
 
     let mut bound = BoundBackends::default();
@@ -165,12 +188,12 @@ pub fn resolve(
                 break;
             }
             BackendOutcome::Absent => {}
-            BackendOutcome::Broken(error) => cache
-                .warnings
-                .push(format!("{} lock backend failed: {error}", spec.bus)),
+            BackendOutcome::Broken(error) => cache.warnings.push(warning(format!(
+                "{} lock backend failed: {error}",
+                spec.bus
+            ))),
         }
     }
-    let logind_allowed = desktop_has_token(desktop, "gnome") || desktop_has_token(desktop, "kde");
     let logind = if logind_allowed {
         if let Some(value) = cache.lock_signal.take_for_poll() {
             BackendOutcome::Available(value)
@@ -181,6 +204,14 @@ pub fn resolve(
         BackendOutcome::Absent
     };
     bound.logind_lock = logind.is_bound();
+    if chain_answer.is_some()
+        && let BackendOutcome::Available(value) = &logind
+    {
+        cache.warnings.push(ActivityLog {
+            level: ActivityLogLevel::Debug,
+            message: format!("logind LockedHint corroboration: locked={value}"),
+        });
+    }
     let locked = chain_answer.unwrap_or(matches!(logind, BackendOutcome::Available(true)));
 
     let power = match session.mutter_power_mode() {
@@ -225,6 +256,57 @@ pub fn resolve(
     (state(locked, power, user_idle), bound)
 }
 
+impl CacheState {
+    pub fn take_warnings(&mut self) -> Vec<ActivityLog> {
+        std::mem::take(&mut self.warnings)
+    }
+}
+
+pub fn probe_backends(
+    desktop: &str,
+    session_type: &str,
+    session: &mut impl SessionBusOps,
+    system: &mut impl SystemBusOps,
+    wayland: &mut impl WaylandIdleOps,
+    x: &mut impl XActivityOps,
+) -> (BoundBackends, Vec<String>) {
+    let mut bound = BoundBackends::default();
+    let mut warnings = Vec::new();
+    // Inventory is independent of answer selection: report every owned service,
+    // including FDO on GNOME even though the lock chain deliberately skips it.
+    for spec in DEFAULT_LOCK_CHAIN {
+        match session.name_has_owner(spec.bus) {
+            BackendOutcome::Available(true) => set_lock_bound(&mut bound, spec.key),
+            BackendOutcome::Broken(error) => warnings.push(format!(
+                "NameHasOwner probe failed for {}: {error}",
+                spec.bus
+            )),
+            BackendOutcome::Available(false) | BackendOutcome::Absent => {}
+        }
+    }
+    if desktop_has_token(desktop, "gnome") || desktop_has_token(desktop, "kde") {
+        bound.logind_lock = system.locked_hint().is_bound();
+    }
+    match session.name_has_owner("org.gnome.Mutter.DisplayConfig") {
+        BackendOutcome::Available(true) => bound.mutter_power = true,
+        BackendOutcome::Broken(error) => warnings.push(format!(
+            "NameHasOwner probe failed for org.gnome.Mutter.DisplayConfig: {error}"
+        )),
+        BackendOutcome::Available(false) | BackendOutcome::Absent => {}
+    }
+    bound.dpms_power = session_type.eq_ignore_ascii_case("x11") && x.dpms_available();
+    bound.wayland_idle = wayland.bind().is_bound();
+    match session.name_has_owner("org.gnome.Mutter.IdleMonitor") {
+        BackendOutcome::Available(true) => bound.mutter_idle = true,
+        BackendOutcome::Broken(error) => warnings.push(format!(
+            "NameHasOwner probe failed for org.gnome.Mutter.IdleMonitor: {error}"
+        )),
+        BackendOutcome::Available(false) | BackendOutcome::Absent => {}
+    }
+    bound.x11_idle = x.screensaver_available();
+    (bound, warnings)
+}
+
 fn resolve_x_power(
     session_type: &str,
     x: &mut impl XActivityOps,
@@ -250,11 +332,15 @@ fn resolve_x_power(
     }
 }
 
-fn warn_once(warnings: &mut Vec<String>, warned: &mut bool, backend: &str, error: String) {
-    warnings.push(format!(
-        "{}: {backend} backend failed: {error}",
-        if *warned { "DEBUG" } else { "WARNING" }
-    ));
+fn warn_once(warnings: &mut Vec<ActivityLog>, warned: &mut bool, backend: &str, error: String) {
+    warnings.push(ActivityLog {
+        level: if *warned {
+            ActivityLogLevel::Debug
+        } else {
+            ActivityLogLevel::Warning
+        },
+        message: format!("{backend} backend failed: {error}"),
+    });
     *warned = true;
 }
 
@@ -376,24 +462,6 @@ pub fn desktop_has_token(desktop: &str, wanted: &str) -> bool {
         .any(|token| token.trim().eq_ignore_ascii_case(wanted))
 }
 
-pub fn choose_lock(
-    desktop: &str,
-    screensavers: &[BackendOutcome<bool>],
-    logind: BackendOutcome<bool>,
-) -> bool {
-    if let Some(value) = screensavers.iter().find_map(|outcome| match outcome {
-        BackendOutcome::Available(value) => Some(*value),
-        BackendOutcome::Absent | BackendOutcome::Broken(_) => None,
-    }) {
-        return value;
-    }
-    if desktop_has_token(desktop, "gnome") || desktop_has_token(desktop, "kde") {
-        matches!(logind, BackendOutcome::Available(true))
-    } else {
-        false
-    }
-}
-
 pub fn mutter_power(mode: i32) -> PowerObservation {
     PowerObservation {
         power_save: mode != 0,
@@ -424,14 +492,17 @@ impl CompositeActivityProbe {
         let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_default();
         let latest = Arc::new(Mutex::new(ActivityState::default()));
         let worker_latest = Arc::clone(&latest);
-        let _ = thread::Builder::new()
+        if let Err(error) = thread::Builder::new()
             .name("solstone-activity".into())
             .spawn(move || {
                 run_worker(
-                    dbus::NativeActivityOps::new(desktop, session_type),
+                    dbus::NativeActivitySources::new(desktop, session_type),
                     worker_latest,
                 )
-            });
+            })
+        {
+            tracing::warn!(%error, "could not start activity worker; defaulting to active");
+        }
         Self { latest }
     }
 
@@ -480,10 +551,10 @@ mod tests {
     struct FakeSession {
         lock: HashMap<&'static str, VecDeque<BackendOutcome<bool>>>,
         calls: Vec<&'static str>,
-        constructions: HashMap<&'static str, usize>,
-        proxy_valid: HashMap<&'static str, bool>,
         power: BackendOutcome<i32>,
         idle: BackendOutcome<u64>,
+        owners: HashMap<&'static str, BackendOutcome<bool>>,
+        owner_calls: Vec<&'static str>,
     }
 
     impl Default for FakeSession {
@@ -491,10 +562,10 @@ mod tests {
             Self {
                 lock: HashMap::new(),
                 calls: vec![],
-                constructions: HashMap::new(),
-                proxy_valid: HashMap::new(),
                 power: BackendOutcome::Absent,
                 idle: BackendOutcome::Absent,
+                owners: HashMap::new(),
+                owner_calls: vec![],
             }
         }
     }
@@ -502,25 +573,23 @@ mod tests {
     impl SessionBusOps for FakeSession {
         fn get_active(&mut self, spec: &ScreenSaverSpec) -> BackendOutcome<bool> {
             self.calls.push(spec.key);
-            if !self.proxy_valid.get(spec.key).copied().unwrap_or(false) {
-                *self.constructions.entry(spec.key).or_default() += 1;
-                self.proxy_valid.insert(spec.key, true);
-            }
-            let result = self
-                .lock
+            self.lock
                 .get_mut(spec.key)
                 .and_then(VecDeque::pop_front)
-                .unwrap_or(BackendOutcome::Absent);
-            if matches!(result, BackendOutcome::Absent | BackendOutcome::Broken(_)) {
-                self.proxy_valid.insert(spec.key, false);
-            }
-            result
+                .unwrap_or(BackendOutcome::Absent)
         }
         fn mutter_power_mode(&mut self) -> BackendOutcome<i32> {
             self.power.clone()
         }
         fn mutter_idletime_ms(&mut self) -> BackendOutcome<u64> {
             self.idle.clone()
+        }
+        fn name_has_owner(&mut self, bus: &'static str) -> BackendOutcome<bool> {
+            self.owner_calls.push(bus);
+            self.owners
+                .get(bus)
+                .cloned()
+                .unwrap_or(BackendOutcome::Available(false))
         }
     }
 
@@ -585,6 +654,8 @@ mod tests {
         idle: BackendOutcome<u64>,
         dpms_calls: usize,
         idle_calls: usize,
+        dpms_available: bool,
+        idle_available: bool,
     }
     impl Default for FakeX {
         fn default() -> Self {
@@ -593,6 +664,8 @@ mod tests {
                 idle: BackendOutcome::Absent,
                 dpms_calls: 0,
                 idle_calls: 0,
+                dpms_available: false,
+                idle_available: false,
             }
         }
     }
@@ -605,6 +678,12 @@ mod tests {
             self.idle_calls += 1;
             self.idle.clone()
         }
+        fn dpms_available(&mut self) -> bool {
+            self.dpms_available
+        }
+        fn screensaver_available(&mut self) -> bool {
+            self.idle_available
+        }
     }
 
     fn queue(
@@ -613,6 +692,12 @@ mod tests {
         values: impl IntoIterator<Item = BackendOutcome<bool>>,
     ) {
         session.lock.insert(key, values.into_iter().collect());
+    }
+
+    fn owner(session: &mut FakeSession, bus: &'static str, available: bool) {
+        session
+            .owners
+            .insert(bus, BackendOutcome::Available(available));
     }
 
     fn run(
@@ -629,7 +714,6 @@ mod tests {
 
     #[test]
     fn exact_desktop_tokens_only() {
-        // tests/test_activity.py::TestIsScreenLocked::test_xdg_current_desktop_ubuntu_gnome_skips_fdo_and_returns_gnome_state
         assert!(desktop_has_token("ubuntu:GNOME", "gnome"));
         // tests/test_activity.py::TestIsScreenLocked::test_xdg_current_desktop_not_gnome_does_not_match_substring
         assert!(!desktop_has_token("NOT-GNOME", "gnome"));
@@ -642,18 +726,21 @@ mod tests {
         let mut session = FakeSession::default();
         queue(&mut session, "fdo", [BackendOutcome::Available(false)]);
         queue(&mut session, "gnome", [BackendOutcome::Available(true)]);
+        let mut x = FakeX::default();
         let state = run(
             "KDE",
             "wayland",
             &mut session,
             &mut FakeSystem::default(),
             &mut FakeWayland::default(),
-            &mut FakeX::default(),
+            &mut x,
             &mut CacheState::default(),
         )
         .0;
         assert!(!state.screen_locked);
         assert_eq!(session.calls, ["fdo"]);
+        // tests/test_activity.py::TestIsScreenLocked::test_xdg_current_desktop_kde_still_probes_fdo_first
+        assert_eq!(session.calls.first(), Some(&"fdo"));
         // tests/test_activity.py::TestIsScreenLocked::test_fdo_failure_gnome_returns_true
         let mut session = FakeSession::default();
         queue(&mut session, "fdo", [BackendOutcome::Absent]);
@@ -671,6 +758,7 @@ mod tests {
         assert!(state.screen_locked);
         assert_eq!(session.calls, ["fdo", "gnome"]);
 
+        // tests/test_activity.py::TestIsScreenLocked::test_fdo_backend_returns_true_without_gnome_fallback
         for (index, spec) in DEFAULT_LOCK_CHAIN.iter().enumerate() {
             let mut session = FakeSession::default();
             for prior in &DEFAULT_LOCK_CHAIN[..index] {
@@ -745,6 +833,7 @@ mod tests {
             hint: BackendOutcome::Available(true),
             ..FakeSystem::default()
         };
+        let mut corroboration = CacheState::default();
         let state = run(
             "ubuntu:GNOME",
             "wayland",
@@ -752,12 +841,16 @@ mod tests {
             &mut system,
             &mut FakeWayland::default(),
             &mut FakeX::default(),
-            &mut CacheState::default(),
+            &mut corroboration,
         )
         .0;
         assert!(!state.screen_locked);
         assert_eq!(session.calls, ["gnome"]);
         assert_eq!(system.hint_calls, 1); // corroboration only while the chain is bound
+        assert!(corroboration.warnings.iter().any(|entry| {
+            entry.level == ActivityLogLevel::Debug
+                && entry.message.contains("LockedHint corroboration")
+        }));
         // No 1:1 Python ancestor: logind LockedHint is answer-bearing only after chain exhaustion.
         let mut session = FakeSession::default();
         let mut system = FakeSystem {
@@ -796,6 +889,7 @@ mod tests {
             .screen_locked
         );
         assert_eq!(system.hint_calls, 0);
+        assert_eq!(system.subscribe_calls, 0);
     }
 
     #[test]
@@ -864,7 +958,7 @@ mod tests {
             cache
                 .warnings
                 .iter()
-                .filter(|value| value.contains("subscription failed"))
+                .filter(|value| value.message.contains("subscription failed"))
                 .count(),
             1
         );
@@ -896,7 +990,9 @@ mod tests {
         queue(
             &mut broken,
             "fdo",
-            [BackendOutcome::Broken("NoReply".into())],
+            [BackendOutcome::Broken(
+                "InvalidMemberNameError: invalid member name: bad".into(),
+            )],
         );
         queue(&mut broken, "gnome", [BackendOutcome::Available(true)]);
         let mut cache = CacheState::default();
@@ -914,54 +1010,38 @@ mod tests {
             .screen_locked
         );
         assert_eq!(cache.warnings.len(), 1);
-    }
+        assert!(cache.warnings[0].message.contains("InvalidMemberNameError"));
 
-    #[test]
-    fn real_chain_drives_proxy_reuse_and_invalidation_counter() {
-        // tests/test_activity.py::TestIsScreenLocked::test_is_screen_locked_caches_and_invalidates_same_bus
-        let mut session = FakeSession::default();
+        // tests/test_activity.py::TestIsScreenLocked::test_is_screen_locked_both_backends_broken_logs_both_warnings
+        let mut both = FakeSession::default();
+        queue(&mut both, "fdo", [BackendOutcome::Broken("NoReply".into())]);
         queue(
-            &mut session,
-            "fdo",
-            [
-                BackendOutcome::Available(false),
-                BackendOutcome::Available(false),
-                BackendOutcome::Broken("NoReply".into()),
-                BackendOutcome::Available(false),
-            ],
+            &mut both,
+            "gnome",
+            [BackendOutcome::Broken("NoReply".into())],
         );
         let mut cache = CacheState::default();
-        for _ in 0..2 {
-            let _ = run(
+        assert!(
+            !run(
                 "KDE",
                 "wayland",
-                &mut session,
+                &mut both,
                 &mut FakeSystem::default(),
                 &mut FakeWayland::default(),
                 &mut FakeX::default(),
-                &mut cache,
-            );
-        }
-        assert_eq!(session.constructions["fdo"], 1);
-        let _ = run(
-            "KDE",
-            "wayland",
-            &mut session,
-            &mut FakeSystem::default(),
-            &mut FakeWayland::default(),
-            &mut FakeX::default(),
-            &mut cache,
+                &mut cache
+            )
+            .0
+            .screen_locked
         );
-        let _ = run(
-            "KDE",
-            "wayland",
-            &mut session,
-            &mut FakeSystem::default(),
-            &mut FakeWayland::default(),
-            &mut FakeX::default(),
-            &mut cache,
+        assert_eq!(
+            cache
+                .warnings
+                .iter()
+                .filter(|value| value.message.contains("lock backend failed"))
+                .count(),
+            2
         );
-        assert_eq!(session.constructions["fdo"], 2);
     }
 
     #[test]
@@ -1066,6 +1146,8 @@ mod tests {
             .0
             .power_save
         );
+        // tests/test_activity.py::TestIsPowerSaveActive::test_mutter_unavailable_non_gnome_x11_dpms_standby_reads_power_save
+        // tests/test_activity.py::TestIsPowerSaveActive::test_mutter_unavailable_x11_dpms_returns_false
         for (dpms, expected) in [
             (DpmsPower::On, false),
             (DpmsPower::Standby, true),
@@ -1089,26 +1171,130 @@ mod tests {
             assert_eq!(state.power_save, expected);
             assert!(!state.power_unreadable);
         }
+        let mut non_x11 = FakeX::default();
         let state = run(
             "COSMIC",
             "wayland",
             &mut FakeSession::default(),
             &mut FakeSystem::default(),
             &mut FakeWayland::default(),
-            &mut FakeX::default(),
+            &mut non_x11,
             &mut CacheState::default(),
         )
         .0;
         assert!(!state.power_save);
         assert!(state.power_unreadable);
+        // tests/test_activity.py::TestIsPowerSaveActive::test_mutter_unavailable_non_x11_skips_dpms
+        assert_eq!(non_x11.dpms_calls, 0);
 
-        // tests/test_activity.py::TestIsPowerSaveActive::test_is_power_save_active_repeated_mutter_failures_log_debug_after_first
+        // tests/test_activity.py::TestIsPowerSaveActive::test_mutter_backend_failure_returns_false
+        // tests/test_activity.py::TestIsPowerSaveActive::test_is_power_save_active_service_missing_does_not_log
+        let mut cache = CacheState::default();
+        let state = run(
+            "GNOME",
+            "wayland",
+            &mut FakeSession::default(),
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+            &mut cache,
+        )
+        .0;
+        assert!(!state.power_save);
+        assert!(cache.warnings.is_empty());
+
+        // tests/test_activity.py::TestIsDpmsActive::test_xset_missing_returns_false
+        // tests/test_activity.py::TestIsDpmsActive::test_no_monitor_line_returns_false
+        let mut x = FakeX {
+            dpms: BackendOutcome::Absent,
+            ..FakeX::default()
+        };
+        let state = run(
+            "KDE",
+            "x11",
+            &mut FakeSession::default(),
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut x,
+            &mut CacheState::default(),
+        )
+        .0;
+        assert!(!state.power_save && state.power_unreadable);
+        // tests/test_activity.py::TestIsDpmsActive::test_xset_nonzero_returns_false
+        let mut x = FakeX {
+            dpms: BackendOutcome::Broken("query failed".into()),
+            ..FakeX::default()
+        };
+        let mut cache = CacheState::default();
+        let state = run(
+            "KDE",
+            "x11",
+            &mut FakeSession::default(),
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut x,
+            &mut cache,
+        )
+        .0;
+        assert!(!state.power_save && state.power_unreadable);
+        assert_eq!(cache.warnings.len(), 1);
+
+        // tests/test_activity.py::TestIsPowerSaveActive::test_is_power_save_active_mutter_parser_error_non_x11_returns_false
+        // tests/test_activity.py::TestIsPowerSaveActive::test_is_power_save_active_mutter_backend_broken_logs_warning
+        let mut broken_once = FakeSession {
+            power: BackendOutcome::Broken("InvalidMemberNameError: bad".into()),
+            ..FakeSession::default()
+        };
+        let mut broken_cache = CacheState::default();
+        let broken_state = run(
+            "GNOME",
+            "wayland",
+            &mut broken_once,
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+            &mut broken_cache,
+        )
+        .0;
+        assert!(!broken_state.power_save && broken_state.power_unreadable);
+        assert_eq!(broken_cache.warnings[0].level, ActivityLogLevel::Warning);
+        assert!(
+            broken_cache.warnings[0]
+                .message
+                .contains("InvalidMemberNameError")
+        );
+
         let mut session = FakeSession {
             power: BackendOutcome::Broken("NoReply".into()),
             ..FakeSession::default()
         };
         let mut cache = CacheState::default();
-        for _ in 0..2 {
+        // tests/test_activity.py::TestIsPowerSaveActive::test_is_power_save_active_repeated_mutter_failures_log_debug_after_first
+        let _ = run(
+            "GNOME",
+            "wayland",
+            &mut session,
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+            &mut cache,
+        );
+        let first = cache.take_warnings();
+        assert_eq!(first[0].level, ActivityLogLevel::Warning);
+        assert!(cache.warnings.is_empty());
+        let _ = run(
+            "GNOME",
+            "wayland",
+            &mut session,
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+            &mut cache,
+        );
+        let second = cache.take_warnings();
+        assert_eq!(second[0].level, ActivityLogLevel::Debug);
+        assert!(cache.warnings.is_empty());
+        for _ in 0..100 {
             let _ = run(
                 "GNOME",
                 "wayland",
@@ -1118,9 +1304,9 @@ mod tests {
                 &mut FakeX::default(),
                 &mut cache,
             );
+            let _ = cache.take_warnings();
         }
-        assert!(cache.warnings[0].starts_with("WARNING:"));
-        assert!(cache.warnings[1].starts_with("DEBUG:"));
+        assert!(cache.warnings.is_empty());
     }
 
     #[test]
@@ -1173,6 +1359,38 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_chain_is_an_ok_unlocked_probe_result() {
+        // No 1:1 Python ancestor: ActivityProbe reserves Err; missing lock backends answer unlocked.
+        let exhausted = run(
+            "XFCE",
+            "wayland",
+            &mut FakeSession::default(),
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+            &mut CacheState::default(),
+        )
+        .0;
+        assert!(!exhausted.screen_locked);
+        struct StaticOps(ActivityState);
+        impl ActivityOps for StaticOps {
+            fn probe_once(&mut self) -> (ActivityState, BoundBackends) {
+                (self.0, BoundBackends::default())
+            }
+        }
+        let mut probe = CompositeActivityProbe::spawn_with_ops(StaticOps(exhausted));
+        for _ in 0..100 {
+            let result = probe.probe();
+            assert!(result.is_ok());
+            if result.unwrap() == exhausted {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("worker did not publish exhausted result");
+    }
+
+    #[test]
     fn mutter_nonzero_including_unknown_is_power_save() {
         // tests/test_activity.py::TestIsPowerSaveActive::test_gnome_backend_nonzero_mode_returns_true
         assert!(mutter_power(2).power_save);
@@ -1184,7 +1402,6 @@ mod tests {
 
     #[test]
     fn startup_warning_includes_idle_availability() {
-        // tests/test_activity.py::TestProbeActivityServices::test_no_services_available_logs_warning
         assert!(startup_report(&BoundBackends::default()).1);
         // No 1:1 Python ancestor: idle availability prevents always-capture mode.
         let bound = BoundBackends {
@@ -1232,6 +1449,165 @@ mod tests {
                 "missing {name}"
             );
         }
+        for bound in [
+            BoundBackends {
+                fdo_lock: true,
+                ..BoundBackends::default()
+            },
+            BoundBackends {
+                mutter_power: true,
+                ..BoundBackends::default()
+            },
+            BoundBackends {
+                wayland_idle: true,
+                ..BoundBackends::default()
+            },
+        ] {
+            assert!(!startup_report(&bound).1);
+        }
+    }
+
+    #[test]
+    fn startup_inventory_probes_every_backend_independently() {
+        // tests/test_activity.py::TestProbeActivityServices::test_all_services_available_returns_true_results
+        let mut session = FakeSession::default();
+        for bus in [
+            FDO.bus,
+            GNOME.bus,
+            CINNAMON.bus,
+            XFCE.bus,
+            MATE.bus,
+            "org.gnome.Mutter.DisplayConfig",
+            "org.gnome.Mutter.IdleMonitor",
+        ] {
+            owner(&mut session, bus, true);
+        }
+        let mut system = FakeSystem {
+            hint: BackendOutcome::Available(false),
+            ..FakeSystem::default()
+        };
+        let mut wayland = FakeWayland {
+            bound: BackendOutcome::Available(()),
+            ..FakeWayland::default()
+        };
+        let mut x = FakeX {
+            dpms_available: true,
+            idle_available: true,
+            ..FakeX::default()
+        };
+        let (all, all_warnings) = probe_backends(
+            "KDE",
+            "x11",
+            &mut session,
+            &mut system,
+            &mut wayland,
+            &mut x,
+        );
+        assert!(all_warnings.is_empty());
+        assert_eq!(
+            session.owner_calls[..DEFAULT_LOCK_CHAIN.len()],
+            [FDO.bus, GNOME.bus, CINNAMON.bus, XFCE.bus, MATE.bus,]
+        );
+        let (lines, warning) = startup_report(&all);
+        assert!(!warning);
+        assert!(
+            all.fdo_lock
+                && all.gnome_lock
+                && all.cinnamon_lock
+                && all.xfce_lock
+                && all.mate_lock
+                && all.logind_lock
+        );
+        assert!(
+            all.mutter_power
+                && all.dpms_power
+                && all.wayland_idle
+                && all.mutter_idle
+                && all.x11_idle
+        );
+        for name in [
+            "org.freedesktop.ScreenSaver",
+            "org.gnome.ScreenSaver",
+            "org.cinnamon.ScreenSaver",
+            "org.xfce.ScreenSaver",
+            "org.mate.ScreenSaver",
+            "logind LockedHint",
+            "Mutter PowerSaveMode",
+            "X11 DPMS",
+            "ext-idle-notify-v1",
+            "Mutter IdleMonitor",
+            "XScreenSaver",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.contains(name)),
+                "missing {name}"
+            );
+        }
+
+        // tests/test_activity.py::TestProbeActivityServices::test_mixed_service_availability_returns_correct_results
+        let mut mixed_session = FakeSession::default();
+        owner(&mut mixed_session, FDO.bus, true);
+        owner(&mut mixed_session, GNOME.bus, false);
+        owner(&mut mixed_session, "org.gnome.Mutter.DisplayConfig", true);
+        let (mixed, mixed_warnings) = probe_backends(
+            "KDE",
+            "wayland",
+            &mut mixed_session,
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+        );
+        assert!(mixed_warnings.is_empty());
+        assert!(mixed.fdo_lock && !mixed.gnome_lock && mixed.mutter_power);
+        assert!(!mixed.dpms_power && !mixed.wayland_idle && !mixed.mutter_idle && !mixed.x11_idle);
+
+        // tests/test_activity.py::TestProbeActivityServices::test_no_services_available_logs_warning
+        let (none, none_warnings) = probe_backends(
+            "XFCE",
+            "wayland",
+            &mut FakeSession::default(),
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+        );
+        assert!(none_warnings.is_empty());
+        assert!(startup_report(&none).1);
+
+        // tests/test_activity.py::TestProbeActivityServices::test_probe_activity_services_parser_error_on_one_service_logs_and_continues
+        let mut broken = FakeSession::default();
+        broken
+            .owners
+            .insert(GNOME.bus, BackendOutcome::Broken("parser error".into()));
+        owner(&mut broken, FDO.bus, true);
+        owner(&mut broken, "org.gnome.Mutter.DisplayConfig", true);
+        let (after_error, warnings) = probe_backends(
+            "KDE",
+            "wayland",
+            &mut broken,
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+        );
+        assert!(after_error.fdo_lock && !after_error.gnome_lock && after_error.mutter_power);
+        assert_eq!(warnings.len(), 1);
+        let (lines, _) = startup_report(&after_error);
+        assert!(lines[0].starts_with("Screen lock backends:"));
+        assert!(lines[1].starts_with("Power save backends:"));
+        assert!(lines[2].starts_with("User idle backends:"));
+
+        // Inventory reports ownership independently of GNOME's FDO answer-selection skip.
+        let mut gnome_inventory = FakeSession::default();
+        owner(&mut gnome_inventory, FDO.bus, true);
+        let (gnome, _) = probe_backends(
+            "ubuntu:GNOME",
+            "wayland",
+            &mut gnome_inventory,
+            &mut FakeSystem::default(),
+            &mut FakeWayland::default(),
+            &mut FakeX::default(),
+        );
+        assert!(gnome.fdo_lock);
+        assert_eq!(gnome_inventory.owner_calls.first(), Some(&FDO.bus));
     }
 
     // tests/test_activity.py::TestIsScreenLocked::test_is_screen_locked_caches_weakref_less_bus

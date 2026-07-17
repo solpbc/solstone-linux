@@ -11,10 +11,16 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
-use super::{BackendOutcome, DpmsPower, IDLE_THRESHOLD, PowerObservation, XActivityOps};
+use super::{BackendOutcome, DpmsPower, XActivityOps};
 
-pub fn dpms_mode(mode: DPMSMode) -> bool {
-    mode == DPMSMode::STANDBY || mode == DPMSMode::SUSPEND || mode == DPMSMode::OFF
+fn map_dpms_mode(mode: DPMSMode) -> Result<DpmsPower, String> {
+    match mode {
+        DPMSMode::ON => Ok(DpmsPower::On),
+        DPMSMode::STANDBY => Ok(DpmsPower::Standby),
+        DPMSMode::SUSPEND => Ok(DpmsPower::Suspend),
+        DPMSMode::OFF => Ok(DpmsPower::Off),
+        _ => Err("unknown DPMS power level".into()),
+    }
 }
 
 pub struct NativeX11 {
@@ -31,17 +37,6 @@ impl NativeX11 {
     pub fn new() -> Self {
         Self {
             connection: x11rb::connect(None).ok(),
-        }
-    }
-
-    pub fn power(&self) -> BackendOutcome<PowerObservation> {
-        match self.power_level() {
-            BackendOutcome::Available(value) => BackendOutcome::Available(PowerObservation {
-                power_save: dpms_mode(value),
-                readable: true,
-            }),
-            BackendOutcome::Absent => BackendOutcome::Absent,
-            BackendOutcome::Broken(error) => BackendOutcome::Broken(error),
         }
     }
 
@@ -64,16 +59,6 @@ impl NativeX11 {
                 Err(error) => BackendOutcome::Broken(error.to_string()),
             },
             Err(error) => BackendOutcome::Broken(error.to_string()),
-        }
-    }
-
-    pub fn idle(&self) -> BackendOutcome<bool> {
-        match self.idle_ms() {
-            BackendOutcome::Available(ms) => {
-                BackendOutcome::Available(Duration::from_millis(ms) >= IDLE_THRESHOLD)
-            }
-            BackendOutcome::Absent => BackendOutcome::Absent,
-            BackendOutcome::Broken(error) => BackendOutcome::Broken(error),
         }
     }
 
@@ -103,17 +88,10 @@ impl NativeX11 {
 impl XActivityOps for NativeX11 {
     fn dpms_state(&mut self) -> BackendOutcome<DpmsPower> {
         match self.power_level() {
-            BackendOutcome::Available(DPMSMode::ON) => BackendOutcome::Available(DpmsPower::On),
-            BackendOutcome::Available(DPMSMode::STANDBY) => {
-                BackendOutcome::Available(DpmsPower::Standby)
-            }
-            BackendOutcome::Available(DPMSMode::SUSPEND) => {
-                BackendOutcome::Available(DpmsPower::Suspend)
-            }
-            BackendOutcome::Available(DPMSMode::OFF) => BackendOutcome::Available(DpmsPower::Off),
-            BackendOutcome::Available(_) => {
-                BackendOutcome::Broken("unknown DPMS power level".into())
-            }
+            BackendOutcome::Available(mode) => match map_dpms_mode(mode) {
+                Ok(power) => BackendOutcome::Available(power),
+                Err(error) => BackendOutcome::Broken(error),
+            },
             BackendOutcome::Absent => BackendOutcome::Absent,
             BackendOutcome::Broken(error) => BackendOutcome::Broken(error),
         }
@@ -122,9 +100,28 @@ impl XActivityOps for NativeX11 {
     fn screensaver_idle_ms(&mut self) -> BackendOutcome<u64> {
         self.idle_ms()
     }
+
+    fn dpms_available(&mut self) -> bool {
+        self.extension_available(b"DPMS")
+    }
+
+    fn screensaver_available(&mut self) -> bool {
+        self.extension_available(b"MIT-SCREEN-SAVER")
+    }
 }
 
-use std::time::Duration;
+impl NativeX11 {
+    fn extension_available(&self, name: &[u8]) -> bool {
+        let Some((connection, _)) = &self.connection else {
+            return false;
+        };
+        connection
+            .query_extension(name)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some_and(|reply| reply.present)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -133,16 +130,12 @@ mod tests {
     #[test]
     fn dpms_behavior_mapping_supersedes_xset_parser() {
         // tests/test_activity.py::TestIsDpmsActive::test_monitor_on_returns_false
-        assert!(!dpms_mode(DPMSMode::ON));
+        assert_eq!(map_dpms_mode(DPMSMode::ON), Ok(DpmsPower::On));
         // tests/test_activity.py::TestIsDpmsActive::test_monitor_standby_returns_true
-        assert!(dpms_mode(DPMSMode::STANDBY));
+        assert_eq!(map_dpms_mode(DPMSMode::STANDBY), Ok(DpmsPower::Standby));
         // No 1:1 Python ancestor: xset suite omitted Suspend; protocol behavior pins it true.
-        assert!(dpms_mode(DPMSMode::SUSPEND));
+        assert_eq!(map_dpms_mode(DPMSMode::SUSPEND), Ok(DpmsPower::Suspend));
         // tests/test_activity.py::TestIsDpmsActive::test_monitor_off_returns_true
-        assert!(dpms_mode(DPMSMode::OFF));
-        // tests/test_activity.py::TestIsDpmsActive::test_xset_missing_returns_false
-        // tests/test_activity.py::TestIsDpmsActive::test_xset_nonzero_returns_false
-        // tests/test_activity.py::TestIsDpmsActive::test_no_monitor_line_returns_false
-        // NativeX11 maps absent extensions and query failures to non-power-save outcomes.
+        assert_eq!(map_dpms_mode(DPMSMode::OFF), Ok(DpmsPower::Off));
     }
 }
