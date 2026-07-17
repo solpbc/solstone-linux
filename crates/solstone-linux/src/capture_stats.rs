@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use std::{fs, path::Path};
+use std::{ffi::OsStr, fs, path::Path};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CaptureStats {
@@ -15,51 +15,120 @@ pub struct QuarantineStats {
     pub oldest_age_seconds: Option<f64>,
 }
 
-pub fn compute_capture_stats(root: &Path, today: &str) -> CaptureStats {
-    let mut captures_today = 0;
-    let mut total_size = 0;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentClass {
+    Accepted,
+    Incomplete,
+    Failed,
+}
+
+fn classify_segment_name(name: &OsStr) -> SegmentClass {
+    let name = name.to_string_lossy();
+    if name.ends_with(".incomplete") {
+        SegmentClass::Incomplete
+    } else if name.ends_with(".failed") {
+        SegmentClass::Failed
+    } else {
+        SegmentClass::Accepted
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct StatusCaptureStats {
+    pub segment_count: u64,
+    pub day_count: u64,
+    pub size_mb: f64,
+    pub incomplete_count: u64,
+}
+
+fn walk_segments(
+    root: &Path,
+    mut day: impl FnMut(&OsStr),
+    mut segment: impl FnMut(&OsStr, SegmentClass),
+    mut accepted_bytes: impl FnMut(u64),
+) {
     let _ = (|| -> std::io::Result<()> {
         if !root.exists() {
             return Ok(());
         }
-        for day in fs::read_dir(root)? {
-            let day = day?;
-            if !day.path().is_dir() {
+        for day_entry in fs::read_dir(root)? {
+            let day_entry = day_entry?;
+            if !day_entry.path().is_dir() {
                 continue;
             }
-            for stream in fs::read_dir(day.path())? {
+            day(&day_entry.file_name());
+            for stream in fs::read_dir(day_entry.path())? {
                 let stream = stream?;
                 if !stream.path().is_dir() {
                     continue;
                 }
-                for segment in fs::read_dir(stream.path())? {
-                    let segment = segment?;
-                    if !segment.path().is_dir() {
+                for segment_entry in fs::read_dir(stream.path())? {
+                    let segment_entry = segment_entry?;
+                    if !segment_entry.path().is_dir() {
                         continue;
                     }
-                    let name = segment.file_name();
-                    let name = name.to_string_lossy();
-                    if name.ends_with(".incomplete") || name.ends_with(".failed") {
-                        continue;
-                    }
-                    if day.file_name() == today {
-                        captures_today += 1;
-                    }
-                    for file in fs::read_dir(segment.path())? {
-                        let file = file?;
-                        if file.path().is_file() {
-                            total_size += file.metadata()?.len();
+                    let class = classify_segment_name(&segment_entry.file_name());
+                    segment(&day_entry.file_name(), class);
+                    let mut bytes = 0;
+                    if class == SegmentClass::Accepted {
+                        for file in fs::read_dir(segment_entry.path())? {
+                            let file = file?;
+                            if file.path().is_file() {
+                                bytes += file.metadata()?.len();
+                            }
                         }
+                        accepted_bytes(bytes);
                     }
                 }
             }
         }
         Ok(())
     })();
+}
+
+pub fn compute_capture_stats(root: &Path, today: &str) -> CaptureStats {
+    let mut captures_today = 0;
+    let mut total_size = 0;
+    walk_segments(
+        root,
+        |_| {},
+        |day, class| {
+            if class == SegmentClass::Accepted && day == OsStr::new(today) {
+                captures_today += 1;
+            }
+        },
+        |bytes| total_size += bytes,
+    );
     CaptureStats {
         captures_today,
         total_size_mb: total_size / (1024 * 1024),
     }
+}
+
+pub fn compute_status_capture_stats(root: &Path) -> StatusCaptureStats {
+    let day_count = std::cell::Cell::new(0);
+    let mut stats = StatusCaptureStats {
+        segment_count: 0,
+        day_count: 0,
+        size_mb: 0.0,
+        incomplete_count: 0,
+    };
+    let mut total_size = 0;
+    walk_segments(
+        root,
+        |_| day_count.set(day_count.get() + 1),
+        |_, class| match class {
+            SegmentClass::Accepted => {
+                stats.segment_count += 1;
+            }
+            SegmentClass::Incomplete => stats.incomplete_count += 1,
+            SegmentClass::Failed => {}
+        },
+        |bytes| total_size += bytes,
+    );
+    stats.day_count = day_count.get();
+    stats.size_mb = total_size as f64 / (1024.0 * 1024.0);
+    stats
 }
 
 pub fn compute_quarantine_stats(root: &Path, now: f64) -> QuarantineStats {
@@ -82,7 +151,7 @@ pub fn compute_quarantine_stats(root: &Path, now: f64) -> QuarantineStats {
                 for segment in fs::read_dir(stream.path())? {
                     let segment = segment?;
                     if !segment.path().is_dir()
-                        || !segment.file_name().to_string_lossy().ends_with(".failed")
+                        || classify_segment_name(&segment.file_name()) != SegmentClass::Failed
                     {
                         continue;
                     }
@@ -307,6 +376,58 @@ mod tests {
             CaptureStats {
                 captures_today: 1,
                 total_size_mb: 1
+            }
+        );
+    }
+
+    // AC: status counts every direct child directory as a day, including empty and arbitrary names.
+    #[test]
+    fn status_counts_all_day_directories() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir(t.path().join("empty")).unwrap();
+        fs::create_dir(t.path().join("not-a-date")).unwrap();
+        fs::write(t.path().join("20260101"), b"not a directory").unwrap();
+        assert_eq!(compute_status_capture_stats(t.path()).day_count, 2);
+    }
+
+    // AC: accepted, incomplete, and failed segments share one classification and sizing policy.
+    #[test]
+    fn status_classifies_and_sizes_segments() {
+        let t = tempfile::tempdir().unwrap();
+        let accepted = segment(t.path(), "20260101", "120000_300");
+        let incomplete = segment(t.path(), "20260101", "120500.incomplete");
+        let failed = segment(t.path(), "20260101", "121000_300.failed");
+        fs::write(
+            accepted.join("audio.flac"),
+            vec![0; 1024 * 1024 + 512 * 1024],
+        )
+        .unwrap();
+        fs::write(incomplete.join("audio.flac"), vec![0; 1024 * 1024]).unwrap();
+        fs::write(failed.join("audio.flac"), vec![0; 1024 * 1024]).unwrap();
+        fs::create_dir(accepted.join("nested")).unwrap();
+        fs::write(accepted.join("nested/ignored"), vec![0; 1024 * 1024]).unwrap();
+        assert_eq!(
+            compute_status_capture_stats(t.path()),
+            StatusCaptureStats {
+                segment_count: 1,
+                day_count: 1,
+                size_mb: 1.5,
+                incomplete_count: 1,
+            }
+        );
+    }
+
+    // AC: missing status trees return an empty aggregate.
+    #[test]
+    fn status_missing_tree_is_empty() {
+        let t = tempfile::tempdir().unwrap();
+        assert_eq!(
+            compute_status_capture_stats(&t.path().join("missing")),
+            StatusCaptureStats {
+                segment_count: 0,
+                day_count: 0,
+                size_mb: 0.0,
+                incomplete_count: 0,
             }
         );
     }

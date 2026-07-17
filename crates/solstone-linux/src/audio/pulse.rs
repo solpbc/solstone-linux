@@ -237,16 +237,7 @@ pub(crate) fn run_pulse(
     let mut mainloop = Mainloop::new().ok_or_else(|| {
         PulseRunError::Degraded("failed to create PulseAudio threaded mainloop".into())
     })?;
-    let mut context = Context::new(&mainloop, "solstone-linux")
-        .ok_or("failed to create PulseAudio context")
-        .map_err(|error| PulseRunError::Degraded(error.into()))?;
-    context
-        .connect(None, ContextFlagSet::NOFLAGS, None)
-        .map_err(|error| PulseRunError::Degraded(format!("{error:?}")))?;
-    mainloop
-        .start()
-        .map_err(|error| PulseRunError::Degraded(format!("{error:?}")))?;
-    wait_for_context(&mut mainloop, &context)
+    let mut context = connect_context(&mut mainloop)
         .map_err(|error| PulseRunError::Degraded(error.to_string()))?;
 
     let outcome = drive_subscription(
@@ -398,6 +389,26 @@ pub(crate) fn run_pulse(
     mainloop.unlock();
     mainloop.stop();
     Ok(threshold_reached.load(Ordering::Acquire))
+}
+
+fn connect_context(mainloop: &mut Mainloop) -> Result<Context, AnyError> {
+    let mut context =
+        Context::new(mainloop, "solstone-linux").ok_or("failed to create PulseAudio context")?;
+    context
+        .connect(None, ContextFlagSet::NOFLAGS, None)
+        .map_err(|error| format!("{error:?}"))?;
+    mainloop.start().map_err(|error| format!("{error:?}"))?;
+    wait_for_context(mainloop, &context)?;
+    Ok(context)
+}
+
+pub(crate) fn probe_server() -> Result<(), String> {
+    let mut mainloop = Mainloop::new()
+        .ok_or_else(|| "failed to create PulseAudio threaded mainloop".to_owned())?;
+    let mut context = connect_context(&mut mainloop).map_err(|error| error.to_string())?;
+    context.disconnect();
+    mainloop.stop();
+    Ok(())
 }
 
 fn initialize_streams<T>(

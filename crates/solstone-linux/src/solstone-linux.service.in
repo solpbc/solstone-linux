@@ -1,0 +1,19 @@
+[Unit]
+Description=sol for Linux
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+# Native readiness plus a 30s watchdog (6x the 5s TICK_INTERVAL) improves on Python Type=simple.
+Type=notify
+WatchdogSec=30
+ExecStart={BINARY} run
+PassEnvironment=DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR XDG_CURRENT_DESKTOP XAUTHORITY XDG_SESSION_TYPE
+Environment=PATH={PATH}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

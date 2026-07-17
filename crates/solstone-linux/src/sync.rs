@@ -39,14 +39,20 @@ pub const SERVER_KEY_FILENAME: &str = ".server_key";
 
 pub struct SyncService {
     notify: Arc<Notify>,
+    pending_trigger: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
-    client: Arc<UploadClient>,
     facts: Arc<Mutex<SyncFacts>>,
     recent_error_count: Arc<AtomicU8>,
     stale_threshold: f64,
     clock: Arc<dyn Clock + Send + Sync>,
     abort: tokio::task::AbortHandle,
     task: JoinHandle<()>,
+}
+
+struct SyncControl {
+    notify: Arc<Notify>,
+    pending_trigger: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
 }
 
 impl SyncService {
@@ -56,6 +62,7 @@ impl SyncService {
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> Self {
         let notify = Arc::new(Notify::new());
+        let pending_trigger = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
         let mut facts = load_facts(&config.state_dir());
         facts.in_progress = false;
@@ -69,8 +76,11 @@ impl SyncService {
             config.clone(),
             Arc::clone(&client),
             Arc::clone(&clock),
-            Arc::clone(&notify),
-            Arc::clone(&running),
+            SyncControl {
+                notify: Arc::clone(&notify),
+                pending_trigger: Arc::clone(&pending_trigger),
+                running: Arc::clone(&running),
+            },
             Arc::clone(&facts),
             Arc::clone(&recent_error_count),
         );
@@ -78,8 +88,8 @@ impl SyncService {
         let abort = task.abort_handle();
         Self {
             notify,
+            pending_trigger,
             running,
-            client,
             facts,
             recent_error_count,
             stale_threshold: config.sync_stale_threshold as f64,
@@ -90,14 +100,32 @@ impl SyncService {
     }
 
     pub fn trigger(&self) {
+        self.pending_trigger.store(true, Ordering::Release);
         self.notify.notify_one();
     }
 
-    pub fn stop(&self) {
+    pub fn trigger_handle(&self) -> SyncTrigger {
+        SyncTrigger {
+            notify: Arc::clone(&self.notify),
+            pending_trigger: Arc::clone(&self.pending_trigger),
+        }
+    }
+
+    pub async fn shutdown(mut self, timeout: Duration) -> Result<(), tokio::task::JoinError> {
         self.running.store(false, Ordering::Release);
         self.notify.notify_one();
-        self.client.request_stop();
-        self.abort.abort();
+        // Never cancel the shared UploadClient here: the walker must finish before the
+        // event sender is stopped, making walker-then-sender shutdown structural.
+        match tokio::time::timeout(timeout, &mut self.task).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.abort.abort();
+                match self.task.await {
+                    Err(error) if error.is_cancelled() => Ok(()),
+                    result => result,
+                }
+            }
+        }
     }
 
     pub fn health(&self) -> SyncHealth {
@@ -128,12 +156,18 @@ impl SyncService {
             }),
         }
     }
+}
 
-    pub async fn join(self) -> Result<(), tokio::task::JoinError> {
-        match self.task.await {
-            Err(error) if error.is_cancelled() => Ok(()),
-            result => result,
-        }
+#[derive(Clone)]
+pub struct SyncTrigger {
+    notify: Arc<Notify>,
+    pending_trigger: Arc<AtomicBool>,
+}
+
+impl SyncTrigger {
+    pub fn trigger(&self) {
+        self.pending_trigger.store(true, Ordering::Release);
+        self.notify.notify_one();
     }
 }
 
@@ -142,6 +176,7 @@ struct SyncWorker {
     client: Arc<UploadClient>,
     clock: Arc<dyn Clock + Send + Sync>,
     notify: Arc<Notify>,
+    pending_trigger: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     facts: Arc<Mutex<SyncFacts>>,
     recent_error_count: Arc<AtomicU8>,
@@ -155,6 +190,7 @@ struct SyncWorker {
     last_full_sync: f64,
     last_contact_flush: f64,
     registration_refused: bool,
+    draining_shutdown: bool,
     #[cfg(test)]
     fail_next_pass: bool,
 }
@@ -164,8 +200,7 @@ impl SyncWorker {
         config: Config,
         client: Arc<UploadClient>,
         clock: Arc<dyn Clock + Send + Sync>,
-        notify: Arc<Notify>,
-        running: Arc<AtomicBool>,
+        control: SyncControl,
         facts: Arc<Mutex<SyncFacts>>,
         recent_error_count: Arc<AtomicU8>,
     ) -> Self {
@@ -174,8 +209,9 @@ impl SyncWorker {
             config,
             client,
             clock,
-            notify,
-            running,
+            notify: control.notify,
+            pending_trigger: control.pending_trigger,
+            running: control.running,
             facts,
             recent_error_count,
             synced_days,
@@ -188,6 +224,7 @@ impl SyncWorker {
             last_full_sync: 0.0,
             last_contact_flush: 0.0,
             registration_refused: false,
+            draining_shutdown: false,
             #[cfg(test)]
             fail_next_pass: false,
         }
@@ -195,9 +232,17 @@ impl SyncWorker {
 
     async fn run(&mut self) {
         self.prune_synced_days();
-        while self.is_running() {
+        loop {
             let _ = tokio::time::timeout(Duration::from_secs(60), self.notify.notified()).await;
+            let completion_pending = self.pending_trigger.swap(false, Ordering::AcqRel);
             if !self.is_running() {
+                // A completion can race shutdown. Give the final local segment one bounded
+                // reconciliation pass before the walker exits; keyless observers stay idle.
+                if completion_pending && self.client.is_registered() {
+                    self.draining_shutdown = true;
+                    let _ = self.execute_pass(false).await;
+                    self.draining_shutdown = false;
+                }
                 break;
             }
             if !self.client.is_registered() {
@@ -304,7 +349,7 @@ impl SyncWorker {
         let mut legacy_logged = false;
 
         for day in days {
-            if !self.is_running() || self.circuit_open {
+            if (!self.is_running() && !self.draining_shutdown) || self.circuit_open {
                 pass_success = false;
                 break;
             }
@@ -339,7 +384,7 @@ impl SyncWorker {
             }
             let mut any_needed_upload = false;
             for segment_dir in segments_by_day.get(&day).into_iter().flatten() {
-                if !self.is_running() || self.circuit_open {
+                if (!self.is_running() && !self.draining_shutdown) || self.circuit_open {
                     break;
                 }
                 let segment_key = segment_dir.file_name().unwrap().to_string_lossy();
@@ -465,7 +510,7 @@ impl SyncWorker {
             return;
         };
         for day_dir in day_entries {
-            if !self.is_running() {
+            if !self.is_running() && !self.draining_shutdown {
                 break;
             }
             let day = day_dir.file_name().unwrap().to_string_lossy().into_owned();
@@ -982,8 +1027,11 @@ mod tests {
                 wall: 1_800_000_000.0,
                 mono: 100.0,
             }),
-            Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(true)),
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
             Arc::new(Mutex::new(SyncFacts::default())),
             Arc::new(AtomicU8::new(0)),
         );
@@ -1632,8 +1680,11 @@ mod tests {
             config.clone(),
             client,
             clock,
-            Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(true)),
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
             facts,
             Arc::new(AtomicU8::new(0)),
         );
@@ -1704,8 +1755,7 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
         assert_eq!(server.request_count("/segments/20260101"), 2);
         assert!(!segment.exists());
     }
@@ -2077,9 +2127,9 @@ mod tests {
         );
     }
 
-    // tests/test_sync.py::test_sync_stop_signals_client_interrupt
+    // AC: sync shutdown releases the walker without retaining or cancelling the upload client.
     #[tokio::test]
-    async fn sync_stop_signals_client_interrupt() {
+    async fn sync_shutdown_releases_client_without_cancelling_it() {
         let temp = tempfile::tempdir().unwrap();
         let server = MockServer::new(vec![]).await;
         let config = Config {
@@ -2098,15 +2148,8 @@ mod tests {
                 mono: 0.0,
             }),
         );
-        service.stop();
-        assert!(!service.running.load(Ordering::Acquire));
-        service.join().await.unwrap();
-        let media = temp.path().join("audio.flac");
-        fs::write(&media, b"audio").unwrap();
-        assert_eq!(
-            client.upload_segment("d", "s", &[media]).await.error_type,
-            Some(ErrorType::Transient)
-        );
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(Arc::strong_count(&client), 1);
     }
 
     // tests/test_sync.py::test_startup_forces_in_progress_false
@@ -2136,8 +2179,7 @@ mod tests {
                 mono: 0.0,
             }),
         );
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
         let facts = load_facts(&config.state_dir());
         assert!(!facts.in_progress);
         assert!(facts.progress.is_empty());
@@ -2609,8 +2651,7 @@ mod tests {
         );
         service.facts.lock().unwrap().last_error_class = None;
         assert_eq!(service.health_beacon().last_error_reason, None);
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // AC: negative pending values persist but never enter the unsigned beacon.
@@ -2638,8 +2679,7 @@ mod tests {
             }),
         );
         assert_eq!(service.health_beacon().pending_queue_depth, None);
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // AC: a completion notification starts a pass.
@@ -2665,8 +2705,7 @@ mod tests {
         );
         service.trigger();
         wait_for_requests(&server, 1).await;
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
         assert_eq!(server.requests().len(), 1);
     }
 
@@ -2694,8 +2733,7 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(60)).await;
         wait_for_requests(&server, 1).await;
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // AC: full reconciliation repeats only after an injected wall day elapses.
@@ -2732,8 +2770,7 @@ mod tests {
         service.trigger();
         wait_for_requests(&server, 5).await;
         assert_eq!(server.request_count("/segments/20260101"), 2);
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // AC: distinct days are queried newest first.
@@ -2795,9 +2832,8 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(server.requests().len(), 2);
-        service.stop();
         gate.notify_waiters();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // AC: shutdown cancels a blocked walk and leaves parseable facts.
@@ -2823,11 +2859,7 @@ mod tests {
         );
         service.trigger();
         wait_for_requests(&server, 1).await;
-        service.stop();
-        tokio::time::timeout(Duration::from_secs(1), service.join())
-            .await
-            .unwrap()
-            .unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
         let text =
             fs::read_to_string(crate::sync_health::sync_health_path(&config.state_dir())).unwrap();
         assert!(serde_json::from_str::<Value>(&text).unwrap().is_object());
@@ -2915,8 +2947,7 @@ mod tests {
         wait_for_requests(&server, 3).await;
         service.trigger();
         wait_for_requests(&server, 5).await;
-        service.stop();
-        service.join().await.unwrap();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
         assert!(server.requests().len() >= 5);
     }
 
@@ -2965,5 +2996,31 @@ mod tests {
         assert_eq!(load_facts(&config.state_dir()), facts);
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert_eq!(output.matches("Sync refused").count(), 1);
+    }
+
+    // AC: a completion racing shutdown drains one walker pass before join completes.
+    #[tokio::test]
+    async fn final_completion_trigger_drains_before_shutdown_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![(200, json!({"items": [], "total": 0}))]).await;
+        let config = Config {
+            server_url: server.url.clone(),
+            key: "K".into(),
+            base_dir: temp.path().into(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let service = SyncService::start(
+            config,
+            client,
+            Arc::new(FixedClock {
+                wall: 1_800_000_000.0,
+                mono: 0.0,
+            }),
+        );
+        service.trigger();
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(server.requests().len(), 1);
     }
 }

@@ -126,9 +126,13 @@ pub struct GstreamerPipelineFactory {
 
 impl GstreamerPipelineFactory {
     pub fn new() -> Result<Self, String> {
-        gst::init().map_err(|error| format!("failed to initialize GStreamer: {error}"))?;
+        ensure_initialized()?;
         Ok(Self { _private: () })
     }
+}
+
+pub fn ensure_initialized() -> Result<(), String> {
+    gst::init().map_err(|error| format!("failed to initialize GStreamer: {error}"))
 }
 
 impl PipelineFactory for GstreamerPipelineFactory {

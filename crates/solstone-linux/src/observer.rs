@@ -1143,6 +1143,52 @@ mod tests {
         f.observer.tick().unwrap();
         assert_eq!(f.observer.state.mode, Mode::Idle)
     }
+    // AC: real Observer state branches all flow through run::tick_once's single watchdog point.
+    #[test]
+    fn runtime_watchdog_covers_real_observer_state_matrix() {
+        use crate::run::{ServiceNotifier, tick_once};
+        struct Notifier(std::sync::atomic::AtomicUsize);
+        impl ServiceNotifier for Notifier {
+            fn ready(&self) -> io::Result<()> {
+                Ok(())
+            }
+            fn watchdog(&self) -> io::Result<()> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                Ok(())
+            }
+            fn stopping(&self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let notifier = Notifier(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut timed = fixture(false);
+        initialize(&mut timed);
+        timed.observer.pause(30);
+        tick_once(&notifier, || timed.observer.tick()).unwrap();
+
+        let mut indefinite = fixture(false);
+        initialize(&mut indefinite);
+        indefinite.observer.pause(0);
+        tick_once(&notifier, || indefinite.observer.tick()).unwrap();
+
+        let mut idle_state = fixture(false);
+        initialize(&mut idle_state);
+        idle_state
+            .observer
+            .backends
+            .activity
+            .0
+            .push_back(Ok(idle()));
+        tick_once(&notifier, || idle_state.observer.tick()).unwrap();
+
+        let mut unhealthy = fixture(false);
+        initialize(&mut unhealthy);
+        unhealthy.observer.backends.video.healthy = false;
+        tick_once(&notifier, || unhealthy.observer.tick()).unwrap();
+
+        assert_eq!(notifier.0.load(std::sync::atomic::Ordering::Acquire), 4);
+    }
     // tests/test_observer_emits_stream_silent_event.py::test_emits_with_full_fields
     #[test]
     fn stop_path_uses_file_threshold_and_enriches_silent_event() {

@@ -30,6 +30,7 @@ ksni = "=0.3.6"
 open = "5.4.0"
 notify-rust = { version = "=4.18.0", default-features = false, features = ["z-with-tokio"] }
 zbus = { version = "=5.17.0", features = ["tokio"] }
+sd-notify = "0.5.0"
 
 [build-dependencies]
 resvg = { version = "0.47", default-features = false }
