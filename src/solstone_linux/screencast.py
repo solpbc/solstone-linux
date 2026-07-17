@@ -435,7 +435,8 @@ class Screencaster:
         if restore_token:
             logger.debug("Using saved restore token")
 
-        cursor_mode = 1 if draw_cursor else 0
+        # Portal cursor-mode bitmask: 1=HIDDEN, 2=EMBEDDED (4=METADATA unused).
+        cursor_mode = 2 if draw_cursor else 1
 
         select_token = "h_" + uuid.uuid4().hex
         select_handle = _make_request_handle(self.bus, select_token)
