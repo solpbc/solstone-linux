@@ -14,6 +14,13 @@ serde_json = "1"
 claxon = "0.4.3"
 chrono = "0.4"
 rustix = { version = "1", features = ["process"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+tokio = { workspace = true, features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
 
 [dev-dependencies]
 tempfile = "3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { workspace = true, features = ["net"] }
