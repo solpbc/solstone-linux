@@ -162,16 +162,34 @@ pub trait EventSink {
     fn stream_silent(&mut self, event: StreamSilentEvent);
     fn segment_completed(&mut self, event: SegmentCompletedEvent);
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StateSnapshot {
     pub mode: Mode,
     pub paused: bool,
     pub segment_open: bool,
     pub captures_today: u64,
     pub total_size_mb: u64,
+    // Additive desktop-surface anchors. Countdowns are derived when read, never stored.
+    pub pause_until: Option<f64>,
+    pub segment_start_mono: Option<f64>,
+    pub process_start_mono: f64,
 }
 pub trait StateSink {
     fn publish(&mut self, snapshot: StateSnapshot);
+}
+pub struct WatchStateSink {
+    sender: tokio::sync::watch::Sender<StateSnapshot>,
+}
+impl WatchStateSink {
+    pub fn channel(initial: StateSnapshot) -> (Self, tokio::sync::watch::Receiver<StateSnapshot>) {
+        let (sender, receiver) = tokio::sync::watch::channel(initial);
+        (Self { sender }, receiver)
+    }
+}
+impl StateSink for WatchStateSink {
+    fn publish(&mut self, snapshot: StateSnapshot) {
+        self.sender.send_replace(snapshot);
+    }
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum ObserverError {
@@ -206,6 +224,8 @@ pub struct ObserverState {
     pub segment_dir: Option<PathBuf>,
     pub segment_start_wall: f64,
     pub segment_start_mono: f64,
+    // Process uptime for tray/GetStats. The observe/status uptime remains segment elapsed.
+    pub process_start_mono: f64,
     pub segment_is_muted: bool,
     pub cached_is_muted: bool,
     pub cached_is_active: bool,
@@ -260,6 +280,7 @@ where
                 segment_dir: None,
                 segment_start_wall: wall,
                 segment_start_mono: mono,
+                process_start_mono: mono,
                 segment_is_muted: false,
                 cached_is_muted: false,
                 cached_is_active: false,
@@ -594,6 +615,13 @@ where
             segment_open: self.state.segment_dir.is_some(),
             captures_today: self.state.capture_stats.captures_today,
             total_size_mb: self.state.capture_stats.total_size_mb,
+            pause_until: self.state.pause_until,
+            segment_start_mono: self
+                .state
+                .segment_dir
+                .as_ref()
+                .map(|_| self.state.segment_start_mono),
+            process_start_mono: self.state.process_start_mono,
         })
     }
 }

@@ -25,6 +25,12 @@ gstreamer = "=0.25.3"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 x11rb = { version = "0.13", default-features = false, features = ["randr"] }
+ksni = "=0.3.6"
+open = "5.4.0"
+zbus = { version = "=5.17.0", features = ["tokio"] }
+
+[build-dependencies]
+resvg = { version = "0.47", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
@@ -32,3 +38,4 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio = { workspace = true, features = ["net", "test-util"] }
+roxmltree = "0.21"
