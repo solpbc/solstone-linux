@@ -60,6 +60,14 @@ enum NotificationOutcome {
     Cancelled,
 }
 
+fn outcome_for_action(action: &str) -> NotificationOutcome {
+    if action == NOTIFY_ACTION_KEY {
+        NotificationOutcome::Open
+    } else {
+        NotificationOutcome::Dismissed
+    }
+}
+
 type NotifyFn = Arc<
     dyn Fn(NotificationSpec, CancellationToken) -> BoxFuture<'static, NotificationOutcome>
         + Send
@@ -683,8 +691,8 @@ async fn production_notification(
             NotificationOutcome::Cancelled
         }
         () = handle.wait_for_action_async(|response| {
-            if matches!(response, NotificationResponse::Action(action) if action == NOTIFY_ACTION_KEY) {
-                outcome = NotificationOutcome::Open;
+            if let NotificationResponse::Action(action) = response {
+                outcome = outcome_for_action(action);
             }
         }) => outcome,
     }
@@ -1311,12 +1319,16 @@ mod tests {
     // tests/test_chat_bridge.py::test_read_timeout_reconnects_and_clears_stale
     #[tokio::test]
     async fn read_timeout_reconnect_then_heartbeat_resets_ladder() {
-        heartbeat_resets_existing_backoff().await;
+        let (state, delays) = heartbeat_after_existing_backoff().await;
+        assert!(!state.is_stale);
+        assert_eq!(delays, [Duration::from_secs(1)]);
     }
     // tests/test_chat_bridge.py::test_reconnect_successful_frame_resets_backoff_index
     #[tokio::test]
     async fn any_frame_resets_reconnect_index() {
-        heartbeat_resets_existing_backoff().await;
+        let (state, delays) = heartbeat_after_existing_backoff().await;
+        assert_eq!(state.reconnect_index, 1);
+        assert_eq!(delays, [Duration::from_secs(1)]);
     }
 
     // tests/test_chat_bridge.py::test_terminal_401_exits_without_reconnect
@@ -1333,13 +1345,22 @@ mod tests {
     // tests/test_chat_bridge.py::test_dismissal_empty_stdout_no_ack_no_open
     #[tokio::test]
     async fn dismissal_does_not_ack_or_open() {
-        outcome_has_no_click_effects(NotificationOutcome::Dismissed).await;
+        let outcome = outcome_for_action("");
+        assert_eq!(outcome, NotificationOutcome::Dismissed);
+        outcome_has_no_click_effects(outcome).await;
     }
     // tests/test_chat_bridge.py::test_nonaction_stdout_treated_as_dismissal
     #[tokio::test]
     async fn non_open_actions_are_dismissals() {
-        outcome_has_no_click_effects(NotificationOutcome::Dismissed).await;
-        outcome_has_no_click_effects(NotificationOutcome::Dismissed).await;
+        for action in ["nope", "op"] {
+            let outcome = outcome_for_action(action);
+            assert_eq!(outcome, NotificationOutcome::Dismissed);
+            outcome_has_no_click_effects(outcome).await;
+        }
+        assert_eq!(
+            outcome_for_action(NOTIFY_ACTION_KEY),
+            NotificationOutcome::Open
+        );
     }
     // tests/test_chat_bridge.py::test_click_notify_nonzero_does_not_xdg_open
     #[tokio::test]
@@ -2189,7 +2210,7 @@ mod tests {
         (deps, delays)
     }
 
-    async fn heartbeat_resets_existing_backoff() {
+    async fn heartbeat_after_existing_backoff() -> (ConnectionState, Vec<Duration>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         sender
             .send(Ok(hyper::body::Bytes::from_static(b": heartbeat\n")))
@@ -2232,11 +2253,10 @@ mod tests {
         gate.notify_waiters();
         let (result, mut state) = task.await.unwrap();
         assert!(matches!(result, ConnectionEnd::Reconnect));
-        assert_eq!(state.reconnect_index, 0);
-        assert!(!state.is_stale);
         let (delay_deps, delays) = delay_deps();
         sleep_for_reconnect(&mut state, &CancellationToken::new(), &delay_deps).await;
-        assert_eq!(*delays.lock().unwrap(), [Duration::from_secs(1)]);
+        let recorded = delays.lock().unwrap().clone();
+        (state, recorded)
     }
 
     async fn terminal_status_exits_without_sleep(status: u16) {
