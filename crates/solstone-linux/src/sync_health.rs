@@ -11,8 +11,6 @@ use std::{
     sync::LazyLock,
 };
 
-use crate::config::DEFAULT_SYNC_STALE_THRESHOLD;
-
 pub const SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -403,18 +401,19 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
-pub fn default_stale_threshold() -> f64 {
-    DEFAULT_SYNC_STALE_THRESHOLD as f64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_SYNC_STALE_THRESHOLD;
 
     // tests/test_sync_health.py::test_empty_facts_derive_unknown
     #[test]
     fn empty_facts_derive_unknown() {
-        let health = derive_health(&SyncFacts::default(), 1000.0, default_stale_threshold());
+        let health = derive_health(
+            &SyncFacts::default(),
+            1000.0,
+            DEFAULT_SYNC_STALE_THRESHOLD as f64,
+        );
         assert_eq!(health.state, HealthState::Unknown);
         assert_eq!(health.sni_status, "Active");
         assert_eq!(health.pending_display, "pending unconfirmed");
@@ -433,7 +432,7 @@ mod tests {
                 ..SyncFacts::default()
             };
             assert_eq!(
-                derive_health(&facts, 1000.0, default_stale_threshold()).state,
+                derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64).state,
                 expected
             );
         }
@@ -448,7 +447,7 @@ mod tests {
             in_progress: true,
             ..SyncFacts::default()
         };
-        let health = derive_health(&facts, 1000.0, default_stale_threshold());
+        let health = derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64);
         assert_eq!(health.state, HealthState::Stale);
         assert_eq!(health.sni_status, "NeedsAttention");
         assert!(health.tooltip.contains("last contact"));
@@ -462,11 +461,16 @@ mod tests {
             ..SyncFacts::default()
         };
         assert_eq!(
-            derive_health(&connected, 1000.0, default_stale_threshold()).state,
+            derive_health(&connected, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64).state,
             HealthState::Connected
         );
         assert_eq!(
-            derive_health(&SyncFacts::default(), 1000.0, default_stale_threshold()).state,
+            derive_health(
+                &SyncFacts::default(),
+                1000.0,
+                DEFAULT_SYNC_STALE_THRESHOLD as f64,
+            )
+            .state,
             HealthState::Unknown
         );
     }
@@ -481,7 +485,7 @@ mod tests {
             ..SyncFacts::default()
         };
         assert_eq!(
-            derive_health(&facts, 1000.0, default_stale_threshold()).state,
+            derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64).state,
             HealthState::Syncing
         );
     }
@@ -565,7 +569,7 @@ mod tests {
             progress: "  ".to_owned(),
             ..SyncFacts::default()
         };
-        let health = derive_health(&facts, 1.0, default_stale_threshold());
+        let health = derive_health(&facts, 1.0, DEFAULT_SYNC_STALE_THRESHOLD as f64);
         assert_eq!(health.sync_line, "sync: syncing...");
         assert_eq!(health.progress, "  ");
         let values = HashMap::from([

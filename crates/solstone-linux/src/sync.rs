@@ -358,11 +358,12 @@ impl SyncWorker {
                     continue;
                 }
                 let files = eligible_files(segment_dir);
-                if !files.is_empty()
-                    && files
-                        .iter()
-                        .all(|file| file.metadata().is_ok_and(|meta| meta.len() == 0))
-                {
+                if files.as_ref().is_ok_and(|files| {
+                    !files.is_empty()
+                        && files
+                            .iter()
+                            .all(|file| file.metadata().is_ok_and(|meta| meta.len() == 0))
+                }) {
                     quarantine_segment(
                         self.clock.wall_seconds(),
                         segment_dir,
@@ -419,7 +420,14 @@ impl SyncWorker {
     }
 
     async fn upload_segment(&mut self, day: &str, segment_dir: &Path) -> bool {
-        let files = eligible_files(segment_dir);
+        let files = match eligible_files(segment_dir) {
+            Ok(files) => files,
+            Err(error) => {
+                tracing::warn!(%error, path = %segment_dir.display(), "Failed to enumerate segment files");
+                self.last_error_type = Some(ErrorType::Transient);
+                return false;
+            }
+        };
         if files.is_empty() {
             return true;
         }
@@ -516,10 +524,20 @@ impl SyncWorker {
                 .ok()
                 .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
                 .map(|duration| duration.as_secs_f64());
-            if mtime.is_some_and(|mtime| mtime <= cutoff)
-                && let Err(error) = fs::remove_dir_all(&segment)
-            {
-                tracing::error!(%error, path = %segment.display(), "Failed to drop quarantine");
+            if let Some(mtime) = mtime.filter(|mtime| *mtime <= cutoff) {
+                if let Err(error) = fs::remove_dir_all(&segment) {
+                    tracing::error!(%error, path = %segment.display(), "Failed to drop quarantine");
+                } else {
+                    let age_days = ((self.clock.wall_seconds() - mtime) / 86_400.0)
+                        .floor()
+                        .max(0.0) as i64;
+                    tracing::warn!(
+                        path = %segment.display(),
+                        age_days,
+                        limit_days = QUARANTINE_TTL_DAYS,
+                        "Dropping quarantined segment — unrecovered quarantined data discarded"
+                    );
+                }
             }
         }
     }
@@ -644,16 +662,16 @@ fn error_name(error: ErrorType) -> &'static str {
     }
 }
 
-fn eligible_files(segment_dir: &Path) -> Vec<PathBuf> {
-    fs::read_dir(segment_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
-        })
-        .map(|entry| entry.path())
-        .collect()
+fn eligible_files(segment_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(segment_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if fs::metadata(&path)?.is_file() && !entry.file_name().to_string_lossy().starts_with('.') {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
@@ -671,7 +689,9 @@ fn sha256_file(path: &Path) -> io::Result<String> {
 }
 
 fn segment_proven_held(segment_dir: &Path, entry: &ListingEntry) -> bool {
-    let files = eligible_files(segment_dir);
+    let Ok(files) = eligible_files(segment_dir) else {
+        return false;
+    };
     if files.is_empty() {
         return false;
     }
@@ -852,6 +872,20 @@ mod tests {
     };
     use serde_json::{Value, json};
     use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct MutableClock {
         wall: std::sync::atomic::AtomicU64,
@@ -1197,6 +1231,42 @@ mod tests {
         assert!(segment.exists());
     }
 
+    // AC: an enumeration failure cannot hide local files from cleanup proof.
+    #[tokio::test]
+    async fn unreadable_segment_directory_is_never_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        let remote = listing(
+            "120000_300",
+            "screen.webm",
+            Some("present"),
+            &sha256_file(&segment.join("screen.webm")).unwrap(),
+        );
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(eligible_files(&segment).is_err());
+        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
+        worker.synced_days.insert("20260101".to_owned());
+        worker.cleanup_synced_segments().await;
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(segment.exists());
+    }
+
+    // AC: upload enumeration failures are transient and never send a partial request.
+    #[tokio::test]
+    async fn unreadable_segment_directory_upload_is_retried() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(eligible_files(&segment).is_err());
+        let (server, mut worker) = test_worker(&temp, vec![], -1).await;
+        assert!(!worker.upload_segment("20260101", &segment).await);
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(worker.last_error_type, Some(ErrorType::Transient));
+        assert!(server.requests().is_empty());
+    }
+
     // tests/test_sync.py::test_truncated_envelope_uploads_and_cleanup_keeps
     #[tokio::test]
     async fn truncated_envelope_uploads_and_cleanup_keeps() {
@@ -1208,17 +1278,6 @@ mod tests {
     // tests/test_sync.py::test_legacy_listing_logs_once_and_cleanup_keeps
     #[tokio::test]
     async fn legacy_listing_logs_once_and_cleanup_keeps() {
-        #[derive(Clone)]
-        struct Buffer(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Buffer {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let legacy = json!([{"key":"120000_300"}]);
@@ -1938,8 +1997,11 @@ mod tests {
             mono: 121.0,
         });
         assert!(worker.try_probe().await);
+        assert!(!worker.circuit_open);
+        assert!(!worker.circuit_open_permanent);
         assert_eq!(worker.circuit_open_since, 0.0);
         assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_INITIAL);
+        assert_eq!(worker.consecutive_failures, 0);
         assert_eq!(worker.last_error_type, None);
     }
 
@@ -1971,17 +2033,46 @@ mod tests {
     #[tokio::test]
     async fn query_failures_recover_to_connected() {
         let temp = tempfile::tempdir().unwrap();
-        let (_server, mut worker) =
-            open_probe_worker(&temp, vec![(200, json!({"items":[],"total":0}))]).await;
-        assert!(worker.try_probe().await);
-        worker.commit_pass_result(true, None, None);
+        let mut responses = (0..5).map(|_| (500, json!({}))).collect::<Vec<_>>();
+        responses.extend([
+            (200, json!({"items":[],"total":0})),
+            (200, json!({"items":[],"total":0})),
+        ]);
+        let (server, mut worker) = test_worker(&temp, responses, -1).await;
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
+        worker.clock = clock.clone();
+        for _ in 0..5 {
+            worker.sync_pass(true).await;
+        }
+        assert!(worker.circuit_open);
         assert_eq!(
-            derive_health(
-                &worker.facts.lock().unwrap(),
-                worker.clock.wall_seconds(),
-                600.0
-            )
-            .state,
+            derive_health(&worker.facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
+            crate::sync_health::HealthState::Offline
+        );
+        assert_eq!(server.requests().len(), 5);
+
+        clock.set_mono(131.0);
+        let notify = Arc::clone(&worker.notify);
+        let running = Arc::clone(&worker.running);
+        let facts = Arc::clone(&worker.facts);
+        let task = tokio::spawn(async move { worker.run().await });
+        notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if facts.lock().unwrap().pending_confirmed == Some(0) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        running.store(false, Ordering::Release);
+        notify.notify_one();
+        task.await.unwrap();
+        assert_eq!(server.requests().len(), 7);
+        assert_eq!(
+            derive_health(&facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
             crate::sync_health::HealthState::Connected
         );
     }
@@ -2169,16 +2260,19 @@ mod tests {
     #[tokio::test]
     async fn never_touches_incomplete() {
         let temp = tempfile::tempdir().unwrap();
-        let (_server, mut worker, segment) = cleanup_worker_with_segment(
-            &temp,
-            "120000.incomplete",
-            vec![(200, json!({"items":[],"total":0}))],
-            7,
-            true,
-        )
-        .await;
+        let segment = create_segment(&temp, "120000.incomplete", b"incomplete");
+        let complete = create_segment(&temp, "140000_300", b"complete");
+        let incomplete_sha = sha256_file(&segment.join("screen.webm")).unwrap();
+        let complete_sha = sha256_file(&complete.join("screen.webm")).unwrap();
+        let remote = json!({"items":[
+            {"key":"120000.incomplete","files":[{"name":"screen.webm","status":"present","sha256":incomplete_sha}]},
+            {"key":"140000_300","files":[{"name":"screen.webm","status":"present","sha256":complete_sha}]}
+        ],"total":2});
+        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
+        worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
+        assert!(!complete.exists());
     }
 
     // tests/test_sync.py::test_retention_negative_one_keeps_forever
@@ -2360,14 +2454,11 @@ mod tests {
     #[tokio::test]
     async fn cleanup_legacy_envelope_disables_deletion() {
         let temp = tempfile::tempdir().unwrap();
-        let (server, mut worker, segment) = cleanup_worker_with_segment(
-            &temp,
-            "120000_300",
-            vec![(200, json!([{"key":"120000_300"}]))],
-            7,
-            true,
-        )
-        .await;
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
+        let legacy = json!([{"key":"120000_300","files":[{"name":"screen.webm","status":"present","sha256":sha}]}]);
+        let (server, mut worker) = test_worker(&temp, vec![(200, legacy)], 7).await;
+        worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
         assert_eq!(server.request_count("/segments/20260101"), 1);
