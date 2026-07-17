@@ -62,6 +62,8 @@ pub trait AudioCapture {
 pub struct ActivityState {
     pub screen_locked: bool,
     pub power_save: bool,
+    pub user_idle: bool,
+    pub power_unreadable: bool,
 }
 pub trait ActivityProbe {
     fn probe(&mut self) -> Result<ActivityState, String>;
@@ -591,6 +593,7 @@ where
                 "screen_locked": self.state.cached_activity.screen_locked,
                 "sink_muted": self.state.cached_is_muted,
                 "power_save": self.state.cached_activity.power_save,
+                "user_idle": self.state.cached_activity.user_idle,
             }),
         );
         m.insert("host".into(), json!(self.host));
@@ -628,7 +631,7 @@ where
     }
 }
 fn mode(a: ActivityState) -> Mode {
-    if a.screen_locked || a.power_save {
+    if a.screen_locked || a.power_save || (a.power_unreadable && a.user_idle) {
         Mode::Idle
     } else {
         Mode::Screencast
@@ -865,13 +868,38 @@ mod tests {
         ActivityState {
             screen_locked: false,
             power_save: false,
+            user_idle: false,
+            power_unreadable: false,
         }
     }
     fn idle() -> ActivityState {
         ActivityState {
             screen_locked: true,
             power_save: false,
+            user_idle: false,
+            power_unreadable: false,
         }
+    }
+
+    #[test]
+    fn user_idle_only_changes_mode_when_power_is_unreadable() {
+        // No 1:1 Python ancestor: user idle is a screen-off proxy only without readable power.
+        assert_eq!(mode(ActivityState::default()), Mode::Screencast);
+        assert_eq!(
+            mode(ActivityState {
+                user_idle: true,
+                ..ActivityState::default()
+            }),
+            Mode::Screencast
+        );
+        assert_eq!(
+            mode(ActivityState {
+                user_idle: true,
+                power_unreadable: true,
+                ..ActivityState::default()
+            }),
+            Mode::Idle
+        );
     }
     fn chunk(level: f32) -> DrainedChunk {
         let mut a = StereoAccumulator::default();

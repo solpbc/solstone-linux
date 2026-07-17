@@ -21,10 +21,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 tokio = { workspace = true, features = ["signal", "sync"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 ashpd = { version = "=0.13.12", features = ["screencast"] }
+futures-util = "0.3"
 gstreamer = "=0.25.3"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
-x11rb = { version = "0.13", default-features = false, features = ["randr"] }
+x11rb = { version = "0.13", default-features = false, features = ["randr", "dpms", "screensaver"] }
 ksni = "=0.3.6"
 open = "5.4.0"
 zbus = { version = "=5.17.0", features = ["tokio"] }

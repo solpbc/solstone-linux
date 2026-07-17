@@ -1973,6 +1973,7 @@ dependencies = [
  "clap",
  "claxon",
  "flac-bound",
+ "futures-util",
  "gstreamer",
  "http-body-util",
  "hyper",

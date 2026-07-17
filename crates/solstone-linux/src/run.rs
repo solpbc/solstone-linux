@@ -18,12 +18,13 @@ use ashpd::zbus::{
 use serde_json::{Map, Value, json};
 
 use crate::{
+    activity::CompositeActivityProbe,
     audio::{backend::PulseAudioCapture, writer::FlacAudioWriter},
     config::Config,
     observer::{
-        ActivityProbe, ActivityState, Backends, BackgroundCaptureStats, Clock, EventSink, Observer,
-        ObserverError, SegmentCompletedEvent, StateSink, StateSnapshot, StoppedStream,
-        StreamSilentEvent, VideoCapture, VideoStream, lifecycle,
+        Backends, BackgroundCaptureStats, Clock, EventSink, Observer, ObserverError,
+        SegmentCompletedEvent, StateSink, StateSnapshot, StoppedStream, StreamSilentEvent,
+        VideoCapture, VideoStream, lifecycle,
     },
     recovery::{ClaxonMediaDurationProbe, recover_incomplete_segments},
     upload::UploadClient,
@@ -125,7 +126,7 @@ fn run_capture(
     let backends = Backends {
         video,
         audio,
-        activity: UnavailableActivity::default(),
+        activity: CompositeActivityProbe::spawn(),
         mute,
         writer: FlacAudioWriter,
         events: UploadEventSink { client: upload },
@@ -210,22 +211,6 @@ impl VideoCapture for VideoBackend {
             Self::Portal(value) => value.is_healthy(),
             Self::X11(value) => value.is_healthy(),
         }
-    }
-}
-
-#[derive(Default)]
-struct UnavailableActivity {
-    logged: bool,
-}
-
-impl ActivityProbe for UnavailableActivity {
-    fn probe(&mut self) -> Result<ActivityState, String> {
-        let reason = "activity backend is not yet attached; see activity.py".to_owned();
-        if !self.logged {
-            tracing::warn!(%reason);
-            self.logged = true;
-        }
-        Err(reason)
     }
 }
 
