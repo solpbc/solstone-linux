@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: install test test-only format ci rust-fmt-check rust-lint rust-test rust-deny clean clean-install versions all bootstrap install-service service-restart service-status service-logs uninstall-service release release-test
+.PHONY: install test test-only format ci shellcheck rust-fmt-check rust-lint rust-test rust-deny clean clean-install versions all bootstrap install-service service-restart service-status service-logs uninstall-service release release-test
 
 # Default target
 all: install
@@ -13,6 +13,7 @@ PYTHON := $(VENV_BIN)/python
 CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 CARGO_DENY ?= $(shell command -v cargo-deny 2>/dev/null || { [ -x $(HOME)/.cargo/bin/cargo-deny ] && echo $(HOME)/.cargo/bin/cargo-deny; })
 CARGO_BIN_DIR := $(patsubst %/,%,$(dir $(CARGO)))
+SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/install.sh
 
 # Require uv
 UV := $(shell command -v uv 2>/dev/null)
@@ -144,6 +145,9 @@ rust-deny:
 		echo "NOTICE: cargo-deny not found on PATH or at $(HOME)/.cargo/bin/cargo-deny; skipping cargo deny check"; \
 	fi
 
+shellcheck:
+	shellcheck $(SHELLCHECK_SCRIPTS)
+
 # Run CI checks (what CI would run)
 ci: .installed
 	@echo "Running CI checks..."
@@ -155,6 +159,9 @@ ci: .installed
 	@echo ""
 	@echo "=== Running tests ==="
 	@$(MAKE) test
+	@echo ""
+	@echo "=== Checking release scripts ==="
+	@$(MAKE) shellcheck
 	@echo ""
 	@echo "=== Checking Rust formatting ==="
 	@$(MAKE) rust-fmt-check

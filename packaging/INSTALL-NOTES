@@ -1,0 +1,33 @@
+solstone-linux Rust release install notes
+
+This package contains the standalone Linux observer binary and its canonical
+icons. It intentionally does not install a systemd unit: service ownership
+belongs to the optional `solstone-linux install-service` command.
+
+Runtime requirements:
+
+- glibc 2.35 or newer
+- libpulse and a PulseAudio-compatible server (PipeWire Pulse is supported)
+- libFLAC
+- GStreamer 1.0 core, base, good, PipeWire, and X11 plugins
+- PipeWire and xdg-desktop-portal with ScreenCast support for Wayland capture
+- xdg-utils for opening links
+- a desktop notification service; an SNI host is optional for the tray icon
+
+Typical package families:
+
+- Debian/Ubuntu: libpulse0, libflac8/libflac12, libgstreamer1.0-0,
+  gstreamer1.0-plugins-base, gstreamer1.0-plugins-good,
+  gstreamer1.0-pipewire, gstreamer1.0-x, pipewire-pulse,
+  xdg-desktop-portal, xdg-utils
+- Fedora/RHEL: pulseaudio-libs, flac-libs, gstreamer1,
+  gstreamer1-plugins-base, gstreamer1-plugins-good, pipewire-gstreamer,
+  pipewire-pulseaudio, xdg-desktop-portal, xdg-utils
+- openSUSE: libpulse0, libFLAC12, gstreamer, gstreamer-plugins-base,
+  gstreamer-plugins-good, gstreamer-plugin-pipewire, pipewire-pulseaudio,
+  xdg-desktop-portal, xdg-utils
+- Arch: libpulse, flac, gstreamer, gst-plugins-base, gst-plugins-good,
+  gst-plugin-pipewire, pipewire-pulse, xdg-desktop-portal, xdg-utils
+
+The Rust install-service subcommand is not implemented in this release. Run
+the observer in the foreground for validation; service setup remains optional.

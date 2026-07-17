@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Linux desktop observer that experiences screen and audio along with its owner"
+homepage = "https://solstone.app"
+repository = "https://github.com/solpbc/solstone-linux"
 
 [dependencies]
 clap.workspace = true
@@ -42,3 +45,56 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio = { workspace = true, features = ["net", "test-util"] }
 roxmltree = "0.21"
+toml = "1"
+
+# cargo-deb resolves ordinary sources from this member package. The target/release
+# prefix is cargo-deb's special workspace-aware spelling for a built binary.
+[package.metadata.deb]
+maintainer = "sol pbc <jeremie.miller@gmail.com>"
+license-file = ["../../LICENSE", "0"]
+extended-description = "A standalone Linux desktop observer that experiences screen and audio along with its owner and syncs segments to their solstone journal."
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/solstone-linux", "usr/bin/", "755"],
+    ["../../LICENSE", "usr/share/doc/solstone-linux/LICENSE", "644"],
+    ["../../packaging/INSTALL-NOTES", "usr/share/doc/solstone-linux/INSTALL-NOTES", "644"],
+    ["../../contrib/icons/hicolor/16x16/apps/solstone-observer.png", "usr/share/icons/hicolor/16x16/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/24x24/apps/solstone-observer.png", "usr/share/icons/hicolor/24x24/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/32x32/apps/solstone-observer.png", "usr/share/icons/hicolor/32x32/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/48x48/apps/solstone-observer.png", "usr/share/icons/hicolor/48x48/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/64x64/apps/solstone-observer.png", "usr/share/icons/hicolor/64x64/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/128x128/apps/solstone-observer.png", "usr/share/icons/hicolor/128x128/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/256x256/apps/solstone-observer.png", "usr/share/icons/hicolor/256x256/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/512x512/apps/solstone-observer.png", "usr/share/icons/hicolor/512x512/apps/solstone-observer.png", "644"],
+    ["../../contrib/icons/hicolor/scalable/apps/solstone-observer.svg", "usr/share/icons/hicolor/scalable/apps/solstone-observer.svg", "644"],
+    ["../../contrib/icons/hicolor/scalable/status/solstone-error.svg", "usr/share/icons/hicolor/scalable/status/solstone-error.svg", "644"],
+    ["../../contrib/icons/hicolor/scalable/status/solstone-paused.svg", "usr/share/icons/hicolor/scalable/status/solstone-paused.svg", "644"],
+    ["../../contrib/icons/hicolor/scalable/status/solstone-recording.svg", "usr/share/icons/hicolor/scalable/status/solstone-recording.svg", "644"],
+    ["../../contrib/icons/hicolor/scalable/status/solstone-syncing.svg", "usr/share/icons/hicolor/scalable/status/solstone-syncing.svg", "644"],
+]
+
+# cargo-generate-rpm resolves sources from build-release.sh's workspace-root CWD
+# before falling back to this package directory. Keep these paths root-relative.
+[package.metadata.generate-rpm]
+license = "AGPL-3.0-only"
+auto-req = "auto"
+assets = [
+    { source = "target/release/solstone-linux", dest = "/usr/bin/solstone-linux", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/doc/solstone-linux/LICENSE", mode = "644", doc = true },
+    { source = "packaging/INSTALL-NOTES", dest = "/usr/share/doc/solstone-linux/INSTALL-NOTES", mode = "644", doc = true },
+    { source = "contrib/icons/hicolor/16x16/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/16x16/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/24x24/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/24x24/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/32x32/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/32x32/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/48x48/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/48x48/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/64x64/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/64x64/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/128x128/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/128x128/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/256x256/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/256x256/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/512x512/apps/solstone-observer.png", dest = "/usr/share/icons/hicolor/512x512/apps/solstone-observer.png", mode = "644" },
+    { source = "contrib/icons/hicolor/scalable/apps/solstone-observer.svg", dest = "/usr/share/icons/hicolor/scalable/apps/solstone-observer.svg", mode = "644" },
+    { source = "contrib/icons/hicolor/scalable/status/solstone-error.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-error.svg", mode = "644" },
+    { source = "contrib/icons/hicolor/scalable/status/solstone-paused.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-paused.svg", mode = "644" },
+    { source = "contrib/icons/hicolor/scalable/status/solstone-recording.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-recording.svg", mode = "644" },
+    { source = "contrib/icons/hicolor/scalable/status/solstone-syncing.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-syncing.svg", mode = "644" },
+]

@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 sol pbc
+
+FROM ubuntu:22.04 AS baseline
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RUST_VERSION=1.92.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        libflac-dev \
+        libglib2.0-dev \
+        libgstreamer1.0-dev \
+        libpulse-dev \
+        pkg-config \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# flac-bound 0.5 documents libFLAC >=1.4 for libflac-nobuild, while Jammy
+# supplies 1.3.3 (soname 8). Linking is not proof of runtime ABI safety: the
+# blocking first-release checkpoint in RELEASING.md validates real FLAC output.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /src
+# The full repository is required: build.rs rasterizes contrib/icons and
+# deliberately panics if those canonical source files cannot be read.
+COPY . .
+
+RUN cargo build --locked --release -p solstone-linux \
+    && VERSION=$(cargo metadata --format-version 1 --no-deps \
+        | sed -n 's/.*"name":"solstone-linux","version":"\([^"]*\)".*/\1/p') \
+    && test -n "$VERSION" \
+    && ROOT="solstone-linux-${VERSION}-linux-x86_64" \
+    && install -D -m 0755 target/release/solstone-linux "/release-tree/${ROOT}/bin/solstone-linux" \
+    && install -D -m 0644 LICENSE "/release-tree/${ROOT}/LICENSE" \
+    && install -D -m 0644 packaging/INSTALL-NOTES "/release-tree/${ROOT}/INSTALL-NOTES" \
+    && mkdir -p "/release-tree/${ROOT}/share/icons" /release \
+    && cp -R contrib/icons/hicolor "/release-tree/${ROOT}/share/icons/hicolor" \
+    && tar -C /release-tree -czf "/release/${ROOT}.tar.gz" "$ROOT" \
+    && printf '%s\n' "$VERSION" > /release/VERSION
+
+FROM baseline AS deb-build
+
+RUN cargo install cargo-deb --version 3.7.0 --locked \
+    && cargo deb --locked -p solstone-linux \
+    && VERSION=$(cat /release/VERSION) \
+    && DEB=$(find target/debian -maxdepth 1 -type f -name '*.deb' -print -quit) \
+    && test -n "$DEB" \
+    && cp "$DEB" "/release/solstone-linux_${VERSION}-1_amd64.deb" \
+    && rm /release/VERSION
+
+FROM scratch AS deb
+COPY --from=deb-build /release/ /
+
+FROM fedora:42 AS rpm-build
+
+ARG RUST_VERSION=1.92.0
+RUN dnf install -y ca-certificates curl gcc glibc-devel rpm-build \
+    && dnf clean all \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+       | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+ENV PATH="/root/.cargo/bin:${PATH}"
+WORKDIR /src
+COPY --from=baseline /src /src
+COPY --from=baseline /release /release
+
+RUN cargo install cargo-generate-rpm --version 0.21.0 --locked \
+    && cargo generate-rpm -p solstone-linux \
+    && VERSION=$(cat /release/VERSION) \
+    && RPM=$(find target/generate-rpm -maxdepth 1 -type f -name '*.rpm' -print -quit) \
+    && test -n "$RPM" \
+    && cp "$RPM" "/release/solstone-linux-${VERSION}-1.x86_64.rpm" \
+    && rm /release/VERSION
+
+FROM scratch AS rpm
+COPY --from=rpm-build /release/ /
