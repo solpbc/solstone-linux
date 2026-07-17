@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 use std::{env, fs, io, os::unix::fs::PermissionsExt, path::PathBuf};
 
 pub const DEFAULT_SERVER_URL: &str = "http://localhost:5015";
+pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,7 +49,7 @@ impl Default for Config {
             segment_interval: 300,
             sync_retry_delays: DEFAULT_RETRY_DELAYS.to_vec(),
             sync_max_retries: 10,
-            sync_stale_threshold: 600,
+            sync_stale_threshold: DEFAULT_SYNC_STALE_THRESHOLD,
             cache_retention_days: 7,
             chat_bridge_enabled: true,
             capture_framerate: 1,
@@ -247,7 +248,12 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
         &mut warnings,
     );
     config.sync_max_retries = load_int(values, "sync_max_retries", 10, &mut warnings);
-    config.sync_stale_threshold = load_int(values, "sync_stale_threshold", 600, &mut warnings);
+    config.sync_stale_threshold = load_int(
+        values,
+        "sync_stale_threshold",
+        DEFAULT_SYNC_STALE_THRESHOLD,
+        &mut warnings,
+    );
     config.cache_retention_days = load_int(values, "cache_retention_days", 7, &mut warnings);
     // Python stores this raw, but all consumers use truthiness, so typed coercion is behaviorally equivalent.
     config.chat_bridge_enabled = json_truthy(values.get("chat_bridge_enabled"), true);

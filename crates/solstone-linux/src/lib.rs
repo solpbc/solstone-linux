@@ -19,6 +19,10 @@ pub mod session_env;
 pub mod sources;
 pub mod streams;
 pub mod subscription;
+pub mod sync;
 pub mod sync_health;
 pub mod upload;
 pub mod video;
+
+#[cfg(test)]
+mod test_support;
