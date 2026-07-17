@@ -4,7 +4,7 @@
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response,
-    body::{Bytes, Incoming},
+    body::{Body, Bytes, Frame, Incoming},
     server::conn::http1,
     service::service_fn,
 };
@@ -13,9 +13,36 @@ use serde_json::Value;
 use std::{
     collections::VecDeque,
     convert::Infallible,
+    pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll},
 };
-use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, mpsc},
+    task::JoinHandle,
+};
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+struct ReceiverBody(mpsc::Receiver<Result<Bytes, std::io::Error>>);
+
+impl Body for ReceiverBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.0.poll_recv(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(Box::new(error)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Received {
@@ -35,6 +62,7 @@ pub(crate) enum Action {
     Response(u16, Value),
     Raw(u16, &'static str),
     Disconnect,
+    Stream(u16, mpsc::Receiver<Result<Bytes, std::io::Error>>),
 }
 
 impl MockServer {
@@ -79,21 +107,44 @@ impl MockServer {
                                 .unwrap()
                                 .pop_front()
                                 .unwrap_or(Action::Response(500, Value::Null));
-                            let (status, body) = match action {
-                                Action::Response(status, body) => (status, body.to_string()),
-                                Action::Raw(status, body) => (status, body.to_owned()),
+                            let (status, body): (
+                                u16,
+                                http_body_util::combinators::BoxBody<Bytes, BoxError>,
+                            ) = match action {
+                                Action::Response(status, body) => (
+                                    status,
+                                    Full::new(Bytes::from(body.to_string()))
+                                        .map_err(|never| match never {})
+                                        .boxed(),
+                                ),
+                                Action::Raw(status, body) => (
+                                    status,
+                                    Full::new(Bytes::from(body))
+                                        .map_err(|never| match never {})
+                                        .boxed(),
+                                ),
                                 Action::Disconnect => {
-                                    return Err::<Response<Full<Bytes>>, _>(std::io::Error::new(
-                                        std::io::ErrorKind::ConnectionAborted,
-                                        "mock disconnect",
-                                    ));
+                                    return Err::<
+                                        Response<
+                                            http_body_util::combinators::BoxBody<Bytes, BoxError>,
+                                        >,
+                                        _,
+                                    >(
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::ConnectionAborted,
+                                            "mock disconnect",
+                                        ),
+                                    );
+                                }
+                                Action::Stream(status, receiver) => {
+                                    (status, ReceiverBody(receiver).boxed())
                                 }
                             };
                             Ok::<_, std::io::Error>(
                                 Response::builder()
                                     .status(status)
                                     .header("content-type", "application/json")
-                                    .body(Full::new(Bytes::from(body)))
+                                    .body(body)
                                     .unwrap(),
                             )
                         }
@@ -203,5 +254,18 @@ mod tests {
         wait_for_requests(&server, 1).await;
         assert_eq!(server.request_count("/app/observer/segments"), 1);
         assert_eq!(server.request_count("/app/observer/ingest"), 0);
+    }
+
+    // AC: shared HTTP harness can emit test-controlled streaming chunks.
+    #[tokio::test]
+    async fn streams_receiver_chunks() {
+        let (sender, receiver) = mpsc::channel(2);
+        let server = MockServer::new_actions(vec![Action::Stream(200, receiver)]).await;
+        let request = tokio::spawn(reqwest::get(server.url.clone()));
+        sender.send(Ok(Bytes::from_static(b"one"))).await.unwrap();
+        sender.send(Ok(Bytes::from_static(b"two"))).await.unwrap();
+        drop(sender);
+        let body = request.await.unwrap().unwrap().bytes().await.unwrap();
+        assert_eq!(body, Bytes::from_static(b"onetwo"));
     }
 }

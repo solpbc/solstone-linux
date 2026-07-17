@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod audio;
 pub mod capture_stats;
+pub mod chat_bridge;
 pub mod chunking;
 pub mod cli;
 pub mod clipboard;
