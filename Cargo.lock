@@ -1050,6 +1050,7 @@ dependencies = [
  "chrono",
  "clap",
  "claxon",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

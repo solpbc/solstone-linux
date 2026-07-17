@@ -15,7 +15,13 @@ pub struct Output {
 
 pub trait Runner {
     fn which(&self, program: &str) -> Option<String>;
-    fn run(&self, program: &str, args: &[&str], timeout: Duration) -> io::Result<Output>;
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+        environment: &HashMap<String, String>,
+    ) -> io::Result<Output>;
 }
 
 fn missing(environment: &HashMap<String, String>, name: &str) -> bool {
@@ -35,13 +41,14 @@ pub fn recover_session_env(
         return;
     }
 
-    environment
-        .entry("XDG_RUNTIME_DIR".into())
-        .or_insert_with(|| format!("/run/user/{uid}"));
+    if missing(environment, "XDG_RUNTIME_DIR") {
+        environment.insert("XDG_RUNTIME_DIR".into(), format!("/run/user/{uid}"));
+    }
     let Ok(output) = runner.run(
         "systemctl",
         &["--user", "show-environment"],
         SESSION_TIMEOUT,
+        environment,
     ) else {
         return;
     };
@@ -69,7 +76,7 @@ pub fn check_session_ready(
     }
     if let Some(pactl) = runner.which("pactl")
         && !runner
-            .run(&pactl, &["info"], SESSION_TIMEOUT)
+            .run(&pactl, &["info"], SESSION_TIMEOUT, environment)
             .is_ok_and(|output| output.success)
     {
         return Some("audio server not responding (pactl info failed)");
@@ -89,6 +96,7 @@ mod tests {
         found: Option<String>,
         results: RefCell<VecDeque<io::Result<Output>>>,
         calls: Cell<usize>,
+        environments: RefCell<Vec<HashMap<String, String>>>,
     }
 
     impl FakeRunner {
@@ -97,6 +105,7 @@ mod tests {
                 found: found.map(str::to_owned),
                 results: RefCell::new(results.into()),
                 calls: Cell::new(0),
+                environments: RefCell::new(Vec::new()),
             }
         }
         fn success(stdout: &str) -> Self {
@@ -114,8 +123,15 @@ mod tests {
         fn which(&self, _: &str) -> Option<String> {
             self.found.clone()
         }
-        fn run(&self, _: &str, _: &[&str], _: Duration) -> io::Result<Output> {
+        fn run(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: Duration,
+            environment: &HashMap<String, String>,
+        ) -> io::Result<Output> {
             self.calls.set(self.calls.get() + 1);
+            self.environments.borrow_mut().push(environment.clone());
             self.results
                 .borrow_mut()
                 .pop_front()
@@ -196,11 +212,19 @@ mod tests {
     #[test]
     fn runtime_dir_fallback() {
         let mut env = HashMap::new();
-        recover_session_env(&mut env, 1234, &FakeRunner::success(""));
+        let runner = FakeRunner::success("");
+        recover_session_env(&mut env, 1234, &runner);
         assert_eq!(env["XDG_RUNTIME_DIR"], "/run/user/1234");
+        assert_eq!(
+            runner.environments.borrow()[0]["XDG_RUNTIME_DIR"],
+            "/run/user/1234"
+        );
         env.insert("XDG_RUNTIME_DIR".into(), "/custom".into());
         recover_session_env(&mut env, 999, &FakeRunner::success(""));
         assert_eq!(env["XDG_RUNTIME_DIR"], "/custom");
+        env.insert("XDG_RUNTIME_DIR".into(), String::new());
+        recover_session_env(&mut env, 4321, &FakeRunner::success(""));
+        assert_eq!(env["XDG_RUNTIME_DIR"], "/run/user/4321");
     }
     // AC: non-zero systemctl status is a silent recovery failure.
     #[test]

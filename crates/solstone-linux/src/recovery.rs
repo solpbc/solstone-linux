@@ -101,32 +101,29 @@ pub fn recover_incomplete_segments(
     now: f64,
     probe: &dyn MediaDurationProbe,
 ) -> u64 {
-    let Ok(days) = fs::read_dir(root) else {
+    if !root.exists() {
+        return 0;
+    }
+    let Some(days) = read_sorted_entries(root, "captures root") else {
         return 0;
     };
-    let mut days: Vec<_> = days.flatten().collect();
-    days.sort_by_key(|entry| entry.file_name());
     let mut recovered = 0;
     for day in days {
-        if !day.file_type().is_ok_and(|kind| kind.is_dir()) {
+        if !day.path().is_dir() {
             continue;
         }
-        let Ok(streams) = fs::read_dir(day.path()) else {
+        let Some(streams) = read_sorted_entries(&day.path(), "day directory") else {
             continue;
         };
-        let mut streams: Vec<_> = streams.flatten().collect();
-        streams.sort_by_key(|entry| entry.file_name());
         for stream in streams {
-            if !stream.file_type().is_ok_and(|kind| kind.is_dir()) {
+            if !stream.path().is_dir() {
                 continue;
             }
-            let Ok(segments) = fs::read_dir(stream.path()) else {
+            let Some(segments) = read_sorted_entries(&stream.path(), "stream directory") else {
                 continue;
             };
-            let mut segments: Vec<_> = segments.flatten().collect();
-            segments.sort_by_key(|entry| entry.file_name());
             for segment in segments {
-                if !segment.file_type().is_ok_and(|kind| kind.is_dir())
+                if !segment.path().is_dir()
                     || !segment
                         .file_name()
                         .to_string_lossy()
@@ -141,13 +138,42 @@ pub fn recover_incomplete_segments(
                 if !candidate_is_old_enough(mtime, now) {
                     continue;
                 }
+                tracing::info!(
+                    "Recovering incomplete segment: {}",
+                    segment.file_name().to_string_lossy()
+                );
                 if recover_segment(&segment.path(), ceiling, now, probe) {
                     recovered += 1;
                 }
             }
         }
     }
+    if recovered > 0 {
+        tracing::info!("Recovered {recovered} incomplete segment(s)");
+    }
     recovered
+}
+
+fn read_sorted_entries(path: &Path, label: &str) -> Option<Vec<fs::DirEntry>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::error!("Failed to read {label} {}: {error}", path.display());
+            return None;
+        }
+    };
+    let mut collected = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => collected.push(entry),
+            Err(error) => tracing::error!(
+                "Failed to read entry in {label} {}: {error}",
+                path.display()
+            ),
+        }
+    }
+    collected.sort_by_key(|entry| entry.file_name());
+    Some(collected)
 }
 
 fn mark_failed(segment_dir: &Path, now: f64) -> bool {
@@ -159,16 +185,33 @@ fn mark_failed(segment_dir: &Path, now: f64) -> bool {
         return false;
     };
     let failed = segment_dir.with_file_name(format!("{prefix}.failed"));
-    if fs::rename(segment_dir, &failed).is_ok()
-        && let Ok(directory) = File::open(failed)
-    {
-        let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(now.max(0.0));
-        let _ = directory.set_times(FileTimes::new().set_modified(stamp));
+    match fs::rename(segment_dir, &failed) {
+        Ok(()) => {
+            let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(now.max(0.0));
+            match File::open(&failed)
+                .and_then(|directory| directory.set_times(FileTimes::new().set_modified(stamp)))
+            {
+                Ok(()) => {}
+                Err(error) => tracing::warn!(
+                    "Failed to stamp quarantine time for {}: {error}",
+                    failed.display()
+                ),
+            }
+            tracing::warn!(
+                "Marked as failed: {} -> {}",
+                segment_dir.display(),
+                failed.display()
+            );
+        }
+        Err(error) => tracing::error!(
+            "Failed to mark {} as failed: {error}",
+            segment_dir.display()
+        ),
     }
     false
 }
 
-pub fn recover_segment(
+fn recover_segment(
     segment_dir: &Path,
     ceiling: u64,
     now: f64,
@@ -201,6 +244,7 @@ pub fn recover_segment(
         })
         .collect();
     if contents.is_empty() {
+        tracing::warn!("Empty incomplete segment: {name}");
         return mark_failed(segment_dir, now);
     }
     if let Some(readable) = readable_media_duration(&contents, probe) {
@@ -208,7 +252,16 @@ pub fn recover_segment(
     }
     let _ = fs::remove_file(segment_dir.join(METADATA_FILENAME));
     let final_dir = segment_dir.with_file_name(format!("{prefix}_{duration}"));
-    fs::rename(segment_dir, final_dir).is_ok() || mark_failed(segment_dir, now)
+    match fs::rename(segment_dir, &final_dir) {
+        Ok(()) => {
+            tracing::info!("Recovered: {name} -> {}", final_dir.display());
+            true
+        }
+        Err(error) => {
+            tracing::warn!("Failed to rename {name}: {error}");
+            mark_failed(segment_dir, now)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -482,5 +535,28 @@ mod tests {
     fn zero_rate_guard() {
         assert_eq!(stream_duration(Some(64_000), 0), None);
         assert_eq!(stream_duration(None, 16_000), None);
+    }
+
+    // Python Path.is_dir follows symlinked capture hierarchy directories.
+    #[test]
+    fn follows_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let t = tempfile::tempdir().unwrap();
+        let captures = t.path().join("captures");
+        let actual_day = t.path().join("actual-day");
+        let segment = actual_day.join("archon/140000.incomplete");
+        fs::create_dir_all(&segment).unwrap();
+        fs::write(segment.join("screen.webm"), b"x").unwrap();
+        write_segment_metadata(&segment, 940.0);
+        age(&segment, 1000.0);
+        fs::create_dir(&captures).unwrap();
+        symlink(&actual_day, captures.join("20260403")).unwrap();
+
+        assert_eq!(
+            recover_incomplete_segments(&captures, 300, 1000.0, &NoMedia),
+            1
+        );
+        assert!(actual_day.join("archon/140000_60").exists());
     }
 }

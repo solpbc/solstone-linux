@@ -18,23 +18,23 @@ pub struct QuarantineStats {
 pub fn compute_capture_stats(root: &Path, today: &str) -> CaptureStats {
     let mut captures_today = 0;
     let mut total_size = 0;
-    let walk_result = (|| -> std::io::Result<()> {
+    let _ = (|| -> std::io::Result<()> {
         if !root.exists() {
             return Ok(());
         }
         for day in fs::read_dir(root)? {
             let day = day?;
-            if !day.file_type()?.is_dir() {
+            if !day.path().is_dir() {
                 continue;
             }
             for stream in fs::read_dir(day.path())? {
                 let stream = stream?;
-                if !stream.file_type()?.is_dir() {
+                if !stream.path().is_dir() {
                     continue;
                 }
                 for segment in fs::read_dir(stream.path())? {
                     let segment = segment?;
-                    if !segment.file_type()?.is_dir() {
+                    if !segment.path().is_dir() {
                         continue;
                     }
                     let name = segment.file_name();
@@ -47,7 +47,7 @@ pub fn compute_capture_stats(root: &Path, today: &str) -> CaptureStats {
                     }
                     for file in fs::read_dir(segment.path())? {
                         let file = file?;
-                        if file.file_type()?.is_file() {
+                        if file.path().is_file() {
                             total_size += file.metadata()?.len();
                         }
                     }
@@ -56,14 +56,6 @@ pub fn compute_capture_stats(root: &Path, today: &str) -> CaptureStats {
         }
         Ok(())
     })();
-    capture_stats_after_walk(captures_today, total_size, walk_result)
-}
-
-fn capture_stats_after_walk(
-    captures_today: u64,
-    total_size: u64,
-    _walk_result: std::io::Result<()>,
-) -> CaptureStats {
     CaptureStats {
         captures_today,
         total_size_mb: total_size / (1024 * 1024),
@@ -73,23 +65,23 @@ fn capture_stats_after_walk(
 pub fn compute_quarantine_stats(root: &Path, now: f64) -> QuarantineStats {
     let mut count = 0;
     let mut oldest_mtime: Option<f64> = None;
-    let walk_result = (|| -> std::io::Result<()> {
+    let _ = (|| -> std::io::Result<()> {
         if !root.exists() {
             return Ok(());
         }
         for day in fs::read_dir(root)? {
             let day = day?;
-            if !day.file_type()?.is_dir() {
+            if !day.path().is_dir() {
                 continue;
             }
             for stream in fs::read_dir(day.path())? {
                 let stream = stream?;
-                if !stream.file_type()?.is_dir() {
+                if !stream.path().is_dir() {
                     continue;
                 }
                 for segment in fs::read_dir(stream.path())? {
                     let segment = segment?;
-                    if !segment.file_type()?.is_dir()
+                    if !segment.path().is_dir()
                         || !segment.file_name().to_string_lossy().ends_with(".failed")
                     {
                         continue;
@@ -109,15 +101,6 @@ pub fn compute_quarantine_stats(root: &Path, now: f64) -> QuarantineStats {
         }
         Ok(())
     })();
-    quarantine_stats_after_walk(count, oldest_mtime, now, walk_result)
-}
-
-fn quarantine_stats_after_walk(
-    count: u64,
-    oldest_mtime: Option<f64>,
-    now: f64,
-    _walk_result: std::io::Result<()>,
-) -> QuarantineStats {
     QuarantineStats {
         count,
         oldest_age_seconds: oldest_mtime.map(|mtime| (now - mtime).max(0.0)),
@@ -146,6 +129,7 @@ mod tests {
     use super::*;
     use std::{
         fs::{File, FileTimes},
+        os::unix::fs::PermissionsExt,
         time::{Duration, SystemTime},
     };
 
@@ -281,23 +265,48 @@ mod tests {
     // AC: an error after accumulated work returns the partial accumulator (the walk's broad OSError contract).
     #[test]
     fn os_error_degrades_to_partial() {
-        assert_eq!(
-            capture_stats_after_walk(1, 2 * 1024 * 1024, Err(std::io::Error::other("mid-walk"))),
-            CaptureStats {
-                captures_today: 1,
-                total_size_mb: 2
-            }
+        let t = tempfile::tempdir().unwrap();
+        let unreadable = segment(t.path(), "20260101", "120000_300");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&unreadable).is_ok() {
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+            eprintln!("skipped: current user can read chmod 000 directories");
+            return;
+        }
+        let stats = compute_capture_stats(t.path(), "20260101");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+        println!(
+            "real traversal error partial stats: captures_today={} total_size_mb={}",
+            stats.captures_today, stats.total_size_mb
         );
         assert_eq!(
-            quarantine_stats_after_walk(
-                2,
-                Some(500.0),
-                1000.0,
-                Err(std::io::Error::other("mid-walk"))
-            ),
-            QuarantineStats {
-                count: 2,
-                oldest_age_seconds: Some(500.0)
+            stats,
+            CaptureStats {
+                captures_today: 1,
+                total_size_mb: 0
+            }
+        );
+    }
+
+    // Python Path.is_dir follows symlinked capture hierarchy directories.
+    #[test]
+    fn follows_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let t = tempfile::tempdir().unwrap();
+        let captures = t.path().join("captures");
+        let actual_day = t.path().join("actual-day");
+        let final_dir = actual_day.join("archon/120000_300");
+        fs::create_dir_all(&final_dir).unwrap();
+        fs::write(final_dir.join("audio.flac"), vec![0; 1024 * 1024]).unwrap();
+        fs::create_dir(&captures).unwrap();
+        symlink(&actual_day, captures.join("20260101")).unwrap();
+
+        assert_eq!(
+            compute_capture_stats(&captures, "20260101"),
+            CaptureStats {
+                captures_today: 1,
+                total_size_mb: 1
             }
         );
     }

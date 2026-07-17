@@ -103,10 +103,10 @@ pub struct ConfigPaths {
     pub config_dir: Option<PathBuf>,
 }
 
-fn warning(field: &'static str, default: impl std::fmt::Debug) -> ConfigWarning {
+fn warning(field: &'static str, value: &Value, default: impl std::fmt::Debug) -> ConfigWarning {
     ConfigWarning {
         field: Some(field),
-        message: format!("Invalid config value for {field}; using default {default:?}"),
+        message: format!("Invalid config value for {field}={value}; using default {default:?}"),
     }
 }
 
@@ -118,12 +118,13 @@ fn load_int(
 ) -> i64 {
     match values.get(field) {
         None => default,
+        // Rust's typed equivalent narrows otherwise-valid Python integers to i64.
         Some(Value::Number(number)) => number
             .as_i64()
             .or_else(|| number.as_f64().map(|value| value as i64))
             .unwrap_or(default),
-        Some(_) => {
-            warnings.push(warning(field, default));
+        Some(value) => {
+            warnings.push(warning(field, value, default));
             default
         }
     }
@@ -139,11 +140,11 @@ fn load_int_list(
         return default.to_vec();
     };
     let Some(items) = value.as_array() else {
-        warnings.push(warning(field, default));
+        warnings.push(warning(field, value, default));
         return default.to_vec();
     };
     if !items.iter().all(Value::is_number) {
-        warnings.push(warning(field, default));
+        warnings.push(warning(field, value, default));
         return default.to_vec();
     }
     items
@@ -164,9 +165,9 @@ fn load_string(
     match values.get(field) {
         None => String::new(),
         Some(Value::String(value)) => value.clone(),
-        Some(_) => {
+        Some(value) => {
             // Named deviation: Python retains raw values; Rust warns and preserves the typed string contract.
-            warnings.push(warning(field, ""));
+            warnings.push(warning(field, value, ""));
             String::new()
         }
     }
@@ -207,7 +208,10 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
         Err(error) => {
             warnings.push(ConfigWarning {
                 field: None,
-                message: format!("Failed to load config: {error}"),
+                message: format!(
+                    "Failed to load config from {}: {error}",
+                    config.config_path().display()
+                ),
             });
             return LoadedConfig { config, warnings };
         }
@@ -217,7 +221,10 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
         Err(error) => {
             warnings.push(ConfigWarning {
                 field: None,
-                message: format!("Failed to load config: {error}"),
+                message: format!(
+                    "Failed to load config from {}: {error}",
+                    config.config_path().display()
+                ),
             });
             return LoadedConfig { config, warnings };
         }
@@ -406,18 +413,28 @@ mod tests {
         let x = load(t.path());
         assert_eq!(x.config.server_url, "");
         assert_eq!(x.warnings.len(), 1);
+        assert!(
+            x.warnings[0]
+                .message
+                .contains(&d.join("config.json").display().to_string())
+        );
     }
-    macro_rules! invalid {($name:ident,$field:literal,$value:expr,$expected:expr)=>{// tests/test_config.py::test_load_invalid_typed_fields_warn_and_default
+    macro_rules! invalid {($name:ident,$field:literal,$value:expr,$expected:expr)=>{
         #[test]fn $name(){let t=tempfile::tempdir().unwrap();write(t.path(),json!({$field:$value}));let x=load(t.path());assert_eq!(warning_fields(&x),vec![Some($field)]);assert_eq!(serde_json::to_value(&x.config).unwrap()[$field],json!($expected));}}}
+    // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[capture_framerate]
     invalid!(invalid_framerate, "capture_framerate", "abc", 1);
+    // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[segment_interval]
     invalid!(invalid_interval, "segment_interval", "300", 300);
+    // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[sync_retry_delays]
     invalid!(
         invalid_retry_delays,
         "sync_retry_delays",
         "oops",
         [5, 30, 120, 300]
     );
+    // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[sync_max_retries]
     invalid!(invalid_max_retries, "sync_max_retries", "many", 10);
+    // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[cache_retention_days]
     invalid!(invalid_retention, "cache_retention_days", json!([]), 7);
     // tests/test_config.py::test_load_non_object_json_warns_and_defaults
     #[test]
@@ -638,6 +655,7 @@ mod tests {
         let x = load(t.path());
         assert_eq!(x.config.server_url, "");
         assert_eq!(warning_fields(&x), vec![Some("server_url")]);
+        assert!(x.warnings[0].message.contains("server_url=7"));
     }
     // AC: save schema is exact and unknown keys are dropped.
     #[test]

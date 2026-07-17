@@ -27,7 +27,8 @@ pub fn clamp_duration(elapsed: f64, ceiling: u64) -> u64 {
     if ceiling == 0 {
         return 1;
     }
-    (elapsed as i64).clamp(1, ceiling as i64) as u64
+    let ceiling = ceiling.min(i64::MAX as u64) as i64;
+    (elapsed as i64).clamp(1, ceiling) as u64
 }
 
 pub fn segment_key(time_prefix: &str, duration: u64) -> String {
@@ -63,6 +64,7 @@ mod tests {
         assert_eq!(clamp_duration(0.5, 300), 1);
         assert_eq!(clamp_duration(999.0, 300), 300);
         assert_eq!(clamp_duration(1.0, 0), 1);
+        assert_eq!(clamp_duration(f64::MAX, u64::MAX), i64::MAX as u64);
     }
     // observer.py::_finalize_segment same-directory atomic rename.
     #[test]

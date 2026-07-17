@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use std::{
     collections::HashMap,
     env, fs, io,
+    io::Read,
     os::unix::fs::PermissionsExt,
     process::{Command, Stdio},
     thread,
@@ -64,23 +65,38 @@ impl Runner for SystemRunner {
             .find(|candidate| is_executable_file(candidate))
     }
 
-    fn run(&self, program: &str, args: &[&str], timeout: Duration) -> io::Result<Output> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+        environment: &HashMap<String, String>,
+    ) -> io::Result<Output> {
         let mut child = Command::new(program)
             .args(args)
+            .envs(environment)
             .stdout(Stdio::piped())
             .spawn()?;
+        let mut stdout = child.stdout.take().expect("piped stdout must be present");
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        });
         let started = Instant::now();
         loop {
-            if child.try_wait()?.is_some() {
-                let result = child.wait_with_output()?;
+            if let Some(status) = child.try_wait()? {
+                let bytes = reader
+                    .join()
+                    .map_err(|_| io::Error::other("stdout reader panicked"))??;
                 return Ok(Output {
-                    success: result.status.success(),
-                    stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
+                    success: status.success(),
+                    stdout: String::from_utf8_lossy(&bytes).into_owned(),
                 });
             }
             if started.elapsed() >= timeout {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = reader.join();
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "command timed out"));
             }
             thread::sleep(Duration::from_millis(10));
@@ -123,15 +139,22 @@ fn session_gate(
 }
 
 fn process_uid() -> u32 {
-    fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| line.starts_with("Uid:"))
-                .and_then(|line| line.split_whitespace().nth(1))
-                .and_then(|uid| uid.parse().ok())
-        })
-        .unwrap_or(0)
+    rustix::process::getuid().as_raw()
+}
+
+fn apply_session_environment(environment: &HashMap<String, String>) {
+    for name in [
+        "XDG_RUNTIME_DIR",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ] {
+        if let Some(value) = environment.get(name) {
+            // SAFETY: cmd_run performs session recovery during single-threaded startup,
+            // before the observer stub starts any worker threads.
+            unsafe { env::set_var(name, value) };
+        }
+    }
 }
 
 fn hostname() -> io::Result<String> {
@@ -200,7 +223,9 @@ fn cmd_run(interval: Option<i64>) -> i32 {
     }
     apply_interval(&mut config, interval);
     let mut environment: HashMap<String, String> = env::vars().collect();
-    if let Err(failure) = session_gate(&mut environment, process_uid(), &SystemRunner) {
+    let gate_result = session_gate(&mut environment, process_uid(), &SystemRunner);
+    apply_session_environment(&environment);
+    if let Err(failure) = gate_result {
         if let RunFailure::NotReady(reason) = failure {
             tracing::warn!("Session not ready: {reason}");
             return session_env::EXIT_TEMPFAIL;
@@ -227,7 +252,13 @@ mod tests {
         fn which(&self, _: &str) -> Option<String> {
             None
         }
-        fn run(&self, _: &str, _: &[&str], _: Duration) -> io::Result<Output> {
+        fn run(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: Duration,
+            _: &HashMap<String, String>,
+        ) -> io::Result<Output> {
             self.calls.set(self.calls.get() + 1);
             match &self.output {
                 Ok(output) => Ok(output.clone()),
