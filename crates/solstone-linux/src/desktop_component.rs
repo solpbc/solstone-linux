@@ -53,6 +53,7 @@ impl SignalState {
     }
 }
 
+#[derive(Clone)]
 pub struct DesktopComponent {
     pub config: Config,
     disabled: Arc<AtomicBool>,
@@ -75,7 +76,8 @@ impl DesktopComponent {
         mut log: impl FnMut(&str),
     ) -> bool {
         match bus.request_name(
-            // Soak scaffolding (delete at cutover): see run.rs bus_name().
+            // Soak scaffolding (delete at cutover): the Python observer owns the production name
+            // while both implementations run side by side.
             std::env::var("SOLSTONE_LINUX_BUS_NAME")
                 .unwrap_or_else(|_| OBSERVER_BUS_NAME.to_owned())
                 .as_str(),

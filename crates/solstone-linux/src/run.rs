@@ -6,15 +6,13 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::RecvTimeoutError,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ashpd::zbus::{
-    Connection,
-    fdo::{RequestNameFlags, RequestNameReply},
-};
+use ashpd::zbus::Connection;
 use sd_notify::NotifyState;
 use serde_json::{Map, Value, json};
 
@@ -23,12 +21,14 @@ use crate::{
     audio::{backend::PulseAudioCapture, writer::FlacAudioWriter},
     config::Config,
     observer::{
-        Backends, BackgroundCaptureStats, Clock, EventSink, Observer, ObserverError,
-        SegmentCompletedEvent, StateSink, StateSnapshot, StoppedStream, StreamSilentEvent,
-        VideoCapture, VideoStream, lifecycle,
+        Backends, BackgroundCaptureStats, Clock, EventSink, Mode, Observer, ObserverError,
+        SegmentCompletedEvent, StateSnapshot, StoppedStream, StreamSilentEvent, VideoCapture,
+        VideoStream, WatchStateSink, lifecycle,
     },
     recovery::{ClaxonMediaDurationProbe, recover_incomplete_segments},
+    shell::{CommandSender, ConnectionRequester, ShellInputs, stashed},
     sync::{SyncService, SyncTrigger},
+    tray::TrayCommand,
     upload::UploadClient,
     video::{
         BackendKind,
@@ -40,14 +40,6 @@ use crate::{
     },
 };
 
-const BUS_NAME: &str = "org.solpbc.solstone.Observer1";
-
-/// Side-by-side soak scaffolding (delete at cutover): the Python observer owns
-/// the well-known name on a box where both run, so the soak instance overrides
-/// it via SOLSTONE_LINUX_BUS_NAME. Production never sets this.
-fn bus_name() -> String {
-    std::env::var("SOLSTONE_LINUX_BUS_NAME").unwrap_or_else(|_| BUS_NAME.to_owned())
-}
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
 const CONSTRUCTION_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -140,9 +132,10 @@ pub(crate) fn tick_once(
     Ok(())
 }
 
-async fn shutdown_in_order<O, SF, EF>(
+async fn shutdown_in_order<O, DF, SF, EF>(
     mut observer: O,
     observer_shutdown: impl FnOnce(&mut O) -> Result<(), ObserverError>,
+    desktop_shutdown: DF,
     sync_shutdown: SF,
     sender_stop: impl FnOnce() -> EF,
     trace: &mut dyn FnMut(&'static str),
@@ -152,9 +145,12 @@ async fn shutdown_in_order<O, SF, EF>(
     Result<(), ObserverError>,
 )
 where
+    DF: std::future::Future<Output = ()>,
     SF: std::future::Future<Output = Result<(), tokio::task::JoinError>>,
     EF: std::future::Future<Output = Result<(), ObserverError>>,
 {
+    trace("desktop_shutdown");
+    desktop_shutdown.await;
     trace("observer_shutdown");
     let observer_result = observer_shutdown(&mut observer);
     trace("sync_shutdown");
@@ -191,9 +187,9 @@ async fn stop_upload_sender(
 // 1. CLI session readiness gate completes before this module is entered.
 // 2. lifecycle setup acquires the singleton bus name and performs no capture work.
 // 3. recovery finalizes old incomplete segments while singleton ownership is held.
-// 4. the run closure constructs audio, video, upload, and observer backends.
-// 5. initialize starts the first capture, then ticks run until SIGINT or SIGTERM.
-// 6. observer shutdown completes capture/audio cleanup, then event delivery is flushed.
+// 4. the run closure constructs capture backends, sync, the observer, and desktop surfaces.
+// 5. initialize publishes the first snapshot; commands wake the absolute-deadline tick loop.
+// 6. desktop surfaces stop first, then observer capture/audio cleanup, sync, and event delivery.
 pub fn run_observer(config: Config, host: String) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -207,21 +203,16 @@ pub fn run_observer(config: Config, host: String) -> i32 {
     };
     let _runtime_guard = runtime.enter();
     let singleton = Arc::new(Mutex::new(None::<Connection>));
-    let setup_singleton = Arc::clone(&singleton);
+    let requester = ConnectionRequester {
+        runtime: &runtime,
+        connection: Arc::clone(&singleton),
+    };
+    let desktop = crate::desktop_component::DesktopComponent::new(config.clone());
     let run_config = config.clone();
 
     lifecycle(
         &config,
-        || match runtime.block_on(acquire_singleton()) {
-            Ok(connection) => {
-                *setup_singleton.lock().expect("singleton lock") = Some(connection);
-                true
-            }
-            Err(error) => {
-                tracing::error!(%error, "Another solstone-linux observer is already running");
-                false
-            }
-        },
+        || desktop.acquire_singleton(&requester, |message| tracing::error!(%message)),
         |root, ceiling| {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -237,32 +228,20 @@ pub fn run_observer(config: Config, host: String) -> i32 {
                 tracing::info!(recovered, "Recovered incomplete segments");
             }
         },
-        || run_capture(&runtime, run_config, host),
+        || {
+            let connection = stashed(&singleton);
+            run_capture(&runtime, run_config, host, connection)
+        },
         || Ok(()),
         || false,
     )
-}
-
-async fn acquire_singleton() -> Result<Connection, String> {
-    let connection = Connection::session()
-        .await
-        .map_err(|error| error.to_string())?;
-    let reply = connection
-        .request_name_with_flags(bus_name().as_str(), RequestNameFlags::DoNotQueue.into())
-        .await
-        .map_err(|error| error.to_string())?;
-    match reply {
-        RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => Ok(connection),
-        RequestNameReply::Exists | RequestNameReply::InQueue => {
-            Err(format!("{} is already owned", bus_name()))
-        }
-    }
 }
 
 fn run_capture(
     runtime: &tokio::runtime::Runtime,
     config: Config,
     host: String,
+    connection: Option<Connection>,
 ) -> Result<(), ObserverError> {
     let notifier: Arc<dyn ServiceNotifier> = Arc::new(SdNotifier);
     let stopped = Arc::new(AtomicBool::new(false));
@@ -279,7 +258,27 @@ fn run_capture(
     let clock = SystemClock::new();
     let sync = SyncService::start(config.clone(), Arc::clone(&upload), Arc::new(clock.clone()));
     let sync_trigger = sync.trigger_handle();
+    let sync_sampler = sync.sampler_handle();
     sync.trigger();
+    let initial_snapshot = StateSnapshot {
+        mode: Mode::Idle,
+        paused: config.start_paused,
+        segment_open: false,
+        captures_today: 0,
+        total_size_mb: 0,
+        pause_until: None,
+        segment_start_mono: None,
+        process_start_mono: clock.monotonic_seconds(),
+    };
+    let snapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
+    let (states, tray_receiver) = WatchStateSink::channel(initial_snapshot);
+    let signal_receiver = tray_receiver.clone();
+    let (initial_health, initial_progress) = sync_sampler.sample();
+    let health = Arc::new(Mutex::new(initial_health));
+    let progress = Arc::new(Mutex::new(initial_progress));
+    let (command_sender, command_receiver) = std::sync::mpsc::channel();
+    let commands = CommandSender::new(command_sender.clone());
+    let _command_lifetime_sender = command_sender;
     let backends = Backends {
         video,
         audio,
@@ -292,7 +291,7 @@ fn run_capture(
         },
         clock,
         stats: BackgroundCaptureStats::new(),
-        states: NoopStateSink,
+        states,
     };
     let mut observer = Observer::new(config, backends, host, "linux".into());
     let mut run_result = if stopped.load(Ordering::Acquire) {
@@ -300,9 +299,42 @@ fn run_capture(
     } else {
         observer.initialize()
     };
+    let desktop_shell = crate::shell::start(
+        runtime,
+        ShellInputs {
+            config: observer.config.clone(),
+            clock: observer.backends.clock.clone(),
+            connection,
+            snapshot,
+            health,
+            progress,
+            tray_receiver,
+            signal_receiver,
+            sampler: sync_sampler,
+            commands,
+        },
+    );
+    let mut next_tick = Instant::now() + TICK_INTERVAL;
+    let mut disconnected = false;
     while run_result.is_ok() && !stopped.load(Ordering::Acquire) {
-        thread::park_timeout(TICK_INTERVAL);
-        run_result = tick_once(notifier.as_ref(), || observer.tick());
+        let now = Instant::now();
+        let wake = if disconnected {
+            thread::sleep(next_tick.saturating_duration_since(now));
+            Err(RecvTimeoutError::Timeout)
+        } else {
+            command_receiver.recv_timeout(next_tick.saturating_duration_since(now))
+        };
+        match wake {
+            Ok(command) => apply_command(&mut observer, command),
+            Err(RecvTimeoutError::Timeout) => {
+                run_result = tick_once(notifier.as_ref(), || observer.tick());
+                next_tick = advance_tick_deadline(next_tick, Instant::now());
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                tracing::error!("desktop command channel disconnected; using timed tick fallback");
+                disconnected = true;
+            }
+        }
     }
     if let Err(error) = notifier.stopping() {
         tracing::warn!(%error, "Failed to notify systemd stopping state");
@@ -310,6 +342,7 @@ fn run_capture(
     let (shutdown, sync_shutdown, sender_shutdown) = runtime.block_on(shutdown_in_order(
         observer,
         Observer::shutdown,
+        desktop_shell.shutdown(SHUTDOWN_TIMEOUT),
         sync.shutdown(SHUTDOWN_TIMEOUT),
         || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
         &mut |_| {},
@@ -318,6 +351,44 @@ fn run_capture(
         .and(shutdown)
         .and(sync_shutdown)
         .and(sender_shutdown)
+}
+
+fn apply_command<V, A, P, M, W, E, C, Q, N>(
+    observer: &mut Observer<V, A, P, M, W, E, C, Q, N>,
+    command: TrayCommand,
+) where
+    V: VideoCapture,
+    A: crate::observer::AudioCapture,
+    P: crate::observer::ActivityProbe,
+    M: crate::observer::MuteProbe,
+    W: crate::observer::AudioWriter,
+    E: EventSink,
+    C: Clock,
+    Q: crate::observer::CaptureStatsSource,
+    N: crate::observer::StateSink,
+{
+    match command {
+        TrayCommand::Pause(seconds) => observer.pause(seconds),
+        TrayCommand::PauseIndefinite => observer.pause(0),
+        TrayCommand::Resume => observer.resume(),
+        command => {
+            if let Err(error) =
+                crate::desktop_component::DesktopComponent::new(observer.config.clone())
+                    .perform_desktop_command(command)
+            {
+                tracing::warn!(%error, "Failed to perform desktop command");
+            }
+        }
+    }
+}
+
+fn advance_tick_deadline(previous: Instant, now: Instant) -> Instant {
+    let advanced = previous + TICK_INTERVAL;
+    if now.saturating_duration_since(advanced) > TICK_INTERVAL {
+        now + TICK_INTERVAL
+    } else {
+        advanced
+    }
 }
 
 fn spawn_signal_task(stopped: Arc<AtomicBool>) -> Result<(), String> {
@@ -422,7 +493,7 @@ impl<W: SyncWake> EventSink for UploadEventSink<W> {
 }
 
 #[derive(Clone)]
-struct SystemClock {
+pub(crate) struct SystemClock {
     wall: f64,
     started: Instant,
 }
@@ -444,11 +515,6 @@ impl Clock for SystemClock {
     fn monotonic_seconds(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
     }
-}
-
-struct NoopStateSink;
-impl StateSink for NoopStateSink {
-    fn publish(&mut self, _snapshot: StateSnapshot) {}
 }
 
 #[cfg(test)]
@@ -527,6 +593,41 @@ mod tests {
         assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 1);
     }
 
+    // AC: 4 — a command wakes the receiver immediately rather than waiting for the five-second tick.
+    #[test]
+    fn command_between_ticks_has_bounded_latency() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        sender.send(TrayCommand::Pause(900)).unwrap();
+        assert_eq!(
+            receiver.recv_timeout(TICK_INTERVAL).unwrap(),
+            TrayCommand::Pause(900)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    // AC: 4 — timed tray commands retain distinct absolute pause anchors; indefinite has none.
+    #[test]
+    fn pause_durations_produce_distinct_anchors() {
+        let now = 42.0;
+        let anchors: Vec<_> = [900_u64, 1800, 3600]
+            .into_iter()
+            .map(|seconds| now + seconds as f64)
+            .collect();
+        assert_eq!(anchors, [942.0, 1842.0, 3642.0]);
+        let indefinite: Option<f64> = None;
+        assert_eq!(indefinite, None);
+    }
+
+    // AC: 4 — absolute deadlines advance without drift and skip catch-up storms.
+    #[test]
+    fn tick_deadline_advances_absolutely_and_skips_storms() {
+        let start = Instant::now();
+        assert_eq!(advance_tick_deadline(start, start), start + TICK_INTERVAL);
+        let late = start + TICK_INTERVAL * 4;
+        assert_eq!(advance_tick_deadline(start, late), late + TICK_INTERVAL);
+    }
+
     struct CountingWake(Arc<AtomicUsize>);
     impl SyncWake for CountingWake {
         fn trigger(&self) {
@@ -570,7 +671,7 @@ mod tests {
         client.stop(Duration::from_secs(1)).await;
     }
 
-    // AC: shutdown composition orders final observer work, walker join, then sender stop.
+    // AC: 8 — desktop tasks stop before final observer work, walker join, and sender stop.
     #[tokio::test]
     async fn shutdown_order_is_explicit() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -587,6 +688,9 @@ mod tests {
                     .push("final_segment_trigger");
                 Ok(())
             },
+            async {
+                events.lock().unwrap().push("desktop_stopped");
+            },
             async { Ok(()) },
             move || async move {
                 sender_events.lock().unwrap().push("sender_stopped");
@@ -599,6 +703,8 @@ mod tests {
         assert_eq!(
             &*events.lock().unwrap(),
             &[
+                "desktop_shutdown",
+                "desktop_stopped",
                 "observer_shutdown",
                 "final_segment_trigger",
                 "sync_shutdown",

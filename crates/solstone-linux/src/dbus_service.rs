@@ -121,12 +121,12 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
         })
     }
     #[zbus(signal)]
-    async fn status_changed(
+    pub(crate) async fn status_changed(
         emitter: &zbus::object_server::SignalEmitter<'_>,
         status: &str,
     ) -> zbus::Result<()>;
     #[zbus(signal)]
-    async fn sync_progress_changed(
+    pub(crate) async fn sync_progress_changed(
         emitter: &zbus::object_server::SignalEmitter<'_>,
         progress: &str,
     ) -> zbus::Result<()>;

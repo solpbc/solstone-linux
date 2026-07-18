@@ -25,6 +25,7 @@ pub mod run;
 pub mod segment;
 pub mod service;
 pub mod session_env;
+mod shell;
 pub mod sources;
 pub mod streams;
 pub mod subscription;

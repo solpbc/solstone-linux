@@ -49,6 +49,42 @@ pub struct SyncService {
     task: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+pub struct SyncSampler {
+    pub(crate) facts: Arc<Mutex<SyncFacts>>,
+    pub(crate) clock: Arc<dyn Clock + Send + Sync>,
+    pub(crate) stale_threshold: f64,
+}
+
+impl SyncSampler {
+    fn with_facts<R>(&self, read: impl FnOnce(&SyncFacts) -> R) -> R {
+        match self.facts.lock() {
+            Ok(facts) => read(&facts),
+            Err(error) => {
+                tracing::warn!("sync facts lock poisoned; recovering sampler state");
+                read(&error.into_inner())
+            }
+        }
+    }
+
+    pub fn sample(&self) -> (SyncHealth, String) {
+        self.with_facts(|facts| {
+            (
+                derive_health(facts, self.clock.wall_seconds(), self.stale_threshold),
+                facts.progress.clone(),
+            )
+        })
+    }
+
+    pub fn health(&self) -> SyncHealth {
+        self.sample().0
+    }
+
+    pub fn progress(&self) -> String {
+        self.sample().1
+    }
+}
+
 struct SyncControl {
     notify: Arc<Notify>,
     pending_trigger: Arc<AtomicBool>,
@@ -111,6 +147,14 @@ impl SyncService {
         }
     }
 
+    pub fn sampler_handle(&self) -> SyncSampler {
+        SyncSampler {
+            facts: Arc::clone(&self.facts),
+            clock: Arc::clone(&self.clock),
+            stale_threshold: self.stale_threshold,
+        }
+    }
+
     pub async fn shutdown(mut self, timeout: Duration) -> Result<(), tokio::task::JoinError> {
         self.running.store(false, Ordering::Release);
         self.notify.notify_one();
@@ -129,15 +173,11 @@ impl SyncService {
     }
 
     pub fn health(&self) -> SyncHealth {
-        derive_health(
-            &self.facts.lock().unwrap(),
-            self.clock.wall_seconds(),
-            self.stale_threshold,
-        )
+        self.sampler_handle().health()
     }
 
     pub fn progress(&self) -> String {
-        self.facts.lock().unwrap().progress.clone()
+        self.sampler_handle().progress()
     }
 
     pub fn health_beacon(&self) -> HealthBeacon {
@@ -980,6 +1020,31 @@ mod tests {
         fn monotonic_seconds(&self) -> f64 {
             self.mono
         }
+    }
+
+    // AC: 7 — poisoned sync facts are recovered instead of killing the shell or tick loop.
+    #[test]
+    fn sampler_recovers_poisoned_facts_lock() {
+        let facts = Arc::new(Mutex::new(SyncFacts {
+            in_progress: true,
+            progress: "1/2".into(),
+            ..Default::default()
+        }));
+        let poison = Arc::clone(&facts);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison.lock().unwrap();
+            panic!("poison sampler facts");
+        });
+        let sampler = SyncSampler {
+            facts,
+            clock: Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+            stale_threshold: 600.0,
+        };
+        assert_eq!(sampler.health().dbus, "syncing");
+        assert_eq!(sampler.progress(), "1/2");
     }
 
     fn entry(name: &str, status: &str, sha: &str) -> ListingEntry {
