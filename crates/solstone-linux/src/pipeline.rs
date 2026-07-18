@@ -171,7 +171,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_pipeline_matches_python_except_target_object() {
+    fn canonical_portal_pipeline_forces_shm_and_matches_encoder_tail() {
         let description =
             pipeline_description(7, 42, 1, Path::new("/tmp/unknown_monitor-0_screen.webm"));
         assert_eq!(
