@@ -44,6 +44,9 @@ use crate::{
 type PortalFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
 const DISPATCH_MARGIN: Duration = Duration::from_secs(10);
+// Realistic single-session monitor ceiling with headroom. This derives the
+// command budget only and never caps the number of runtime streams.
+const MAX_STREAMS: u64 = 8;
 
 // A start can consume both interactive budgets plus every short operation. Keep
 // this derived from the operation table so the synchronous bridge cannot drift
@@ -52,7 +55,7 @@ const START_OPERATION_BUDGET: Duration = Duration::from_secs(
     portal_timeout(PortalOperation::CreateSession).as_secs() * 2
         + portal_timeout(PortalOperation::SelectSources).as_secs()
         + portal_timeout(PortalOperation::Start).as_secs()
-        + portal_timeout(PortalOperation::OpenPipeWireRemote).as_secs()
+        + MAX_STREAMS * portal_timeout(PortalOperation::OpenPipeWireRemote).as_secs()
         + WAYLAND_ENUMERATION_TIMEOUT.as_secs(),
 );
 const COMMAND_TIMEOUT: Duration =
@@ -140,7 +143,6 @@ impl PortalGeometry for NativeWaylandGeometry {
 #[derive(Debug)]
 struct PortalSession {
     streams: PortalStartResult,
-    remote: OwnedFd,
     monitors: Vec<Monitor>,
 }
 
@@ -179,19 +181,11 @@ async fn open_session<O: PortalOps, T: TokenStore, G: PortalGeometry>(
     {
         warn!(%error, "could not save rotated portal restore token");
     }
-    let remote = match ops.open_pipe_wire_remote().await {
-        Ok(remote) => remote,
-        Err(error) => return Err(close_after_error(ops, error).await),
-    };
     let monitors = match geometry.monitors() {
         Ok(monitors) => monitors,
         Err(error) => return Err(close_after_error(ops, error).await),
     };
-    Ok(PortalSession {
-        streams,
-        remote,
-        monitors,
-    })
+    Ok(PortalSession { streams, monitors })
 }
 
 pub struct AshpdPortalOps {
@@ -331,8 +325,8 @@ struct PortalPipeline {
     connector: String,
     position: String,
     output: PathBuf,
-    // Deliberately retain one clone per pipeline. Whether pipewiresrc duplicates
-    // internally is unverified; sibling lifetime must be correct by construction.
+    // Opened specifically for this pipeline via open_pipe_wire_remote() and
+    // closed automatically when the pipeline is dropped.
     _remote: OwnedFd,
     pipeline: Box<dyn CapturePipeline>,
 }
@@ -415,8 +409,8 @@ impl PortalVideoCapture {
                             let matched = match_streams_to_monitors(&session.streams.streams, &session.monitors);
                             let mut streams = Vec::new();
                             for stream in matched {
+                                let remote = match runtime.block_on(ops.open_pipe_wire_remote()) { Ok(fd) => fd, Err(error) => { warn!(connector = %stream.connector, %error, "could not open PipeWire remote; other streams continue"); continue; } };
                                 let output = directory.join(stream_filename(&stream.position_label, &stream.connector));
-                                let remote = match session.remote.try_clone() { Ok(fd) => fd, Err(error) => { warn!(%error, "could not clone PipeWire fd; other streams continue"); continue; } };
                                 let description = pipeline_description(remote.as_raw_fd(), stream.node_id, clamp_framerate(framerate), &output);
                                 let mut pipeline = match factory.build(&description) { Ok(pipeline) => pipeline, Err(error) => { warn!(connector = %stream.connector, %error, "portal pipeline construction failed; other streams continue"); continue; } };
                                 if let Err(error) = pipeline.start() { warn!(connector = %stream.connector, %error, "portal pipeline failed to enter Playing; other streams continue"); pipeline.force_stop(); continue; }
@@ -533,7 +527,10 @@ impl Drop for PortalVideoCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{pipeline::PipelineDescription, positions::BoxGeometry};
+    use crate::{
+        pipeline::{PipelineDescription, PropertyValue},
+        positions::BoxGeometry,
+    };
     use std::{
         collections::VecDeque,
         sync::{Arc, Mutex},
@@ -561,6 +558,9 @@ mod tests {
         fail: Option<&'static str>,
         token: Option<String>,
         streams: Vec<PortalStream>,
+        opens: Arc<Mutex<usize>>,
+        open_outcomes: VecDeque<bool>,
+        started: bool,
     }
     impl PortalOps for FakeOps {
         fn create_session(&mut self) -> PortalFuture<'_, ()> {
@@ -589,6 +589,7 @@ mod tests {
                 if self.fail == Some("start") {
                     Err("start failed".into())
                 } else {
+                    self.started = true;
                     Ok(PortalStartResult {
                         streams: self.streams.clone(),
                         restore_token: self.token.clone(),
@@ -598,8 +599,11 @@ mod tests {
         }
         fn open_pipe_wire_remote(&mut self) -> PortalFuture<'_, OwnedFd> {
             Box::pin(async move {
+                *self.opens.lock().unwrap() += 1;
                 self.calls.lock().unwrap().push("open");
-                if self.fail == Some("open") {
+                if !self.started {
+                    Err("open before Start: No streams available".into())
+                } else if self.open_outcomes.pop_front() == Some(true) {
                     Err("open failed".into())
                 } else {
                     Ok(std::fs::File::open("/dev/null").unwrap().into())
@@ -705,6 +709,9 @@ mod tests {
                     size: Some((800, 600)),
                 },
             ],
+            opens: Arc::new(Mutex::new(0)),
+            open_outcomes: VecDeque::new(),
+            started: false,
         }
     }
 
@@ -736,15 +743,31 @@ mod tests {
         }
         assert!(COMMAND_TIMEOUT > START_OPERATION_BUDGET);
     }
+
+    #[test]
+    fn start_operation_budget_accounts_for_maximum_remote_opens() {
+        assert_eq!(
+            START_OPERATION_BUDGET,
+            Duration::from_secs(2 * 30 + 600 + 600 + MAX_STREAMS * 30 + 5)
+        );
+        assert_eq!(
+            portal_timeout(PortalOperation::OpenPipeWireRemote),
+            Duration::from_secs(30)
+        );
+        assert!(COMMAND_TIMEOUT > START_OPERATION_BUDGET);
+    }
     #[test]
     fn failures_after_create_always_close() {
-        for fail in ["select", "start", "open"] {
+        for fail in ["select", "start"] {
             let calls = Arc::new(Mutex::new(vec![]));
             let mut ops = FakeOps {
                 calls: calls.clone(),
                 fail: Some(fail),
                 token: None,
                 streams: vec![],
+                opens: Arc::new(Mutex::new(0)),
+                open_outcomes: VecDeque::new(),
+                started: false,
             };
             let store = Store::default();
             let mut geometry = Geometry(vec![monitor()]);
@@ -765,6 +788,9 @@ mod tests {
             fail: Some("select+close"),
             token: None,
             streams: vec![],
+            opens: Arc::new(Mutex::new(0)),
+            open_outcomes: VecDeque::new(),
+            started: false,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let error = runtime
@@ -789,15 +815,20 @@ mod tests {
             let calls = Arc::new(Mutex::new(vec![]));
             let mut ops = FakeOps {
                 calls,
-                fail: Some("open"),
+                fail: None,
                 token: returned,
                 streams: vec![],
+                opens: Arc::new(Mutex::new(0)),
+                open_outcomes: VecDeque::new(),
+                started: false,
             };
             let store = Store::default();
             *store.0.lock().unwrap() = Some("old".into());
             let mut geometry = Geometry(vec![monitor()]);
             let runtime = tokio::runtime::Runtime::new().unwrap();
-            let _ = runtime.block_on(open_session(&mut ops, &store, &mut geometry, true));
+            runtime
+                .block_on(open_session(&mut ops, &store, &mut geometry, true))
+                .unwrap();
             assert_eq!(store.load().as_deref(), Some(expected));
         }
     }
@@ -823,6 +854,9 @@ mod tests {
                     size: Some((800, 600)),
                 },
             ],
+            opens: Arc::new(Mutex::new(0)),
+            open_outcomes: VecDeque::new(),
+            started: false,
         };
         let factory = FakeFactory::default();
         let states = factory.states.clone();
@@ -855,6 +889,131 @@ mod tests {
     }
 
     #[test]
+    fn matched_streams_each_open_a_pipewire_remote() {
+        let ops = two_stream_ops();
+        let opens = ops.opens.clone();
+        let mut capture = PortalVideoCapture::spawn(
+            ops,
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        assert_eq!(capture.start(directory.path(), 1, true).unwrap().len(), 2);
+        assert_eq!(*opens.lock().unwrap(), 2);
+        capture.stop().unwrap();
+    }
+
+    #[test]
+    fn pipelines_receive_distinct_pipewire_remote_fds() {
+        let factory = FakeFactory::default();
+        let descriptions = factory.descriptions.clone();
+        let mut capture = PortalVideoCapture::spawn(
+            two_stream_ops(),
+            Store::default(),
+            Geometry(vec![monitor()]),
+            factory,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        capture.start(directory.path(), 1, true).unwrap();
+        let descriptions = descriptions.lock().unwrap();
+        let fds: Vec<i32> = descriptions
+            .iter()
+            .map(|description| {
+                description.elements[0]
+                    .properties
+                    .iter()
+                    .find_map(|property| match (&*property.name, &property.value) {
+                        ("fd", PropertyValue::I32(fd)) => Some(*fd),
+                        _ => None,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(fds.len(), 2);
+        assert_ne!(fds[0], fds[1]);
+        drop(descriptions);
+        capture.stop().unwrap();
+    }
+
+    #[test]
+    fn open_before_start_is_a_modeled_violation() {
+        let mut ops = two_stream_ops();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let error = runtime.block_on(ops.open_pipe_wire_remote()).unwrap_err();
+
+        assert!(error.contains("No streams available"));
+    }
+
+    #[test]
+    fn individual_open_failure_keeps_the_other_stream_healthy() {
+        for (outcomes, connector) in [
+            (VecDeque::from([false, true]), "DP-1"),
+            (VecDeque::from([true, false]), "monitor-1"),
+        ] {
+            let mut ops = two_stream_ops();
+            ops.open_outcomes = outcomes;
+            let opens = ops.opens.clone();
+            let factory = FakeFactory::default();
+            let states = factory.states.clone();
+            let descriptions = factory.descriptions.clone();
+            let mut capture = PortalVideoCapture::spawn(
+                ops,
+                Store::default(),
+                Geometry(vec![monitor()]),
+                factory,
+            )
+            .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+
+            let streams = capture.start(directory.path(), 1, true).unwrap();
+
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].connector, connector);
+            assert_eq!(*opens.lock().unwrap(), 2);
+            assert_eq!(descriptions.lock().unwrap().len(), 1);
+            assert!(states.lock().unwrap()[0].lock().unwrap().healthy);
+            assert!(capture.is_healthy());
+            assert_eq!(capture.stop().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn all_open_failures_close_the_portal_session_once() {
+        let mut ops = two_stream_ops();
+        ops.open_outcomes = VecDeque::from([true, true]);
+        let calls = ops.calls.clone();
+        let opens = ops.opens.clone();
+        let mut capture = PortalVideoCapture::spawn(
+            ops,
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        let error = capture.start(directory.path(), 1, true).unwrap_err();
+
+        assert!(error.contains("No portal stream pipelines could be started"));
+        assert_eq!(*opens.lock().unwrap(), 2);
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == "close")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn partial_start_failure_keeps_healthy_sibling() {
         let factory = FakeFactory {
             start_outcomes: VecDeque::from([true, false]),
@@ -882,12 +1041,6 @@ mod tests {
 
     #[test]
     fn one_pipeline_teardown_does_not_invalidate_sibling_state() {
-        let remote: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
-        let first = remote.try_clone().unwrap();
-        let sibling = remote.try_clone().unwrap();
-        drop(first);
-        assert!(sibling.try_clone().is_ok());
-
         let factory = FakeFactory {
             start_outcomes: VecDeque::from([false, true]),
             ..Default::default()
@@ -955,6 +1108,9 @@ mod tests {
                 position: Some((0, 0)),
                 size: Some((1920, 1080)),
             }],
+            opens: Arc::new(Mutex::new(0)),
+            open_outcomes: VecDeque::new(),
+            started: false,
         };
         let mut capture = PortalVideoCapture::spawn(
             ops,
@@ -993,6 +1149,9 @@ mod tests {
             fail: None,
             token: None,
             streams: vec![],
+            opens: Arc::new(Mutex::new(0)),
+            open_outcomes: VecDeque::new(),
+            started: false,
         };
         let mut capture =
             PortalVideoCapture::spawn(ops, Store::default(), PanicGeometry, FakeFactory::default())
@@ -1015,6 +1174,9 @@ mod tests {
                 position: Some((0, 0)),
                 size: Some((1920, 1080)),
             }],
+            opens: Arc::new(Mutex::new(0)),
+            open_outcomes: VecDeque::new(),
+            started: false,
         };
         let mut capture = PortalVideoCapture::spawn(
             ops,
@@ -1037,6 +1199,7 @@ mod tests {
     #[test]
     fn reconnect_strategy_controls_real_session_teardown_branch() {
         let calls = Arc::new(Mutex::new(vec![]));
+        let opens = Arc::new(Mutex::new(0));
         let ops = FakeOps {
             calls: calls.clone(),
             fail: None,
@@ -1047,6 +1210,9 @@ mod tests {
                 position: Some((0, 0)),
                 size: Some((1920, 1080)),
             }],
+            opens: opens.clone(),
+            open_outcomes: VecDeque::new(),
+            started: false,
         };
         let mut capture = PortalVideoCapture::spawn_with_strategy(
             ops,
@@ -1078,6 +1244,7 @@ mod tests {
                 .count(),
             0
         );
+        assert_eq!(*opens.lock().unwrap(), 2);
         capture.stop().unwrap();
     }
 }
