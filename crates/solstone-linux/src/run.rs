@@ -378,11 +378,10 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
     Q: crate::observer::CaptureStatsSource,
     N: crate::observer::StateSink,
 {
-    match command {
-        TrayCommand::Pause(seconds) => observer.pause(seconds),
-        TrayCommand::PauseIndefinite => observer.pause(0),
-        TrayCommand::Resume => observer.resume(),
-        command => {
+    match route_command(command) {
+        ObserverAction::Pause(seconds) => observer.pause(seconds),
+        ObserverAction::Resume => observer.resume(),
+        ObserverAction::Desktop(command) => {
             if let Err(error) =
                 crate::desktop_component::DesktopComponent::new(observer.config.clone())
                     .perform_desktop_command(command)
@@ -390,6 +389,22 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                 tracing::warn!(%error, "Failed to perform desktop command");
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObserverAction {
+    Pause(u64),
+    Resume,
+    Desktop(TrayCommand),
+}
+
+fn route_command(command: TrayCommand) -> ObserverAction {
+    match command {
+        TrayCommand::Pause(seconds) => ObserverAction::Pause(seconds),
+        TrayCommand::PauseIndefinite => ObserverAction::Pause(0),
+        TrayCommand::Resume => ObserverAction::Resume,
+        command => ObserverAction::Desktop(command),
     }
 }
 
@@ -663,11 +678,34 @@ mod tests {
         )
     }
 
-    fn apply_test_command(observer: &mut CommandObserver, command: TrayCommand) {
-        match command {
-            TrayCommand::Pause(seconds) => observer.pause(seconds),
-            TrayCommand::PauseIndefinite => observer.pause(0),
-            _ => {}
+    fn apply_test_action(observer: &mut CommandObserver, action: ObserverAction) {
+        if let ObserverAction::Pause(seconds) = action {
+            observer.pause(seconds);
+        }
+    }
+
+    fn route_test_command(observer: &mut CommandObserver, command: TrayCommand) {
+        apply_test_action(observer, route_command(command));
+    }
+
+    #[test]
+    fn every_tray_command_routes_to_one_action() {
+        assert_eq!(
+            route_command(TrayCommand::Pause(900)),
+            ObserverAction::Pause(900)
+        );
+        assert_eq!(
+            route_command(TrayCommand::PauseIndefinite),
+            ObserverAction::Pause(0)
+        );
+        assert_eq!(route_command(TrayCommand::Resume), ObserverAction::Resume);
+        for command in [
+            TrayCommand::OpenJournal,
+            TrayCommand::OpenUrl("https://example.test"),
+            TrayCommand::OpenConfig,
+            TrayCommand::CopyInstructions,
+        ] {
+            assert_eq!(route_command(command), ObserverAction::Desktop(command));
         }
     }
 
@@ -687,7 +725,7 @@ mod tests {
         dispatch_wake(
             &mut observer,
             LoopWake::Command(command),
-            apply_test_command,
+            route_test_command,
             move |_| {
                 tick_count.fetch_add(1, Ordering::AcqRel);
                 Ok::<(), ()>(())
@@ -709,7 +747,7 @@ mod tests {
             dispatch_wake(
                 &mut observer,
                 LoopWake::Command(TrayCommand::Pause(seconds)),
-                apply_test_command,
+                route_test_command,
                 |_| Ok::<(), ()>(()),
             )
             .unwrap();
@@ -731,7 +769,7 @@ mod tests {
             dispatch_wake(
                 &mut observer,
                 LoopWake::Command(command),
-                apply_test_command,
+                route_test_command,
                 |_| Ok::<(), ()>(()),
             )
             .unwrap();
