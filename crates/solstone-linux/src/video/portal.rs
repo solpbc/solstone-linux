@@ -534,7 +534,10 @@ impl Drop for PortalVideoCapture {
 mod tests {
     use super::*;
     use crate::{pipeline::PipelineDescription, positions::BoxGeometry};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     #[derive(Default)]
     struct Store(Arc<Mutex<Option<String>>>);
@@ -618,11 +621,16 @@ mod tests {
     struct PipelineState {
         healthy: bool,
         stopped: bool,
+        start_fails: bool,
     }
     struct FakePipeline(Arc<Mutex<PipelineState>>);
     impl CapturePipeline for FakePipeline {
         fn start(&mut self) -> Result<(), String> {
-            Ok(())
+            if self.0.lock().unwrap().start_fails {
+                Err("fake start failed".into())
+            } else {
+                Ok(())
+            }
         }
         fn is_healthy(&self) -> bool {
             self.0.lock().unwrap().healthy
@@ -645,6 +653,7 @@ mod tests {
         states: Arc<Mutex<Vec<Arc<Mutex<PipelineState>>>>>,
         descriptions: Arc<Mutex<Vec<PipelineDescription>>>,
         fail: bool,
+        start_outcomes: VecDeque<bool>,
     }
     impl PipelineFactory for FakeFactory {
         fn build(
@@ -658,6 +667,7 @@ mod tests {
             let state = Arc::new(Mutex::new(PipelineState {
                 healthy: true,
                 stopped: false,
+                start_fails: self.start_outcomes.pop_front().unwrap_or(false),
             }));
             self.states.lock().unwrap().push(state.clone());
             Ok(Box::new(FakePipeline(state)))
@@ -673,6 +683,28 @@ mod tests {
                 y2: 1080,
             },
             position: Some("center".into()),
+        }
+    }
+
+    fn two_stream_ops() -> FakeOps {
+        FakeOps {
+            calls: Arc::new(Mutex::new(vec![])),
+            fail: None,
+            token: None,
+            streams: vec![
+                PortalStream {
+                    index: 0,
+                    node_id: 10,
+                    position: Some((0, 0)),
+                    size: Some((1920, 1080)),
+                },
+                PortalStream {
+                    index: 1,
+                    node_id: 11,
+                    position: Some((9000, 0)),
+                    size: Some((800, 600)),
+                },
+            ],
         }
     }
 
@@ -823,12 +855,88 @@ mod tests {
     }
 
     #[test]
+    fn partial_start_failure_keeps_healthy_sibling() {
+        let factory = FakeFactory {
+            start_outcomes: VecDeque::from([true, false]),
+            ..Default::default()
+        };
+        let states = factory.states.clone();
+        let mut capture = PortalVideoCapture::spawn(
+            two_stream_ops(),
+            Store::default(),
+            Geometry(vec![monitor()]),
+            factory,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        let streams = capture.start(directory.path(), 1, true).unwrap();
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].connector, "monitor-1");
+        assert!(capture.is_healthy());
+        assert!(states.lock().unwrap()[0].lock().unwrap().stopped);
+        assert!(states.lock().unwrap()[1].lock().unwrap().healthy);
+        assert_eq!(capture.stop().unwrap().len(), 1);
+    }
+
+    #[test]
     fn one_pipeline_teardown_does_not_invalidate_sibling_state() {
         let remote: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
         let first = remote.try_clone().unwrap();
         let sibling = remote.try_clone().unwrap();
         drop(first);
         assert!(sibling.try_clone().is_ok());
+
+        let factory = FakeFactory {
+            start_outcomes: VecDeque::from([false, true]),
+            ..Default::default()
+        };
+        let states = factory.states.clone();
+        let mut capture = PortalVideoCapture::spawn(
+            two_stream_ops(),
+            Store::default(),
+            Geometry(vec![monitor()]),
+            factory,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        let streams = capture.start(directory.path(), 1, true).unwrap();
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].connector, "DP-1");
+        assert!(states.lock().unwrap()[0].lock().unwrap().healthy);
+        assert!(states.lock().unwrap()[1].lock().unwrap().stopped);
+        assert!(capture.is_healthy());
+        assert_eq!(capture.stop().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn all_pipeline_start_failures_return_error() {
+        let factory = FakeFactory {
+            start_outcomes: VecDeque::from([true, true]),
+            ..Default::default()
+        };
+        let states = factory.states.clone();
+        let mut capture = PortalVideoCapture::spawn(
+            two_stream_ops(),
+            Store::default(),
+            Geometry(vec![monitor()]),
+            factory,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        assert!(capture.start(directory.path(), 1, true).is_err());
+        assert!(
+            states
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|state| state.lock().unwrap().stopped)
+        );
+        assert!(!capture.is_healthy());
     }
 
     #[test]

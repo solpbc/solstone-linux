@@ -203,6 +203,17 @@ impl CapturePipeline for GstreamerPipeline {
 
     fn force_stop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
+        let (_, current, pending) = self.pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+        if current != gst::State::Null {
+            tracing::warn!(
+                ?current,
+                ?pending,
+                "pipeline did not reach Null during forced stop"
+            );
+        }
+        if let Some(bus) = self.pipeline.bus() {
+            bus.set_flushing(true);
+        }
     }
 }
 

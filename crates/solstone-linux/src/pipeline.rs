@@ -63,6 +63,11 @@ pub fn pipeline_description(
         ],
         None,
     )];
+    // pipewiresrc exposes no DMA-BUF-disabling property. Plain video/x-raw has
+    // empty caps features (memory:SystemMemory), excluding the
+    // video/x-raw(memory:DMABuf) branch and its EGL/GL dependency for 1fps
+    // multi-monitor Wayland capture.
+    elements.push(element("capsfilter", vec![], Some("video/x-raw".into())));
     elements.extend(encoder_tail(framerate, output));
     PipelineDescription { elements }
 }
@@ -171,7 +176,7 @@ mod tests {
             pipeline_description(7, 42, 1, Path::new("/tmp/unknown_monitor-0_screen.webm"));
         assert_eq!(
             render_gst_launch(&description),
-            "pipewiresrc fd=7 path=42 ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 keyframe-max-dist=30 static-threshold=100 ! webmmux ! filesink location=/tmp/unknown_monitor-0_screen.webm"
+            "pipewiresrc fd=7 path=42 ! video/x-raw ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 keyframe-max-dist=30 static-threshold=100 ! webmmux ! filesink location=/tmp/unknown_monitor-0_screen.webm"
         );
     }
 
@@ -193,8 +198,12 @@ mod tests {
                 .iter()
                 .all(|property| property.name != "target-object")
         );
+        let source_caps = description.elements[1].caps.as_deref().unwrap();
+        assert_eq!(source_caps, "video/x-raw");
+        assert!(!source_caps.contains("memory:"));
+        assert!(!source_caps.contains("DMABuf"));
         assert_eq!(
-            description.elements[2].caps.as_deref(),
+            description.elements[3].caps.as_deref(),
             Some("video/x-raw,framerate=10/1")
         );
     }
