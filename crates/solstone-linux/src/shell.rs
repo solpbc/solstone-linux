@@ -72,6 +72,10 @@ pub(crate) fn stashed<T: Clone>(cell: &Arc<Mutex<Option<T>>>) -> Option<T> {
         .unwrap_or_else(|error| error.into_inner().clone())
 }
 
+fn with_connection<T, R>(connection: Option<&T>, serve: impl FnOnce(&T) -> R) -> Option<R> {
+    connection.map(serve)
+}
+
 #[derive(Clone)]
 pub(crate) struct CommandSender {
     sender: Sender<TrayCommand>,
@@ -152,6 +156,35 @@ struct ShellCells {
     progress: Arc<Mutex<String>>,
 }
 
+#[derive(Clone)]
+struct TrayHealth {
+    cell: Arc<Mutex<SyncHealth>>,
+}
+
+fn bind_consumers<C: Clock, O: ObserverCommands>(
+    snapshot: Arc<Mutex<StateSnapshot>>,
+    health: Arc<Mutex<SyncHealth>>,
+    progress: Arc<Mutex<String>>,
+    config: Config,
+    clock: C,
+    commands: O,
+) -> (Observer1<C, O>, TrayHealth) {
+    let tray_health = TrayHealth {
+        cell: Arc::clone(&health),
+    };
+    (
+        Observer1 {
+            snapshot,
+            health,
+            progress,
+            config,
+            clock,
+            commands,
+        },
+        tray_health,
+    )
+}
+
 pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> DesktopShell {
     let component = DesktopComponent::new(inputs.config.clone());
     let initial_snapshot = inputs
@@ -171,15 +204,15 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         .unwrap_or_else(|error| error.into_inner().clone());
 
     let mut interface_served = false;
-    let signal_sink = if let Some(connection) = &inputs.connection {
-        let interface = Observer1 {
-            snapshot: Arc::clone(&inputs.snapshot),
-            health: Arc::clone(&inputs.health),
-            progress: Arc::clone(&inputs.progress),
-            config: inputs.config.clone(),
-            clock: inputs.clock.clone(),
-            commands: inputs.commands.clone(),
-        };
+    let (interface, tray_health) = bind_consumers(
+        Arc::clone(&inputs.snapshot),
+        Arc::clone(&inputs.health),
+        Arc::clone(&inputs.progress),
+        inputs.config.clone(),
+        inputs.clock.clone(),
+        inputs.commands.clone(),
+    );
+    let signal_sink = with_connection(inputs.connection.as_ref(), |connection| {
         // Setup owns the name before recovery. Observer1 can only be served after recovery and
         // video construction (including a portal consent wait that can block on a human), so
         // `busctl` may hang transiently in that startup window. That is expected and is distinct
@@ -206,6 +239,10 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
                 None
             }
         }
+    })
+    .flatten();
+    let signal_sink = if inputs.connection.is_some() {
+        signal_sink
     } else {
         tracing::error!("Singleton connection absent; desktop D-Bus interface disabled");
         None
@@ -244,7 +281,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
                     true
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "Failed to register status notifier item");
+                    tracing::debug!(%error, "Failed to register status notifier item");
                     false
                 }
             }
@@ -261,7 +298,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
             models,
             inputs.config.segment_interval,
             inputs.clock,
-            inputs.health,
+            tray_health,
         ));
         let apply_task = tokio::spawn(run_tray_applier(handle, model_receiver, shutdown_rx));
         (Some(render_task), Some(apply_task))
@@ -285,11 +322,12 @@ async fn run_tray_renderer(
     models: watch::Sender<TrayModel>,
     segment_interval: i64,
     clock: SystemClock,
-    health: Arc<Mutex<SyncHealth>>,
+    health: TrayHealth,
 ) {
     component
         .watch_until_lost(receiver, move |snapshot| {
             let health = health
+                .cell
                 .lock()
                 .map(|value| value.clone())
                 .unwrap_or_else(|error| error.into_inner().clone());
@@ -397,18 +435,49 @@ impl DesktopShell {
         if let Some(task) = &self.render_task {
             task.abort();
         }
-        stop_task("tray renderer", self.render_task.take(), timeout).await;
-        stop_task("tray applier", self.apply_task.take(), timeout).await;
-        stop_task("desktop signal", Some(self.signal_task), timeout).await;
-        if self.interface_served
-            && let Some(connection) = &self.connection
-            && let Err(error) = connection
-                .object_server()
-                .remove::<Observer1<SystemClock, CommandSender>, _>(OBSERVER_PATH)
-                .await
-        {
-            tracing::warn!(%error, "Failed to remove Observer1 interface");
-        }
+        let removal = async {
+            if self.interface_served
+                && let Some(connection) = &self.connection
+            {
+                connection
+                    .object_server()
+                    .remove::<Observer1<SystemClock, CommandSender>, _>(OBSERVER_PATH)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                Ok(())
+            }
+        };
+        // Three tasks can each consume two bounds (join, then post-abort join), and interface
+        // removal consumes one: total worst case is seven times `timeout`.
+        finish_shutdown(
+            self.render_task.take(),
+            self.apply_task.take(),
+            Some(self.signal_task),
+            removal,
+            timeout,
+        )
+        .await;
+    }
+}
+
+async fn finish_shutdown<F>(
+    render_task: Option<JoinHandle<()>>,
+    apply_task: Option<JoinHandle<()>>,
+    signal_task: Option<JoinHandle<()>>,
+    removal: F,
+    timeout: Duration,
+) where
+    F: Future<Output = Result<(), String>>,
+{
+    stop_task("tray renderer", render_task, timeout).await;
+    stop_task("tray applier", apply_task, timeout).await;
+    stop_task("desktop signal", signal_task, timeout).await;
+    match tokio::time::timeout(timeout, removal).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "Failed to remove Observer1 interface"),
+        Err(_) => tracing::warn!("Observer1 interface removal timed out"),
     }
 }
 
@@ -417,7 +486,12 @@ async fn stop_task(name: &str, task: Option<JoinHandle<()>>, timeout: Duration) 
     if tokio::time::timeout(timeout, &mut task).await.is_err() {
         tracing::warn!(task = name, "Desktop task shutdown timed out; aborting");
         task.abort();
-        let _ = task.await;
+        if tokio::time::timeout(timeout, task).await.is_err() {
+            tracing::warn!(
+                task = name,
+                "Aborted desktop task did not join before timeout"
+            );
+        }
     }
 }
 
@@ -429,7 +503,7 @@ mod tests {
         observer::{Mode, StateSink, WatchStateSink},
         sync_health::{SyncFacts, derive_health},
     };
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     #[derive(Clone)]
     struct TestClock(Arc<AtomicU64>);
@@ -460,6 +534,7 @@ mod tests {
             facts,
             clock: Arc::new(TestClock(Arc::new(AtomicU64::new(0)))),
             stale_threshold: 600.0,
+            poison_reports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -519,6 +594,17 @@ mod tests {
         let unknown = derive_health(&SyncFacts::default(), 0.0, 600.0);
         let health = Arc::new(Mutex::new(unknown.clone()));
         let progress = Arc::new(Mutex::new(String::new()));
+        let (command_sender, _) = std::sync::mpsc::channel();
+        let (interface, tray_health) = bind_consumers(
+            Arc::new(Mutex::new(initial.clone())),
+            Arc::clone(&health),
+            Arc::clone(&progress),
+            Config::default(),
+            TestClock(Arc::new(AtomicU64::new(0))),
+            CommandSender::new(command_sender),
+        );
+        assert!(Arc::ptr_eq(&interface.health, &tray_health.cell));
+        assert!(Arc::ptr_eq(&interface.progress, &progress));
         let facts = Arc::new(Mutex::new(SyncFacts::default()));
         let seen = Arc::new(Mutex::new(Vec::new()));
         facts.lock().unwrap().in_progress = true;
@@ -565,13 +651,12 @@ mod tests {
         assert_eq!(receiver.recv().unwrap(), TrayCommand::PauseIndefinite);
     }
 
-    // AC: 5 — the required registration policy exhausts three attempts without capture work.
+    // AC: 5 — the required registration policy exhausts three attempts and returns tray-less.
     #[test]
-    fn trayless_setup_is_nonfatal_and_does_not_touch_capture() {
+    fn trayless_setup_retries_three_times() {
         let component = DesktopComponent::new(Config::default());
         let mut attempts = 0;
         let mut waits = 0;
-        let capture_touched = false;
         assert!(!component.setup(
             || {
                 attempts += 1;
@@ -580,7 +665,6 @@ mod tests {
             |_| waits += 1,
         ));
         assert_eq!((attempts, waits), (3, 2));
-        assert!(!capture_touched);
     }
 
     // AC: 6 — only the exact name-owning value is stashed and handed to the object-server path.
@@ -594,7 +678,8 @@ mod tests {
             let requested_on = Arc::new(());
             stash_owned(&cell, Arc::clone(&requested_on), &reply).unwrap();
             let handed_to_shell = stashed(&cell).expect("owner connection is handed to shell");
-            assert!(Arc::ptr_eq(&requested_on, &handed_to_shell));
+            let served_on = with_connection(Some(&handed_to_shell), Arc::clone).unwrap();
+            assert!(Arc::ptr_eq(&requested_on, &served_on));
         }
     }
 
@@ -617,5 +702,23 @@ mod tests {
         let constructor = ["Connection", "::session()"].concat();
         assert_eq!(include_str!("shell.rs").matches(&constructor).count(), 1);
         assert_eq!(include_str!("run.rs").matches(&constructor).count(), 0);
+        let serve_site = ["with_connection", "(inputs.connection.as_ref()"].concat();
+        assert_eq!(include_str!("shell.rs").matches(&serve_site).count(), 1);
+    }
+
+    // AC: 8 — hung tasks and interface removal are both bounded without a live bus or tray.
+    #[tokio::test]
+    async fn shutdown_bounds_hung_task_and_removal() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let removal_started = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&removal_started);
+        let removal = async move {
+            seen.store(true, Ordering::Release);
+            std::future::pending::<Result<(), String>>().await
+        };
+        let started = tokio::time::Instant::now();
+        finish_shutdown(Some(task), None, None, removal, Duration::from_millis(5)).await;
+        assert!(removal_started.load(Ordering::Acquire));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

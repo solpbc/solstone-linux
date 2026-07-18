@@ -187,8 +187,9 @@ async fn stop_upload_sender(
 // 1. CLI session readiness gate completes before this module is entered.
 // 2. lifecycle setup acquires the singleton bus name and performs no capture work.
 // 3. recovery finalizes old incomplete segments while singleton ownership is held.
-// 4. the run closure constructs capture backends, sync, the observer, and desktop surfaces.
-// 5. initialize publishes the first snapshot; commands wake the absolute-deadline tick loop.
+// 4. the run closure constructs capture backends, sync, and the observer.
+// 5. initialize publishes the first snapshot, then desktop surfaces start and commands wake the
+//    absolute-deadline tick loop.
 // 6. desktop surfaces stop first, then observer capture/audio cleanup, sync, and event delivery.
 pub fn run_observer(config: Config, host: String) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -325,9 +326,19 @@ fn run_capture(
             command_receiver.recv_timeout(next_tick.saturating_duration_since(now))
         };
         match wake {
-            Ok(command) => apply_command(&mut observer, command),
+            Ok(command) => {
+                run_result = dispatch_wake(
+                    &mut observer,
+                    LoopWake::Command(command),
+                    apply_command,
+                    |observer| tick_once(notifier.as_ref(), || observer.tick()),
+                );
+            }
             Err(RecvTimeoutError::Timeout) => {
-                run_result = tick_once(notifier.as_ref(), || observer.tick());
+                run_result =
+                    dispatch_wake(&mut observer, LoopWake::Tick, apply_command, |observer| {
+                        tick_once(notifier.as_ref(), || observer.tick())
+                    });
                 next_tick = advance_tick_deadline(next_tick, Instant::now());
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -383,11 +394,30 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
 }
 
 fn advance_tick_deadline(previous: Instant, now: Instant) -> Instant {
-    let advanced = previous + TICK_INTERVAL;
-    if now.saturating_duration_since(advanced) > TICK_INTERVAL {
+    if now.saturating_duration_since(previous) > TICK_INTERVAL {
         now + TICK_INTERVAL
     } else {
-        advanced
+        previous + TICK_INTERVAL
+    }
+}
+
+enum LoopWake {
+    Command(TrayCommand),
+    Tick,
+}
+
+fn dispatch_wake<T, E>(
+    owner: &mut T,
+    wake: LoopWake,
+    apply: impl FnOnce(&mut T, TrayCommand),
+    tick: impl FnOnce(&mut T) -> Result<(), E>,
+) -> Result<(), E> {
+    match wake {
+        LoopWake::Command(command) => {
+            apply(owner, command);
+            Ok(())
+        }
+        LoopWake::Tick => tick(owner),
     }
 }
 
@@ -520,6 +550,10 @@ impl Clock for SystemClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        dbus_service::{ObserverCommands, clamp_pause},
+        observer::StateSink,
+    };
     use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicUsize};
 
     #[derive(Default)]
@@ -593,30 +627,118 @@ mod tests {
         assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 1);
     }
 
-    // AC: 4 — a command wakes the receiver immediately rather than waiting for the five-second tick.
+    struct CommandObserver {
+        now: f64,
+        snapshot: StateSnapshot,
+        states: WatchStateSink,
+    }
+
+    impl CommandObserver {
+        fn pause(&mut self, seconds: u64) {
+            self.snapshot.paused = true;
+            self.snapshot.pause_until = (seconds > 0).then_some(self.now + seconds as f64);
+            self.states.publish(self.snapshot.clone());
+        }
+    }
+
+    fn command_observer() -> (CommandObserver, tokio::sync::watch::Receiver<StateSnapshot>) {
+        let snapshot = StateSnapshot {
+            mode: Mode::Idle,
+            paused: false,
+            segment_open: false,
+            captures_today: 0,
+            total_size_mb: 0,
+            pause_until: None,
+            segment_start_mono: None,
+            process_start_mono: 0.0,
+        };
+        let (states, receiver) = WatchStateSink::channel(snapshot.clone());
+        (
+            CommandObserver {
+                now: 42.0,
+                snapshot,
+                states,
+            },
+            receiver,
+        )
+    }
+
+    fn apply_test_command(observer: &mut CommandObserver, command: TrayCommand) {
+        match command {
+            TrayCommand::Pause(seconds) => observer.pause(seconds),
+            TrayCommand::PauseIndefinite => observer.pause(0),
+            _ => {}
+        }
+    }
+
+    // AC: 4 — the production wake dispatcher applies a command before the next tick.
     #[test]
     fn command_between_ticks_has_bounded_latency() {
         let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            sender.send(TrayCommand::Pause(900)).unwrap();
+        });
+        let (mut observer, _) = command_observer();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let tick_count = Arc::clone(&ticks);
         let started = Instant::now();
-        sender.send(TrayCommand::Pause(900)).unwrap();
-        assert_eq!(
-            receiver.recv_timeout(TICK_INTERVAL).unwrap(),
-            TrayCommand::Pause(900)
-        );
+        let command = receiver.recv_timeout(TICK_INTERVAL).unwrap();
+        dispatch_wake(
+            &mut observer,
+            LoopWake::Command(command),
+            apply_test_command,
+            move |_| {
+                tick_count.fetch_add(1, Ordering::AcqRel);
+                Ok::<(), ()>(())
+            },
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert!(observer.snapshot.paused);
+        assert_eq!(ticks.load(Ordering::Acquire), 0);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
-    // AC: 4 — timed tray commands retain distinct absolute pause anchors; indefinite has none.
+    // AC: 4 — real command routing publishes distinct timed anchors and all indefinite variants.
     #[test]
     fn pause_durations_produce_distinct_anchors() {
-        let now = 42.0;
-        let anchors: Vec<_> = [900_u64, 1800, 3600]
-            .into_iter()
-            .map(|seconds| now + seconds as f64)
-            .collect();
+        let (mut observer, receiver) = command_observer();
+        let mut anchors = Vec::new();
+        for seconds in [900, 1800, 3600] {
+            dispatch_wake(
+                &mut observer,
+                LoopWake::Command(TrayCommand::Pause(seconds)),
+                apply_test_command,
+                |_| Ok::<(), ()>(()),
+            )
+            .unwrap();
+            let published = receiver.borrow().clone();
+            assert!(published.paused);
+            anchors.push(published.pause_until.unwrap());
+        }
         assert_eq!(anchors, [942.0, 1842.0, 3642.0]);
-        let indefinite: Option<f64> = None;
-        assert_eq!(indefinite, None);
+
+        let (sender, commands) = std::sync::mpsc::channel();
+        let dbus = CommandSender::new(sender);
+        dbus.pause(clamp_pause(0));
+        dbus.pause(clamp_pause(-1));
+        for command in [
+            TrayCommand::PauseIndefinite,
+            commands.recv().unwrap(),
+            commands.recv().unwrap(),
+        ] {
+            dispatch_wake(
+                &mut observer,
+                LoopWake::Command(command),
+                apply_test_command,
+                |_| Ok::<(), ()>(()),
+            )
+            .unwrap();
+            let published = receiver.borrow().clone();
+            assert!(published.paused);
+            assert_eq!(published.pause_until, None);
+        }
     }
 
     // AC: 4 — absolute deadlines advance without drift and skip catch-up storms.
@@ -624,6 +746,15 @@ mod tests {
     fn tick_deadline_advances_absolutely_and_skips_storms() {
         let start = Instant::now();
         assert_eq!(advance_tick_deadline(start, start), start + TICK_INTERVAL);
+        let one_second_late = start + Duration::from_secs(1);
+        assert_eq!(
+            advance_tick_deadline(start, one_second_late),
+            start + TICK_INTERVAL
+        );
+        let six_seconds_late = start + Duration::from_secs(6);
+        let reset = advance_tick_deadline(start, six_seconds_late);
+        assert_eq!(reset, six_seconds_late + TICK_INTERVAL);
+        assert!(reset > six_seconds_late);
         let late = start + TICK_INTERVAL * 4;
         assert_eq!(advance_tick_deadline(start, late), late + TICK_INTERVAL);
     }

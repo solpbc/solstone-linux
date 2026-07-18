@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -54,6 +54,7 @@ pub struct SyncSampler {
     pub(crate) facts: Arc<Mutex<SyncFacts>>,
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     pub(crate) stale_threshold: f64,
+    pub(crate) poison_reports: Arc<AtomicUsize>,
 }
 
 impl SyncSampler {
@@ -61,7 +62,13 @@ impl SyncSampler {
         match self.facts.lock() {
             Ok(facts) => read(&facts),
             Err(error) => {
-                tracing::warn!("sync facts lock poisoned; recovering sampler state");
+                if self
+                    .poison_reports
+                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    tracing::warn!("sync facts lock poisoned; recovering sampler state");
+                }
                 read(&error.into_inner())
             }
         }
@@ -152,6 +159,7 @@ impl SyncService {
             facts: Arc::clone(&self.facts),
             clock: Arc::clone(&self.clock),
             stale_threshold: self.stale_threshold,
+            poison_reports: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1042,9 +1050,11 @@ mod tests {
                 mono: 0.0,
             }),
             stale_threshold: 600.0,
+            poison_reports: Arc::new(AtomicUsize::new(0)),
         };
         assert_eq!(sampler.health().dbus, "syncing");
         assert_eq!(sampler.progress(), "1/2");
+        assert_eq!(sampler.poison_reports.load(Ordering::Acquire), 1);
     }
 
     fn entry(name: &str, status: &str, sha: &str) -> ListingEntry {
