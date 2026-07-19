@@ -6,12 +6,17 @@ Development guidelines for solstone-linux, a standalone Linux desktop observer.
 
 solstone-linux is a companion app that runs alongside the main [solstone](https://solstone.app) journal. It is one of the owner's observers — it experiences screen and audio along with the owner on a Linux desktop using PipeWire and GStreamer, stores segments locally, and syncs them to your solstone journal. It runs as a systemd user service on GNOME Wayland sessions.
 
-This is **not** part of the solstone monorepo. It is a standalone package with its own release lifecycle, installed via pipx alongside system-provided PyGObject/GStreamer bindings.
+This is **not** part of the solstone monorepo. It is a standalone Rust package with its own native release lifecycle. The retained Python implementation is non-shipping legacy code.
 
 ## Source Layout
 
 ```
-src/solstone_linux/
+crates/solstone-linux/src/  Shipping Rust observer, CLI, service, sync, and capture code
+packaging/                  Native package Containerfile and install notes
+scripts/build-release.sh    Operator-run native package build
+scripts/install.sh          Portable archive installer
+
+src/solstone_linux/         Non-shipping legacy Python implementation
     __init__.py             Package version
     cli.py                  CLI entry point (run, setup, settings, install-service, status)
     solstone-linux.service.in        Systemd unit template (rendered by install-service)
@@ -39,7 +44,7 @@ src/solstone_linux/
     sni.py                  StatusNotifierItem D-Bus interface for tray icons
     tray.py                 In-process D-Bus SNI tray icon, menu, and tooltip
 
-tests/                      pytest test suite
+tests/                      Legacy Python pytest suite
 contrib/                    Reference icons for development fallback
 ```
 
@@ -62,48 +67,43 @@ The `observe/status` heartbeat carries top-level diagnostics-only health-beacon 
 ## Commands
 
 ```bash
-make install        # Create venv, install package + dev tools (pytest, ruff) via uv
-make test           # Run all tests
-make test-only TEST=tests/test_config.py  # Run specific test
-make format         # Auto-format with ruff
-make ci             # Python + Rust lint, format, dependency, and test checks
-make install-service  # Smart install-or-upgrade: guards against cross-repo contamination; runs CI in upgrade mode
+make bootstrap      # Install rustup if needed, then establish pinned tools
+make install        # Establish pinned Rust/tools and install the observer
+make format         # Format Rust source
+make test           # Run locked Rust tests
+make ci             # Host evidence: Rust format, lint, tests, offline policy
+make audit          # Refresh RustSec data, then check advisories
+make update-deps    # Sole unlocked Cargo dependency-update path
+make install-service  # Install the native systemd user service
 make service-restart  # systemctl restart wrapper
 make service-status   # systemctl status wrapper
 make service-logs     # systemctl log tail wrapper
-make uninstall-service  # Disable + remove unit + pipx uninstall
+make uninstall-service  # Remove the native systemd user service
 make clean          # Remove build artifacts and caches
 make versions       # Show installed package versions
+
+make legacy-python-install  # Set up retained non-shipping Python code
+make legacy-python-test     # Run the legacy Python tests
+make legacy-python-ci       # Run the legacy Python gate
 ```
 
 ## Rust rebuild
 
-The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains the portable observer logic and Linux video-capture backends, plus a stub CLI. Run `make rust-fmt-check`, `make rust-lint`, `make rust-test`, and `make rust-deny` individually, or use `make ci` as the combined Python and Rust gate. Python remains the shipped pipx observer until an explicit cutover; Rust crates are not installed or released with it.
-For the unexercised operator-run Rust packaging rail and its blocking first-release validation, see `RELEASING.md`.
+The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains the shipping observer, native CLI, service lifecycle, and Linux video-capture backends. `rust-toolchain.toml` is the compiler authority. Use the canonical Make targets above; Python targets are retained only for non-shipping legacy maintenance. For the operator-run native packaging rail and its blocking release validation, see `RELEASING.md`.
 
 ## Releasing
 
-solstone-linux ships to PyPI via `scripts/release.sh`. The operator runs the
-release from a clean checkout; there is no CI publish path.
+solstone-linux ships as portable, Debian, and RPM artifacts through the
+operator-run native release rail. There is no automated publish path.
 
 ```bash
-make release-test   # upload to TestPyPI (requires TESTPYPI_TOKEN)
-make release        # upload to PyPI (requires PYPI_TOKEN)
+make release        # build native Debian and RPM release artifacts
 ```
 
-The script refuses to run on a dirty tree, builds an sdist + a
-`py3-none-any` wheel with `uv build`, runs `uvx twine check`, uploads,
-tags the commit `vX.Y.Z`, pushes the tag, and creates a matching GitHub
-Release with the artifacts attached and the CHANGELOG block as release
-notes.
-
-Before releasing, bump the version in BOTH `pyproject.toml` (`[project].version`)
-and `src/solstone_linux/__init__.py` (`__version__`) — they must match — and add
-a `## [X.Y.Z] - YYYY-MM-DD` block to `CHANGELOG.md`.
-
-Set `RELEASE_DRY_RUN=1` to walk the full flow without uploading, tagging,
-pushing, or publishing a GitHub Release; the build and `twine check` still
-run for real.
+The build refuses a dirty tree and does not upload, tag, or publish. Follow
+`RELEASING.md` for artifact inspection, the blocking FLAC soak, and handoff.
+`scripts/release.sh` and its `legacy-python-release*` Make targets are retained
+only for the non-shipping Python implementation.
 
 ## Development Principles
 

@@ -3,8 +3,8 @@ yanked = "deny"
 ignore = [
     # Build-only via wayland-scanner; it parses crate-bundled protocol XML, not
     # runtime or untrusted input. Remove when wayland-scanner accepts quick-xml >=0.41.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
+    { id = "RUSTSEC-2026-0194", reason = "Owner: sol pbc engineering. Build-only via wayland-scanner; it parses crate-bundled protocol XML, not runtime or untrusted input. Remove when wayland-scanner accepts quick-xml >=0.41." },
+    { id = "RUSTSEC-2026-0195", reason = "Owner: sol pbc engineering. Build-only via wayland-scanner; it parses crate-bundled protocol XML, not runtime or untrusted input. Remove when wayland-scanner accepts quick-xml >=0.41." },
 ]
 
 [licenses]
@@ -25,7 +25,7 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
 
 [sources]
 unknown-registry = "deny"

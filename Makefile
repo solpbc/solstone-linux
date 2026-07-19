@@ -1,79 +1,106 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: install test test-only format ci shellcheck rust-fmt-check rust-lint rust-test rust-deny clean clean-install versions all bootstrap install-service service-restart service-status service-logs uninstall-service release release-test
-
-# Default target
-all: install
-
-# Virtual environment directory
-VENV := .venv
-VENV_BIN := $(VENV)/bin
-PYTHON := $(VENV_BIN)/python
-CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
-CARGO_DENY ?= $(shell command -v cargo-deny 2>/dev/null || { [ -x $(HOME)/.cargo/bin/cargo-deny ] && echo $(HOME)/.cargo/bin/cargo-deny; })
-CARGO_BIN_DIR := $(patsubst %/,%,$(dir $(CARGO)))
-SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/install.sh
-
-# Require uv
-UV := $(shell command -v uv 2>/dev/null)
-ifneq ($(filter bootstrap,$(MAKECMDGOALS)),bootstrap)
-ifndef UV
-$(error uv is not installed. Run: make bootstrap)
-endif
-endif
+.PHONY: all bootstrap install format test ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
+CARGO ?= cargo
+RUSTUP ?= rustup
+RUST_VERSION := $(shell sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml 2>/dev/null)
+AMBIENT_RUSTUP_TOOLCHAIN := $(RUSTUP_TOOLCHAIN)
+export RUSTUP_TOOLCHAIN := $(RUST_VERSION)
+RUST_TARGET := x86_64-unknown-linux-gnu
+CARGO_LOCKED := --locked
+CARGO_DENY_VERSION := 0.20.2
+CARGO_DEB_VERSION := 3.7.0
+CARGO_GENERATE_RPM_VERSION := 0.21.0
+SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/install.sh
+
+VENV := .venv
+VENV_BIN := $(VENV)/bin
+PYTHON := $(VENV_BIN)/python
+PYTEST := $(VENV_BIN)/pytest
+RUFF := $(VENV_BIN)/ruff
+UV := $(shell command -v uv 2>/dev/null)
 PIPX_FLAGS := --system-site-packages
 VENV_FLAGS := --system-site-packages
 
-# Marker file to track installation
-.installed: pyproject.toml
-	@echo "Installing package with uv (including dev tools)..."
-	@[ -f $(VENV)/pyvenv.cfg ] || $(UV) venv $(VENV_FLAGS) --python /usr/bin/python3 $(VENV)
-	$(UV) sync --group dev --no-install-package pygobject --no-install-package pycairo
-	@touch .installed
+all: install
 
-# Install package in editable mode with isolated venv
-install: .installed
-
-bootstrap:
-	@if command -v uv >/dev/null 2>&1; then \
-		echo "uv already installed"; \
-	else \
-		echo "installing uv..."; \
-		curl -LsSf https://astral.sh/uv/install.sh | sh; \
-	fi
-	@if ! command -v pipx >/dev/null 2>&1; then \
-		echo "pipx missing — install instructions:"; \
-		echo "  fedora:   sudo dnf install pipx"; \
-		echo "  debian:   sudo apt install pipx"; \
-		echo "  arch:     sudo pacman -S python-pipx"; \
-		echo "  opensuse: sudo zypper install python3-pipx"; \
+check-toolchain-env:
+	@test -n "$(RUST_VERSION)" || { echo "error: rust-toolchain.toml is missing or has no channel" >&2; exit 1; }
+	@if [ -n "$(AMBIENT_RUSTUP_TOOLCHAIN)" ] && [ "$(AMBIENT_RUSTUP_TOOLCHAIN)" != "$(RUST_VERSION)" ]; then \
+		echo "error: Rust toolchain mismatch: expected $(RUST_VERSION), RUSTUP_TOOLCHAIN is '$(AMBIENT_RUSTUP_TOOLCHAIN)'" >&2; \
+		echo "repair: unset RUSTUP_TOOLCHAIN" >&2; \
+		echo "repair: rustup toolchain install $(RUST_VERSION) --component rustfmt --component clippy" >&2; \
 		exit 1; \
 	fi
-	@python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' || { \
-		echo "python >=3.10 required"; exit 1; \
-	}
-	@if [ -f .installed ]; then \
-		$(VENV_BIN)/solstone-linux doctor; \
-	else \
-		echo "now run: make install-service"; \
+
+establish-toolchain: check-toolchain-env
+	@command -v $(RUSTUP) >/dev/null 2>&1 || { echo "error: rustup not found; run 'make bootstrap'" >&2; exit 1; }
+	$(RUSTUP) toolchain install $(RUST_VERSION) --profile minimal --component rustfmt --component clippy --target $(RUST_TARGET)
+
+rust-preflight: check-toolchain-env
+	@actual=$$($(CARGO) --version >/dev/null 2>&1 && rustc --version --verbose | sed -n 's/^release: //p'); \
+	if [ "$$actual" != "$(RUST_VERSION)" ]; then \
+		echo "error: Rust toolchain mismatch: expected $(RUST_VERSION), actual $${actual:-unavailable}" >&2; \
+		echo "repair: rustup toolchain install $(RUST_VERSION) --component rustfmt --component clippy" >&2; \
+		exit 1; \
 	fi
 
-install-service: .installed
-	@$(VENV_BIN)/solstone-linux doctor
-	@command -v pipx >/dev/null || { echo "pipx not found — install with: sudo dnf install pipx (or apt/brew equivalent)"; exit 1; }
-	@$(PYTHON) -m solstone_linux.install_guard preinstall "$(CURDIR)"; rc=$$?; \
-	 if [ $$rc -eq 2 ]; then exit 1; \
-	 elif [ $$rc -eq 10 ]; then $(MAKE) ci; \
-	 fi
-	# Editable installs (pipx install -e .) are deliberately avoided: pipx treats editable installs differently and system-site-packages behavior is unreliable with them.
-	pipx install --force $(PIPX_FLAGS) .
-	$(PYTHON) -m solstone_linux.install_guard write "$(CURDIR)"
+check-cargo-deny:
+	@actual=$$(cargo deny --version 2>/dev/null || true); \
+	if [ -z "$$actual" ]; then \
+		echo "error: cargo-deny not found; expected 'cargo-deny $(CARGO_DENY_VERSION)'; run 'make install'" >&2; exit 1; \
+	elif [ "$$actual" != "cargo-deny $(CARGO_DENY_VERSION)" ]; then \
+		echo "error: cargo-deny version mismatch: expected 'cargo-deny $(CARGO_DENY_VERSION)', got '$$actual'; run 'make install'" >&2; exit 1; \
+	fi
+
+install: establish-toolchain rust-preflight
+	@actual=$$(cargo deny --version 2>/dev/null || true); \
+	if [ "$$actual" != "cargo-deny $(CARGO_DENY_VERSION)" ]; then \
+		$(CARGO) install cargo-deny --version $(CARGO_DENY_VERSION) $(CARGO_LOCKED) || { echo "error: cargo-deny $(CARGO_DENY_VERSION) tool not established; cargo install failed" >&2; exit 1; }; \
+	fi
+	@actual=$$(cargo deny --version 2>/dev/null || true); \
+	[ "$$actual" = "cargo-deny $(CARGO_DENY_VERSION)" ] || { echo "error: cargo-deny $(CARGO_DENY_VERSION) tool not established; got '$$actual'" >&2; exit 1; }
+	$(CARGO) install --path crates/solstone-linux $(CARGO_LOCKED)
+
+bootstrap:
+	@if ! command -v rustup >/dev/null 2>&1; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path; fi
+	@$(MAKE) install
+
+format: rust-preflight
+	$(CARGO) fmt
+
+test: rust-preflight
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux
+
+shellcheck:
+	shellcheck $(SHELLCHECK_SCRIPTS)
+
+ci: rust-preflight check-cargo-deny
+	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."
+	@echo "This gate does not run target-package validation or the release FLAC soak."
+	$(CARGO) fmt --check
+	$(CARGO) clippy $(CARGO_LOCKED) --all-targets -- -D warnings
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux
+	$(MAKE) shellcheck
+	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
+
+audit: rust-preflight check-cargo-deny
+	@echo "Evidence class: refreshed advisory evidence."
+	cargo deny fetch db
+	cargo deny $(CARGO_LOCKED) check advisories
+
+update-deps: rust-preflight
+	$(CARGO) update
+
+install-service: install
 	$(APP) install-service
-	systemctl --user status $(UNIT) --no-pager -l | head -n 20 || true
+
+uninstall-service: rust-preflight
+	$(CARGO) run $(CARGO_LOCKED) -p solstone-linux -- uninstall-service
 
 service-restart:
 	systemctl --user restart $(UNIT)
@@ -84,100 +111,17 @@ service-status:
 service-logs:
 	journalctl --user -u $(UNIT) -n 100 --no-pager -f
 
-uninstall-service: .installed
-	@$(PYTHON) -m solstone_linux.install_guard preuninstall "$(CURDIR)"; rc=$$?; \
-	 if [ $$rc -eq 2 ]; then exit 1; \
-	 elif [ $$rc -eq 0 ]; then exit 0; \
-	 fi
-	-systemctl --user stop $(UNIT)
-	-systemctl --user disable $(UNIT)
-	-rm -f $(HOME)/.config/systemd/user/$(UNIT)
-	-systemctl --user daemon-reload
-	-pipx uninstall $(APP)
-	$(PYTHON) -m solstone_linux.install_guard remove
+versions: rust-preflight check-cargo-deny
+	rustc --version --verbose
+	$(CARGO) --version
+	cargo deny --version
+	@command -v $(APP) >/dev/null 2>&1 && $(APP) --version || true
 
-# Venv tool shortcuts
-PYTEST := $(VENV_BIN)/pytest
-RUFF := $(VENV_BIN)/ruff
+release: rust-preflight
+	@echo "Evidence class: target-package drift evidence. This does not run the release FLAC soak."
+	@bash scripts/build-release.sh deb
+	@bash scripts/build-release.sh rpm
 
-# Run all tests
-test: .installed
-	@echo "Running tests..."
-	$(PYTEST) tests/ -q
-
-# Run specific test file or pattern
-test-only: .installed
-	@if [ -z "$(TEST)" ]; then \
-		echo "Usage: make test-only TEST=<test_file_or_pattern>"; \
-		echo "Example: make test-only TEST=tests/test_config.py"; \
-		echo "Example: make test-only TEST=\"-k test_function_name\""; \
-		exit 1; \
-	fi
-	$(PYTEST) $(TEST)
-
-# Auto-format and fix code, then report remaining issues
-format: .installed
-	@echo "Formatting and fixing code with ruff..."
-	@$(RUFF) format .
-	@$(RUFF) check --fix .
-	@echo ""
-	@echo "Checking for remaining issues..."
-	@$(RUFF) check . || { echo ""; echo "Issues above need manual fixes."; exit 1; }
-	@echo ""
-	@echo "All clean!"
-
-rust-fmt-check rust-lint rust-test rust-deny: export PATH := $(CARGO_BIN_DIR):$(PATH)
-
-rust-fmt-check:
-	$(CARGO) fmt --check
-
-rust-lint:
-	$(CARGO) clippy --all-targets -- -D warnings
-
-rust-test:
-	$(CARGO) test
-
-rust-deny:
-	@if [ -n "$(CARGO_DENY)" ] && [ -x "$(CARGO_DENY)" ]; then \
-		echo "Running cargo deny check with $(CARGO_DENY)..."; \
-		"$(CARGO_DENY)" check; \
-	else \
-		echo "NOTICE: cargo-deny not found on PATH or at $(HOME)/.cargo/bin/cargo-deny; skipping cargo deny check"; \
-	fi
-
-shellcheck:
-	shellcheck $(SHELLCHECK_SCRIPTS)
-
-# Run CI checks (what CI would run)
-ci: .installed
-	@echo "Running CI checks..."
-	@echo "=== Checking formatting ==="
-	@$(RUFF) format --check . || { echo "Run 'make format' to fix formatting"; exit 1; }
-	@echo ""
-	@echo "=== Running ruff ==="
-	@$(RUFF) check . || { echo "Run 'make format' to auto-fix"; exit 1; }
-	@echo ""
-	@echo "=== Running tests ==="
-	@$(MAKE) test
-	@echo ""
-	@echo "=== Checking release scripts ==="
-	@$(MAKE) shellcheck
-	@echo ""
-	@echo "=== Checking Rust formatting ==="
-	@$(MAKE) rust-fmt-check
-	@echo ""
-	@echo "=== Running Rust clippy ==="
-	@$(MAKE) rust-lint
-	@echo ""
-	@echo "=== Running Rust tests ==="
-	@$(MAKE) rust-test
-	@echo ""
-	@echo "=== Checking Rust dependencies ==="
-	@$(MAKE) rust-deny
-	@echo ""
-	@echo "All CI checks passed!"
-
-# Clean build artifacts and cache files
 clean:
 	@echo "Cleaning build artifacts and cache files..."
 	rm -rf build/ dist/ *.egg-info/
@@ -186,22 +130,41 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
 	find . -type f -name "*.pyo" -delete
-	rm -f .installed
+	rm -f .legacy-python-installed
 	rm -rf $(VENV)
 
-# Clean everything and reinstall
 clean-install: clean install
 
-# Show installed package versions
-versions: .installed
-	@echo "=== Python version ==="
-	$(PYTHON) --version
-	@echo ""
-	@echo "=== Installed packages ==="
-	@$(UV) pip list | grep -E "^(pytest|ruff|requests|numpy|soundfile|soundcard|dbus-fast|PyGObject)" || true
+.legacy-python-installed: pyproject.toml
+	@command -v uv >/dev/null 2>&1 || { echo "error: uv is required for legacy Python targets" >&2; exit 1; }
+	@[ -f $(VENV)/pyvenv.cfg ] || $(UV) venv $(VENV_FLAGS) --python /usr/bin/python3 $(VENV)
+	$(UV) sync --group dev --no-install-package pygobject --no-install-package pycairo
+	@touch .legacy-python-installed
 
-release: ## Publish solstone-linux to PyPI (production)
+legacy-python-install: .legacy-python-installed
+
+legacy-python-format: .legacy-python-installed
+	$(RUFF) format .
+	$(RUFF) check --fix .
+
+legacy-python-test: .legacy-python-installed
+	$(PYTEST) tests/ -q
+
+legacy-python-test-only: .legacy-python-installed
+	@test -n "$(TEST)" || { echo "Usage: make legacy-python-test-only TEST=<test_file_or_pattern>" >&2; exit 1; }
+	$(PYTEST) $(TEST)
+
+legacy-python-ci: .legacy-python-installed
+	$(RUFF) format --check .
+	$(RUFF) check .
+	$(PYTEST) tests/ -q
+
+legacy-python-bootstrap:
+	@if command -v uv >/dev/null 2>&1; then echo "uv already installed"; else curl -LsSf https://astral.sh/uv/install.sh | sh; fi
+	@$(MAKE) legacy-python-install
+
+legacy-python-release:
 	@bash scripts/release.sh
 
-release-test: ## Publish solstone-linux to TestPyPI
+legacy-python-release-test:
 	@bash scripts/release.sh --test

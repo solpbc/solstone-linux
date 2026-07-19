@@ -166,11 +166,16 @@ fn apply_session_environment(environment: &HashMap<String, String>) {
         "DBUS_SESSION_BUS_ADDRESS",
     ] {
         if let Some(value) = environment.get(name) {
-            // SAFETY: cmd_run performs session recovery during single-threaded startup,
-            // before the observer stub starts any worker threads.
-            unsafe { env::set_var(name, value) };
+            set_session_environment_variable(name, value);
         }
     }
+}
+
+#[allow(unsafe_code)]
+fn set_session_environment_variable(name: &str, value: &str) {
+    // SAFETY: cmd_run performs session recovery during single-threaded startup,
+    // before the observer starts any worker threads.
+    unsafe { env::set_var(name, value) };
 }
 
 fn hostname() -> io::Result<String> {
@@ -697,6 +702,26 @@ mod tests {
                 .verbose
         );
         assert!(!Args::try_parse_from(["solstone-linux"]).unwrap().verbose);
+    }
+    // AC: the safe wrapper assigns the exact value and leaves the process environment as found.
+    #[test]
+    #[allow(unsafe_code)]
+    fn session_environment_wrapper_assigns_and_restores() {
+        const NAME: &str = "SOLSTONE_LINUX_TEST_SAFE_ENVIRONMENT_WRAPPER";
+        const VALUE: &str = "known-wrapper-value";
+        // Compile-time proof: this coercion fails if the wrapper becomes an unsafe function.
+        let wrapper: fn(&str, &str) = set_session_environment_variable;
+        let previous = env::var_os(NAME);
+
+        wrapper(NAME, VALUE);
+        assert_eq!(env::var(NAME).as_deref(), Ok(VALUE));
+
+        match previous {
+            Some(value) => wrapper(NAME, &value.to_string_lossy()),
+            // SAFETY: this test restores its uniquely named variable after the assertion,
+            // and no other test or runtime path reads or writes that variable.
+            None => unsafe { env::remove_var(NAME) },
+        }
     }
     // AC: bare invocation is run parity.
     #[test]

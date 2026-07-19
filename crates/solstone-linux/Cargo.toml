@@ -8,6 +8,9 @@ description = "Linux desktop observer that experiences screen and audio along wi
 homepage = "https://solstone.app"
 repository = "https://github.com/solpbc/solstone-linux"
 
+[lints]
+workspace = true
+
 [dependencies]
 clap.workspace = true
 tracing.workspace = true

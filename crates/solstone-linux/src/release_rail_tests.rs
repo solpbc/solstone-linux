@@ -16,11 +16,11 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     manifest_dir().join("../..").canonicalize().unwrap()
 }
 
-fn read_toml(path: &Path) -> Value {
+pub(crate) fn read_toml(path: &Path) -> Value {
     toml::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
@@ -297,7 +297,7 @@ fn installer_command(archive: &Path, os_release: &Path) -> Command {
     command
 }
 
-fn command_path(name: &str) -> PathBuf {
+pub(crate) fn command_path(name: &str) -> PathBuf {
     let output = Command::new("sh")
         .args(["-c", &format!("command -v {name}")])
         .output()

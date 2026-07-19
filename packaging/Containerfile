@@ -4,7 +4,7 @@
 FROM ubuntu:22.04 AS baseline
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RUST_VERSION=1.92.0
+ARG RUST_VERSION=1.97.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -29,10 +29,12 @@ WORKDIR /src
 # deliberately panics if those canonical source files cannot be read.
 COPY . .
 
+RUN test "$(rustc --version --verbose | sed -n 's/^release: //p')" = "${RUST_VERSION}"
+
 # Cargo currently serializes package name immediately before version. Keep the
 # non-empty guard below so any JSON ordering change fails the build.
 RUN cargo build --locked --release -p solstone-linux \
-    && VERSION=$(cargo metadata --format-version 1 --no-deps \
+    && VERSION=$(cargo metadata --locked --format-version 1 --no-deps \
         | sed -n 's/.*"name":"solstone-linux","version":"\([^"]*\)".*/\1/p') \
     && test -n "$VERSION" \
     && ROOT="solstone-linux-${VERSION}-linux-x86_64" \
@@ -46,7 +48,9 @@ RUN cargo build --locked --release -p solstone-linux \
 
 FROM baseline AS deb-build
 
-RUN cargo install cargo-deb --version 3.7.0 --locked \
+ARG CARGO_DEB_VERSION=3.7.0
+RUN cargo install cargo-deb --version "${CARGO_DEB_VERSION}" --locked \
+    && test "$(cargo deb --version)" = "cargo-deb ${CARGO_DEB_VERSION}" \
     && cargo deb --locked -p solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && DEB="target/debian/solstone-linux_${VERSION}-1_amd64.deb" \
@@ -59,7 +63,8 @@ COPY --from=deb-build /release/ /
 
 FROM fedora:42 AS rpm-build
 
-ARG RUST_VERSION=1.92.0
+ARG RUST_VERSION=1.97.1
+ARG CARGO_GENERATE_RPM_VERSION=0.21.0
 RUN dnf install -y ca-certificates curl gcc glibc-devel rpm-build \
     && dnf clean all \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -69,7 +74,10 @@ WORKDIR /src
 COPY --from=baseline /src /src
 COPY --from=baseline /release /release
 
-RUN cargo install cargo-generate-rpm --version 0.21.0 --locked \
+RUN test "$(rustc --version --verbose | sed -n 's/^release: //p')" = "${RUST_VERSION}"
+
+RUN cargo install cargo-generate-rpm --version "${CARGO_GENERATE_RPM_VERSION}" --locked \
+    && test "$(cargo generate-rpm --version)" = "cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}" \
     && cargo generate-rpm -p crates/solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && RPM="target/generate-rpm/solstone-linux-${VERSION}-1.x86_64.rpm" \

@@ -28,5 +28,5 @@ Typical package families:
 - Arch: libpulse, gstreamer, gst-plugins-base, gst-plugins-good,
   gst-plugin-pipewire, pipewire-pulse, xdg-desktop-portal, xdg-utils
 
-The Rust install-service subcommand is not implemented in this release. Run
-the observer in the foreground for validation; service setup remains optional.
+Run `solstone-linux install-service` to write and enable the systemd user unit
+and desktop autostart entry after installing the observer binary.

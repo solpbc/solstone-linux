@@ -40,3 +40,5 @@ pub mod video;
 mod release_rail_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod toolchain_policy_tests;

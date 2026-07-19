@@ -4,41 +4,41 @@ Standalone Linux desktop observer for [solstone](https://solpbc.org). Experience
 
 **Note:** Activity detection uses screen-lock and power-save signals to notice when you step away. Coverage varies by desktop: GNOME provides both signals; KDE (Wayland) provides screen lock only; any X11 session also provides DPMS power save; other Wayland desktops provide screen lock where the compositor exposes it. Where neither signal is available, solstone-linux still experiences your screen and audio, but activity-based segment boundaries won't trigger.
 
-## System Dependencies
+## System dependencies
 
-   **Fedora:**
-   ```
-   sudo dnf install python3-gobject python3-cairo gtk4 gstreamer1-plugins-base pipewire-gstreamer alsa-lib-devel pulseaudio-utils pipewire-pulseaudio xdg-desktop-portal pipx gcc python3-devel pkgconf-pkg-config cairo-devel cairo-gobject-devel
-   ```
+**Fedora:**
+```
+sudo dnf install pulseaudio-libs gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good pipewire-gstreamer pipewire-pulseaudio xdg-desktop-portal xdg-utils
+```
 
-   **Debian / Ubuntu:**
-   ```
-   sudo apt install python3-gi python3-cairo gir1.2-gtk-4.0 gstreamer1.0-pipewire gstreamer1.0-tools libasound2-dev pulseaudio-utils pipewire-pulse xdg-desktop-portal pipx gcc python3-dev pkg-config libcairo2-dev
-   ```
+**Debian / Ubuntu:**
+```
+sudo apt install libpulse0 libgstreamer1.0-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-pipewire gstreamer1.0-x pipewire-pulse xdg-desktop-portal xdg-utils
+```
 
-   **Arch:**
-   ```
-   sudo pacman -S python-gobject gtk4 gstreamer gst-plugin-pipewire gst-plugins-good libpulse alsa-lib xdg-desktop-portal python-pipx uv python-cairo
-   ```
+**Arch:**
+```
+sudo pacman -S libpulse gstreamer gst-plugins-base gst-plugins-good gst-plugin-pipewire pipewire-pulse xdg-desktop-portal xdg-utils
+```
 
-   **openSUSE:**
-   ```
-   sudo zypper install python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-4_0 gtk4-tools gstreamer-plugins-base gstreamer-plugin-pipewire pipewire-pulseaudio pulseaudio-utils alsa-devel xdg-desktop-portal python3-pipx
-   ```
+**openSUSE:**
+```
+sudo zypper install libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins-good gstreamer-plugin-pipewire pipewire-pulseaudio xdg-desktop-portal xdg-utils
+```
 
 ## Install
 
 solstone (the journal) must already be installed and running on the host this observer reports to. If it isn't, start with the [journal install](https://solstone.app/install).
 
-On the machine that will host the observer:
+Install a native Debian/RPM package from the release, or install its portable archive:
 
 ```bash
-pipx install --system-site-packages solstone-linux
+scripts/install.sh solstone-linux-<VERSION>-linux-x86_64.tar.gz
 solstone-linux install-service
 solstone-linux setup
 ```
 
-The `--system-site-packages` flag is required: it lets pipx reuse your distro's system PyGObject/pycairo/GStreamer bindings (the `python3-gi` / `python3-cairo` packages from System Dependencies above) instead of rebuilding PyGObject from source — which needs the GObject-Introspection build toolchain and isn't packaged on every distro. See `INSTALL.md` if a plain `pipx install` failed with a `girepository-2.0` build error.
+The archive includes `packaging/INSTALL-NOTES`, the canonical runtime-dependency list. See `INSTALL.md` for package installation, tray notes, and troubleshooting.
 
 `setup` registers the observer against your journal over the local `http://localhost:5015` link, so there's no URL to type. If this machine reaches your solstone host directly instead, run `solstone-linux setup --server-url <journal-url>`. (Legacy fallback: mint a key on the journal host with `journal observer create <name>` and paste it during setup.)
 
@@ -51,7 +51,7 @@ make install-service
 solstone-linux setup
 ```
 
-See `INSTALL.md` for distro packages, tray notes, and troubleshooting details.
+The Python implementation and its `legacy-python-*` developer targets remain in the repository for reference and parity testing, but are non-shipping.
 
 ## Setup
 

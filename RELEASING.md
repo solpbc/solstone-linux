@@ -1,6 +1,6 @@
-# Rust release rail
+# Native Rust release rail
 
-The Rust release rail is operator-run and separate from the Python/PyPI rail.
+The shipping release rail is operator-run. The retained Python/PyPI rail is non-shipping.
 It produces portable, Debian, and RPM artifacts; it does not publish, tag, or
 create a hosted release. Releases remain an operator-run process.
 
@@ -13,6 +13,11 @@ needed to compile the program.
 
 Only x86_64 is supported. The build and install scripts refuse every other
 architecture rather than placing an x86_64 binary under a misleading name.
+
+The compiler authority is `rust-toolchain.toml` (`1.97.1`). Native package
+tools are pinned to cargo-deb `3.7.0` and cargo-generate-rpm `0.21.0`; their
+exact single-line version banners are asserted in the build container before
+packaging starts.
 
 ## 2. Version source and output names
 
@@ -97,8 +102,9 @@ The script reports when `$HOME/.local/bin` is not on PATH. A different prefix
 requires explicit `--prefix PATH`; the script never silently invokes sudo.
 Unknown distribution families stop without making changes.
 
-The Rust `install-service` command is not implemented yet. It is an optional
-future step, and its current failure must not invalidate a binary install.
+Run `solstone-linux install-service` after installing the binary. The native
+command writes the user unit and desktop autostart entry, reloads systemd, and
+enables and starts the observer service.
 
 ## 7. Runtime dependencies
 
@@ -122,7 +128,7 @@ separate engineering-tone release-note template here.
 - x86_64 only
 - glibc 2.35 baseline
 - no packaged unit file or desktop file
-- Rust `install-service` remains a stub
+- native service files are installed at runtime rather than packaged
 - release panics unwind; reconsider abort only at the Rust cutover
 
 ## 10. Failure recovery
@@ -131,3 +137,22 @@ Container builds and local installs do not publish, tag, or push. Fix the
 reported problem, remove only the affected files under `dist/rust/`, and rerun
 the relevant `deb` or `rpm` command. Never relabel an artifact built for a
 different architecture or version.
+
+## 11. Evidence classes
+
+| Evidence class | What it proves | What it does not prove |
+|---|---|---|
+| Host evidence | Source formatting, lint, tests, and offline dependency policy | Target-distribution packaging or runtime behavior |
+| Target-package drift evidence | Container compiler/tool pins and distro-native package construction | Installed-artifact behavior or the release soak |
+| Shipped-artifact proof | Artifact contents, linkage, installation, and the manual FLAC soak | Behavior outside the tested artifact and environment |
+
+`make ci` names itself as host evidence. Container package gates name the
+target-package class. Neither may claim the blocking FLAC soak ran; only the
+operator completing section 5 has shipped-artifact proof.
+
+## 12. Dependency policy
+
+`make ci` runs cargo-deny offline for licenses, bans, and sources. It does not
+fetch or inspect advisories. `make audit` first refreshes the RustSec database
+and stops nonzero if refresh fails, then performs the locked advisory check.
+This prevents stale cached data from being presented as freshly audited.
