@@ -30,13 +30,19 @@ sudo zypper install libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins
 
 solstone (the journal) must already be installed and running on the host this observer reports to. If it isn't, start with the [journal install](https://solstone.app/install).
 
-Install a native Debian/RPM package from the release, or install its portable archive:
+Install a native Debian/RPM package from the release. From a matching source
+checkout, the portable archive installer is:
 
 ```bash
 scripts/install.sh solstone-linux-<VERSION>-linux-x86_64.tar.gz
 solstone-linux install-service
 solstone-linux setup
 ```
+
+The installer is distributed in the source repository, not inside the
+tarball. If you downloaded only the tarball, obtain `scripts/install.sh` from
+the matching release source, or extract it and manually copy `bin/solstone-linux`
+to a directory on `PATH` and `share/icons/hicolor` beneath the same prefix.
 
 The archive includes `packaging/INSTALL-NOTES`, the canonical runtime-dependency list. See `INSTALL.md` for package installation, tray notes, and troubleshooting.
 
@@ -51,7 +57,9 @@ make install-service
 solstone-linux setup
 ```
 
-The Python implementation and its `legacy-python-*` developer targets remain in the repository for reference and parity testing, but are non-shipping.
+The former Python rail remains functional behind `legacy-python-*` targets,
+including its publishing targets, but it is not part of the shipping product
+rail.
 
 ## Setup
 

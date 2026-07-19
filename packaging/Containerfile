@@ -29,14 +29,19 @@ WORKDIR /src
 # deliberately panics if those canonical source files cannot be read.
 COPY . .
 
-RUN test "$(rustc --version --verbose | sed -n 's/^release: //p')" = "${RUST_VERSION}"
+RUN actual="$(rustc --version --verbose | sed -n 's/^release: //p')" \
+    && test "${actual}" = "${RUST_VERSION}" \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION}, actual ${actual:-unavailable}" >&2; \
+         echo "repair: rustup toolchain install ${RUST_VERSION} --profile minimal" >&2; exit 1; }
 
 # Cargo currently serializes package name immediately before version. Keep the
 # non-empty guard below so any JSON ordering change fails the build.
 RUN cargo build --locked --release -p solstone-linux \
     && VERSION=$(cargo metadata --locked --format-version 1 --no-deps \
         | sed -n 's/.*"name":"solstone-linux","version":"\([^"]*\)".*/\1/p') \
-    && test -n "$VERSION" \
+    && { test -n "$VERSION" \
+        || { echo "error: package version mismatch: expected a nonempty solstone-linux version, actual empty" >&2; \
+             echo "repair: cargo metadata --locked --format-version 1 --no-deps" >&2; exit 1; }; } \
     && ROOT="solstone-linux-${VERSION}-linux-x86_64" \
     && install -D -m 0755 target/release/solstone-linux "/release-tree/${ROOT}/bin/solstone-linux" \
     && install -D -m 0644 LICENSE "/release-tree/${ROOT}/LICENSE" \
@@ -50,11 +55,16 @@ FROM baseline AS deb-build
 
 ARG CARGO_DEB_VERSION=3.7.0
 RUN cargo install cargo-deb --version "${CARGO_DEB_VERSION}" --locked \
-    && test "$(cargo deb --version)" = "cargo-deb ${CARGO_DEB_VERSION}" \
+    && actual="$(cargo deb --version)" \
+    && { test "${actual}" = "cargo-deb ${CARGO_DEB_VERSION}" \
+        || { echo "error: cargo-deb mismatch: expected 'cargo-deb ${CARGO_DEB_VERSION}', actual '${actual:-unavailable}'" >&2; \
+             echo "repair: cargo install cargo-deb --version ${CARGO_DEB_VERSION} --locked" >&2; exit 1; }; } \
     && cargo deb --locked -p solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && DEB="target/debian/solstone-linux_${VERSION}-1_amd64.deb" \
-    && test -f "$DEB" \
+    && { test -f "$DEB" \
+        || { echo "error: Debian artifact mismatch: expected ${DEB}, actual missing" >&2; \
+             echo "repair: cargo deb --locked -p solstone-linux" >&2; exit 1; }; } \
     && cp "$DEB" "/release/solstone-linux_${VERSION}-1_amd64.deb" \
     && rm /release/VERSION
 
@@ -74,14 +84,22 @@ WORKDIR /src
 COPY --from=baseline /src /src
 COPY --from=baseline /release /release
 
-RUN test "$(rustc --version --verbose | sed -n 's/^release: //p')" = "${RUST_VERSION}"
+RUN actual="$(rustc --version --verbose | sed -n 's/^release: //p')" \
+    && test "${actual}" = "${RUST_VERSION}" \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION}, actual ${actual:-unavailable}" >&2; \
+         echo "repair: rustup toolchain install ${RUST_VERSION} --profile minimal" >&2; exit 1; }
 
 RUN cargo install cargo-generate-rpm --version "${CARGO_GENERATE_RPM_VERSION}" --locked \
-    && test "$(cargo generate-rpm --version)" = "cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}" \
+    && actual="$(cargo generate-rpm --version)" \
+    && { test "${actual}" = "cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}" \
+        || { echo "error: cargo-generate-rpm mismatch: expected 'cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}', actual '${actual:-unavailable}'" >&2; \
+             echo "repair: cargo install cargo-generate-rpm --version ${CARGO_GENERATE_RPM_VERSION} --locked" >&2; exit 1; }; } \
     && cargo generate-rpm -p crates/solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && RPM="target/generate-rpm/solstone-linux-${VERSION}-1.x86_64.rpm" \
-    && test -f "$RPM" \
+    && { test -f "$RPM" \
+        || { echo "error: RPM artifact mismatch: expected ${RPM}, actual missing" >&2; \
+             echo "repair: cargo generate-rpm -p crates/solstone-linux" >&2; exit 1; }; } \
     && cp "$RPM" "/release/solstone-linux-${VERSION}-1.x86_64.rpm" \
     && rm /release/VERSION
 

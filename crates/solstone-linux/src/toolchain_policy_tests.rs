@@ -14,9 +14,10 @@ const LOCKED_SUBCOMMANDS: &[&str] = &[
     "build", "check", "clippy", "test", "install", "metadata", "deb", "run",
 ];
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ScanCounts {
     inspected: usize,
+    resolving: usize,
     nested_container: usize,
     make_wrapper: usize,
 }
@@ -33,7 +34,7 @@ fn pin() -> String {
 }
 
 fn make_variables(makefile: &str) -> HashMap<String, String> {
-    makefile
+    let mut variables = makefile
         .lines()
         .filter_map(|line| {
             let (name, value) = line.split_once(":=").or_else(|| line.split_once("?="))?;
@@ -41,7 +42,15 @@ fn make_variables(makefile: &str) -> HashMap<String, String> {
             (!name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
                 .then(|| (name.to_owned(), value.trim().to_owned()))
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    variables
+        .entry("HOME".into())
+        .or_insert("/home/user".into());
+    variables.entry("MAKE".into()).or_insert("make".into());
+    variables
+        .entry("PATH".into())
+        .or_insert("/usr/bin:/bin".into());
+    variables
 }
 
 fn expand_make(mut line: String, variables: &HashMap<String, String>) -> String {
@@ -57,59 +66,268 @@ fn expand_make(mut line: String, variables: &HashMap<String, String>) -> String 
     line
 }
 
-fn logical_lines(text: &str) -> Vec<String> {
+fn shell_variables(text: &str, base: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut variables = base.clone();
+    for line in text.lines() {
+        let Some((name, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|character| character.is_ascii_uppercase() || character == '_')
+        {
+            continue;
+        }
+        let value = value.trim().trim_matches(['"', '\'']);
+        let value = value
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+            .unwrap_or(value);
+        if !value.contains('$') && !value.contains('`') {
+            variables.insert(name.to_owned(), value.to_owned());
+        }
+    }
+    variables
+}
+
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
     let mut result = Vec::new();
     let mut current = String::new();
-    for raw in text.lines() {
+    let mut start = 1;
+    for (index, raw) in text.lines().enumerate() {
+        if current.is_empty() {
+            start = index + 1;
+        }
         let trimmed = raw.trim_end();
         current.push_str(trimmed.strip_suffix('\\').unwrap_or(trimmed));
         if trimmed.ends_with('\\') {
             current.push(' ');
         } else {
-            result.push(std::mem::take(&mut current));
+            result.push((start, std::mem::take(&mut current)));
         }
     }
     if !current.is_empty() {
-        result.push(current);
+        result.push((start, current));
     }
     result
 }
 
-fn cargo_command(fragment: &str) -> Option<(&str, bool)> {
+fn expand_shell_variables(text: String, variables: &HashMap<String, String>) -> String {
+    let mut expanded = String::new();
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '$' || chars.get(index + 1) == Some(&'$') {
+            expanded.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let braced = chars.get(index + 1) == Some(&'{');
+        let name_start = index + if braced { 2 } else { 1 };
+        let mut name_end = name_start;
+        while chars.get(name_end).is_some_and(|character| {
+            character.is_ascii_uppercase() || *character == '_' || character.is_ascii_digit()
+        }) {
+            name_end += 1;
+        }
+        let reference_end = if braced {
+            chars[name_end..]
+                .iter()
+                .position(|character| *character == '}')
+                .map(|offset| name_end + offset)
+        } else {
+            Some(name_end)
+        };
+        if name_end == name_start || reference_end.is_none() {
+            expanded.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let reference_end = reference_end.unwrap();
+        let name = chars[name_start..name_end].iter().collect::<String>();
+        if let Some(value) = variables.get(&name) {
+            expanded.push_str(value);
+            index = reference_end + usize::from(braced);
+        } else {
+            expanded.extend(chars[index..reference_end + usize::from(braced)].iter());
+            index = reference_end + usize::from(braced);
+        }
+    }
+    expanded
+}
+
+fn command_segments(line: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut conditional_test = false;
+    while let Some(character) = chars.next() {
+        match character {
+            '\'' if !double_quote => single_quote = !single_quote,
+            '"' if !single_quote => double_quote = !double_quote,
+            '[' if !single_quote && !double_quote && chars.peek() == Some(&'[') => {
+                conditional_test = true;
+            }
+            ']' if !single_quote && !double_quote && chars.peek() == Some(&']') => {
+                conditional_test = false;
+            }
+            ';' if !single_quote && !double_quote && !conditional_test => {
+                segments.push(std::mem::take(&mut current));
+                continue;
+            }
+            '&' | '|'
+                if !single_quote
+                    && !double_quote
+                    && !conditional_test
+                    && chars.peek() == Some(&character) =>
+            {
+                chars.next();
+                segments.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    if !current.trim().is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+fn unresolved_reference(word: &str) -> Option<String> {
+    for prefix in ["$(", "${"] {
+        if let Some(start) = word.find(prefix) {
+            let suffix = if prefix == "$(" { ')' } else { '}' };
+            if let Some(end) = word[start + 2..].find(suffix) {
+                let token = &word[start..start + 2 + end + 1];
+                let name = &word[start + 2..start + 2 + end];
+                if name
+                    .chars()
+                    .all(|character| character.is_ascii_uppercase() || character == '_')
+                {
+                    return Some(token.to_owned());
+                }
+            }
+        }
+    }
+    if let Some(start) = word.find('$') {
+        let name = word[start + 1..]
+            .chars()
+            .take_while(|character| character.is_ascii_uppercase() || *character == '_')
+            .collect::<String>();
+        if !name.is_empty() {
+            return Some(format!("${name}"));
+        }
+    }
+    None
+}
+
+fn command_position<'a>(words: &'a [&'a str]) -> Option<&'a str> {
+    words.iter().copied().find(|word| {
+        let word = word.trim_start_matches(['@', '-', '{', '}']);
+        !word.is_empty()
+            && !matches!(word, "RUN" | "if" | "then" | "elif" | "else" | "do")
+            && !word.contains('=')
+    })
+}
+
+fn after_case_pattern(fragment: &str) -> &str {
+    let trimmed = fragment.trim_start();
+    if trimmed.contains("$(") {
+        return fragment;
+    }
+    trimmed
+        .find(')')
+        .map_or(fragment, |end| &trimmed[end + 1..])
+}
+
+fn is_cargo_word(word: &str) -> bool {
+    let embedded = word
+        .find("$(cargo")
+        .map_or(word, |index| &word[index + 2..]);
+    let cleaned = embedded.trim_matches(|character: char| {
+        matches!(character, '@' | '"' | '\'' | '(' | ')' | '{' | '}' | ';')
+    });
+    PathBuf::from(cleaned)
+        .file_name()
+        .is_some_and(|name| name == "cargo")
+}
+
+struct CargoCommand<'a> {
+    subcommand: &'a str,
+    locked: bool,
+    version_query: bool,
+    deny_check: bool,
+    deny_fetch: bool,
+}
+
+fn cargo_commands(fragment: &str) -> Vec<CargoCommand<'_>> {
     let words = fragment.split_whitespace().collect::<Vec<_>>();
-    let cargo = words.iter().position(|word| {
-        word.trim_matches(|c: char| matches!(c, '@' | '"' | '\'')) == "cargo"
-            || word.contains("$(cargo")
-            || word.contains("$(CARGO)")
-    })?;
-    let tail = &words[cargo + 1..];
-    let first = tail
+    let cargo_indices = words
         .iter()
-        .find(|word| !word.starts_with('+') && !word.starts_with('-'))?;
-    let subcommand = first.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
-    Some((
-        subcommand,
-        fragment.split_whitespace().any(|word| {
-            word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-') == "--locked"
-        }),
-    ))
+        .enumerate()
+        .filter(|(_, word)| is_cargo_word(word))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    cargo_indices
+        .iter()
+        .enumerate()
+        .filter_map(|(position, cargo)| {
+            let end = cargo_indices
+                .get(position + 1)
+                .copied()
+                .unwrap_or(words.len());
+            let tail = &words[cargo + 1..end];
+            let subcommand = tail
+                .iter()
+                .find(|word| !word.starts_with('+') && !word.starts_with('-'))?
+                .trim_matches(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '-'
+                });
+            let has_word = |expected: &str| {
+                tail.iter().any(|word| {
+                    word.trim_matches(|character: char| {
+                        !character.is_ascii_alphanumeric() && character != '-'
+                    }) == expected
+                })
+            };
+            Some(CargoCommand {
+                subcommand,
+                locked: has_word("--locked"),
+                version_query: has_word("--version"),
+                deny_check: has_word("check"),
+                deny_fetch: has_word("fetch"),
+            })
+        })
+        .collect()
 }
 
 fn scan_policy(
     makefile: &str,
     containerfile: &str,
-    scripts: &[String],
+    scripts: &[(String, String)],
 ) -> Result<ScanCounts, String> {
     let variables = make_variables(makefile);
     let mut counts = ScanCounts::default();
     let mut sources = vec![
-        ("Makefile", makefile.to_owned()),
-        ("Containerfile", containerfile.to_owned()),
+        ("Makefile".to_owned(), makefile.to_owned()),
+        ("Containerfile".to_owned(), containerfile.to_owned()),
     ];
-    sources.extend(scripts.iter().cloned().map(|text| ("script", text)));
+    sources.extend(scripts.iter().cloned());
 
     for (source, text) in sources {
-        for logical in logical_lines(&text) {
+        let source_variables = shell_variables(&text, &variables);
+        for (line_number, logical) in logical_lines(&text) {
+            if (source == "Makefile" && !logical.starts_with('\t'))
+                || (source == "Containerfile" && !logical.starts_with("RUN "))
+                || logical.trim_start().starts_with('#')
+            {
+                continue;
+            }
             let was_wrapper = logical.contains("$(CARGO)");
             if was_wrapper
                 && logical.contains("$(CARGO_LOCKED)")
@@ -117,47 +335,72 @@ fn scan_policy(
             {
                 return Err("unresolvable Make lock indirection".into());
             }
-            let expanded = expand_make(logical.clone(), &variables);
-            if expanded.contains("$(CARGO)") || expanded.contains("$(CARGO_LOCKED)") {
-                return Err(format!("unresolvable Cargo indirection in {source}"));
-            }
-            for fragment in expanded.split("&&") {
-                let Some((subcommand, locked)) = cargo_command(fragment) else {
-                    continue;
+            let expanded =
+                expand_shell_variables(expand_make(logical.clone(), &variables), &source_variables);
+            for fragment in command_segments(&expanded) {
+                let command_fragment = if source.starts_with("scripts/") {
+                    after_case_pattern(&fragment)
+                } else {
+                    &fragment
                 };
-                counts.inspected += 1;
-                if was_wrapper {
-                    counts.make_wrapper += 1;
-                }
-                if source == "Containerfile" && logical.contains("&&") {
-                    counts.nested_container += 1;
-                }
-                let version_query = fragment.contains("--version");
-                let resolving = !version_query
-                    && (LOCKED_SUBCOMMANDS.contains(&subcommand)
-                        || (subcommand == "deny" && fragment.contains(" check ")));
-                let exempt = matches!(subcommand, "fmt" | "generate-rpm" | "clean" | "update")
-                    || (subcommand == "deny" && (fragment.contains(" fetch ") || version_query))
-                    || version_query
-                    || subcommand == "--version";
-                if resolving && !locked {
+                let words = command_fragment.split_whitespace().collect::<Vec<_>>();
+                if let Some(command) = command_position(&words)
+                    && let Some(token) = unresolved_reference(command)
+                {
                     return Err(format!(
-                        "resolving Cargo invocation lacks --locked: {fragment}"
+                        "{source}:{line_number}: unresolved command token '{token}'"
                     ));
                 }
-                if !resolving && !exempt {
-                    return Err(format!("unclassified Cargo invocation: {fragment}"));
+                let command = command_position(&words).unwrap_or_default();
+                if matches!(command.trim_matches(['@', '{', '}']), "echo" | "printf") {
+                    continue;
+                }
+                for cargo in cargo_commands(&fragment) {
+                    counts.inspected += 1;
+                    if was_wrapper {
+                        counts.make_wrapper += 1;
+                    }
+                    if source == "Containerfile" && logical.contains("&&") {
+                        counts.nested_container += 1;
+                    }
+                    let resolving = !cargo.version_query
+                        && (LOCKED_SUBCOMMANDS.contains(&cargo.subcommand)
+                            || (cargo.subcommand == "deny" && cargo.deny_check));
+                    if resolving {
+                        counts.resolving += 1;
+                    }
+                    let exempt = matches!(
+                        cargo.subcommand,
+                        "fmt" | "generate-rpm" | "clean" | "update"
+                    ) || (cargo.subcommand == "deny"
+                        && (cargo.deny_fetch || cargo.version_query))
+                        || cargo.version_query
+                        || cargo.subcommand == "--version";
+                    if resolving && !cargo.locked {
+                        return Err(format!(
+                            "{source}:{line_number}: resolving Cargo invocation lacks --locked: {fragment}"
+                        ));
+                    }
+                    if !resolving && !exempt {
+                        return Err(format!(
+                            "{source}:{line_number}: unclassified Cargo invocation: {fragment}"
+                        ));
+                    }
                 }
             }
         }
     }
-    if counts.inspected == 0 || counts.nested_container == 0 || counts.make_wrapper == 0 {
+    if counts.inspected == 0
+        || counts.resolving == 0
+        || counts.nested_container == 0
+        || counts.make_wrapper == 0
+    {
         return Err("policy scan did not inspect required command classes".into());
     }
     Ok(counts)
 }
 
-fn policy_sources() -> (String, String, Vec<String>) {
+fn policy_sources() -> (String, String, Vec<(String, String)>) {
     let root = workspace_root();
     let makefile = fs::read_to_string(root.join("Makefile")).unwrap();
     let containerfile = fs::read_to_string(root.join("packaging/Containerfile")).unwrap();
@@ -169,7 +412,10 @@ fn policy_sources() -> (String, String, Vec<String>) {
     paths.sort();
     let scripts = paths
         .into_iter()
-        .map(|path| fs::read_to_string(path).unwrap())
+        .map(|path| {
+            let name = path.strip_prefix(&root).unwrap().display().to_string();
+            (name, fs::read_to_string(path).unwrap())
+        })
         .collect();
     (makefile, containerfile, scripts)
 }
@@ -189,6 +435,7 @@ fn make_with_fake_cargo(version: Option<&str>) -> Output {
         .arg("--no-print-directory")
         .arg("check-cargo-deny")
         .current_dir(workspace_root())
+        .env("CARGO_HOME", temp.path())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .output()
         .unwrap()
@@ -259,6 +506,40 @@ fn locked_policy_resolves_make_wrappers() {
     let (makefile, container, scripts) = policy_sources();
     let counts = scan_policy(&makefile, &container, &scripts).unwrap();
     assert!(counts.make_wrapper > 0);
+}
+
+// AC: unresolved command indirection is a named hard failure, never an ignored command.
+#[test]
+fn locked_policy_fails_closed_on_unresolved_command_wrapper() {
+    let (mut makefile, container, scripts) = policy_sources();
+    makefile.push_str("\npolicy-probe:\n\t$(SOME_UNDEFINED_CMD) build --locked\n");
+    let error = scan_policy(&makefile, &container, &scripts).unwrap_err();
+    assert!(error.contains("Makefile:"));
+    assert!(error.contains("$(SOME_UNDEFINED_CMD)"));
+}
+
+// AC: a scan containing only exempt Cargo commands cannot satisfy lock-policy coverage.
+#[test]
+fn locked_policy_requires_a_resolving_invocation() {
+    let makefile = "CARGO := cargo\nprobe:\n\t$(CARGO) fmt\n";
+    let container = "RUN cargo fmt && cargo generate-rpm -p crates/solstone-linux\n";
+    let error = scan_policy(makefile, container, &[]).unwrap_err();
+    assert!(error.contains("required command classes"));
+}
+
+// AC: shell variables, Make wrappers, paths, and compound commands cannot evade inspection.
+#[test]
+fn locked_policy_recognizes_general_cargo_command_forms() {
+    let (mut makefile, mut container, mut scripts) = policy_sources();
+    makefile.push_str("\nCARGO_CMD := /usr/bin/cargo\npolicy-probe:\n\t$(CARGO_CMD) build --locked\n\t$(CARGO_BIN_DIR)/cargo test --locked\n");
+    container.push_str(
+        "\nRUN /usr/bin/cargo build --locked; cargo test --locked || cargo clippy --locked\n",
+    );
+    scripts.push((
+        "scripts/policy-probe.sh".into(),
+        "$CARGO build --locked\n${CARGO} test --locked\n".into(),
+    ));
+    scan_policy(&makefile, &container, &scripts).unwrap();
 }
 
 // AC: every workspace member inherits the workspace lint floor.

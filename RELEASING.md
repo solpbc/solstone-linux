@@ -1,15 +1,18 @@
 # Native Rust release rail
 
-The shipping release rail is operator-run. The retained Python/PyPI rail is non-shipping.
+The shipping release rail is operator-run. The retained Python/PyPI rail is
+not part of the shipping product rail, though its commands remain functional.
 It produces portable, Debian, and RPM artifacts; it does not publish, tag, or
 create a hosted release. Releases remain an operator-run process.
 
 ## 1. Host prerequisites
 
 Run from a clean checkout with Git and either Podman or Docker. ShellCheck is
-required by `make ci`. Cargo and jq are not host requirements: the crate
-version is read with Cargo inside the build container, where Cargo is already
-needed to compile the program.
+required by `make ci`. The canonical `make release` path also runs the host
+Rust preflight, so it requires rustup plus the compiler and Cargo selected by
+`rust-toolchain.toml`. Invoking `scripts/build-release.sh` directly requires
+Git and the container engine but not host Cargo; the crate version is read
+inside the build container.
 
 Only x86_64 is supported. The build and install scripts refuse every other
 architecture rather than placing an x86_64 binary under a misleading name.
@@ -30,6 +33,15 @@ Every artifact is written below `dist/rust/` and contains the Rust version:
 - `solstone-linux-<VERSION>-1.x86_64.rpm`
 
 ## 3. Build commands
+
+The canonical command builds both native package families after its host
+toolchain preflight:
+
+```bash
+make release
+```
+
+To invoke either container build directly without the host preflight, use:
 
 Build each package family explicitly:
 

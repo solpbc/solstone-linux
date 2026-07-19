@@ -6,7 +6,7 @@ Development guidelines for solstone-linux, a standalone Linux desktop observer.
 
 solstone-linux is a companion app that runs alongside the main [solstone](https://solstone.app) journal. It is one of the owner's observers — it experiences screen and audio along with the owner on a Linux desktop using PipeWire and GStreamer, stores segments locally, and syncs them to your solstone journal. It runs as a systemd user service on GNOME Wayland sessions.
 
-This is **not** part of the solstone monorepo. It is a standalone Rust package with its own native release lifecycle. The retained Python implementation is non-shipping legacy code.
+This is **not** part of the solstone monorepo. It is a standalone Rust package with its own native release lifecycle. The retained former Python rail remains functional but is not part of the shipping product rail.
 
 ## Source Layout
 
@@ -16,7 +16,7 @@ packaging/                  Native package Containerfile and install notes
 scripts/build-release.sh    Operator-run native package build
 scripts/install.sh          Portable archive installer
 
-src/solstone_linux/         Non-shipping legacy Python implementation
+src/solstone_linux/         Retained former Python implementation
     __init__.py             Package version
     cli.py                  CLI entry point (run, setup, settings, install-service, status)
     solstone-linux.service.in        Systemd unit template (rendered by install-service)
@@ -48,9 +48,17 @@ tests/                      Legacy Python pytest suite
 contrib/                    Reference icons for development fallback
 ```
 
-## Architecture
+## Shipping Rust architecture
 
-The observer runs a single asyncio event loop with three concurrent concerns:
+The shipping observer is the Rust workspace member under
+`crates/solstone-linux/`. Its native CLI owns capture, sync, setup, status, and
+the systemd user-service lifecycle. Use the Rust source and tests as the
+authority for current product behavior.
+
+## Legacy Python architecture
+
+The retained Python implementation runs a single asyncio event loop with three
+concurrent concerns. This describes legacy code, not the shipping observer:
 
 1. **Capture loop** (`observer.py`) — Checks activity status every 5 seconds, records audio continuously, manages screencast recording via GStreamer. Creates 5-minute segments in `~/.local/share/solstone-linux/captures/YYYYMMDD/stream/HHMMSS_DDD/`. Segment directories start as `.incomplete` and are renamed on finalization.
 
@@ -82,14 +90,19 @@ make uninstall-service  # Remove the native systemd user service
 make clean          # Remove build artifacts and caches
 make versions       # Show installed package versions
 
-make legacy-python-install  # Set up retained non-shipping Python code
-make legacy-python-test     # Run the legacy Python tests
-make legacy-python-ci       # Run the legacy Python gate
+make legacy-python-bootstrap     # Install uv if needed and set up retained Python code
+make legacy-python-install       # Set up the retained Python environment
+make legacy-python-format        # Format and lint retained Python code
+make legacy-python-test          # Run all retained Python tests
+make legacy-python-test-only TEST=<selector>  # Run selected retained Python tests
+make legacy-python-ci            # Run the retained Python gate
+make legacy-python-release       # Run the functional former PyPI/GitHub release script
+make legacy-python-release-test  # Run that script against its test publishing path
 ```
 
 ## Rust rebuild
 
-The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains the shipping observer, native CLI, service lifecycle, and Linux video-capture backends. `rust-toolchain.toml` is the compiler authority. Use the canonical Make targets above; Python targets are retained only for non-shipping legacy maintenance. For the operator-run native packaging rail and its blocking release validation, see `RELEASING.md`.
+The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains the shipping observer, native CLI, service lifecycle, and Linux video-capture backends. `rust-toolchain.toml` is the compiler authority. Use the canonical Make targets above; Python targets are retained for maintenance of the former rail and are not part of the shipping product rail. For the operator-run native packaging rail and its blocking release validation, see `RELEASING.md`.
 
 ## Releasing
 
@@ -102,16 +115,18 @@ make release        # build native Debian and RPM release artifacts
 
 The build refuses a dirty tree and does not upload, tag, or publish. Follow
 `RELEASING.md` for artifact inspection, the blocking FLAC soak, and handoff.
-`scripts/release.sh` and its `legacy-python-release*` Make targets are retained
-only for the non-shipping Python implementation.
+`scripts/release.sh` and its `legacy-python-release*` Make targets remain
+functional and can publish, tag, push, and create a GitHub release when
+credentials are present. They are retained for the former Python rail and are
+not part of the shipping product rail.
 
-## Development Principles
+## Legacy Python development principles
 
 - **Simple code.** Prefer plain functions over classes. Use dataclasses for structured data. Only use classes when managing stateful lifecycle (Observer, Screencaster, SyncService, AudioRecorder).
 - **Async by default.** The main loop is asyncio. DBus calls, subprocess management, and sync all use async. Audio recording uses a dedicated thread because soundcard is blocking.
 - **No network in the capture loop.** The observer writes segments locally. The sync service uploads asynchronously. This keeps capture reliable even when the server is down.
 - **Atomic directory operations.** Segments start as `HHMMSS.incomplete/`, are renamed to `HHMMSS_DDD/` on completion, or `HHMMSS.failed/` on recovery failure.
-- **System site-packages required.** PyGObject and GStreamer bindings come from system packages. The venv (and pipx) must use `--system-site-packages`.
+- **System site-packages required for legacy Python.** PyGObject and GStreamer bindings come from system packages. Its venv must use `--system-site-packages`.
 
 ## File Headers
 
@@ -126,14 +141,14 @@ Add this header to new `.py` files in `src/solstone_linux/` and `tests/`. Do not
 
 ## Runtime Dependencies
 
-System packages (not pip-installable):
+Shipping system packages:
 - `python3-gobject` / `python3-gi` — PyGObject for GTK4 and GDK
 - GStreamer with PipeWire plugin (`gst-launch-1.0 pipewiresrc`)
 - PipeWire running
 - `pactl` (PulseAudio utils) for mute detection
 - xdg-desktop-portal with ScreenCast support
 
-Python packages (in pyproject.toml):
+Legacy Python packages (in `pyproject.toml`; not used by the shipping binary):
 - `requests` — HTTP upload client
 - `numpy` — Audio buffer manipulation and RMS computation
 - `soundfile` — FLAC encoding
@@ -147,9 +162,9 @@ Python packages (in pyproject.toml):
 - Captures: `~/.local/share/solstone-linux/captures/`
 - State: `~/.local/share/solstone-linux/state/`
 - Restore token: `~/.config/solstone-linux/restore_token`
-- Install source marker: `~/.config/solstone-linux/.install-source` (tracks which repo clone owns the pipx install)
+- Legacy Python install source marker: `~/.config/solstone-linux/.install-source` (tracks which repo clone owns the former pipx install)
 
-## Key Patterns
+## Legacy Python implementation patterns
 
 - **Activity detection is cross-desktop.** Uses ordered DBus fallback chains for screen lock (freedesktop.org ScreenSaver → GNOME ScreenSaver) and power save (Mutter DisplayConfig → KDE Solid PowerManagement). All backends degrade gracefully to safe defaults.
 - **Audio is stereo-interleaved.** Left channel = microphone, right channel = system audio. When muted, channels are split into separate mono FLAC files.
@@ -158,7 +173,10 @@ Python packages (in pyproject.toml):
 
 ## Testing
 
-Tests use pytest with standard mocking. No system dependencies required for tests — audio devices, DBus, and GStreamer are mocked. Run `make test` to execute the full suite.
+Run `make test` for the locked Rust suite or `make ci` for host evidence across
+Rust formatting, lint, tests, shell scripts, and offline dependency policy.
+The retained Python tests use pytest with mocked audio devices, D-Bus, and
+GStreamer; run them separately with `make legacy-python-test`.
 
 ## Brand canon
 

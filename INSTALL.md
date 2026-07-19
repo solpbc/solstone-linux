@@ -28,13 +28,21 @@ sudo zypper install libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins
 
 ## install a release
 
-use the Debian or RPM package published for your distribution when available. For the portable archive:
+use the Debian or RPM package published for your distribution when available.
+The portable installer is in the matching release source checkout, not inside
+the archive:
 
 ```bash
 scripts/install.sh solstone-linux-<VERSION>-linux-x86_64.tar.gz
 solstone-linux install-service
 solstone-linux setup
 ```
+
+If you downloaded only the tarball, obtain `scripts/install.sh` from the
+matching release source. Alternatively, extract the archive, copy
+`bin/solstone-linux` to a directory on `PATH`, and copy `share/icons/hicolor`
+beneath the same installation prefix before running the service and setup
+commands.
 
 the archive includes `INSTALL-NOTES`, which is the canonical cross-distribution runtime dependency list. Native packages install the same observer binary and icon set. The service command writes the systemd user unit and desktop autostart entry, enables the unit, and starts sol.
 
@@ -78,4 +86,12 @@ The tray uses the StatusNotifierItem D-Bus protocol. KDE supports it directly. G
 
 ## retained Python implementation
 
-The Python source, tests, PyPI metadata, and `scripts/release.sh` remain for maintenance and historical parity, but they are non-shipping. Their developer commands are explicitly named `make legacy-python-*`; they require uv and the former system PyGObject environment. Canonical install, test, CI, service, and release commands are Rust-native.
+The Python source, tests, PyPI metadata, and `scripts/release.sh` remain for
+maintenance and historical parity. This former rail remains functional and
+can publish when credentials are present, but it is not part of the shipping
+product rail. Its commands are `make legacy-python-bootstrap`,
+`legacy-python-install`, `legacy-python-format`, `legacy-python-test`,
+`legacy-python-test-only TEST=<selector>`, `legacy-python-ci`,
+`legacy-python-release`, and `legacy-python-release-test`. They require uv and
+the former system PyGObject environment. Canonical install, test, CI, service,
+and release commands are Rust-native.
