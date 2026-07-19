@@ -1,9 +1,9 @@
 # Native Rust release rail
 
-The shipping release rail is operator-run. The retained Python/PyPI rail is
-not part of the shipping product rail, though its commands remain functional.
-It produces portable, Debian, and RPM artifacts; it does not publish, tag, or
-create a hosted release. Releases remain an operator-run process.
+The shipping Rust release rail is operator-run. It produces portable, Debian,
+and RPM artifacts; it does not publish, tag, or create a hosted release. The
+retained Python/PyPI rail is not part of the shipping product rail, though its
+commands remain functional and can publish when credentials are present.
 
 ## 1. Host prerequisites
 
@@ -41,9 +41,8 @@ toolchain preflight:
 make release
 ```
 
-To invoke either container build directly without the host preflight, use:
-
-Build each package family explicitly:
+To invoke either container build directly without the host preflight, build
+each package family explicitly:
 
 ```bash
 scripts/build-release.sh deb

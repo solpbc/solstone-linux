@@ -82,12 +82,14 @@ make test           # Run locked Rust tests
 make ci             # Host evidence: Rust format, lint, tests, offline policy
 make audit          # Refresh RustSec data, then check advisories
 make update-deps    # Sole unlocked Cargo dependency-update path
+make shellcheck     # Check release and installer shell scripts
 make install-service  # Install the native systemd user service
 make service-restart  # systemctl restart wrapper
 make service-status   # systemctl status wrapper
 make service-logs     # systemctl log tail wrapper
 make uninstall-service  # Remove the native systemd user service
 make clean          # Remove build artifacts and caches
+make clean-install  # Clean build artifacts, then reinstall the Rust observer
 make versions       # Show installed package versions
 
 make legacy-python-bootstrap     # Install uv if needed and set up retained Python code
@@ -142,11 +144,12 @@ Add this header to new `.py` files in `src/solstone_linux/` and `tests/`. Do not
 ## Runtime Dependencies
 
 Shipping system packages:
-- `python3-gobject` / `python3-gi` — PyGObject for GTK4 and GDK
-- GStreamer with PipeWire plugin (`gst-launch-1.0 pipewiresrc`)
-- PipeWire running
-- `pactl` (PulseAudio utils) for mute detection
-- xdg-desktop-portal with ScreenCast support
+- glibc 2.35 or newer
+- libpulse and a PulseAudio-compatible server such as PipeWire Pulse
+- GStreamer 1.0 core, base, good, PipeWire, and X11 plugins
+- PipeWire and xdg-desktop-portal with ScreenCast support for Wayland capture
+- xdg-utils for opening links
+- a desktop notification service; an SNI host is optional for the tray icon
 
 Legacy Python packages (in `pyproject.toml`; not used by the shipping binary):
 - `requests` — HTTP upload client
@@ -154,7 +157,7 @@ Legacy Python packages (in `pyproject.toml`; not used by the shipping binary):
 - `soundfile` — FLAC encoding
 - `soundcard` — Audio device enumeration and recording
 - `dbus-fast` — Async DBus client for portal and activity detection
-- `PyGObject` — GDK monitor geometry (installed from system)
+- `PyGObject` — GDK monitor geometry (`python3-gobject` / `python3-gi`, installed from the system)
 
 ## Data Paths
 
