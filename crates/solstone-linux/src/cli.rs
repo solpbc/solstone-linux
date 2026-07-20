@@ -175,7 +175,7 @@ fn apply_session_environment(environment: &HashMap<String, String>) {
 fn set_session_environment_variable(name: &str, value: &str) {
     // SAFETY: cmd_run performs session recovery during single-threaded startup,
     // before the observer starts any worker threads.
-    unsafe { env::set_var(name, value) };
+    unsafe { ::std::env::set_var(name, value) };
 }
 
 fn hostname() -> io::Result<String> {
@@ -720,7 +720,7 @@ mod tests {
             Some(value) => wrapper(NAME, &value.to_string_lossy()),
             // SAFETY: this test restores its uniquely named variable after the assertion,
             // and no other test or runtime path reads or writes that variable.
-            None => unsafe { env::remove_var(NAME) },
+            None => unsafe { ::std::env::remove_var(NAME) },
         }
     }
     // AC: bare invocation is run parity.
