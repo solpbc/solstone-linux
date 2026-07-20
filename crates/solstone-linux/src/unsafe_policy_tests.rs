@@ -19,6 +19,7 @@ use syn::{
 struct Inventory {
     findings: Vec<Finding>,
     files: Vec<PathBuf>,
+    absolute_files: Vec<PathBuf>,
     files_inspected: usize,
     nested_src_files: usize,
     build_scripts: usize,
@@ -216,10 +217,6 @@ fn normalize_absolute(path: &Path) -> Option<PathBuf> {
     Some(normalized)
 }
 
-fn metadata_roots(root: &Path) -> Result<Vec<PathBuf>, ScanError> {
-    metadata_roots_with_command(root, &command_path("cargo"))
-}
-
 fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>, ScanError> {
     let output = Command::new(cargo)
         .args([
@@ -334,6 +331,10 @@ fn validate_output_root(root: &Path, cause: ScanErrorCause) -> Result<(), ScanEr
 }
 
 fn scan_workspace_unsafe(root: &Path) -> Result<Inventory, ScanError> {
+    scan_workspace_unsafe_with_command(root, &command_path("cargo"))
+}
+
+fn scan_workspace_unsafe_with_command(root: &Path, cargo: &Path) -> Result<Inventory, ScanError> {
     let manifest_path = root.join("Cargo.toml");
     let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
         ScanError::new(
@@ -415,7 +416,7 @@ fn scan_workspace_unsafe(root: &Path) -> Result<Inventory, ScanError> {
         }
         member_roots.push((relative, absolute));
     }
-    let output_roots = metadata_roots(root)?;
+    let output_roots = metadata_roots_with_command(root, cargo)?;
     for output_root in &output_roots {
         let cause = if output_root == &output_roots[0] {
             ScanErrorCause::MetadataTargetDirectory
@@ -440,6 +441,7 @@ fn scan_workspace_unsafe(root: &Path) -> Result<Inventory, ScanError> {
     let mut inventory = Inventory {
         findings: Vec::new(),
         files: Vec::new(),
+        absolute_files: Vec::new(),
         files_inspected: 0,
         nested_src_files: 0,
         build_scripts: 0,
@@ -582,6 +584,7 @@ fn scan_rust_file(
     })?;
     inventory.files_inspected += 1;
     inventory.files.push(workspace_relative.to_owned());
+    inventory.absolute_files.push(path.to_owned());
     if path.file_name().is_some_and(|name| name == "build.rs") {
         inventory.build_scripts += 1;
     }
@@ -688,7 +691,9 @@ fn function_identity(
                 let syn::Type::Path(path) = reference.elem.as_ref() else {
                     return ParameterIdentity::Other;
                 };
-                if pattern.by_ref.is_none()
+                if typed.attrs.is_empty()
+                    && pattern.attrs.is_empty()
+                    && pattern.by_ref.is_none()
                     && pattern.mutability.is_none()
                     && pattern.subpat.is_none()
                     && reference.lifetime.is_none()
@@ -1057,13 +1062,19 @@ fn expression_identity(statement: &Stmt) -> ExpressionIdentity {
     let Stmt::Expr(Expr::Call(call), semicolon) = statement else {
         return ExpressionIdentity::Other;
     };
+    if !call.attrs.is_empty() {
+        return ExpressionIdentity::Other;
+    }
     let Expr::Path(ExprPath {
-        qself: None, path, ..
+        attrs,
+        qself: None,
+        path,
     }) = call.func.as_ref()
     else {
         return ExpressionIdentity::Other;
     };
-    if path.leading_colon.is_none()
+    if !attrs.is_empty()
+        || path.leading_colon.is_none()
         || path
             .segments
             .iter()
@@ -1074,12 +1085,15 @@ fn expression_identity(statement: &Stmt) -> ExpressionIdentity {
     let mut arguments = Vec::new();
     for argument in &call.args {
         let Expr::Path(ExprPath {
-            qself: None, path, ..
+            attrs,
+            qself: None,
+            path,
         }) = argument
         else {
             return ExpressionIdentity::Other;
         };
-        if path.leading_colon.is_some()
+        if !attrs.is_empty()
+            || path.leading_colon.is_some()
             || path.segments.len() != 1
             || !matches!(path.segments[0].arguments, syn::PathArguments::None)
         {
@@ -1251,10 +1265,6 @@ fn reviewed_seams_error(inventory: &Inventory) -> Result<(), String> {
             returns_default: true,
             outer,
         };
-        let _diagnostic_ordinal = finding
-            .unsafe_blocks
-            .first()
-            .map(|block| block.node.ordinal);
         if finding.path != Path::new("crates/solstone-linux/src/cli.rs")
             || finding.kind != FindingKind::UnsafeCodeAllowance
             || finding.attribute_style != Some(AttributePlacement::FunctionOuter)
@@ -1269,7 +1279,14 @@ fn reviewed_seams_error(inventory: &Inventory) -> Result<(), String> {
                     semicolon,
                 }]
         {
-            return Err(format!("reviewed seam changed: {finding:#?}"));
+            return Err(format!(
+                "reviewed seam changed at finding ordinal {} (unsafe block ordinal {:?}): {finding:#?}",
+                finding.node.ordinal,
+                finding
+                    .unsafe_blocks
+                    .first()
+                    .map(|block| block.node.ordinal),
+            ));
         }
     }
     Ok(())
@@ -1292,6 +1309,12 @@ fn repository_unsafe_inventory_matches_reviewed_seams() {
 #[test]
 fn fixture_coverage_shape_is_computed_by_the_scanner() {
     let fixture = fixture_workspace();
+    let unsafe_source = "fn hidden() { unsafe {} }\n";
+    let control = fixture
+        .root
+        .path()
+        .join("crates/helper/src/unsafe-control.rs");
+    fs::write(&control, unsafe_source).expect("positive scanned control");
     let inventory = scan_fixture(&fixture).expect("safe fixture scans");
     assert_eq!(inventory.members, 2);
     for path in [
@@ -1305,14 +1328,22 @@ fn fixture_coverage_shape_is_computed_by_the_scanner() {
             "missing {path}: {inventory:#?}"
         );
     }
+    let malformed_output = fixture.root.path().join("target/MALFORMED.rs");
+    let unsafe_output = fixture.root.path().join("target/UNSAFE.rs");
+    assert!(!inventory.absolute_files.contains(&malformed_output));
+    assert!(!inventory.absolute_files.contains(&unsafe_output));
+    assert!(inventory.absolute_files.contains(&control));
+    assert!(inventory.findings.iter().any(|finding| {
+        fixture.root.path().join(&finding.path) == control
+            && finding.kind == FindingKind::UnsafeBlock
+    }));
     assert!(
         !inventory
-            .files
+            .findings
             .iter()
-            .any(|path| path.starts_with("target"))
+            .any(|finding| fixture.root.path().join(&finding.path) == unsafe_output)
     );
     assert_eq!(inventory.build_scripts, 2);
-    assert!(inventory.findings.is_empty());
 }
 
 // AC: a member-root target/source.rs is scanned when it is not a metadata output root.
@@ -1494,6 +1525,8 @@ fn reviewed_seam_wrapped_expressions_fail_identity() {
         "::std::env::set_var(name.field, value)",
         "::std::env::set_var(name[0], value)",
         "::std::env::set_var(make!(), value)",
+        "#[allow(unused)] ::std::env::set_var(name, value)",
+        "::std::env::set_var(#[allow(unused)] name, value)",
     ] {
         let fixture = fixture_workspace();
         let source = REVIEWED_FIXTURE_SEAMS.replace("::std::env::set_var(name, value)", call);
@@ -1809,7 +1842,7 @@ fn detects_assembly_macros_and_nested_macro_tokens() {
 
 // AC: direct path metadata is rejected before target resolution regardless of payload shape.
 #[test]
-fn rejects_escaping_and_nonliteral_path_attributes() {
+fn rejects_direct_path_meta_without_resolution() {
     for source in [
         "#[path = \"../../../escape.rs\"] mod escape;",
         "#[path(test)] mod escape;",
@@ -1824,7 +1857,7 @@ fn rejects_escaping_and_nonliteral_path_attributes() {
 
 // AC: path metadata is rejected because alternate source routing is unsupported, not because a directory is excluded.
 #[test]
-fn rejects_path_attributes_hidden_from_recursive_enumeration() {
+fn rejects_path_meta_regardless_of_target_location() {
     for source in [
         "#[path = \"hidden.txt\"] mod hidden;",
         "#[path = \"target/mod.rs\"] mod generated;",
@@ -1998,6 +2031,67 @@ fn reports_workspace_member_resolution_failures() {
     }
 }
 
+// AC: a missing root manifest reports RootManifestRead at the exact manifest path.
+#[test]
+fn reports_root_manifest_read_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing_root = temp.path().join("missing-workspace");
+    fs::create_dir(&missing_root).unwrap();
+    let error = scan_workspace_unsafe(&missing_root).expect_err("missing manifest must fail");
+    assert_eq!(error.cause, ScanErrorCause::RootManifestRead);
+    assert_eq!(error.path, Path::new("Cargo.toml"));
+}
+
+// AC: a non-UTF-8 root manifest reports RootManifestUtf8 at the exact manifest path.
+#[test]
+fn reports_root_manifest_utf8_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("Cargo.toml"), [0xff]).unwrap();
+    let error = scan_workspace_unsafe(temp.path()).expect_err("non-UTF-8 manifest must fail");
+    assert_eq!(error.cause, ScanErrorCause::RootManifestUtf8);
+    assert_eq!(error.path, Path::new("Cargo.toml"));
+}
+
+// AC: malformed root TOML reports RootManifestToml at the exact manifest path.
+#[test]
+fn reports_root_manifest_toml_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("Cargo.toml"), "[workspace\n").unwrap();
+    let error = scan_workspace_unsafe(temp.path()).expect_err("malformed manifest must fail");
+    assert_eq!(error.cause, ScanErrorCause::RootManifestToml);
+    assert_eq!(error.path, Path::new("Cargo.toml"));
+}
+
+// AC: a directory removed before recursive enumeration reports Walk at that exact member path.
+#[test]
+fn reports_member_walk_failure() {
+    let fixture = fixture_workspace();
+    let member_relative = Path::new("crates/helper");
+    let member_root = fixture.root.path().join(member_relative);
+    let removed = Path::new("src/nested");
+    fs::remove_dir_all(member_root.join(removed)).unwrap();
+    let mut inventory = Inventory {
+        findings: Vec::new(),
+        files: Vec::new(),
+        absolute_files: Vec::new(),
+        files_inspected: 0,
+        nested_src_files: 0,
+        build_scripts: 0,
+        members: 2,
+    };
+    let error = walk_member(
+        fixture.root.path(),
+        &member_root,
+        member_relative,
+        removed,
+        &[],
+        &mut inventory,
+    )
+    .expect_err("removed directory must fail");
+    assert_eq!(error.cause, ScanErrorCause::Walk);
+    assert_eq!(error.path, Path::new("crates/helper/src/nested"));
+}
+
 fn fake_cargo(root: &Path, name: &str, body: &[u8]) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = root.join(name);
@@ -2102,6 +2196,29 @@ fn metadata_output_root_symlink_component_always_fails() {
     }
 }
 
+// AC: a non-directory metadata output component fails with its exact path and field cause.
+#[test]
+fn metadata_output_root_non_directory_component_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("not-a-directory");
+    fs::write(&file, "ordinary file").unwrap();
+    let error = validate_output_root(&file.join("target"), ScanErrorCause::MetadataBuildDirectory)
+        .expect_err("non-directory output component must fail");
+    assert_eq!(error.cause, ScanErrorCause::MetadataBuildDirectory);
+    assert_eq!(error.path, file);
+}
+
+// AC: a metadata output component I/O error fails with its exact path and field cause.
+#[test]
+fn metadata_output_root_io_error_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let offending = temp.path().join("x".repeat(256));
+    let error = validate_output_root(&offending, ScanErrorCause::MetadataTargetDirectory)
+        .expect_err("overlong output component must fail with I/O error");
+    assert_eq!(error.cause, ScanErrorCause::MetadataTargetDirectory);
+    assert_eq!(error.path, offending);
+}
+
 // AC: a nonexistent metadata output root is a valid clean-tree pruning boundary.
 #[test]
 fn nonexistent_metadata_output_root_is_accepted() {
@@ -2110,16 +2227,40 @@ fn nonexistent_metadata_output_root_is_accepted() {
     assert!(validate_output_root(&root, ScanErrorCause::MetadataTargetDirectory).is_ok());
 }
 
-// AC: an output root intersecting a member tree in either direction is rejected by the guard predicate.
+// AC: real scanner metadata rejects target and build output roots that intersect member source.
 #[test]
 fn metadata_output_root_intersection_with_member_fails() {
-    let base = Path::new("/workspace");
-    assert!(paths_intersect(
-        &base.join("member/target"),
-        &base.join("member")
-    ));
-    assert!(paths_intersect(base, &base.join("member")));
-    assert!(!paths_intersect(&base.join("target"), &base.join("member")));
+    for (field, expected) in [
+        ("target", ScanErrorCause::MetadataTargetDirectory),
+        ("build", ScanErrorCause::MetadataBuildDirectory),
+    ] {
+        let fixture = fixture_workspace();
+        let ordinary_target = fixture.root.path().join("target");
+        let ordinary_build = fixture.root.path().join("build");
+        let intersection = fixture
+            .root
+            .path()
+            .join("crates/helper")
+            .join(format!("{field}-output"));
+        let (target, build) = if field == "target" {
+            (&intersection, &ordinary_build)
+        } else {
+            (&ordinary_target, &intersection)
+        };
+        let command = fake_cargo(
+            fixture.root.path(),
+            &format!("cargo-{field}-intersection"),
+            &output_script(&metadata_json(
+                fixture.root.path(),
+                Some(target),
+                Some(build),
+            )),
+        );
+        let error = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
+            .expect_err("member-intersecting output root must fail");
+        assert_eq!(error.cause, expected);
+        assert_eq!(error.path, intersection);
+    }
 }
 
 // AC: include source is rejected except for the exact generated tray icon include.
