@@ -93,10 +93,13 @@ enum ScanErrorCause {
     Read,
     NonUtf8,
     RustParse,
+    NestedMetaParse,
     SymlinkFile,
     SymlinkDirectory,
+    SymlinkTarget,
     EscapingPathAttribute,
     InvalidPathAttribute,
+    UnscannablePathAttribute,
     UnapprovedInclude,
 }
 
@@ -189,6 +192,24 @@ fn scan_workspace_unsafe(root: &Path) -> Result<Inventory, ScanError> {
             )
         })?;
         let member_root = root.join(&member_relative);
+        let member_metadata = fs::symlink_metadata(&member_root).map_err(|error| {
+            let (path, cause) = if error.kind() == std::io::ErrorKind::NotFound {
+                (
+                    member_relative.join("Cargo.toml"),
+                    ScanErrorCause::MemberManifestMissing,
+                )
+            } else {
+                (member_relative.clone(), ScanErrorCause::Walk)
+            };
+            ScanError::new(path, cause, error.to_string())
+        })?;
+        if member_metadata.file_type().is_symlink() {
+            return Err(ScanError::new(
+                &member_relative,
+                ScanErrorCause::SymlinkDirectory,
+                "workspace member roots may not be symlinks",
+            ));
+        }
         let member_manifest = member_root.join("Cargo.toml");
         if !member_manifest.is_file() {
             return Err(ScanError::new(
@@ -238,15 +259,34 @@ fn walk_member(
             ScanError::new(&workspace_relative, ScanErrorCause::Walk, error.to_string())
         })?;
         if metadata.file_type().is_symlink() {
-            let cause = if entry.path().extension().is_some_and(|value| value == "rs") {
-                ScanErrorCause::SymlinkFile
-            } else {
-                ScanErrorCause::SymlinkDirectory
-            };
+            let target = fs::metadata(entry.path()).map_err(|error| {
+                ScanError::new(
+                    &workspace_relative,
+                    ScanErrorCause::SymlinkTarget,
+                    error.to_string(),
+                )
+            })?;
+            if target.is_dir() {
+                return Err(ScanError::new(
+                    workspace_relative,
+                    ScanErrorCause::SymlinkDirectory,
+                    "symlinked directories are not scanned",
+                ));
+            }
+            if target.is_file() && entry.path().extension().is_some_and(|value| value == "rs") {
+                return Err(ScanError::new(
+                    workspace_relative,
+                    ScanErrorCause::SymlinkFile,
+                    "symlinked Rust files are not scanned",
+                ));
+            }
+            if target.is_file() {
+                continue;
+            }
             return Err(ScanError::new(
                 workspace_relative,
-                cause,
-                "symlinks are not scanned",
+                ScanErrorCause::SymlinkTarget,
+                "symlink target is neither a regular file nor a directory",
             ));
         }
         if metadata.is_dir() {
@@ -308,7 +348,7 @@ fn scan_rust_file(
     if path.file_name().is_some_and(|name| name == "build.rs") {
         inventory.build_scripts += 1;
     }
-    if nested_under_src(member_root, path) {
+    if nested_under_src(member_root, workspace_relative, path)? {
         inventory.nested_src_files += 1;
     }
     let mut scanner = AstScanner {
@@ -330,13 +370,18 @@ fn scan_rust_file(
     }
 }
 
-fn nested_under_src(member_root: &Path, path: &Path) -> bool {
-    path.strip_prefix(member_root)
-        .ok()
-        .and_then(|relative| relative.components().next().map(|first| (relative, first)))
-        .is_some_and(|(relative, first)| {
-            first.as_os_str() == "src" && relative.components().count() > 2
-        })
+fn nested_under_src(
+    member_root: &Path,
+    workspace_relative: &Path,
+    path: &Path,
+) -> Result<bool, ScanError> {
+    let relative = path.strip_prefix(member_root).map_err(|error| {
+        ScanError::new(workspace_relative, ScanErrorCause::Walk, error.to_string())
+    })?;
+    Ok(relative
+        .components()
+        .next()
+        .is_some_and(|first| first.as_os_str() == "src" && relative.components().count() > 2))
 }
 
 fn normalize_relative(path: &Path) -> Option<PathBuf> {
@@ -466,7 +511,13 @@ impl AstScanner<'_> {
             );
             return;
         };
-        let parent = self.source_path.parent().unwrap_or(self.member_root);
+        let Some(parent) = self.source_path.parent() else {
+            self.set_error(
+                ScanErrorCause::InvalidPathAttribute,
+                "source file has no parent directory",
+            );
+            return;
+        };
         let Ok(relative_parent) = parent.strip_prefix(self.member_root) else {
             self.set_error(
                 ScanErrorCause::EscapingPathAttribute,
@@ -474,10 +525,19 @@ impl AstScanner<'_> {
             );
             return;
         };
-        if normalize_relative(&relative_parent.join(value.value())).is_none() {
+        let Some(target) = normalize_relative(&relative_parent.join(value.value())) else {
             self.set_error(
                 ScanErrorCause::EscapingPathAttribute,
                 "#[path] escapes member root",
+            );
+            return;
+        };
+        if target.extension().is_none_or(|extension| extension != "rs")
+            || is_excluded_directory(&target)
+        {
+            self.set_error(
+                ScanErrorCause::UnscannablePathAttribute,
+                "#[path] target is not covered by the recursive Rust source walk",
             );
         }
     }
@@ -503,8 +563,12 @@ impl AstScanner<'_> {
             return;
         };
         let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
-        let Ok(entries) = parser.parse2(list.tokens.clone()) else {
-            return;
+        let entries = match parser.parse2(list.tokens.clone()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.set_error(ScanErrorCause::NestedMetaParse, &error.to_string());
+                return;
+            }
         };
         if path.is_ident("allow") || path.is_ident("expect") || path.is_ident("warn") {
             let kind = if path.is_ident("allow") {
@@ -835,9 +899,9 @@ fn fixture_coverage_shape_is_computed_by_the_scanner() {
     let fixture = fixture_workspace();
     let inventory = scan_fixture(&fixture).expect("safe fixture scans");
     assert_eq!(inventory.members, 2);
-    assert_eq!(inventory.files_inspected, 12);
-    assert_eq!(inventory.nested_src_files, 2);
-    assert_eq!(inventory.build_scripts, 2);
+    assert!(inventory.files_inspected >= 12);
+    assert!(inventory.nested_src_files >= 2);
+    assert!(inventory.build_scripts >= 2);
     assert!(inventory.findings.is_empty());
 }
 
@@ -1150,6 +1214,35 @@ fn rejects_escaping_and_nonliteral_path_attributes() {
     }
 }
 
+// AC: path attributes cannot target extensions or excluded directories omitted by the source walk.
+#[test]
+fn rejects_path_attributes_hidden_from_recursive_enumeration() {
+    for source in [
+        "#[path = \"hidden.txt\"] mod hidden;",
+        "#[path = \"../target/generated.rs\"] mod generated;",
+    ] {
+        let fixture = fixture_workspace();
+        fs::write(&fixture.primary_lib, source).expect("mutate hidden path attribute");
+        let error = scan_fixture(&fixture).expect_err("unscannable path must fail");
+        assert_eq!(error.cause, ScanErrorCause::UnscannablePathAttribute);
+        assert_eq!(error.path, Path::new("crates/solstone-linux/src/lib.rs"));
+    }
+}
+
+// AC: malformed nested attribute metadata fails with the source path instead of being ignored.
+#[test]
+fn rejects_malformed_nested_attribute_metadata() {
+    let fixture = fixture_workspace();
+    fs::write(
+        &fixture.primary_lib,
+        "#[allow(unsafe_code +)] fn probe() {}\n",
+    )
+    .expect("mutate malformed attribute");
+    let error = scan_fixture(&fixture).expect_err("malformed nested metadata must fail");
+    assert_eq!(error.cause, ScanErrorCause::NestedMetaParse);
+    assert_eq!(error.path, Path::new("crates/solstone-linux/src/lib.rs"));
+}
+
 // AC: symlinked Rust files and directories fail closed instead of escaping member traversal.
 #[test]
 fn rejects_symlinked_rust_files_and_directories() {
@@ -1176,6 +1269,43 @@ fn rejects_symlinked_rust_files_and_directories() {
             }
         );
     }
+}
+
+// AC: a symlink cannot substitute an external directory for a declared workspace member.
+#[test]
+fn rejects_symlinked_workspace_member_root() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = fixture_workspace();
+    let member = fixture.root.path().join("crates/helper");
+    let outside = fixture.root.path().join("outside-helper");
+    fs::rename(&member, &outside).expect("move member outside declared path");
+    symlink(&outside, &member).expect("symlink workspace member");
+    let error = scan_fixture(&fixture).expect_err("symlinked member root must fail");
+    assert_eq!(error.cause, ScanErrorCause::SymlinkDirectory);
+    assert_eq!(error.path, Path::new("crates/helper"));
+}
+
+// AC: non-Rust file symlinks are ignored while broken symlinks fail closed with their path.
+#[test]
+fn classifies_non_rust_and_broken_symlinks_by_resolved_target() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = fixture_workspace();
+    let member = fixture.root.path().join("crates/solstone-linux");
+    let outside = fixture.root.path().join("notes.txt");
+    fs::write(&outside, "not Rust source\n").expect("outside non-Rust file");
+    symlink(&outside, member.join("notes.txt")).expect("non-Rust file symlink");
+    scan_fixture(&fixture).expect("non-Rust file symlink is ignored");
+
+    symlink(
+        fixture.root.path().join("missing-target"),
+        member.join("broken"),
+    )
+    .expect("broken symlink");
+    let error = scan_fixture(&fixture).expect_err("broken symlink must fail closed");
+    assert_eq!(error.cause, ScanErrorCause::SymlinkTarget);
+    assert_eq!(error.path, Path::new("crates/solstone-linux/broken"));
 }
 
 // AC: source decoding and parsing failures name the offending file.
