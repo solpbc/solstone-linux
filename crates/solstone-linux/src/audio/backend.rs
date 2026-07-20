@@ -194,15 +194,13 @@ struct Shared {
 }
 
 impl Shared {
-    fn pump(&mut self) -> Vec<AudioDiagnostic> {
-        let mut diagnostics = Vec::new();
+    fn pump(&mut self, observe: &mut dyn FnMut(AudioDiagnostic)) {
         while let Ok(message) = self.receiver.try_recv() {
             if let Some(diagnostic) = self.state.apply(message) {
                 diagnostic.report();
-                diagnostics.push(diagnostic);
+                observe(diagnostic);
             }
         }
-        diagnostics
     }
 }
 
@@ -232,6 +230,7 @@ impl PulseAudioCapture {
                         run_pulse(sender, stopped, failures, reset_on_detection)
                     },
                     wait_interruptibly,
+                    |_| {},
                     failures,
                 );
             })
@@ -251,11 +250,12 @@ impl PulseAudioCapture {
     }
 }
 
-fn supervise<Run, Wait>(
+fn supervise<Run, Wait, Observe>(
     stopped: &Arc<AtomicBool>,
     sender: &mpsc::Sender<PulseMessage>,
     mut run: Run,
     mut wait: Wait,
+    mut observe: Observe,
     failures: Arc<FailureCounter>,
 ) where
     Run: FnMut(
@@ -265,6 +265,7 @@ fn supervise<Run, Wait>(
         bool,
     ) -> Result<bool, PulseRunError>,
     Wait: FnMut(&AtomicBool, Duration) -> bool,
+    Observe: FnMut(AudioDiagnostic),
 {
     let mut reset_on_detection = true;
     while !stopped.load(Ordering::Acquire) {
@@ -282,6 +283,7 @@ fn supervise<Run, Wait>(
                 if restart_for_failures {
                     let diagnostic = prepare_redetect(&failures);
                     diagnostic.report();
+                    observe(diagnostic);
                 }
             }
             Err(PulseRunError::Degraded(reason)) => {
@@ -300,6 +302,7 @@ fn supervise<Run, Wait>(
                 if threshold {
                     let diagnostic = prepare_redetect(&failures);
                     diagnostic.report();
+                    observe(diagnostic);
                     reset_on_detection = true;
                 } else {
                     // Rebuilding Pulse after setup failure remains the same logical
@@ -344,13 +347,15 @@ fn wait_interruptibly_with(
 impl AudioCapture for PulseAudioCapture {
     fn drain(&mut self) -> DrainedChunk {
         let mut shared = self.shared.lock().expect("audio state lock");
-        drop(shared.pump());
+        let mut observe = |_| {};
+        shared.pump(&mut observe);
         shared.state.accumulator.drain()
     }
 
     fn audio_available(&self) -> bool {
         let mut shared = self.shared.lock().expect("audio state lock");
-        drop(shared.pump());
+        let mut observe = |_| {};
+        shared.pump(&mut observe);
         shared.state.available
     }
 
@@ -380,7 +385,8 @@ impl Drop for PulseAudioCapture {
 impl MuteProbe for PulseMuteProbe {
     fn probe_muted(&mut self) -> Result<bool, String> {
         let mut shared = self.shared.lock().map_err(|error| error.to_string())?;
-        drop(shared.pump());
+        let mut observe = |_| {};
+        shared.pump(&mut observe);
         Ok(shared.state.muted)
     }
 }
@@ -403,20 +409,25 @@ mod tests {
     }
 
     #[test]
-    fn availability_diagnostics_once_per_transition() {
+    fn availability_logs_once_per_transition_with_exact_copy() {
         // tests/test_audio_recorder.py::test_set_audio_available_edge_logs_once
         let (sender, mut shared) = shared_channel();
+        let mut seen = Vec::new();
         sender.send(PulseMessage::Failed("one".into())).unwrap();
         sender.send(PulseMessage::Failed("two".into())).unwrap();
-        assert!(shared.pump().is_empty());
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
 
         sender.send(PulseMessage::Failed("three".into())).unwrap();
-        assert_eq!(shared.pump(), vec![AudioDiagnostic::Unavailable]);
+        shared.pump(&mut |d| seen.push(d));
+        assert_eq!(seen, [AudioDiagnostic::Unavailable]);
         assert!(!shared.state.available);
+        seen.clear();
 
         sender.send(PulseMessage::Failed("four".into())).unwrap();
         sender.send(PulseMessage::Failed("five".into())).unwrap();
-        assert!(shared.pump().is_empty());
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
 
         sender
             .send(PulseMessage::Ready {
@@ -424,14 +435,17 @@ mod tests {
                 mute_failure: None,
             })
             .unwrap();
-        assert_eq!(shared.pump(), vec![AudioDiagnostic::Recovered]);
+        shared.pump(&mut |d| seen.push(d));
+        assert_eq!(seen, [AudioDiagnostic::Recovered]);
+        seen.clear();
         sender
             .send(PulseMessage::Ready {
                 muted: false,
                 mute_failure: None,
             })
             .unwrap();
-        assert!(shared.pump().is_empty());
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
         assert!(shared.state.available);
     }
 
@@ -446,9 +460,33 @@ mod tests {
             .unwrap();
         sender.send(PulseMessage::Detected).unwrap();
 
-        assert!(shared.pump().is_empty());
+        let mut seen = Vec::new();
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
         assert!(shared.state.available);
         assert!(shared.state.muted);
+    }
+
+    #[test]
+    fn adversarial_backlog_reports_every_availability_edge_in_order() {
+        let (sender, mut shared) = shared_channel();
+        for _ in 0..256 {
+            sender.send(PulseMessage::Failed("one".into())).unwrap();
+            sender.send(PulseMessage::Failed("two".into())).unwrap();
+            sender.send(PulseMessage::Failed("three".into())).unwrap();
+            sender.send(PulseMessage::Detected).unwrap();
+        }
+
+        let mut seen = Vec::new();
+        shared.pump(&mut |d| seen.push(d));
+
+        assert_eq!(seen.len(), 512);
+        assert!(
+            seen.chunks_exact(2)
+                .all(|pair| { pair == [AudioDiagnostic::Unavailable, AudioDiagnostic::Recovered] })
+        );
+        assert!(shared.state.available);
+        assert_eq!(shared.state.failures, 0);
     }
 
     #[test]
@@ -457,7 +495,10 @@ mod tests {
         sender
             .send(PulseMessage::Degraded("unavailable".into()))
             .unwrap();
-        assert_eq!(shared.pump(), vec![AudioDiagnostic::Unavailable]);
+        let mut seen = Vec::new();
+        shared.pump(&mut |d| seen.push(d));
+        assert_eq!(seen, [AudioDiagnostic::Unavailable]);
+        seen.clear();
         for _ in 0..2 {
             sender
                 .send(PulseMessage::Ready {
@@ -466,11 +507,13 @@ mod tests {
                 })
                 .unwrap();
             let expected = if shared.state.available {
-                Vec::new()
+                &[][..]
             } else {
-                vec![AudioDiagnostic::Recovered]
+                &[AudioDiagnostic::Recovered][..]
             };
-            assert_eq!(shared.pump(), expected);
+            shared.pump(&mut |d| seen.push(d));
+            assert_eq!(seen, expected);
+            seen.clear();
         }
         assert!(shared.state.available);
 
@@ -478,21 +521,37 @@ mod tests {
         sender
             .send(PulseMessage::Degraded("unavailable".into()))
             .unwrap();
-        assert_eq!(shared.pump(), vec![AudioDiagnostic::Unavailable]);
+        shared.pump(&mut |d| seen.push(d));
+        assert_eq!(seen, [AudioDiagnostic::Unavailable]);
+        seen.clear();
         sender.send(PulseMessage::Detected).unwrap();
-        assert_eq!(shared.pump(), vec![AudioDiagnostic::Recovered]);
+        shared.pump(&mut |d| seen.push(d));
+        assert_eq!(seen, [AudioDiagnostic::Recovered]);
+        seen.clear();
         sender.send(PulseMessage::Detected).unwrap();
-        assert!(shared.pump().is_empty());
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
         assert!(shared.state.available);
     }
 
     #[test]
     fn diagnostic_levels_and_redetect_rendering_are_stable() {
         assert_eq!(AudioDiagnostic::Unavailable.level(), tracing::Level::WARN);
+        assert_eq!(
+            AudioDiagnostic::Unavailable.to_string(),
+            "Audio devices unavailable — continuing with screen capture only"
+        );
         assert_eq!(AudioDiagnostic::Recovered.level(), tracing::Level::INFO);
+        assert_eq!(
+            AudioDiagnostic::Recovered.to_string(),
+            "Audio devices recovered — resuming audio capture"
+        );
         let redetect = AudioDiagnostic::Redetect { count: 3 };
         assert_eq!(redetect.level(), tracing::Level::INFO);
-        assert!(redetect.to_string().contains('3'));
+        assert_eq!(
+            redetect.to_string(),
+            "Re-detecting audio devices after 3 consecutive recorder failures"
+        );
     }
 
     #[test]
@@ -506,7 +565,6 @@ mod tests {
 
         assert_eq!(diagnostic, AudioDiagnostic::Redetect { count: 3 });
         assert_eq!(diagnostic.level(), tracing::Level::INFO);
-        assert!(diagnostic.to_string().contains('3'));
         assert_eq!(failures.count(), 0);
     }
 
@@ -520,6 +578,7 @@ mod tests {
         let failures = Arc::new(FailureCounter::default());
         let run_states = Arc::new(Mutex::new(Vec::new()));
         let order = Arc::new(Mutex::new(Vec::new()));
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
         supervise(
             &stopped,
             &sender,
@@ -554,6 +613,14 @@ mod tests {
                     true
                 }
             },
+            {
+                let order = Arc::clone(&order);
+                let diagnostics = Arc::clone(&diagnostics);
+                move |d| {
+                    order.lock().unwrap().push("observe");
+                    diagnostics.lock().unwrap().push(d);
+                }
+            },
             Arc::clone(&failures),
         );
         assert_eq!(attempts.load(Ordering::Acquire), 4);
@@ -566,8 +633,17 @@ mod tests {
         assert_eq!(
             *order.lock().unwrap(),
             [
-                "run", "send", "wait", "run", "send", "wait", "run", "send", "wait", "run"
+                "run", "send", "wait", "run", "send", "wait", "run", "send", "wait", "observe",
+                "run"
             ]
+        );
+        assert_eq!(
+            *diagnostics.lock().unwrap(),
+            [AudioDiagnostic::Redetect { count: 3 }]
+        );
+        assert_eq!(
+            diagnostics.lock().unwrap()[0].to_string(),
+            "Re-detecting audio devices after 3 consecutive recorder failures"
         );
     }
 
@@ -598,14 +674,17 @@ mod tests {
                 assert_eq!(duration, Duration::from_secs(5));
                 !stopped.load(Ordering::Acquire)
             },
+            |_| {},
             Arc::new(FailureCounter::default()),
         );
         let mut shared = Shared {
             receiver,
             state: CaptureState::default(),
         };
+        let mut seen = Vec::new();
+        shared.pump(&mut |d| seen.push(d));
         assert_eq!(
-            shared.pump(),
+            seen,
             [AudioDiagnostic::Unavailable, AudioDiagnostic::Recovered]
         );
         assert_eq!(attempts.load(Ordering::Acquire), 2);
@@ -625,7 +704,9 @@ mod tests {
             )))
             .unwrap();
         sender.send(PulseMessage::SuccessfulRecord).unwrap();
-        assert!(shared.pump().is_empty());
+        let mut seen = Vec::new();
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
         assert_eq!(shared.state.failures, 0);
         let chunk = shared.state.accumulator.drain();
         assert_eq!(chunk.report.microphone.received_samples, 1);
@@ -641,7 +722,9 @@ mod tests {
             })
             .unwrap();
 
-        assert!(shared.pump().is_empty());
+        let mut seen = Vec::new();
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
         assert!(shared.state.muted);
     }
 
@@ -670,23 +753,30 @@ mod tests {
                     false
                 }
             },
+            |_| {},
             Arc::new(FailureCounter::default()),
         );
         let mut shared = Shared {
             receiver,
             state: CaptureState::default(),
         };
-        assert_eq!(shared.pump(), vec![AudioDiagnostic::Unavailable]);
+        let mut seen = Vec::new();
+        shared.pump(&mut |d| seen.push(d));
+        assert_eq!(seen, [AudioDiagnostic::Unavailable]);
         assert!(!shared.state.available);
         assert_eq!(waits.load(Ordering::Acquire), 1);
 
         let (sender, mut shared) = shared_channel();
         sender.send(PulseMessage::Degraded("first".into())).unwrap();
-        assert_eq!(shared.pump(), vec![AudioDiagnostic::Unavailable]);
+        seen.clear();
+        shared.pump(&mut |d| seen.push(d));
+        assert_eq!(seen, [AudioDiagnostic::Unavailable]);
+        seen.clear();
         sender
             .send(PulseMessage::Degraded("repeat".into()))
             .unwrap();
-        assert!(shared.pump().is_empty());
+        shared.pump(&mut |d| seen.push(d));
+        assert!(seen.is_empty());
     }
 
     #[test]
