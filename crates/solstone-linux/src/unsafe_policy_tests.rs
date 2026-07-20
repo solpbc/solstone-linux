@@ -68,13 +68,29 @@ struct NodeIdentity {
 enum AncestryNode {
     Module {
         name: String,
+        visibility: ModuleVisibilityIdentity,
+        form: ModuleFormIdentity,
         outer: Vec<AttributeIdentity>,
+        inner: Vec<AttributeIdentity>,
     },
     Trait(String),
     Impl {
         trait_path: Option<Vec<String>>,
     },
     Function(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModuleVisibilityIdentity {
+    Inherited,
+    Public,
+    Restricted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModuleFormIdentity {
+    Inline,
+    External,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +233,16 @@ fn normalize_absolute(path: &Path) -> Option<PathBuf> {
     Some(normalized)
 }
 
+fn normalize_scan_root(root: &Path) -> Result<PathBuf, ScanError> {
+    normalize_absolute(root).ok_or_else(|| {
+        ScanError::new(
+            root,
+            ScanErrorCause::MetadataWorkspaceRootMismatch,
+            "scan root is not absolute or lexically valid",
+        )
+    })
+}
+
 fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>, ScanError> {
     let output = Command::new(cargo)
         .args([
@@ -226,7 +252,9 @@ fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>
             "--format-version",
             "1",
             "--no-deps",
+            "--manifest-path",
         ])
+        .arg(root.join("Cargo.toml"))
         .current_dir(root)
         .output()
         .map_err(|error| {
@@ -248,13 +276,6 @@ fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>
     })?;
     let metadata: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| ScanError::new(root, ScanErrorCause::MetadataJson, error.to_string()))?;
-    let scan_root = normalize_absolute(root).ok_or_else(|| {
-        ScanError::new(
-            root,
-            ScanErrorCause::MetadataWorkspaceRootMismatch,
-            "scan root is not absolute",
-        )
-    })?;
     let metadata_workspace = metadata
         .get("workspace_root")
         .and_then(serde_json::Value::as_str)
@@ -266,11 +287,11 @@ fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>
                 "workspace_root is missing, non-string, or non-absolute",
             )
         })?;
-    if metadata_workspace != scan_root {
+    if metadata_workspace != root {
         return Err(ScanError::new(
             metadata_workspace,
             ScanErrorCause::MetadataWorkspaceRootMismatch,
-            format!("expected workspace root {}", scan_root.display()),
+            format!("expected scan root {}", root.display()),
         ));
     }
     let mut roots = Vec::new();
@@ -294,10 +315,6 @@ fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>
         }
     }
     Ok(roots)
-}
-
-fn paths_intersect(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
 }
 
 fn validate_output_root(root: &Path, cause: ScanErrorCause) -> Result<(), ScanError> {
@@ -335,6 +352,8 @@ fn scan_workspace_unsafe(root: &Path) -> Result<Inventory, ScanError> {
 }
 
 fn scan_workspace_unsafe_with_command(root: &Path, cargo: &Path) -> Result<Inventory, ScanError> {
+    let normalized_root = normalize_scan_root(root)?;
+    let root = normalized_root.as_path();
     let manifest_path = root.join("Cargo.toml");
     let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
         ScanError::new(
@@ -424,7 +443,7 @@ fn scan_workspace_unsafe_with_command(root: &Path, cargo: &Path) -> Result<Inven
             ScanErrorCause::MetadataBuildDirectory
         };
         for (relative, member_root) in &member_roots {
-            if paths_intersect(output_root, member_root) {
+            if member_root.starts_with(output_root) {
                 return Err(ScanError::new(
                     output_root,
                     cause,
@@ -663,6 +682,34 @@ fn attribute_identity(attribute: &Attribute) -> AttributeIdentity {
             AttributeIdentity::AllowUnsafeCode
         }
         _ => AttributeIdentity::Other,
+    }
+}
+
+fn module_identity(node: &syn::ItemMod) -> AncestryNode {
+    let visibility = match node.vis {
+        syn::Visibility::Inherited => ModuleVisibilityIdentity::Inherited,
+        syn::Visibility::Public(_) => ModuleVisibilityIdentity::Public,
+        syn::Visibility::Restricted(_) => ModuleVisibilityIdentity::Restricted,
+    };
+    let form = if node.content.is_some() {
+        ModuleFormIdentity::Inline
+    } else {
+        ModuleFormIdentity::External
+    };
+    let mut outer = Vec::new();
+    let mut inner = Vec::new();
+    for attribute in &node.attrs {
+        match attribute.style {
+            syn::AttrStyle::Outer => outer.push(attribute_identity(attribute)),
+            syn::AttrStyle::Inner(_) => inner.push(attribute_identity(attribute)),
+        }
+    }
+    AncestryNode::Module {
+        name: node.ident.to_string(),
+        visibility,
+        form,
+        outer,
+        inner,
     }
 }
 
@@ -1000,14 +1047,9 @@ impl<'ast> Visit<'ast> for AstScanner<'_> {
         if node.unsafety.is_some() {
             self.finding(FindingKind::UnsafeModule, None);
         }
-        let outer = node.attrs.iter().map(attribute_identity).collect();
-        self.with_item(
-            AncestryNode::Module {
-                name: node.ident.to_string(),
-                outer,
-            },
-            |scanner| visit::visit_item_mod(scanner, node),
-        );
+        self.with_item(module_identity(node), |scanner| {
+            visit::visit_item_mod(scanner, node)
+        });
     }
 
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
@@ -1235,7 +1277,10 @@ fn reviewed_seams_error(inventory: &Inventory) -> Result<(), String> {
             vec![
                 AncestryNode::Module {
                     name: "tests".into(),
+                    visibility: ModuleVisibilityIdentity::Inherited,
+                    form: ModuleFormIdentity::Inline,
                     outer: vec![AttributeIdentity::CfgTest],
+                    inner: vec![],
                 },
                 AncestryNode::Function("session_environment_wrapper_assigns_and_restores".into()),
             ],
@@ -1571,6 +1616,28 @@ fn reviewed_test_seam_requires_test_module_and_attributes() {
         REVIEWED_FIXTURE_SEAMS.replace("#[cfg(test)]", "#[cfg(any(test, unix))]"),
         REVIEWED_FIXTURE_SEAMS.replace("#[cfg(test)]", "#[cfg(not(test))]"),
         REVIEWED_FIXTURE_SEAMS.replace("#[cfg(test)]", "#[cfg_attr(test, cfg(test))]"),
+        REVIEWED_FIXTURE_SEAMS.replace("mod tests", "pub mod tests"),
+        REVIEWED_FIXTURE_SEAMS.replace("mod tests", "pub(crate) mod tests"),
+        REVIEWED_FIXTURE_SEAMS.replace("mod tests", "#[path=\"tests.rs\"]\nmod tests"),
+        REVIEWED_FIXTURE_SEAMS.replace(
+            "mod tests {\n#[test]\n#[allow(unsafe_code)]\nfn session_environment_wrapper_assigns_and_restores() {\n    const NAME: &str = \"NAME\";\n    unsafe { ::std::env::remove_var(NAME) }\n}\n}",
+            "mod tests;",
+        ),
+        REVIEWED_FIXTURE_SEAMS
+            .replace("#[cfg(test)]\nmod tests {", "mod tests {\n#![cfg(test)]"),
+        REVIEWED_FIXTURE_SEAMS.replace(
+            "#[cfg(test)]\nmod tests {",
+            "mod tests {\n#![cfg_attr(test, cfg(test))]",
+        ),
+        REVIEWED_FIXTURE_SEAMS.replace(
+            "#[cfg(test)]\nmod tests",
+            "#[cfg_attr(test, cfg(test))]\nmod tests",
+        ),
+        REVIEWED_FIXTURE_SEAMS.replace("mod tests {", "mod tests {\n#![cfg(test)]"),
+        REVIEWED_FIXTURE_SEAMS.replace(
+            "#[cfg(test)]\nmod tests {",
+            "#[cfg(test)]\nmod tests {\n#![cfg(test)]",
+        ),
         REVIEWED_FIXTURE_SEAMS.replace("mod tests", "mod renamed"),
         format!("mod outer {{\n{REVIEWED_FIXTURE_SEAMS}\n}}\n"),
         REVIEWED_FIXTURE_SEAMS.replacen("#[test]\n", "", 1),
@@ -1579,8 +1646,65 @@ fn reviewed_test_seam_requires_test_module_and_attributes() {
     for source in mutations {
         let fixture = fixture_workspace();
         write_reviewed_fixture_seams(&fixture, &source);
-        let inventory = scan_fixture(&fixture).expect("module identity fixture scans");
-        assert!(reviewed_seams_error(&inventory).is_err(), "{source}");
+        match scan_fixture(&fixture) {
+            Ok(inventory) => assert!(reviewed_seams_error(&inventory).is_err(), "{source}"),
+            Err(error) => {
+                assert_eq!(
+                    error.cause,
+                    ScanErrorCause::InvalidPathAttribute,
+                    "{source}"
+                )
+            }
+        }
+    }
+}
+
+// AC: module identity preserves visibility, form, and direct attribute placement without evaluating paths.
+#[test]
+fn module_identity_distinguishes_reviewed_module_structure() {
+    let cases = [
+        (
+            "#[cfg(test)] mod tests {}",
+            ModuleVisibilityIdentity::Inherited,
+            ModuleFormIdentity::Inline,
+            vec![AttributeIdentity::CfgTest],
+            vec![],
+        ),
+        (
+            "pub mod tests {}",
+            ModuleVisibilityIdentity::Public,
+            ModuleFormIdentity::Inline,
+            vec![],
+            vec![],
+        ),
+        (
+            "pub(crate) mod tests;",
+            ModuleVisibilityIdentity::Restricted,
+            ModuleFormIdentity::External,
+            vec![],
+            vec![],
+        ),
+        (
+            "#[path=\"tests.rs\"] mod tests { #![cfg(test)] }",
+            ModuleVisibilityIdentity::Inherited,
+            ModuleFormIdentity::Inline,
+            vec![AttributeIdentity::Other],
+            vec![AttributeIdentity::CfgTest],
+        ),
+    ];
+    for (source, visibility, form, outer, inner) in cases {
+        let node = syn::parse_str::<syn::ItemMod>(source).expect("module parses");
+        assert_eq!(
+            module_identity(&node),
+            AncestryNode::Module {
+                name: "tests".into(),
+                visibility,
+                form,
+                outer,
+                inner,
+            },
+            "{source}"
+        );
     }
 }
 
@@ -2100,6 +2224,19 @@ fn fake_cargo(root: &Path, name: &str, body: &[u8]) -> PathBuf {
     path
 }
 
+fn spying_cargo(root: &Path, name: &str, record: &Path, json: &str) -> PathBuf {
+    fake_cargo(
+        root,
+        name,
+        format!(
+            "#!/bin/sh\n{{\n    pwd\n    printf '%s\\n' \"$@\"\n}} > '{}'\nprintf '%s' '{}'\n",
+            record.display(),
+            json
+        )
+        .as_bytes(),
+    )
+}
+
 fn metadata_json(root: &Path, target: Option<&Path>, build: Option<&Path>) -> String {
     let mut value = serde_json::json!({ "workspace_root": root });
     if let Some(target) = target {
@@ -2113,6 +2250,56 @@ fn metadata_json(root: &Path, target: Option<&Path>, build: Option<&Path>) -> St
 
 fn output_script(json: &str) -> Vec<u8> {
     format!("#!/bin/sh\nprintf '%s' '{}'\n", json).into_bytes()
+}
+
+// AC: production metadata invocation uses one normalized root for cwd and the complete locked argv.
+#[test]
+fn cargo_metadata_uses_normalized_root_and_manifest_path() {
+    let fixture = fixture_workspace();
+    let normalized = fixture.root.path().to_owned();
+    let unnormalized = normalized.join("crates/..");
+    let record = normalized.join("cargo-invocation");
+    let target = normalized.join("target");
+    let build = normalized.join("build");
+    let command = spying_cargo(
+        &normalized,
+        "cargo-spy",
+        &record,
+        &metadata_json(&normalized, Some(&target), Some(&build)),
+    );
+    scan_workspace_unsafe_with_command(&unnormalized, &command).expect("fixture scans");
+    let lines = fs::read_to_string(&record)
+        .expect("spy output")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![
+            normalized.display().to_string(),
+            "metadata".into(),
+            "--locked".into(),
+            "--offline".into(),
+            "--format-version".into(),
+            "1".into(),
+            "--no-deps".into(),
+            "--manifest-path".into(),
+            normalized.join("Cargo.toml").display().to_string(),
+        ]
+    );
+
+    let not_run = normalized.join("cargo-not-run");
+    let command = spying_cargo(
+        &normalized,
+        "cargo-relative-spy",
+        &not_run,
+        &metadata_json(&normalized, Some(&target), Some(&build)),
+    );
+    let error = scan_workspace_unsafe_with_command(Path::new("relative-root"), &command)
+        .expect_err("relative root must fail before spawn");
+    assert_eq!(error.cause, ScanErrorCause::MetadataWorkspaceRootMismatch);
+    assert!(error.detail.contains("scan root"));
+    assert!(!not_run.exists());
 }
 
 // AC: all seven metadata failure discriminants are reachable and carry a path.
@@ -2227,40 +2414,180 @@ fn nonexistent_metadata_output_root_is_accepted() {
     assert!(validate_output_root(&root, ScanErrorCause::MetadataTargetDirectory).is_ok());
 }
 
-// AC: real scanner metadata rejects target and build output roots that intersect member source.
+// AC: metadata output roots equal to or containing a member fail with the field cause and member name.
 #[test]
-fn metadata_output_root_intersection_with_member_fails() {
-    for (field, expected) in [
-        ("target", ScanErrorCause::MetadataTargetDirectory),
-        ("build", ScanErrorCause::MetadataBuildDirectory),
-    ] {
+fn metadata_output_root_containing_or_equal_to_member_fails() {
+    for containing in [false, true] {
         let fixture = fixture_workspace();
+        let member = fixture.root.path().join("crates/helper");
+        let output = if containing {
+            fixture.root.path().join("crates")
+        } else {
+            member
+        };
+        let build = fixture.root.path().join("build");
+        let command = fake_cargo(
+            fixture.root.path(),
+            "cargo-containing-output",
+            &output_script(&metadata_json(
+                fixture.root.path(),
+                Some(&output),
+                Some(&build),
+            )),
+        );
+        let error = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
+            .expect_err("member-containing output root must fail");
+        assert_eq!(error.cause, ScanErrorCause::MetadataTargetDirectory);
+        assert_eq!(error.path, output);
+        let expected_member = if containing {
+            "crates/solstone-linux"
+        } else {
+            "crates/helper"
+        };
+        assert!(error.detail.contains(expected_member));
+    }
+}
+
+// AC: output roots strictly inside members are validated before their exact subtree is pruned.
+#[test]
+fn metadata_output_root_inside_member_is_pruned() {
+    for field in ["target", "build"] {
+        let fixture = fixture_workspace();
+        let output = fixture.root.path().join("crates/helper/generated-output");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("MALFORMED.rs"), "fn broken(").unwrap();
+        fs::write(output.join("UNSAFE.rs"), "fn hidden() { unsafe {} }").unwrap();
         let ordinary_target = fixture.root.path().join("target");
         let ordinary_build = fixture.root.path().join("build");
-        let intersection = fixture
-            .root
-            .path()
-            .join("crates/helper")
-            .join(format!("{field}-output"));
         let (target, build) = if field == "target" {
-            (&intersection, &ordinary_build)
+            (&output, &ordinary_build)
         } else {
-            (&ordinary_target, &intersection)
+            (&ordinary_target, &output)
         };
         let command = fake_cargo(
             fixture.root.path(),
-            &format!("cargo-{field}-intersection"),
+            &format!("cargo-{field}-nested-output"),
             &output_script(&metadata_json(
                 fixture.root.path(),
                 Some(target),
                 Some(build),
             )),
         );
-        let error = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
-            .expect_err("member-intersecting output root must fail");
-        assert_eq!(error.cause, expected);
-        assert_eq!(error.path, intersection);
+        let inventory = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
+            .expect("nested output root is pruned");
+        assert!(
+            !inventory
+                .absolute_files
+                .contains(&output.join("MALFORMED.rs"))
+        );
+        assert!(!inventory.absolute_files.contains(&output.join("UNSAFE.rs")));
     }
+}
+
+// AC: invalid components in a member-local output root fail before traversal and pruning.
+#[test]
+fn metadata_output_root_inside_member_is_validated_before_pruning() {
+    use std::os::unix::fs::symlink;
+
+    for (field, expected) in [
+        ("target", ScanErrorCause::MetadataTargetDirectory),
+        ("build", ScanErrorCause::MetadataBuildDirectory),
+    ] {
+        for kind in ["symlink", "file", "io"] {
+            let fixture = fixture_workspace();
+            let member = fixture.root.path().join("crates/helper");
+            let component = member.join(format!("{field}-{kind}"));
+            let (output, offending) = match kind {
+                "symlink" => {
+                    let destination = fixture.root.path().join("harmless");
+                    fs::create_dir(&destination).unwrap();
+                    symlink(destination, &component).unwrap();
+                    (component.join("nested"), component)
+                }
+                "file" => {
+                    fs::write(&component, "not a directory").unwrap();
+                    (component.join("nested"), component)
+                }
+                "io" => {
+                    let output = member.join("x".repeat(256));
+                    (output.clone(), output)
+                }
+                _ => unreachable!(),
+            };
+            let ordinary_target = fixture.root.path().join("target");
+            let ordinary_build = fixture.root.path().join("build");
+            let (target, build) = if field == "target" {
+                (&output, &ordinary_build)
+            } else {
+                (&ordinary_target, &output)
+            };
+            let command = fake_cargo(
+                fixture.root.path(),
+                &format!("cargo-{field}-{kind}-output"),
+                &output_script(&metadata_json(
+                    fixture.root.path(),
+                    Some(target),
+                    Some(build),
+                )),
+            );
+            let error = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
+                .expect_err("invalid nested output root must fail");
+            assert_eq!(error.cause, expected);
+            assert_eq!(error.path, offending);
+        }
+    }
+}
+
+// AC: exact output pruning leaves sibling and ordinary member source visible with precise paths.
+#[test]
+fn metadata_output_prunes_only_the_exact_member_subtree() {
+    let fixture = fixture_workspace();
+    let member = fixture.root.path().join("crates/helper");
+    let output = member.join("generated-output");
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("MALFORMED.rs"), "fn broken(").unwrap();
+    fs::write(output.join("UNSAFE.rs"), "fn hidden() { unsafe {} }").unwrap();
+
+    let sources = [
+        ("target/source.rs", "fn target() { unsafe {} }\n"),
+        ("src/target/mod.rs", "fn src_target() { unsafe {} }\n"),
+        ("src/nested/mod.rs", "fn nested() { unsafe {} }\n"),
+    ];
+    for (relative, source) in sources {
+        fs::write(member.join(relative), source).unwrap();
+    }
+    let clean = member.join("src/clean.rs");
+    fs::write(&clean, "fn clean() {}\n").unwrap();
+    let build = fixture.root.path().join("build");
+    let command = fake_cargo(
+        fixture.root.path(),
+        "cargo-exact-pruning",
+        &output_script(&metadata_json(
+            fixture.root.path(),
+            Some(&output),
+            Some(&build),
+        )),
+    );
+    let inventory = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
+        .expect("exact output subtree is pruned");
+    assert!(
+        !inventory
+            .absolute_files
+            .contains(&output.join("MALFORMED.rs"))
+    );
+    assert!(!inventory.absolute_files.contains(&output.join("UNSAFE.rs")));
+    for (relative, _) in sources {
+        let expected = Path::new("crates/helper").join(relative);
+        assert!(
+            inventory
+                .findings
+                .iter()
+                .any(|finding| finding.path == expected),
+            "missing finding at {}",
+            expected.display()
+        );
+    }
+    assert!(inventory.absolute_files.contains(&clean));
 }
 
 // AC: include source is rejected except for the exact generated tray icon include.
