@@ -225,7 +225,7 @@ impl PulseAudioCapture {
             .name("solstone-audio".into())
             .spawn(move || {
                 let failures = Arc::new(FailureCounter::default());
-                drop(supervise(
+                supervise(
                     &worker_stopped,
                     &sender,
                     |sender, stopped, failures, reset_on_detection| {
@@ -233,7 +233,7 @@ impl PulseAudioCapture {
                     },
                     wait_interruptibly,
                     failures,
-                ));
+                );
             })
             .map_err(|error| error.to_string())?;
         let shared = Arc::new(Mutex::new(Shared {
@@ -257,8 +257,7 @@ fn supervise<Run, Wait>(
     mut run: Run,
     mut wait: Wait,
     failures: Arc<FailureCounter>,
-) -> Vec<AudioDiagnostic>
-where
+) where
     Run: FnMut(
         mpsc::Sender<PulseMessage>,
         Arc<AtomicBool>,
@@ -268,7 +267,6 @@ where
     Wait: FnMut(&AtomicBool, Duration) -> bool,
 {
     let mut reset_on_detection = true;
-    let mut diagnostics = Vec::new();
     while !stopped.load(Ordering::Acquire) {
         match run(
             sender.clone(),
@@ -284,7 +282,6 @@ where
                 if restart_for_failures {
                     let diagnostic = prepare_redetect(&failures);
                     diagnostic.report();
-                    diagnostics.push(diagnostic);
                 }
             }
             Err(PulseRunError::Degraded(reason)) => {
@@ -303,7 +300,6 @@ where
                 if threshold {
                     let diagnostic = prepare_redetect(&failures);
                     diagnostic.report();
-                    diagnostics.push(diagnostic);
                     reset_on_detection = true;
                 } else {
                     // Rebuilding Pulse after setup failure remains the same logical
@@ -313,7 +309,6 @@ where
             }
         }
     }
-    diagnostics
 }
 
 trait InterruptibleWait {
@@ -501,6 +496,21 @@ mod tests {
     }
 
     #[test]
+    fn prepare_redetect_reports_count_and_resets_counter() {
+        let failures = FailureCounter::default();
+        assert!(!failures.failed());
+        assert!(!failures.failed());
+        assert!(failures.failed());
+
+        let diagnostic = prepare_redetect(&failures);
+
+        assert_eq!(diagnostic, AudioDiagnostic::Redetect { count: 3 });
+        assert_eq!(diagnostic.level(), tracing::Level::INFO);
+        assert!(diagnostic.to_string().contains('3'));
+        assert_eq!(failures.count(), 0);
+    }
+
+    #[test]
     fn repeated_start_failures_reconstruct_and_reach_degraded() {
         // tests/test_audio_recorder.py::test_record_both_setup_failures_trigger_redetect
         let stopped = Arc::new(AtomicBool::new(false));
@@ -510,7 +520,7 @@ mod tests {
         let failures = Arc::new(FailureCounter::default());
         let run_states = Arc::new(Mutex::new(Vec::new()));
         let order = Arc::new(Mutex::new(Vec::new()));
-        let diagnostics = supervise(
+        supervise(
             &stopped,
             &sender,
             {
@@ -548,9 +558,6 @@ mod tests {
         );
         assert_eq!(attempts.load(Ordering::Acquire), 4);
         assert_eq!(waits.load(Ordering::Acquire), 3);
-        assert_eq!(diagnostics, vec![AudioDiagnostic::Redetect { count: 3 }]);
-        assert_eq!(diagnostics[0].level(), tracing::Level::INFO);
-        assert!(diagnostics[0].to_string().contains('3'));
         assert_eq!(failures.count(), 0);
         assert_eq!(
             *run_states.lock().unwrap(),
@@ -570,7 +577,7 @@ mod tests {
         let stopped = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::channel();
         let attempts = Arc::new(AtomicUsize::new(0));
-        let supervisor_diagnostics = supervise(
+        supervise(
             &stopped,
             &sender,
             {
@@ -597,7 +604,6 @@ mod tests {
             receiver,
             state: CaptureState::default(),
         };
-        assert!(supervisor_diagnostics.is_empty());
         assert_eq!(
             shared.pump(),
             [AudioDiagnostic::Unavailable, AudioDiagnostic::Recovered]
@@ -646,7 +652,7 @@ mod tests {
         let stopped = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::channel();
         let waits = Arc::new(AtomicUsize::new(0));
-        let supervisor_diagnostics = supervise(
+        supervise(
             &stopped,
             &sender,
             {
@@ -670,7 +676,6 @@ mod tests {
             receiver,
             state: CaptureState::default(),
         };
-        assert!(supervisor_diagnostics.is_empty());
         assert_eq!(shared.pump(), vec![AudioDiagnostic::Unavailable]);
         assert!(!shared.state.available);
         assert_eq!(waits.load(Ordering::Acquire), 1);
