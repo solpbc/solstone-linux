@@ -42,3 +42,5 @@ mod release_rail_tests;
 mod test_support;
 #[cfg(test)]
 mod toolchain_policy_tests;
+#[cfg(test)]
+mod unsafe_policy_tests;

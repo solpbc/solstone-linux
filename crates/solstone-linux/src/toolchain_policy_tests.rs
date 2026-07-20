@@ -597,34 +597,6 @@ fn ambient_toolchain_override_cannot_escape_preflight() {
     assert!(!text.contains("cargo clippy"));
 }
 
-// AC: unsafe Rust remains confined to the reviewed startup environment seam.
-#[test]
-fn unsafe_code_is_confined_to_session_environment_wrapper() {
-    let source = workspace_root().join("crates/solstone-linux/src");
-    let mut unsafe_blocks = Vec::<PathBuf>::new();
-    let mut allowances = Vec::<PathBuf>::new();
-    for entry in fs::read_dir(&source).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_none_or(|extension| extension != "rs")
-            || path.file_name().unwrap() == "toolchain_policy_tests.rs"
-        {
-            continue;
-        }
-        let text = fs::read_to_string(&path).unwrap();
-        unsafe_blocks.extend(std::iter::repeat_n(
-            path.clone(),
-            text.matches("unsafe {").count(),
-        ));
-        allowances.extend(std::iter::repeat_n(
-            path.clone(),
-            text.matches("#[allow(unsafe_code)]").count(),
-        ));
-    }
-    let cli = source.join("cli.rs");
-    assert_eq!(unsafe_blocks, vec![cli.clone(), cli.clone()]);
-    assert_eq!(allowances, vec![cli.clone(), cli]);
-}
-
 // AC: package-tool mirrors equal their Makefile authorities without test literals.
 #[test]
 fn package_tool_versions_match_authority() {

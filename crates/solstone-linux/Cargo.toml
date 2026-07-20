@@ -42,6 +42,8 @@ sd-notify = "0.5.0"
 resvg = { version = "0.47", default-features = false }
 
 [dev-dependencies]
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
