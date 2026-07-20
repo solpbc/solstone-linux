@@ -633,3 +633,21 @@ fn dependency_policy_denies_wildcards_and_unknown_sources() {
         assert!(reason.contains("Remove when wayland-scanner accepts quick-xml >=0.41."));
     }
 }
+
+#[test]
+fn observer_contract_gate_is_locked_offline_and_named() {
+    let makefile = fs::read_to_string(workspace_root().join("Makefile")).unwrap();
+    let target = makefile
+        .split("check-observer-contract: rust-preflight")
+        .nth(1)
+        .unwrap()
+        .split("\nci:")
+        .next()
+        .unwrap();
+    assert!(target.contains("CARGO_NET_OFFLINE=true"));
+    assert!(target.contains("$(CARGO_LOCKED) -p solstone-linux"));
+    assert!(target.contains("observer_contract_tests::observer_contract_conformance"));
+    assert!(target.contains("1.0.2"));
+    assert!(target.contains("9ecf4bbfcd793a8aecc9e2257254e68c74c48cde22282ff07369101b90d97c33"));
+    assert!(makefile.contains("ci: rust-preflight check-cargo-deny check-observer-contract"));
+}

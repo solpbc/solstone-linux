@@ -819,6 +819,16 @@ fn segment_proven_held(segment_dir: &Path, entry: &ListingEntry) -> bool {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn contract_sha256_file(path: &Path) -> io::Result<String> {
+    sha256_file(path)
+}
+
+#[cfg(test)]
+pub(crate) fn contract_segment_proven_held(segment_dir: &Path, entry: &ListingEntry) -> bool {
+    segment_proven_held(segment_dir, entry)
+}
+
 fn index_entries(items: &[ListingEntry]) -> HashMap<String, &ListingEntry> {
     let mut indexed = HashMap::new();
     for item in items {

@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -77,10 +77,24 @@ format: rust-preflight
 test: rust-preflight
 	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux
 
+check-observer-contract: rust-preflight
+	@echo "Observer contract bundle: 1.0.2"
+	@echo "Observer contract manifest SHA-256: 9ecf4bbfcd793a8aecc9e2257254e68c74c48cde22282ff07369101b90d97c33"
+	@inventory=$$(CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p solstone-linux observer_contract_tests:: -- --list); \
+	printf '%s\n' "$$inventory"; \
+	printf '%s\n' "$$inventory" | grep -Fx 'observer_contract_tests::observer_contract_conformance: test' >/dev/null || { echo "error: observer contract test inventory mismatch" >&2; exit 1; }; \
+	actual=$$(printf '%s\n' "$$inventory" | grep -c '^observer_contract_tests::'); \
+	[ "$$actual" -eq 1 ] || { echo "error: observer contract test inventory mismatch: expected 1, actual $$actual" >&2; exit 1; }
+	@output=$$(mktemp); \
+	trap 'rm -f "$$output"' EXIT; \
+	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p solstone-linux observer_contract_tests::observer_contract_conformance -- --exact >"$$output" 2>&1 || { status=$$?; tail -50 "$$output"; exit $$status; }; \
+	tail -50 "$$output"; \
+	grep -Eq 'test result: ok\. 1 passed; 0 failed' "$$output" || { echo "error: observer contract named test did not execute" >&2; exit 1; }
+
 shellcheck:
 	shellcheck $(SHELLCHECK_SCRIPTS)
 
-ci: rust-preflight check-cargo-deny
+ci: rust-preflight check-cargo-deny check-observer-contract
 	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check

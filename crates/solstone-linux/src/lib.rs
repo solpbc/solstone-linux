@@ -37,6 +37,8 @@ pub mod upload;
 pub mod video;
 
 #[cfg(test)]
+mod observer_contract_tests;
+#[cfg(test)]
 mod release_rail_tests;
 #[cfg(test)]
 mod test_support;

@@ -12,6 +12,8 @@ use rustix::{
     fs::{FileType, Mode, OFlags},
     io::Errno,
 };
+#[cfg(test)]
+use serde_json::Map;
 use serde_json::Value;
 use std::{
     env,
@@ -358,6 +360,10 @@ async fn dispatch_event(
         tracing::debug!(event, "Chat event missing request_id");
         return;
     };
+    if request_id.trim().is_empty() {
+        tracing::debug!(event, "Chat event missing request_id");
+        return;
+    }
 
     if event == EVENT_SOL_CHAT_REQUEST {
         let summary = python_or_empty_str(payload.get("summary"));
@@ -455,7 +461,10 @@ async fn poll_opt_in(
     key: &str,
     stop: &CancellationToken,
 ) -> bool {
-    let url = format!("{}/api/sol_voice", server_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/app/settings/api/sol_voice",
+        server_url.trim_end_matches('/')
+    );
     let request = client
         .get(url)
         .bearer_auth(key)
@@ -473,8 +482,69 @@ async fn poll_opt_in(
         .json::<Value>()
         .await
         .ok()
-        .and_then(|body| body.get("linux_notify_send").and_then(Value::as_bool))
+        .and_then(|body| {
+            body.get("system_notifications")
+                .and_then(Value::as_object)
+                .and_then(|settings| settings.get("linux"))
+                .and_then(Value::as_bool)
+        })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub(crate) async fn contract_poll_opt_in(
+    client: &Client,
+    server_url: &str,
+    key: &str,
+    stop: &CancellationToken,
+) -> bool {
+    poll_opt_in(client, server_url, key, stop).await
+}
+
+#[cfg(test)]
+pub(crate) fn contract_parse_sse(chunk: &[u8]) -> Vec<(String, Option<String>, String)> {
+    let (_, items) = parse_sse_chunk(SseParseState::default(), chunk);
+    items
+        .into_iter()
+        .map(|item| match item {
+            SseItem::Heartbeat => ("heartbeat".to_owned(), None, String::new()),
+            SseItem::Frame(frame) => ("frame".to_owned(), frame.event, frame.data),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) async fn contract_dispatch_creates_pending(payload: Map<String, Value>) -> bool {
+    let mut pending = Vec::new();
+    let temp = tempfile::tempdir().unwrap();
+    let deps = BridgeDeps {
+        notify: Arc::new(|_, cancellation| {
+            async move {
+                cancellation.cancelled().await;
+                NotificationOutcome::Cancelled
+            }
+            .boxed()
+        }),
+        ack_open: Arc::new(|_, _, _| async {}.boxed()),
+        open_browser: Arc::new(|_| async {}.boxed()),
+        supports_actions: Arc::new(|| async { true }.boxed()),
+        sleep: Arc::new(|_| async {}.boxed()),
+        monotonic_now: Arc::new(|| Duration::ZERO),
+        local_day: Arc::new(|| "20260101".to_owned()),
+    };
+    dispatch_event(
+        &payload,
+        &mut pending,
+        true,
+        false,
+        &Config::default(),
+        &deps,
+        &temp.path().join("missing"),
+    )
+    .await;
+    let created = !pending.is_empty();
+    cancel_all_pending(&mut pending).await;
+    created
 }
 
 async fn opt_in_loop(
@@ -587,6 +657,23 @@ async fn consume_connection(
             let SseItem::Frame(frame) = item else {
                 continue;
             };
+            if frame.event.as_deref() == Some("error") {
+                let reason_code =
+                    serde_json::from_str::<Value>(&frame.data)
+                        .ok()
+                        .and_then(|payload| {
+                            payload
+                                .get("reason_code")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        });
+                tracing::error!(
+                    frame_kind = "error",
+                    reason_code = reason_code.as_deref(),
+                    "Chat bridge SSE error"
+                );
+                return ConnectionEnd::Terminal;
+            }
             let payload = match serde_json::from_str::<Value>(&frame.data) {
                 Ok(Value::Object(payload)) => payload,
                 Ok(_) => continue,
@@ -1703,6 +1790,43 @@ mod tests {
         assert_eq!(pending, 1);
     }
 
+    #[tokio::test]
+    async fn observer_error_frame_is_terminal_before_dispatch() {
+        let (result, requests) = consume_mock_body(
+            "event: error\ndata: {\"detail\":\"Observer revoked\",\"error\":\"revoked\",\"reason_code\":\"pl_revoked\"}\n\n"
+                .to_owned(),
+        )
+        .await;
+        assert!(matches!(result, ConnectionEnd::Terminal));
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn blank_request_id_is_rejected_without_normalizing_nonblank_ids() {
+        for request_id in ["", " ", "\t\r\n"] {
+            let mut value = payload(EVENT_SOL_CHAT_REQUEST);
+            value.insert("request_id".into(), Value::String(request_id.to_owned()));
+            assert!(!contract_dispatch_creates_pending(value).await);
+        }
+        let preserved = "  request-id  ";
+        let mut value = payload(EVENT_SOL_CHAT_REQUEST);
+        value.insert("request_id".into(), Value::String(preserved.to_owned()));
+        let temp = tempfile::tempdir().unwrap();
+        let mut pending = Vec::new();
+        dispatch_event(
+            &value,
+            &mut pending,
+            true,
+            false,
+            &config(),
+            &test_deps(),
+            &temp.path().join("missing"),
+        )
+        .await;
+        assert_eq!(pending[0].request_id, preserved);
+        cancel_all_pending(&mut pending).await;
+    }
+
     // AC: malformed-frame hardening — scalar/array JSON payloads are silently dropped.
     #[tokio::test]
     async fn non_object_json_frames_do_not_break_connection() {
@@ -1886,7 +2010,8 @@ mod tests {
     // AC: opt-in polls immediately and only then requests the 300-second interval.
     #[tokio::test]
     async fn opt_in_poll_is_immediate_then_sleeps_three_hundred_seconds() {
-        let server = MockServer::new(vec![(200, json!({"linux_notify_send":true}))]).await;
+        let server =
+            MockServer::new(vec![(200, json!({"system_notifications":{"linux":true}}))]).await;
         let delays = Arc::new(Mutex::new(Vec::new()));
         let stop = CancellationToken::new();
         let stop_on_sleep = stop.clone();
@@ -1909,7 +2034,7 @@ mod tests {
         .await;
         assert!(value.load(Ordering::Acquire));
         assert_eq!(*delays.lock().unwrap(), [OPT_IN_POLL]);
-        assert_eq!(server.request_count("/api/sol_voice"), 1);
+        assert_eq!(server.request_count("/app/settings/api/sol_voice"), 1);
     }
 
     // AC: opt-in fails closed on status, transport, and malformed JSON failures.

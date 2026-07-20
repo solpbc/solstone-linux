@@ -304,21 +304,26 @@ impl UploadClient {
                 Ok(response) if response.status() == StatusCode::OK => {
                     match response.json::<Value>().await {
                         Ok(body) => {
-                            let duplicate =
-                                body.get("status").and_then(Value::as_str) == Some("duplicate");
-                            let stored_key = body
-                                .get(if duplicate {
-                                    "existing_segment"
-                                } else {
-                                    "segment"
-                                })
-                                .and_then(Value::as_str)
-                                .map(str::to_owned);
-                            return UploadResult {
-                                success: true,
-                                duplicate,
-                                error_type: None,
-                                stored_key,
+                            return match body.get("status").and_then(Value::as_str) {
+                                Some("ok" | "collision") => UploadResult {
+                                    success: true,
+                                    duplicate: false,
+                                    error_type: None,
+                                    stored_key: body
+                                        .get("segment")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned),
+                                },
+                                Some("duplicate") => UploadResult {
+                                    success: true,
+                                    duplicate: true,
+                                    error_type: None,
+                                    stored_key: body
+                                        .get("existing_segment")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned),
+                                },
+                                _ => UploadResult::failure(Some(ErrorType::Incompatible)),
                             };
                         }
                         Err(error) => {
@@ -537,6 +542,11 @@ fn parse_listing(body: Value, status_code: u16) -> QueryResult {
         legacy,
         truncated,
     }
+}
+
+#[cfg(test)]
+pub(crate) fn contract_parse_listing(body: Value, status_code: u16) -> QueryResult {
+    parse_listing(body, status_code)
 }
 
 #[cfg(test)]

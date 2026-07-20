@@ -84,6 +84,14 @@ Registered observers also include a diagnostics-only status beacon in the
 journal: identity, version, uptime, and sync liveness counts only, with no
 captured or experienced content.
 
+## Observer contract
+
+The observer-client contract is owned by the solstone journal and frozen here as a byte-exact, language-neutral bundle at `vendor/observer-client-contract/`. This observer adopts bundle version 1.0.2 and verifies it offline with `make check-observer-contract`.
+
+The bundle version, the solstone-linux application release, and observer wire-protocol version 2 are independent versions. When the observer and authority disagree, resolve the incompatibility at the journal authority first; do not rewrite the vendored contract or weaken consumer conformance.
+
+See `contracts/README.md` for the verified import ritual and public provenance record.
+
 ## License
 
 AGPL-3.0-only — Copyright (c) 2026 sol pbc
