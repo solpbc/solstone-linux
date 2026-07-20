@@ -3,6 +3,7 @@
 
 use crate::release_rail_tests::{command_path, workspace_root};
 use proc_macro2::{TokenStream, TokenTree};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -243,8 +244,17 @@ fn normalize_scan_root(root: &Path) -> Result<PathBuf, ScanError> {
     })
 }
 
-fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>, ScanError> {
-    let output = Command::new(cargo)
+struct CargoCommand {
+    program: PathBuf,
+    prefix: Vec<OsString>,
+}
+
+fn metadata_roots_with_command(
+    root: &Path,
+    cargo: &CargoCommand,
+) -> Result<Vec<PathBuf>, ScanError> {
+    let output = Command::new(&cargo.program)
+        .args(&cargo.prefix)
         .args([
             "metadata",
             "--locked",
@@ -258,7 +268,11 @@ fn metadata_roots_with_command(root: &Path, cargo: &Path) -> Result<Vec<PathBuf>
         .current_dir(root)
         .output()
         .map_err(|error| {
-            ScanError::new(cargo, ScanErrorCause::MetadataExecution, error.to_string())
+            ScanError::new(
+                &cargo.program,
+                ScanErrorCause::MetadataExecution,
+                error.to_string(),
+            )
         })?;
     if !output.status.success() {
         return Err(ScanError::new(
@@ -348,10 +362,19 @@ fn validate_output_root(root: &Path, cause: ScanErrorCause) -> Result<(), ScanEr
 }
 
 fn scan_workspace_unsafe(root: &Path) -> Result<Inventory, ScanError> {
-    scan_workspace_unsafe_with_command(root, &command_path("cargo"))
+    scan_workspace_unsafe_with_command(
+        root,
+        &CargoCommand {
+            program: command_path("cargo"),
+            prefix: Vec::new(),
+        },
+    )
 }
 
-fn scan_workspace_unsafe_with_command(root: &Path, cargo: &Path) -> Result<Inventory, ScanError> {
+fn scan_workspace_unsafe_with_command(
+    root: &Path,
+    cargo: &CargoCommand,
+) -> Result<Inventory, ScanError> {
     let normalized_root = normalize_scan_root(root)?;
     let root = normalized_root.as_path();
     let manifest_path = root.join("Cargo.toml");
@@ -2217,20 +2240,23 @@ fn reports_member_walk_failure() {
     assert_eq!(error.path, Path::new("crates/helper/src/nested"));
 }
 
-fn fake_cargo(root: &Path, name: &str, body: &[u8]) -> PathBuf {
+fn fixture_cargo_command(root: &Path, name: &str, body: &[u8]) -> CargoCommand {
     use std::os::unix::fs::PermissionsExt;
     let path = root.join(name);
-    fs::write(&path, body).expect("fake cargo");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("fake cargo mode");
-    path
+    fs::write(&path, body).expect("fixture cargo");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("fixture cargo mode");
+    CargoCommand {
+        program: command_path("sh"),
+        prefix: vec![path.into_os_string()],
+    }
 }
 
-fn spying_cargo(root: &Path, name: &str, record: &Path, json: &str) -> PathBuf {
-    fake_cargo(
+fn spying_cargo(root: &Path, name: &str, record: &Path, json: &str) -> CargoCommand {
+    fixture_cargo_command(
         root,
         name,
         format!(
-            "#!/bin/sh\n{{\n    pwd\n    printf '%s\\n' \"$@\"\n}} > '{}'\nprintf '%s' '{}'\n",
+            "#!/bin/sh\n{{\n    printf '%s\\n' \"$0\"\n    pwd\n    printf '%s\\n' \"$@\"\n}} > '{}'\nprintf '%s' '{}'\n",
             record.display(),
             json
         )
@@ -2268,6 +2294,7 @@ fn cargo_metadata_uses_normalized_root_and_manifest_path() {
         &record,
         &metadata_json(&normalized, Some(&target), Some(&build)),
     );
+    let script = PathBuf::from(&command.prefix[0]);
     scan_workspace_unsafe_with_command(&unnormalized, &command).expect("fixture scans");
     let lines = fs::read_to_string(&record)
         .expect("spy output")
@@ -2277,6 +2304,7 @@ fn cargo_metadata_uses_normalized_root_and_manifest_path() {
     assert_eq!(
         lines,
         vec![
+            script.display().to_string(),
             normalized.display().to_string(),
             "metadata".into(),
             "--locked".into(),
@@ -2311,19 +2339,19 @@ fn cargo_metadata_failures_are_discriminated_and_path_bearing() {
     let target = root.join("target");
     let cases = [
         (
-            fake_cargo(root, "cargo-exit", b"#!/bin/sh\nexit 19\n"),
+            fixture_cargo_command(root, "cargo-exit", b"#!/bin/sh\nexit 19\n"),
             ScanErrorCause::MetadataExit,
         ),
         (
-            fake_cargo(root, "cargo-utf8", b"#!/bin/sh\nprintf '\\377'\n"),
+            fixture_cargo_command(root, "cargo-utf8", b"#!/bin/sh\nprintf '\\377'\n"),
             ScanErrorCause::MetadataStdoutUtf8,
         ),
         (
-            fake_cargo(root, "cargo-json", b"#!/bin/sh\nprintf '{'\n"),
+            fixture_cargo_command(root, "cargo-json", b"#!/bin/sh\nprintf '{'\n"),
             ScanErrorCause::MetadataJson,
         ),
         (
-            fake_cargo(
+            fixture_cargo_command(
                 root,
                 "cargo-target",
                 &output_script(&metadata_json(root, None, Some(&target))),
@@ -2331,7 +2359,7 @@ fn cargo_metadata_failures_are_discriminated_and_path_bearing() {
             ScanErrorCause::MetadataTargetDirectory,
         ),
         (
-            fake_cargo(
+            fixture_cargo_command(
                 root,
                 "cargo-build",
                 &output_script(&metadata_json(root, Some(&target), None)),
@@ -2339,7 +2367,7 @@ fn cargo_metadata_failures_are_discriminated_and_path_bearing() {
             ScanErrorCause::MetadataBuildDirectory,
         ),
         (
-            fake_cargo(
+            fixture_cargo_command(
                 root,
                 "cargo-workspace",
                 &output_script(&metadata_json(
@@ -2357,9 +2385,77 @@ fn cargo_metadata_failures_are_discriminated_and_path_bearing() {
         assert!(!error.path.as_os_str().is_empty(), "{error}");
     }
     let missing = root.join("does-not-exist");
-    let error = metadata_roots_with_command(root, &missing).expect_err("spawn must fail");
+    let command = CargoCommand {
+        program: missing.clone(),
+        prefix: Vec::new(),
+    };
+    let error = metadata_roots_with_command(root, &command).expect_err("spawn must fail");
     assert_eq!(error.cause, ScanErrorCause::MetadataExecution);
     assert_eq!(error.path, missing);
+}
+
+// AC: non-executable metadata fixtures run as interpreter data while preserving the exact command boundary and process behavior.
+#[test]
+fn non_executable_metadata_fixture_runs_only_through_interpreter_seam() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let body = b"#!/bin/sh\nrecord=$1\nmode=$2\nshift 2\n{\n    printf '%s\\n' \"$0\"\n    pwd\n    printf '%s\\n' \"$@\"\n} > \"$record\"\nprintf '\\377'\nprintf 'fixture stderr' >&2\nif [ \"$mode\" = exit ]; then\n    exit 23\nfi\n";
+    let mut cargo = fixture_cargo_command(root, "cargo-process-witness", body);
+    let script = PathBuf::from(&cargo.prefix[0]);
+    let mode = fs::metadata(&script)
+        .expect("fixture metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0);
+
+    let direct_record = root.join("direct-record");
+    let output = Command::new(&cargo.program)
+        .args([
+            script.as_os_str(),
+            direct_record.as_os_str(),
+            std::ffi::OsStr::new("exit"),
+            std::ffi::OsStr::new("sentinel-one"),
+            std::ffi::OsStr::new("sentinel-two"),
+        ])
+        .current_dir(root)
+        .output()
+        .expect("interpreter executes fixture data");
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(output.stdout, vec![0xff]);
+    assert_eq!(output.stderr, b"fixture stderr");
+    assert_eq!(
+        fs::read_to_string(&direct_record).expect("direct record"),
+        format!(
+            "{}\n{}\nsentinel-one\nsentinel-two\n",
+            script.display(),
+            root.display()
+        )
+    );
+
+    let metadata_record = root.join("metadata-record");
+    cargo.prefix.extend([
+        metadata_record.clone().into_os_string(),
+        OsString::from("utf8"),
+    ]);
+    let error = metadata_roots_with_command(root, &cargo).expect_err("stdout is not UTF-8");
+    assert_eq!(error.cause, ScanErrorCause::MetadataStdoutUtf8);
+    assert_eq!(error.path, root);
+    assert_eq!(
+        fs::read_to_string(&metadata_record).expect("metadata record"),
+        format!(
+            "{}\n{}\nmetadata\n--locked\n--offline\n--format-version\n1\n--no-deps\n--manifest-path\n{}\n",
+            script.display(),
+            root.display(),
+            root.join("Cargo.toml").display()
+        )
+    );
+
+    let error = Command::new(&script)
+        .output()
+        .expect_err("direct fixture execution must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }
 
 // AC: every symlink component in a metadata output root fails without regard to its destination.
@@ -2437,7 +2533,7 @@ fn metadata_output_root_containing_or_equal_to_member_fails() {
             } else {
                 (&ordinary_target, &output)
             };
-            let command = fake_cargo(
+            let command = fixture_cargo_command(
                 fixture.root.path(),
                 &format!("cargo-{field}-containing-output"),
                 &output_script(&metadata_json(
@@ -2477,7 +2573,7 @@ fn metadata_output_root_inside_member_is_pruned() {
         } else {
             (&ordinary_target, &output)
         };
-        let command = fake_cargo(
+        let command = fixture_cargo_command(
             fixture.root.path(),
             &format!("cargo-{field}-nested-output"),
             &output_script(&metadata_json(
@@ -2534,7 +2630,7 @@ fn metadata_output_root_inside_member_is_validated_before_pruning() {
             } else {
                 (&ordinary_target, &output)
             };
-            let command = fake_cargo(
+            let command = fixture_cargo_command(
                 fixture.root.path(),
                 &format!("cargo-{field}-{kind}-output"),
                 &output_script(&metadata_json(
@@ -2572,7 +2668,7 @@ fn metadata_output_prunes_only_the_exact_member_subtree() {
     let clean = member.join("src/clean.rs");
     fs::write(&clean, "fn clean() {}\n").unwrap();
     let build = fixture.root.path().join("build");
-    let command = fake_cargo(
+    let command = fixture_cargo_command(
         fixture.root.path(),
         "cargo-exact-pruning",
         &output_script(&metadata_json(
