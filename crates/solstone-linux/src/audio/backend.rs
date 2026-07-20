@@ -98,10 +98,13 @@ impl FailureCounter {
     }
 }
 
-fn prepare_redetect(failures: &FailureCounter) -> AudioDiagnostic {
-    let count = failures.count();
+fn report_redetect(failures: &FailureCounter, observe: &mut dyn FnMut(AudioDiagnostic)) {
+    let diagnostic = AudioDiagnostic::Redetect {
+        count: failures.count(),
+    };
+    diagnostic.report();
+    observe(diagnostic);
     failures.detected();
-    AudioDiagnostic::Redetect { count }
 }
 
 struct CaptureState {
@@ -281,9 +284,7 @@ fn supervise<Run, Wait, Observe>(
                     break;
                 }
                 if restart_for_failures {
-                    let diagnostic = prepare_redetect(&failures);
-                    diagnostic.report();
-                    observe(diagnostic);
+                    report_redetect(&failures, &mut observe);
                 }
             }
             Err(PulseRunError::Degraded(reason)) => {
@@ -300,9 +301,7 @@ fn supervise<Run, Wait, Observe>(
                     break;
                 }
                 if threshold {
-                    let diagnostic = prepare_redetect(&failures);
-                    diagnostic.report();
-                    observe(diagnostic);
+                    report_redetect(&failures, &mut observe);
                     reset_on_detection = true;
                 } else {
                     // Rebuilding Pulse after setup failure remains the same logical
@@ -555,16 +554,16 @@ mod tests {
     }
 
     #[test]
-    fn prepare_redetect_reports_count_and_resets_counter() {
+    fn report_redetect_observes_count_before_reset() {
         let failures = FailureCounter::default();
         assert!(!failures.failed());
         assert!(!failures.failed());
         assert!(failures.failed());
+        let mut observed_count = None;
 
-        let diagnostic = prepare_redetect(&failures);
+        report_redetect(&failures, &mut |_| observed_count = Some(failures.count()));
 
-        assert_eq!(diagnostic, AudioDiagnostic::Redetect { count: 3 });
-        assert_eq!(diagnostic.level(), tracing::Level::INFO);
+        assert_eq!(observed_count, Some(3));
         assert_eq!(failures.count(), 0);
     }
 
@@ -579,6 +578,7 @@ mod tests {
         let run_states = Arc::new(Mutex::new(Vec::new()));
         let order = Arc::new(Mutex::new(Vec::new()));
         let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let observed_counts = Arc::new(Mutex::new(Vec::new()));
         supervise(
             &stopped,
             &sender,
@@ -616,9 +616,12 @@ mod tests {
             {
                 let order = Arc::clone(&order);
                 let diagnostics = Arc::clone(&diagnostics);
+                let failures = Arc::clone(&failures);
+                let observed_counts = Arc::clone(&observed_counts);
                 move |d| {
                     order.lock().unwrap().push("observe");
                     diagnostics.lock().unwrap().push(d);
+                    observed_counts.lock().unwrap().push(failures.count());
                 }
             },
             Arc::clone(&failures),
@@ -626,6 +629,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Acquire), 4);
         assert_eq!(waits.load(Ordering::Acquire), 3);
         assert_eq!(failures.count(), 0);
+        assert_eq!(*observed_counts.lock().unwrap(), [3]);
         assert_eq!(
             *run_states.lock().unwrap(),
             [(true, 0), (false, 1), (false, 2), (true, 0)]
@@ -641,6 +645,73 @@ mod tests {
             *diagnostics.lock().unwrap(),
             [AudioDiagnostic::Redetect { count: 3 }]
         );
+        assert_eq!(
+            diagnostics.lock().unwrap()[0].to_string(),
+            "Re-detecting audio devices after 3 consecutive recorder failures"
+        );
+    }
+
+    #[test]
+    fn successful_run_redetect_reports_before_reset() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (sender, _) = mpsc::channel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let failures = Arc::new(FailureCounter::default());
+        let run_states = Arc::new(Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let observed_counts = Arc::new(Mutex::new(Vec::new()));
+        supervise(
+            &stopped,
+            &sender,
+            {
+                let attempts = Arc::clone(&attempts);
+                let stopped = Arc::clone(&stopped);
+                let run_states = Arc::clone(&run_states);
+                let order = Arc::clone(&order);
+                move |_, _, failures, reset_on_detection| {
+                    order.lock().unwrap().push("run");
+                    run_states
+                        .lock()
+                        .unwrap()
+                        .push((reset_on_detection, failures.count()));
+                    let attempt = attempts.fetch_add(1, Ordering::AcqRel) + 1;
+                    if attempt == 1 {
+                        assert!(!failures.failed());
+                        assert!(!failures.failed());
+                        assert!(failures.failed());
+                        Ok(true)
+                    } else {
+                        stopped.store(true, Ordering::Release);
+                        Ok(false)
+                    }
+                }
+            },
+            |_, _| panic!("successful runs must not wait"),
+            {
+                let order = Arc::clone(&order);
+                let diagnostics = Arc::clone(&diagnostics);
+                let failures = Arc::clone(&failures);
+                let observed_counts = Arc::clone(&observed_counts);
+                move |diagnostic| {
+                    order.lock().unwrap().push("observe");
+                    diagnostics.lock().unwrap().push(diagnostic);
+                    observed_counts.lock().unwrap().push(failures.count());
+                }
+            },
+            Arc::clone(&failures),
+        );
+
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(*order.lock().unwrap(), ["run", "observe", "run"]);
+        assert_eq!(*observed_counts.lock().unwrap(), [3]);
+        assert_eq!(failures.count(), 0);
+        assert_eq!(*run_states.lock().unwrap(), [(true, 0), (true, 0)]);
+        assert_eq!(
+            *diagnostics.lock().unwrap(),
+            [AudioDiagnostic::Redetect { count: 3 }]
+        );
+        assert_eq!(diagnostics.lock().unwrap()[0].level(), tracing::Level::INFO);
         assert_eq!(
             diagnostics.lock().unwrap()[0].to_string(),
             "Re-detecting audio devices after 3 consecutive recorder failures"
