@@ -448,7 +448,7 @@ fn scan_workspace_unsafe_with_command(root: &Path, cargo: &Path) -> Result<Inven
                     output_root,
                     cause,
                     format!(
-                        "metadata output root intersects member {}",
+                        "metadata output root contains or equals member {}",
                         relative.display()
                     ),
                 ));
@@ -1618,7 +1618,6 @@ fn reviewed_test_seam_requires_test_module_and_attributes() {
         REVIEWED_FIXTURE_SEAMS.replace("#[cfg(test)]", "#[cfg_attr(test, cfg(test))]"),
         REVIEWED_FIXTURE_SEAMS.replace("mod tests", "pub mod tests"),
         REVIEWED_FIXTURE_SEAMS.replace("mod tests", "pub(crate) mod tests"),
-        REVIEWED_FIXTURE_SEAMS.replace("mod tests", "#[path=\"tests.rs\"]\nmod tests"),
         REVIEWED_FIXTURE_SEAMS.replace(
             "mod tests {\n#[test]\n#[allow(unsafe_code)]\nfn session_environment_wrapper_assigns_and_restores() {\n    const NAME: &str = \"NAME\";\n    unsafe { ::std::env::remove_var(NAME) }\n}\n}",
             "mod tests;",
@@ -1636,7 +1635,7 @@ fn reviewed_test_seam_requires_test_module_and_attributes() {
         REVIEWED_FIXTURE_SEAMS.replace("mod tests {", "mod tests {\n#![cfg(test)]"),
         REVIEWED_FIXTURE_SEAMS.replace(
             "#[cfg(test)]\nmod tests {",
-            "#[cfg(test)]\nmod tests {\n#![cfg(test)]",
+            "#[cfg(test)]\nmod tests {\n#![cfg(test)]\n#![cfg(test)]",
         ),
         REVIEWED_FIXTURE_SEAMS.replace("mod tests", "mod renamed"),
         format!("mod outer {{\n{REVIEWED_FIXTURE_SEAMS}\n}}\n"),
@@ -1646,17 +1645,15 @@ fn reviewed_test_seam_requires_test_module_and_attributes() {
     for source in mutations {
         let fixture = fixture_workspace();
         write_reviewed_fixture_seams(&fixture, &source);
-        match scan_fixture(&fixture) {
-            Ok(inventory) => assert!(reviewed_seams_error(&inventory).is_err(), "{source}"),
-            Err(error) => {
-                assert_eq!(
-                    error.cause,
-                    ScanErrorCause::InvalidPathAttribute,
-                    "{source}"
-                )
-            }
-        }
+        let inventory = scan_fixture(&fixture).expect("module identity fixture scans");
+        assert!(reviewed_seams_error(&inventory).is_err(), "{source}");
     }
+
+    let fixture = fixture_workspace();
+    let source = REVIEWED_FIXTURE_SEAMS.replace("mod tests", "#[path=\"tests.rs\"]\nmod tests");
+    write_reviewed_fixture_seams(&fixture, &source);
+    let error = scan_fixture(&fixture).expect_err("path attribute must fail scanning");
+    assert_eq!(error.cause, ScanErrorCause::InvalidPathAttribute);
 }
 
 // AC: module identity preserves visibility, form, and direct attribute placement without evaluating paths.
@@ -1694,17 +1691,21 @@ fn module_identity_distinguishes_reviewed_module_structure() {
     ];
     for (source, visibility, form, outer, inner) in cases {
         let node = syn::parse_str::<syn::ItemMod>(source).expect("module parses");
-        assert_eq!(
-            module_identity(&node),
-            AncestryNode::Module {
-                name: "tests".into(),
-                visibility,
-                form,
-                outer,
-                inner,
-            },
-            "{source}"
-        );
+        let AncestryNode::Module {
+            name,
+            visibility: actual_visibility,
+            form: actual_form,
+            outer: actual_outer,
+            inner: actual_inner,
+        } = module_identity(&node)
+        else {
+            unreachable!("module identity helper returned non-module ancestry")
+        };
+        assert_eq!(name, "tests", "{source}");
+        assert_eq!(actual_visibility, visibility, "{source}");
+        assert_eq!(actual_form, form, "{source}");
+        assert_eq!(actual_outer, outer, "{source}");
+        assert_eq!(actual_inner, inner, "{source}");
     }
 }
 
@@ -2417,38 +2418,50 @@ fn nonexistent_metadata_output_root_is_accepted() {
 // AC: metadata output roots equal to or containing a member fail with the field cause and member name.
 #[test]
 fn metadata_output_root_containing_or_equal_to_member_fails() {
-    for containing in [false, true] {
-        let fixture = fixture_workspace();
-        let member = fixture.root.path().join("crates/helper");
-        let output = if containing {
-            fixture.root.path().join("crates")
-        } else {
-            member
-        };
-        let build = fixture.root.path().join("build");
-        let command = fake_cargo(
-            fixture.root.path(),
-            "cargo-containing-output",
-            &output_script(&metadata_json(
+    for (field, expected) in [
+        ("target", ScanErrorCause::MetadataTargetDirectory),
+        ("build", ScanErrorCause::MetadataBuildDirectory),
+    ] {
+        for containing in [false, true] {
+            let fixture = fixture_workspace();
+            let member = fixture.root.path().join("crates/helper");
+            let output = if containing {
+                fixture.root.path().join("crates")
+            } else {
+                member
+            };
+            let ordinary_target = fixture.root.path().join("target");
+            let ordinary_build = fixture.root.path().join("build");
+            let (target, build) = if field == "target" {
+                (&output, &ordinary_build)
+            } else {
+                (&ordinary_target, &output)
+            };
+            let command = fake_cargo(
                 fixture.root.path(),
-                Some(&output),
-                Some(&build),
-            )),
-        );
-        let error = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
-            .expect_err("member-containing output root must fail");
-        assert_eq!(error.cause, ScanErrorCause::MetadataTargetDirectory);
-        assert_eq!(error.path, output);
-        let expected_member = if containing {
-            "crates/solstone-linux"
-        } else {
-            "crates/helper"
-        };
-        assert!(error.detail.contains(expected_member));
+                &format!("cargo-{field}-containing-output"),
+                &output_script(&metadata_json(
+                    fixture.root.path(),
+                    Some(target),
+                    Some(build),
+                )),
+            );
+            let error = scan_workspace_unsafe_with_command(fixture.root.path(), &command)
+                .expect_err("member-containing output root must fail");
+            assert_eq!(error.cause, expected);
+            assert_eq!(error.path, output);
+            let expected_member = if containing {
+                "crates/solstone-linux"
+            } else {
+                "crates/helper"
+            };
+            assert!(error.detail.contains(expected_member));
+            assert!(error.detail.contains("contains or equals"));
+        }
     }
 }
 
-// AC: output roots strictly inside members are validated before their exact subtree is pruned.
+// AC: malformed and unsafe Rust beneath a valid member-local output root is not scanned.
 #[test]
 fn metadata_output_root_inside_member_is_pruned() {
     for field in ["target", "build"] {
