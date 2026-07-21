@@ -4,6 +4,7 @@
 //! Offline validation and deterministic rendering for Rust release manifests.
 
 use chrono::DateTime;
+use flate2::bufread::GzDecoder as BufGzDecoder;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,12 +12,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::net::IpAddr;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use tar::Archive;
+use tar::{Archive, Entry, EntryType};
 use xz2::read::XzDecoder;
 
 pub const SCHEMA_VERSION: u64 = 1;
@@ -649,32 +650,169 @@ fn verify_package_identity(path: &Path, version: &str) -> Result<()> {
 
 fn tar_version(path: &Path) -> Result<String> {
     let file = File::open(path).map_err(display_error)?;
-    let mut archive = Archive::new(GzDecoder::new(file));
-    let mut roots = BTreeSet::new();
-    for entry in archive.entries().map_err(display_error)? {
-        let entry = entry.map_err(display_error)?;
-        let path = entry.path().map_err(display_error)?;
-        let path_text = path
-            .to_str()
-            .ok_or_else(|| Error::new("tar path mismatch: expected UTF-8"))?;
-        portable_path(path_text)?;
-        let root = path
-            .components()
-            .find_map(|part| match part {
-                Component::Normal(value) => value.to_str(),
-                _ => None,
-            })
-            .ok_or_else(|| Error::new("tar root mismatch"))?;
-        roots.insert(root.to_owned());
+    let decoder = BufGzDecoder::new(BufReader::new(file));
+    let mut archive = Archive::new(decoder);
+    archive.set_ignore_zeros(true);
+    let mut members = Vec::new();
+    for (index, entry) in archive
+        .entries()
+        .map_err(|_| Error::new("tar archive mismatch"))?
+        .enumerate()
+    {
+        let mut entry = entry.map_err(|_| tar_member_error("header", index))?;
+        members.push(tar_member(&mut entry, index)?);
     }
+    let decoder = archive.into_inner();
+    let mut reader = decoder.into_inner();
+    if !reader
+        .fill_buf()
+        .map_err(|_| Error::new("tar archive mismatch"))?
+        .is_empty()
+    {
+        return Err(Error::new("tar archive mismatch"));
+    }
+
+    let roots = members
+        .iter()
+        .filter_map(|member| member.components.first())
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if roots.len() != 1 {
         return Err(Error::new("tar root inventory mismatch"));
     }
-    let root = roots.pop_first().unwrap();
+    let root = roots
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::new("tar root inventory mismatch"))?;
+
+    let mut paths = BTreeMap::new();
+    let mut folded_paths = BTreeMap::new();
+    let regular_paths = members
+        .iter()
+        .filter(|member| member.kind == TarMemberKind::Regular)
+        .map(|member| member.components.clone())
+        .collect::<BTreeSet<_>>();
+    for member in &members {
+        if member.kind == TarMemberKind::Regular && member.components.len() == 1 {
+            return Err(tar_member_error("topology", member.index));
+        }
+        if let Some(previous_kind) = paths.insert(member.components.clone(), member.kind) {
+            let category = if previous_kind == member.kind {
+                "duplicate"
+            } else {
+                "topology"
+            };
+            return Err(tar_member_error(category, member.index));
+        }
+        let folded = member
+            .components
+            .iter()
+            .map(|component| component.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if folded_paths.insert(folded, member.index).is_some() {
+            return Err(tar_member_error("collision", member.index));
+        }
+        for depth in 1..member.components.len() {
+            if regular_paths.contains(&member.components[..depth]) {
+                return Err(tar_member_error("topology", member.index));
+            }
+        }
+    }
+
     root.strip_prefix("solstone-linux-")
         .and_then(|value| value.strip_suffix("-linux-x86_64"))
         .map(str::to_owned)
         .ok_or_else(|| Error::new("tar embedded version mismatch"))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TarMemberKind {
+    Regular,
+    Directory,
+}
+
+struct TarMember {
+    components: Vec<String>,
+    kind: TarMemberKind,
+    index: usize,
+}
+
+fn tar_member<R: Read>(entry: &mut Entry<'_, R>, index: usize) -> Result<TarMember> {
+    let kind = match entry.header().entry_type() {
+        EntryType::Regular => TarMemberKind::Regular,
+        EntryType::Directory => TarMemberKind::Directory,
+        _ => return Err(tar_member_error("type", index)),
+    };
+    if entry
+        .header()
+        .mode()
+        .map_err(|_| tar_member_error("mode", index))?
+        & 0o6000
+        != 0
+    {
+        return Err(tar_member_error("mode", index));
+    }
+    let pax_record = match entry
+        .pax_extensions()
+        .map_err(|_| tar_member_error("metadata", index))?
+    {
+        Some(mut extensions) => extensions
+            .next()
+            .transpose()
+            .map_err(|_| tar_member_error("metadata", index))?,
+        None => None,
+    };
+    if pax_record.is_some() {
+        return Err(tar_member_error("metadata", index));
+    }
+    if entry
+        .link_name_bytes()
+        .is_some_and(|link_name| !link_name.is_empty())
+    {
+        return Err(tar_member_error("link", index));
+    }
+    if kind == TarMemberKind::Directory && entry.size() != 0 {
+        return Err(tar_member_error("payload", index));
+    }
+
+    let path = entry.path().map_err(|_| tar_member_error("path", index))?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| tar_member_error("path", index))?;
+    let normalized = match kind {
+        TarMemberKind::Directory => path.strip_suffix('/').unwrap_or(path),
+        TarMemberKind::Regular if path.ends_with('/') => {
+            return Err(tar_member_error("path", index));
+        }
+        TarMemberKind::Regular => path,
+    };
+    if normalized.is_empty()
+        || normalized.starts_with(['/', '\\'])
+        || normalized.contains('\\')
+        || normalized.chars().any(char::is_control)
+        || Path::new(normalized)
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(tar_member_error("path", index));
+    }
+    let components = normalized
+        .split('/')
+        .map(|component| {
+            portable_path_component(component)
+                .map(|()| component.to_owned())
+                .map_err(|_| tar_member_error("path", index))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(TarMember {
+        components,
+        kind,
+        index,
+    })
+}
+
+fn tar_member_error(category: &str, index: usize) -> Error {
+    Error::new(format!("tar member {category} mismatch: index {index}"))
 }
 
 fn deb_identity(path: &Path) -> Result<PackageIdentity> {
@@ -967,28 +1105,31 @@ fn portable_path(path: &str) -> Result<()> {
         return Err(Error::new("unsafe path"));
     }
     for part in path.split('/') {
-        if part.is_empty()
-            || part.ends_with(['.', ' '])
-            || part.contains(['<', '>', ':', '"', '|', '?', '*'])
-        {
-            return Err(Error::new("non-portable path"));
-        }
-        let stem = part
-            .split('.')
-            .next()
-            .unwrap()
-            .trim_end()
-            .to_ascii_uppercase();
-        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || stem
-                .strip_prefix("COM")
-                .or_else(|| stem.strip_prefix("LPT"))
-                .is_some_and(|suffix| {
-                    suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9')
-                });
-        if reserved {
-            return Err(Error::new("reserved path"));
-        }
+        portable_path_component(part)?;
+    }
+    Ok(())
+}
+
+fn portable_path_component(part: &str) -> Result<()> {
+    if part.is_empty()
+        || part.ends_with(['.', ' '])
+        || part.contains(['<', '>', ':', '"', '|', '?', '*'])
+    {
+        return Err(Error::new("non-portable path"));
+    }
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap()
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'));
+    if reserved {
+        return Err(Error::new("reserved path"));
     }
     Ok(())
 }

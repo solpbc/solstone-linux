@@ -87,23 +87,100 @@ fn tarball(root: &Path, version: &str) -> PathBuf {
     path
 }
 
-fn raw_tarball(root: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
-    let path = root.join(name);
-    let encoder = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
-    let mut builder = tar::Builder::new(encoder);
-    for (entry_path, body) in entries {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(body.len() as u64);
-        header.set_mode(0o644);
-        let name_bytes = entry_path.as_bytes();
-        assert!(name_bytes.len() < 100);
-        header.as_mut_bytes()[..100].fill(0);
-        header.as_mut_bytes()[..name_bytes.len()].copy_from_slice(name_bytes);
-        header.set_cksum();
-        builder.append(&header, *body).unwrap();
+struct RawTarEntry<'a> {
+    name: &'a [u8],
+    body: &'a [u8],
+    entry_type: u8,
+    mode: u32,
+    link_name: &'a [u8],
+}
+
+fn raw_entry<'a>(name: &'a [u8], body: &'a [u8]) -> RawTarEntry<'a> {
+    RawTarEntry {
+        name,
+        body,
+        entry_type: b'0',
+        mode: 0o644,
+        link_name: b"",
     }
-    builder.into_inner().unwrap().finish().unwrap();
+}
+
+fn tar_bytes(entries: &[RawTarEntry<'_>]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for entry in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(entry.body.len() as u64);
+        header.set_mode(entry.mode);
+        header.set_entry_type(tar::EntryType::new(entry.entry_type));
+        if entry.entry_type == b'S' {
+            header.as_gnu_mut().unwrap().set_real_size(0);
+        }
+        assert!(entry.name.len() < 100);
+        header.as_mut_bytes()[..100].fill(0);
+        header.as_mut_bytes()[..entry.name.len()].copy_from_slice(entry.name);
+        header.set_link_name_literal(entry.link_name).unwrap();
+        header.set_cksum();
+        builder.append(&header, entry.body).unwrap();
+    }
+    builder.into_inner().unwrap()
+}
+
+fn gz_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = root.join(name);
+    let mut encoder = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap();
     path
+}
+
+fn pax_record(key: &str, value: &str) -> Vec<u8> {
+    let payload = format!("{key}={value}\n");
+    let mut length = payload.len() + 2;
+    loop {
+        let record = format!("{length} {payload}");
+        if record.len() == length {
+            return record.into_bytes();
+        }
+        length = record.len();
+    }
+}
+
+fn raw_tarball(root: &Path, name: &str, entries: &[RawTarEntry<'_>]) -> PathBuf {
+    gz_file(root, name, &tar_bytes(entries))
+}
+
+fn producer_tar_bytes(version: &str) -> Vec<u8> {
+    let member_root = format!("solstone-linux-{version}-linux-x86_64");
+    let names = [
+        format!("{member_root}/"),
+        format!("{member_root}/bin/"),
+        format!("{member_root}/share/"),
+        format!("{member_root}/share/icons/"),
+        format!("{member_root}/bin/solstone-linux"),
+        format!("{member_root}/LICENSE"),
+        format!("{member_root}/INSTALL-NOTES"),
+        format!("{member_root}/share/icons/solstone.png"),
+    ];
+    let entries = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| RawTarEntry {
+            name: name.as_bytes(),
+            body: if index < 4 { b"" } else { b"fixture" },
+            entry_type: if index < 4 { b'5' } else { b'0' },
+            mode: if index == 4 { 0o755 } else { 0o644 },
+            link_name: b"",
+        })
+        .collect::<Vec<_>>();
+    tar_bytes(&entries)
+}
+
+fn producer_tarball(root: &Path, version: &str) -> PathBuf {
+    gz_file(
+        root,
+        &format!("solstone-linux-{version}-linux-x86_64.tar.gz"),
+        &producer_tar_bytes(version),
+    )
 }
 
 fn control_tar(version: &str) -> Vec<u8> {
@@ -175,7 +252,7 @@ fn rpm_file(root: &Path, version: &str) -> PathBuf {
 fn release_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let version = evidence().version;
-    tarball(temp.path(), &version);
+    producer_tarball(temp.path(), &version);
     deb(temp.path(), &version);
     rpm_file(temp.path(), &version);
     temp
@@ -339,7 +416,11 @@ fn renderer_requires_authoritative_ordered_exceptions() {
 fn package_readers_reject_malformed_and_stale_bytes() {
     let temp = release_fixture();
     let version = evidence().version;
-    let stale = tarball(temp.path(), "9.9.9");
+    let stale = gz_file(
+        temp.path(),
+        &format!("solstone-linux-{version}-linux-x86_64.tar.gz"),
+        &producer_tar_bytes("9.9.9"),
+    );
     assert!(verify_package_identity(&stale, &version).is_err());
     fs::write(&stale, b"not gzip").unwrap();
     assert!(tar_version(&stale).is_err());
@@ -351,11 +432,17 @@ fn package_readers_reject_malformed_and_stale_bytes() {
     assert!(rpm_identity(&bad_rpm).is_err());
 
     for (name, entries) in [
-        ("traversal.tar.gz", vec![("../evil", &b"x"[..])]),
-        ("absolute.tar.gz", vec![("/etc/passwd", &b"x"[..])]),
+        ("traversal.tar.gz", vec![raw_entry(b"../evil", &b"x"[..])]),
+        (
+            "absolute.tar.gz",
+            vec![raw_entry(b"/etc/passwd", &b"x"[..])],
+        ),
         (
             "multiple-roots.tar.gz",
-            vec![("one/file", &b"x"[..]), ("two/file", &b"y"[..])],
+            vec![
+                raw_entry(b"one/file", &b"x"[..]),
+                raw_entry(b"two/file", &b"y"[..]),
+            ],
         ),
     ] {
         assert!(tar_version(&raw_tarball(temp.path(), name, &entries)).is_err());
@@ -417,6 +504,467 @@ fn package_readers_reject_malformed_and_stale_bytes() {
             ],
         ))
         .is_err()
+    );
+}
+
+#[test]
+fn tar_reader_accepts_safe_producer_and_file_only_shapes() {
+    let temp = tempfile::tempdir().unwrap();
+    let version = evidence().version;
+    assert_eq!(
+        tar_version(&producer_tarball(temp.path(), &version)).unwrap(),
+        version
+    );
+    assert_eq!(
+        tar_version(&tarball(temp.path(), &version)).unwrap(),
+        version
+    );
+
+    let long_path = format!(
+        "solstone-linux-{version}-linux-x86_64/share/{}",
+        "long-name-".repeat(12)
+    );
+    let mut long_path_body = long_path.into_bytes();
+    long_path_body.push(0);
+    let placeholder = format!("solstone-linux-{version}-linux-x86_64/placeholder");
+    let long_name = RawTarEntry {
+        name: b"././@LongLink",
+        body: &long_path_body,
+        entry_type: b'L',
+        mode: 0o644,
+        link_name: b"",
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "long-name-positive.tar.gz",
+            &[long_name, raw_entry(placeholder.as_bytes(), b"x")],
+        ))
+        .unwrap(),
+        version
+    );
+}
+
+#[test]
+fn tar_reader_rejects_truncated_and_checksum_invalid_archives() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut truncated = producer_tar_bytes("1.0.0");
+    truncated.truncate(truncated.len() / 2 + 100);
+    assert!(tar_version(&gz_file(temp.path(), "truncated.tar.gz", &truncated,)).is_err());
+
+    let mut checksum_invalid = producer_tar_bytes("1.0.0");
+    checksum_invalid[148] ^= 1;
+    assert_eq!(
+        tar_version(&gz_file(
+            temp.path(),
+            "checksum-invalid.tar.gz",
+            &checksum_invalid,
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar member header mismatch: index 0"
+    );
+
+    let safe = [raw_entry(
+        b"solstone-linux-1.0.0-linux-x86_64/LICENSE",
+        b"x",
+    )];
+    let unsafe_after_end = [raw_entry(b"../CANARYMARKER", b"x")];
+    let mut after_end = tar_bytes(&safe);
+    after_end.extend_from_slice(&tar_bytes(&unsafe_after_end));
+    assert!(tar_version(&gz_file(temp.path(), "member-after-end.tar.gz", &after_end,)).is_err());
+
+    let mut bad_trailer = gzip(&tar_bytes(&safe));
+    let trailer_byte = bad_trailer.len() - 1;
+    bad_trailer[trailer_byte] ^= 1;
+    let bad_trailer_path = temp.path().join("bad-trailer.tar.gz");
+    fs::write(&bad_trailer_path, bad_trailer).unwrap();
+    assert!(tar_version(&bad_trailer_path).is_err());
+
+    let mut trailing_garbage = gzip(&tar_bytes(&safe));
+    trailing_garbage.extend_from_slice(b"CANARYMARKER");
+    let trailing_garbage_path = temp.path().join("trailing-garbage.tar.gz");
+    fs::write(&trailing_garbage_path, trailing_garbage).unwrap();
+    assert!(tar_version(&trailing_garbage_path).is_err());
+}
+
+#[test]
+fn tar_reader_rejects_unsupported_member_metadata_and_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = b"solstone-linux-1.0.0-linux-x86_64/file";
+    for (case, entry_type) in b"gS8123467".iter().copied().enumerate() {
+        let entry = RawTarEntry {
+            entry_type,
+            ..raw_entry(root, b"")
+        };
+        let error = tar_version(&raw_tarball(
+            temp.path(),
+            &format!("unsupported-{case}.tar.gz"),
+            &[entry],
+        ))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "tar member type mismatch: index 0");
+    }
+
+    for (case, mode) in [("setuid", 0o4644), ("setgid", 0o2644)] {
+        let entry = RawTarEntry {
+            mode,
+            ..raw_entry(root, b"x")
+        };
+        assert_eq!(
+            tar_version(&raw_tarball(
+                temp.path(),
+                &format!("{case}.tar.gz"),
+                &[entry],
+            ))
+            .unwrap_err()
+            .to_string(),
+            "tar member mode mismatch: index 0"
+        );
+    }
+
+    let pax = RawTarEntry {
+        name: b"pax",
+        body: b"13 comment=x\n",
+        entry_type: b'x',
+        mode: 0o644,
+        link_name: b"",
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "pax.tar.gz",
+            &[pax, raw_entry(root, b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar member metadata mismatch: index 0"
+    );
+
+    let pax_path = RawTarEntry {
+        name: b"pax",
+        body: b"16 path=../evil\n",
+        entry_type: b'x',
+        mode: 0o644,
+        link_name: b"",
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "pax-path.tar.gz",
+            &[pax_path, raw_entry(root, b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar member metadata mismatch: index 0"
+    );
+
+    let long_link = RawTarEntry {
+        name: b"././@LongLink",
+        body: b"target\0",
+        entry_type: b'K',
+        mode: 0o644,
+        link_name: b"",
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "long-link.tar.gz",
+            &[long_link, raw_entry(root, b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar member link mismatch: index 0"
+    );
+
+    let raw_link = RawTarEntry {
+        link_name: b"target",
+        ..raw_entry(root, b"x")
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(temp.path(), "raw-link.tar.gz", &[raw_link],))
+            .unwrap_err()
+            .to_string(),
+        "tar member link mismatch: index 0"
+    );
+
+    let directory_payload = RawTarEntry {
+        entry_type: b'5',
+        ..raw_entry(b"solstone-linux-1.0.0-linux-x86_64/", b"x")
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "directory-payload.tar.gz",
+            &[directory_payload],
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar member payload mismatch: index 0"
+    );
+}
+
+#[test]
+fn tar_reader_rejects_nonportable_member_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let bad_paths: &[&[u8]] = &[
+        b"",
+        b"/absolute",
+        b"\\absolute",
+        b"root/bad\\name",
+        b"root/control\n",
+        b"root/./file",
+        b"root/../file",
+        b"root//file",
+        b"root/name.",
+        b"root/name ",
+        b"root/name?",
+        b"root/CON.txt",
+        b"root/\xff",
+    ];
+    for (index, name) in bad_paths.iter().enumerate() {
+        let error = tar_version(&raw_tarball(
+            temp.path(),
+            &format!("bad-path-{index}.tar.gz"),
+            &[raw_entry(name, b"x")],
+        ))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "tar member path mismatch: index 0");
+    }
+
+    for (name, entry_type) in [
+        (b"solstone-linux-1.0.0-linux-x86_64/file/".as_slice(), b'0'),
+        (b"solstone-linux-1.0.0-linux-x86_64//".as_slice(), b'5'),
+    ] {
+        let entry = RawTarEntry {
+            entry_type,
+            ..raw_entry(name, b"")
+        };
+        assert_eq!(
+            tar_version(&raw_tarball(temp.path(), "bad-slash.tar.gz", &[entry]))
+                .unwrap_err()
+                .to_string(),
+            "tar member path mismatch: index 0"
+        );
+    }
+
+    let long_name = RawTarEntry {
+        name: b"././@LongLink",
+        body: b"../CANARYMARKER/evil\0",
+        entry_type: b'L',
+        mode: 0o644,
+        link_name: b"",
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "long-name-traversal.tar.gz",
+            &[long_name, raw_entry(b"placeholder", b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar member path mismatch: index 0"
+    );
+}
+
+#[test]
+fn tar_reader_diagnostics_are_bounded_ascii_and_private() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = b"solstone-linux-1.0.0-linux-x86_64";
+    let file = b"solstone-linux-1.0.0-linux-x86_64/file";
+    let mut errors = Vec::new();
+
+    let invalid_gzip = temp.path().join("diagnostic-invalid-gzip.tar.gz");
+    fs::write(&invalid_gzip, b"CANARYMARKER").unwrap();
+    errors.push(tar_version(&invalid_gzip).unwrap_err().to_string());
+
+    for (name, entry) in [
+        (
+            "diagnostic-type.tar.gz",
+            RawTarEntry {
+                entry_type: b'8',
+                ..raw_entry(b"CANARYMARKER", b"")
+            },
+        ),
+        (
+            "diagnostic-mode.tar.gz",
+            RawTarEntry {
+                mode: 0o4644,
+                ..raw_entry(b"CANARYMARKER", b"x")
+            },
+        ),
+        (
+            "diagnostic-link.tar.gz",
+            RawTarEntry {
+                link_name: b"CANARYMARKER",
+                ..raw_entry(file, b"x")
+            },
+        ),
+        (
+            "diagnostic-payload.tar.gz",
+            RawTarEntry {
+                entry_type: b'5',
+                ..raw_entry(b"CANARYMARKER/", b"x")
+            },
+        ),
+        (
+            "diagnostic-path.tar.gz",
+            raw_entry(b"root/CANARYMARKER?", b"x"),
+        ),
+        (
+            "diagnostic-utf8.tar.gz",
+            raw_entry(b"root/CANARYMARKER\xff", b"x"),
+        ),
+    ] {
+        errors.push(
+            tar_version(&raw_tarball(temp.path(), name, &[entry]))
+                .unwrap_err()
+                .to_string(),
+        );
+    }
+
+    let pax_body = pax_record("comment", "CANARYMARKER");
+    let pax = RawTarEntry {
+        name: b"pax",
+        body: &pax_body,
+        entry_type: b'x',
+        mode: 0o644,
+        link_name: b"",
+    };
+    errors.push(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "diagnostic-pax.tar.gz",
+            &[pax, raw_entry(file, b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+    );
+
+    let long_name = RawTarEntry {
+        name: b"././@LongLink",
+        body: b"../CANARYMARKER/evil\0",
+        entry_type: b'L',
+        mode: 0o644,
+        link_name: b"",
+    };
+    errors.push(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "diagnostic-long-name.tar.gz",
+            &[long_name, raw_entry(b"placeholder", b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+    );
+
+    for (name, entries) in [
+        (
+            "diagnostic-duplicate.tar.gz",
+            vec![raw_entry(file, b"x"), raw_entry(file, b"y")],
+        ),
+        (
+            "diagnostic-collision.tar.gz",
+            vec![
+                raw_entry(file, b"x"),
+                raw_entry(b"solstone-linux-1.0.0-linux-x86_64/FILE", b"y"),
+            ],
+        ),
+        ("diagnostic-topology.tar.gz", vec![raw_entry(root, b"x")]),
+        (
+            "diagnostic-roots.tar.gz",
+            vec![raw_entry(b"one/file", b"x"), raw_entry(b"two/file", b"y")],
+        ),
+        (
+            "diagnostic-embedded.tar.gz",
+            vec![raw_entry(b"not-canonical/file", b"x")],
+        ),
+    ] {
+        errors.push(
+            tar_version(&raw_tarball(temp.path(), name, &entries))
+                .unwrap_err()
+                .to_string(),
+        );
+    }
+
+    for error in errors {
+        assert!(!error.contains("CANARYMARKER"));
+        assert!(
+            error
+                .bytes()
+                .all(|byte| byte == b' ' || byte.is_ascii_graphic()),
+            "non-printable diagnostic"
+        );
+    }
+}
+
+#[test]
+fn tar_reader_rejects_ambiguous_member_topology() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = b"solstone-linux-1.0.0-linux-x86_64";
+    let file = b"solstone-linux-1.0.0-linux-x86_64/file";
+    let child = b"solstone-linux-1.0.0-linux-x86_64/file/child";
+
+    let root_file = raw_entry(root, b"x");
+    assert_eq!(
+        tar_version(&raw_tarball(temp.path(), "root-file.tar.gz", &[root_file]))
+            .unwrap_err()
+            .to_string(),
+        "tar member topology mismatch: index 0"
+    );
+
+    for (name, entries, expected) in [
+        (
+            "duplicate.tar.gz",
+            vec![raw_entry(file, b"x"), raw_entry(file, b"y")],
+            "tar member duplicate mismatch: index 1",
+        ),
+        (
+            "collision.tar.gz",
+            vec![
+                raw_entry(file, b"x"),
+                raw_entry(b"solstone-linux-1.0.0-linux-x86_64/FILE", b"y"),
+            ],
+            "tar member collision mismatch: index 1",
+        ),
+        (
+            "ancestor.tar.gz",
+            vec![raw_entry(child, b"y"), raw_entry(file, b"x")],
+            "tar member topology mismatch: index 0",
+        ),
+    ] {
+        assert_eq!(
+            tar_version(&raw_tarball(temp.path(), name, &entries))
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+    }
+
+    let directory = RawTarEntry {
+        entry_type: b'5',
+        ..raw_entry(b"solstone-linux-1.0.0-linux-x86_64/file/", b"")
+    };
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "file-directory.tar.gz",
+            &[directory, raw_entry(file, b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar member topology mismatch: index 1"
+    );
+
+    assert_eq!(
+        tar_version(&raw_tarball(
+            temp.path(),
+            "noncanonical-root.tar.gz",
+            &[raw_entry(b"not-canonical/file", b"x")],
+        ))
+        .unwrap_err()
+        .to_string(),
+        "tar embedded version mismatch"
     );
 }
 
