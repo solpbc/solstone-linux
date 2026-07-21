@@ -197,7 +197,40 @@ fn fixture_binds_real_repository_authorities() {
     assert_eq!(repo.commit.len(), 40);
     assert!(is_sha256(&repo.cargo_lock_sha256));
     assert_eq!(repo.cargo_deny_version, CARGO_DENY_VERSION);
-    assert_eq!(repo.exceptions, EXCEPTIONS);
+    assert_eq!(repo.exceptions, TEST_EXCEPTIONS);
+}
+
+#[test]
+fn lane_rejects_carried_source_that_disagrees_with_exported_context() {
+    let repo = fixture();
+    let temp = tempfile::tempdir().unwrap();
+    let context_root = temp.path().join("context");
+    fs::create_dir(&context_root).unwrap();
+    let context = export_immutable_context(&repo.root, &context_root).unwrap();
+    let error = emit_lane_handoff_in(
+        &LaneEmitRequest {
+            lane: Lane::Deb,
+            invocation_id: "d",
+            source_commit: &"e".repeat(40),
+            source_archive_sha256: &context.archive_sha256,
+            expected_cargo_lock_sha256: &context.cargo_lock_sha256,
+            version: "1.0.0",
+            target: TARGET_TRIPLE,
+            profile: "release",
+            features: Vec::new(),
+            image_digest: &format!("sha256:{}", "f".repeat(64)),
+            baseline_executable: Path::new("target/release/solstone-linux"),
+            artifacts: Vec::new(),
+            output: Path::new("unused"),
+        },
+        &context_root,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("immutable context binding mismatch")
+    );
 }
 
 #[test]
@@ -226,7 +259,19 @@ fn exclusive_lock_loser_mutates_nothing() {
 }
 
 #[test]
-fn staging_and_emptying_paths_are_owner_scoped() {
+fn explicit_lock_release_reports_replacement_and_preserves_foreign_file() {
+    let repo = fixture();
+    let lock = CandidateLock::acquire(&repo.root).unwrap();
+    let path = lock.path().to_owned();
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, b"foreign").unwrap();
+    let error = lock.release().unwrap_err();
+    assert!(error.to_string().contains("repair:"));
+    assert_eq!(fs::read(path).unwrap(), b"foreign");
+}
+
+#[test]
+fn staging_paths_are_owner_scoped() {
     let repo = fixture();
     let lock = CandidateLock::acquire(&repo.root).unwrap();
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
@@ -243,15 +288,9 @@ fn staging_and_emptying_paths_are_owner_scoped() {
         &staging.rpm_lane,
         &staging.advisory_db,
         &staging.payload,
-        &staging.proofs,
     ] {
         assert!(path.is_dir());
     }
-    let id = staging.root.file_name().unwrap().to_str().unwrap();
-    let allowlist = owner_emptying_allowlist(&repo.root, "1.0.0", id).unwrap();
-    assert_eq!(allowlist.len(), 4);
-    assert!(!allowlist.contains(&repo.root.path().join("dist")));
-    assert!(allowlist.contains(&staging.root));
 }
 
 #[test]
@@ -714,13 +753,23 @@ pub(super) fn lane_tools(lane: Lane, image_digest: &str) -> LaneNativeTools {
 #[test]
 fn image_inspection_and_recheck_are_immutable_and_local() {
     let script = format!(
-        "#!/bin/sh\ncase \"$*\" in '--version') printf '%s' 'podman version 5.8.3' ;; 'image inspect ubuntu:tool') printf '%s' '{}' ;; 'image inspect fedora:tool') printf '%s' '{}' ;; *) exit 97;; esac\n",
+        "#!/bin/sh\ncase \"$*\" in '--version') printf '%s' 'podman version 5.8.3' ;; 'image inspect sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') printf '%s' '{}' ;; 'image inspect sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') printf '%s' '{}' ;; *) exit 97;; esac\n",
         image_json('a'),
         image_json('b')
     );
     let (_bin, processes) = process_bin("#!/bin/sh\nexit 97\n", Some(&script));
-    let ubuntu = inspect_image(&processes, ContainerEngine::Podman, "ubuntu:tool").unwrap();
-    let fedora = inspect_image(&processes, ContainerEngine::Podman, "fedora:tool").unwrap();
+    let ubuntu = inspect_image(
+        &processes,
+        ContainerEngine::Podman,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .unwrap();
+    let fedora = inspect_image(
+        &processes,
+        ContainerEngine::Podman,
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
     assert_eq!(ubuntu.digest, format!("sha256:{}", "a".repeat(64)));
     assert_eq!(
         observe_container_engine(&processes, ContainerEngine::Podman).unwrap(),
@@ -739,7 +788,14 @@ fn image_inspection_and_recheck_are_immutable_and_local() {
         .is_err()
     );
     let (_bin, missing) = process_bin("#!/bin/sh\nexit 97\n", Some("#!/bin/sh\nexit 44\n"));
-    assert!(inspect_image(&missing, ContainerEngine::Podman, "missing:tool").is_err());
+    assert!(
+        inspect_image(
+            &missing,
+            ContainerEngine::Podman,
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        )
+        .is_err()
+    );
 }
 
 pub(super) fn lane_fixture(
@@ -768,7 +824,7 @@ pub(super) fn lane_fixture(
         target: TARGET_TRIPLE.into(),
         profile: "release".into(),
         features: vec![],
-        rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef012\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
+        rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
         cargo: "cargo 1.97.1 (abcdef012 2026-06-30)".into(),
         baseline_executable_sha256: "d".repeat(64),
         image_digest: image.into(),
@@ -1267,11 +1323,13 @@ fn lane_build_argv_is_offline_no_pull_and_uses_exported_context() {
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let ubuntu = ImageIdentity {
-        configured_tag: "ubuntu:tool".into(),
+        configured_reference:
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
     };
     let fedora = ImageIdentity {
-        configured_tag: "fedora:tool".into(),
+        configured_reference:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         digest: format!("sha256:{}", "b".repeat(64)),
     };
     lane_handoff(
@@ -1281,7 +1339,7 @@ fn lane_build_argv_is_offline_no_pull_and_uses_exported_context() {
         "0123456789abcdef0123456789abcdef",
         &ubuntu.digest,
         b"same tar",
-        "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef012\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0\n",
+        "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0\n",
     );
     fs::write(
         repo.root.path().join("packaging/Containerfile"),
@@ -1391,11 +1449,13 @@ fn lane_build_rejects_extra_output_and_unsafe_rustc_evidence() {
         let staging = StagingLayout::create(&repo.root, &lock).unwrap();
         let context = export_immutable_context(&repo.root, &staging.context).unwrap();
         let ubuntu = ImageIdentity {
-            configured_tag: "ubuntu:tool".into(),
+            configured_reference:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
         };
         let fedora = ImageIdentity {
-            configured_tag: "fedora:tool".into(),
+            configured_reference:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             digest: format!("sha256:{}", "b".repeat(64)),
         };
         let rustc = match case {
@@ -1447,11 +1507,13 @@ fn lane_build_rejects_malformed_image_digests_before_subprocess() {
         let staging = StagingLayout::create(&repo.root, &lock).unwrap();
         let context = export_immutable_context(&repo.root, &staging.context).unwrap();
         let ubuntu = ImageIdentity {
-            configured_tag: "ubuntu:tool".into(),
+            configured_reference:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             digest,
         };
         let fedora = ImageIdentity {
-            configured_tag: "fedora:tool".into(),
+            configured_reference:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             digest: format!("sha256:{}", "b".repeat(64)),
         };
         let tripwire = staging.root.join("container-tripwire");
@@ -1509,11 +1571,13 @@ fn production_handoff_rejects_missing_duplicate_unknown_and_byte_drift() {
         let staging = StagingLayout::create(&repo.root, &lock).unwrap();
         let context = export_immutable_context(&repo.root, &staging.context).unwrap();
         let ubuntu = ImageIdentity {
-            configured_tag: "ubuntu:tool".into(),
+            configured_reference:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
         };
         let fedora = ImageIdentity {
-            configured_tag: "fedora:tool".into(),
+            configured_reference:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             digest: format!("sha256:{}", "b".repeat(64)),
         };
         let evidence = lane_handoff(
@@ -1580,11 +1644,13 @@ fn production_handoff_rejects_stale_swapped_and_crosswired_documents() {
         let staging = StagingLayout::create(&repo.root, &lock).unwrap();
         let context = export_immutable_context(&repo.root, &staging.context).unwrap();
         let ubuntu = ImageIdentity {
-            configured_tag: "ubuntu:tool".into(),
+            configured_reference:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
         };
         let fedora = ImageIdentity {
-            configured_tag: "fedora:tool".into(),
+            configured_reference:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             digest: format!("sha256:{}", "b".repeat(64)),
         };
         let evidence = lane_handoff(
@@ -1626,11 +1692,13 @@ fn production_handoff_rejects_stale_swapped_and_crosswired_documents() {
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let ubuntu = ImageIdentity {
-        configured_tag: "ubuntu:tool".into(),
+        configured_reference:
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
     };
     let fedora = ImageIdentity {
-        configured_tag: "fedora:tool".into(),
+        configured_reference:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         digest: format!("sha256:{}", "b".repeat(64)),
     };
     let rustc =
@@ -1706,11 +1774,13 @@ fn production_handoff_rejects_every_native_identity_mutation() {
         let staging = StagingLayout::create(&repo.root, &lock).unwrap();
         let context = export_immutable_context(&repo.root, &staging.context).unwrap();
         let ubuntu = ImageIdentity {
-            configured_tag: "ubuntu:tool".into(),
+            configured_reference:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
         };
         let fedora = ImageIdentity {
-            configured_tag: "fedora:tool".into(),
+            configured_reference:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             digest: format!("sha256:{}", "b".repeat(64)),
         };
         let output = match lane {
@@ -1782,11 +1852,13 @@ fn lane_evidence_rejects_stale_swapped_crosswired_and_tar_mismatch() {
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let ubuntu = ImageIdentity {
-        configured_tag: "ubuntu:tool".into(),
+        configured_reference:
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         digest: format!("sha256:{}", "a".repeat(64)),
     };
     let fedora = ImageIdentity {
-        configured_tag: "fedora:tool".into(),
+        configured_reference:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         digest: format!("sha256:{}", "b".repeat(64)),
     };
     let invocation = "0123456789abcdef0123456789abcdef";
@@ -1875,3 +1947,4 @@ fn manifest_tool_map_is_derived_from_two_lanes_and_host_identity() {
     assert_eq!(tools["ubuntu_image_digest"], "a".repeat(64));
     assert_eq!(tools["fedora_image_digest"], "b".repeat(64));
 }
+pub const TEST_EXCEPTIONS: [&str; 2] = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"];

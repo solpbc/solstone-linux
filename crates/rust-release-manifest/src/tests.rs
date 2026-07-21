@@ -85,7 +85,7 @@ pub(super) fn evidence() -> Evidence {
         source_dirty: false,
         cargo_lock_sha256: digest(&fs::read(root.join("Cargo.lock")).unwrap()),
         rust: RustEvidence {
-            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
+            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
             cargo_version: "cargo 1.97.1 (c980f4866 2026-06-30)".into(),
         },
         target: TargetEvidence::Compiled {
@@ -99,8 +99,18 @@ pub(super) fn evidence() -> Evidence {
             deterministic_gate: "pass".into(),
             advisory_checked_at: "2026-07-20T12:34:56Z".into(),
         },
-        active_exceptions: EXCEPTIONS.iter().map(|value| (*value).into()).collect(),
+        active_exceptions: crate::candidate_tests::TEST_EXCEPTIONS
+            .iter()
+            .map(|value| (*value).into())
+            .collect(),
     }
+}
+
+#[test]
+fn real_rustc_verbose_shape_is_privacy_safe() {
+    let banner = "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0";
+    validate_evidence_text("rust.rustc_verbose", banner).unwrap();
+    assert!(validate_evidence_text("other evidence", &"a".repeat(40)).is_err());
 }
 
 fn tarball(root: &Path, version: &str) -> PathBuf {
@@ -416,7 +426,7 @@ fn rust_release_manifest_conformance() {
     bad["dependency_policy"]["advisory_checked_at"] = Value::String("not-a-date".into());
     assert!(validate_manifest_bytes(serde_json::to_string(&bad).unwrap().as_bytes()).is_err());
 
-    for key in TOOL_KEYS {
+    for key in TOOL_SPECS.iter().map(|spec| spec.key) {
         let mut value: Value = serde_json::from_str(&first).unwrap();
         value["native_tools"].as_object_mut().unwrap().remove(key);
         assert!(

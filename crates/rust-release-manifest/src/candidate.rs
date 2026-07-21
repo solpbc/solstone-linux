@@ -97,9 +97,9 @@ impl ReleaseImages {
 
     pub fn proof_policies(&self) -> [(&'static str, &ProofPlatformPolicy, &str); 3] {
         [
-            ("debian-amd64", &self.debian_amd64, &self.proof_debian),
-            ("rpm-x86_64", &self.rpm_x86_64, &self.proof_rpm),
-            ("tar-x86_64", &self.tar_x86_64, &self.proof_tar),
+            (PROOF_SPECS[0].id, &self.debian_amd64, &self.proof_debian),
+            (PROOF_SPECS[1].id, &self.rpm_x86_64, &self.proof_rpm),
+            (PROOF_SPECS[2].id, &self.tar_x86_64, &self.proof_tar),
         ]
     }
 
@@ -272,7 +272,7 @@ fn validate_advisory_descriptor_identity_mode(
         )));
     }
     validate_evidence_text("advisory source_id", &descriptor.source_id)?;
-    validate_timestamp(&descriptor.acquired_at)?;
+    validate_timestamp("advisory acquired_at", &descriptor.acquired_at)?;
     let acquired = DateTime::parse_from_rfc3339(&descriptor.acquired_at).map_err(display_error)?;
     let age = Utc::now().signed_duration_since(acquired);
     if enforce_freshness && (age.num_seconds() < 0 || age.num_seconds() > DAY_SECONDS) {
@@ -559,20 +559,16 @@ impl ContainerEngine {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageIdentity {
-    pub configured_tag: String,
+    pub configured_reference: String,
     pub digest: String,
 }
 
 pub fn inspect_image(
     processes: &ProcessEnvironment,
     engine: ContainerEngine,
-    tag: &str,
+    reference: &str,
 ) -> Result<ImageIdentity> {
-    if tag.is_empty() || tag.chars().any(char::is_control) {
-        return Err(Error::new(
-            "image tag mismatch: expected configured tag, actual invalid",
-        ));
-    }
+    validate_image_reference("inspect", reference)?;
     if engine == ContainerEngine::Docker {
         run_success(processes, Path::new("."), "docker", &["buildx", "version"])?;
     }
@@ -580,7 +576,7 @@ pub fn inspect_image(
         processes,
         Path::new("."),
         engine.executable(),
-        &["image", "inspect", tag],
+        &["image", "inspect", reference],
     )?;
     let values: Vec<Value> = serde_json::from_slice(&output.stdout).map_err(display_error)?;
     if values.len() != 1 {
@@ -608,7 +604,7 @@ pub fn inspect_image(
         )));
     }
     Ok(ImageIdentity {
-        configured_tag: tag.into(),
+        configured_reference: reference.into(),
         digest: format!("sha256:{id}"),
     })
 }
@@ -750,11 +746,22 @@ pub struct LaneEmitRequest<'a> {
 }
 
 pub fn emit_lane_handoff(request: &LaneEmitRequest<'_>) -> Result<()> {
+    emit_lane_handoff_in(request, Path::new("."))
+}
+
+pub(crate) fn emit_lane_handoff_in(
+    request: &LaneEmitRequest<'_>,
+    context_root: &Path,
+) -> Result<()> {
     require_image_digest(request.image_digest)?;
-    require_commit(request.source_commit, "lane source commit")?;
+    let binding: ContextBinding = strict_json_file(&context_root.join(CONTEXT_BINDING_NAME))?;
+    let archive = fs::read(context_root.join(CONTEXT_ARCHIVE_NAME)).map_err(display_error)?;
+    let observed_commit = git_archive_commit(&archive)?;
+    let observed_archive_sha256 = digest(&archive);
+    require_commit(&observed_commit, "lane source commit")?;
     for (label, value) in [
-        ("source archive digest", request.source_archive_sha256),
-        ("Cargo.lock digest", request.expected_cargo_lock_sha256),
+        ("source archive digest", observed_archive_sha256.as_str()),
+        ("Cargo.lock digest", binding.cargo_lock_sha256.as_str()),
     ] {
         if !is_sha256(value) {
             return Err(Error::new(format!(
@@ -762,22 +769,71 @@ pub fn emit_lane_handoff(request: &LaneEmitRequest<'_>) -> Result<()> {
             )));
         }
     }
-    validate_version(request.version)?;
-    let actual_lock = digest(&fs::read("Cargo.lock").map_err(display_error)?);
-    if actual_lock != request.expected_cargo_lock_sha256 {
-        return Err(Error::new(format!(
-            "Cargo.lock digest mismatch: expected {}, actual {actual_lock}",
-            request.expected_cargo_lock_sha256
-        )));
-    }
-    let mut features = request.features.clone();
-    features.sort();
-    if features != request.features {
+    if binding.source_commit != observed_commit
+        || binding.source_archive_sha256 != observed_archive_sha256
+        || observed_commit != request.source_commit
+        || observed_archive_sha256 != request.source_archive_sha256
+        || binding.cargo_lock_sha256 != request.expected_cargo_lock_sha256
+    {
         return Err(Error::new(
-            "lane features mismatch: expected sorted features, actual unsorted",
+            "lane immutable context binding mismatch: expected exported context authority, actual carried arguments differ",
         ));
     }
+    let workspace: toml::Value = toml::from_str(
+        &fs::read_to_string(context_root.join("Cargo.toml")).map_err(display_error)?,
+    )
+    .map_err(display_error)?;
+    let actual_version = workspace["workspace"]["package"]["version"]
+        .as_str()
+        .ok_or_else(|| Error::new("lane version mismatch: expected workspace version"))?
+        .to_owned();
+    validate_version(&actual_version)?;
+    if actual_version != request.version {
+        return Err(Error::new(format!(
+            "lane version mismatch: expected {actual_version}, actual {}",
+            request.version
+        )));
+    }
+    let actual_lock = digest(&fs::read(context_root.join("Cargo.lock")).map_err(display_error)?);
+    if actual_lock != binding.cargo_lock_sha256 {
+        return Err(Error::new(format!(
+            "Cargo.lock digest mismatch: expected {}, actual {actual_lock}",
+            binding.cargo_lock_sha256
+        )));
+    }
+    if !request.features.is_empty() {
+        return Err(Error::new(
+            "lane features mismatch: expected build command's empty feature set, actual nonempty",
+        ));
+    }
+    let features = Vec::new();
     let rustc_verbose = command_evidence("rustc", &["--version", "--verbose"])?;
+    let actual_target = rustc_verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .ok_or_else(|| Error::new("lane target mismatch: expected rustc host"))?
+        .to_owned();
+    if actual_target != request.target {
+        return Err(Error::new(format!(
+            "lane target mismatch: expected {actual_target}, actual {}",
+            request.target
+        )));
+    }
+    let executable_path = request.baseline_executable.to_string_lossy();
+    let actual_profile = if executable_path.contains("/release/")
+        || executable_path.starts_with("target/release/")
+    {
+        "release"
+    } else {
+        return Err(Error::new(
+            "lane profile mismatch: expected release build output, actual other",
+        ));
+    };
+    if actual_profile != request.profile {
+        return Err(Error::new(
+            "lane profile mismatch: expected observed release output",
+        ));
+    }
     let cargo = command_evidence("cargo", &["--version"])?;
     let packaging_tool = match request.lane {
         Lane::Deb => command_evidence("cargo", &["deb", "--version"]),
@@ -824,12 +880,15 @@ pub fn emit_lane_handoff(request: &LaneEmitRequest<'_>) -> Result<()> {
     let evidence = LaneEvidence {
         invocation_id: request.invocation_id.into(),
         lane: request.lane,
-        source_commit: request.source_commit.into(),
-        source_archive_sha256: request.source_archive_sha256.into(),
+        // The invocation nonce and base-image digest are carried authorities: the
+        // nonce has no in-container source, while the digest is the same value
+        // consumed by FROM and cannot be introspected from a build container.
+        source_commit: observed_commit,
+        source_archive_sha256: observed_archive_sha256,
         cargo_lock_sha256: actual_lock,
-        version: request.version.into(),
-        target: request.target.into(),
-        profile: request.profile.into(),
+        version: actual_version,
+        target: actual_target,
+        profile: actual_profile.into(),
         features,
         rustc_verbose,
         cargo,
@@ -1071,7 +1130,7 @@ fn validate_lane_inventory(request: &LaneRequest<'_>, evidence_name: &str) -> Re
         );
     }
     let mut expected = BTreeSet::from([evidence_name.to_owned()]);
-    expected.extend(expected_artifact_names(request.lane, request.version));
+    expected.extend(expected_artifact_names(request.lane, request.version)?);
     if actual != expected {
         return Err(Error::new(format!(
             "lane output inventory mismatch: expected {expected:?}, actual {actual:?}"
@@ -1080,13 +1139,16 @@ fn validate_lane_inventory(request: &LaneRequest<'_>, evidence_name: &str) -> Re
     Ok(())
 }
 
-fn expected_artifact_names(lane: Lane, version: &str) -> [String; 2] {
-    let tar = format!("solstone-linux-{version}-linux-x86_64.tar.gz");
-    let native = match lane {
-        Lane::Deb => format!("solstone-linux_{version}-1_amd64.deb"),
-        Lane::Rpm => format!("solstone-linux-{version}-1.x86_64.rpm"),
-    };
-    [tar, native]
+fn expected_artifact_names(lane: Lane, version: &str) -> Result<[String; 2]> {
+    let tar = artifact_name("tar", version)?;
+    let native = artifact_name(
+        match lane {
+            Lane::Deb => "deb",
+            Lane::Rpm => "rpm",
+        },
+        version,
+    )?;
+    Ok([tar, native])
 }
 
 pub(crate) fn validate_lane_evidence(
@@ -1177,6 +1239,26 @@ pub(crate) fn validate_lane_evidence(
 }
 
 fn validate_lane_native_tools(evidence: &LaneEvidence, request: &LaneRequest<'_>) -> Result<()> {
+    let actual = serde_json::from_value::<BTreeMap<String, String>>(
+        serde_json::to_value(&evidence.native_tools).map_err(display_error)?,
+    )
+    .map_err(display_error)?;
+    let expected = TOOL_SPECS
+        .iter()
+        .filter(|spec| {
+            spec.source == ToolSource::BothLanes
+                || matches!(
+                    (request.lane, spec.source),
+                    (Lane::Deb, ToolSource::Ubuntu) | (Lane::Rpm, ToolSource::Fedora)
+                )
+        })
+        .map(|spec| spec.key)
+        .collect::<BTreeSet<_>>();
+    if actual.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected {
+        return Err(Error::new(
+            "lane native tool inventory mismatch: expected typed lane authority, actual different",
+        ));
+    }
     match (&evidence.native_tools, request.lane) {
         (LaneNativeTools::Ubuntu(tools), Lane::Deb) => {
             for (actual, expected, key) in [
@@ -1349,7 +1431,7 @@ pub fn recheck_images(
     expected: [&ImageIdentity; 2],
 ) -> Result<()> {
     for identity in expected {
-        let actual = inspect_image(processes, engine, &identity.configured_tag)?;
+        let actual = inspect_image(processes, engine, &identity.configured_reference)?;
         if actual.digest != identity.digest {
             return Err(Error::new(format!(
                 "image identity mismatch: expected {}, actual {}",

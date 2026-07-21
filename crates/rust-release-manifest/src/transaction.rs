@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-pub const PROOF_IDS: [&str; 3] = ["debian-amd64", "rpm-x86_64", "tar-x86_64"];
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateLedger {
@@ -148,7 +146,7 @@ pub fn construct_ledger(input: LedgerInput<'_>) -> Result<CandidateLedger> {
         tools: input.tools,
         payload,
         package_members: members,
-        expected_proof_ids: PROOF_IDS.map(str::to_owned).to_vec(),
+        expected_proof_ids: PROOF_SPECS.iter().map(|spec| spec.id.to_owned()).collect(),
         candidate_digest: candidate,
     };
     validate_ledger(input.root, input.payload_root, &ledger)?;
@@ -182,8 +180,8 @@ pub fn validate_ledger(
         return Err(Error::new(format!("ledger schema mismatch: {error}")));
     }
     validate_version(&ledger.version)?;
-    validate_timestamp(&ledger.policy.checked_at)?;
-    validate_timestamp(&ledger.advisory_cohort.acquired_at)?;
+    validate_timestamp("policy checked_at", &ledger.policy.checked_at)?;
+    validate_timestamp("advisory acquired_at", &ledger.advisory_cohort.acquired_at)?;
     validate_evidence_text("ledger advisory source", &ledger.advisory_cohort.source_id)?;
     validate_native_tools(root, &ledger.tools)?;
     if ledger.validator.version != env!("CARGO_PKG_VERSION") {
@@ -231,7 +229,10 @@ pub fn validate_ledger(
             "ledger payload digest mismatch: expected promoted bytes, actual different",
         ));
     }
-    if ledger.package_members.len() != 3 || ledger.expected_proof_ids != PROOF_IDS {
+    let expected_proofs = PROOF_SPECS.iter().map(|spec| spec.id).collect::<Vec<_>>();
+    if ledger.package_members.len() != PROOF_SPECS.len()
+        || ledger.expected_proof_ids != expected_proofs
+    {
         return Err(Error::new("ledger evidence inventory mismatch"));
     }
     let mut members = package_members(payload_root, &ledger.version)?;
@@ -288,11 +289,26 @@ pub fn atomic_write_0644(path: &Path, bytes: &[u8]) -> Result<()> {
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o644)).map_err(display_error)?;
         fs::rename(&temp, path).map_err(display_error)
     })();
+    let owned = file.metadata().map_err(display_error)?;
     drop(file);
     finish_atomic_publish(&temp, publish)?;
-    File::open(parent)
+    let synced = File::open(parent)
         .and_then(|file| file.sync_all())
-        .map_err(display_error)
+        .map_err(display_error);
+    if let Err(error) = synced {
+        let same_file = fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.dev() == owned.dev() && metadata.ino() == owned.ino());
+        if same_file {
+            fs::remove_file(path).map_err(|cleanup| {
+                Error::new(format!(
+                    "{error}\nerror: atomic output cleanup mismatch: expected published file absent, actual residue\nrepair: remove {} after confirming it belongs to the failed transaction: {cleanup}",
+                    path.display()
+                ))
+            })?;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(crate) fn finish_atomic_publish(temp: &Path, publish: Result<()>) -> Result<()> {
@@ -559,17 +575,27 @@ pub fn rollback_error(
         }
     }
     let proofs_root = evidence_root.join("proofs");
-    if proofs_root.is_dir()
-        && fs::read_dir(&proofs_root).is_ok_and(|mut entries| entries.next().is_none())
-        && fs::remove_dir(&proofs_root).is_err()
-    {
-        residues.push(proofs_root);
+    if proofs_root.is_dir() {
+        match fs::read_dir(&proofs_root) {
+            Ok(mut entries) => match entries.next() {
+                None if fs::remove_dir(&proofs_root).is_err() => residues.push(proofs_root),
+                Some(Err(_)) => residues.push(proofs_root),
+                _ => {}
+            },
+            Err(_) => residues.push(proofs_root),
+        }
     }
-    if evidence_root.is_dir()
-        && fs::read_dir(evidence_root).is_ok_and(|mut entries| entries.next().is_none())
-        && fs::remove_dir(evidence_root).is_err()
-    {
-        residues.push(evidence_root.to_owned());
+    if evidence_root.is_dir() {
+        match fs::read_dir(evidence_root) {
+            Ok(mut entries) => match entries.next() {
+                None if fs::remove_dir(evidence_root).is_err() => {
+                    residues.push(evidence_root.to_owned());
+                }
+                Some(Err(_)) => residues.push(evidence_root.to_owned()),
+                _ => {}
+            },
+            Err(_) => residues.push(evidence_root.to_owned()),
+        }
     }
     if residues.is_empty() {
         original
@@ -630,11 +656,7 @@ pub struct ProofRequest<'a> {
 }
 
 pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
-    if !PROOF_IDS.contains(&request.platform) {
-        return Err(Error::new(
-            "proof platform mismatch: expected known proof ID, actual unknown",
-        ));
-    }
+    proof_spec(request.platform)?;
     let evidence_root = request
         .root
         .path()
@@ -653,97 +675,141 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
         transaction_id()?
     ));
     fs::create_dir(&attempt).map_err(display_error)?;
-    let artifact = proof_artifact(request.ledger, request.platform)?;
-    let artifact_path = request.root.path().join("dist/rust").join(&artifact.path);
-    require_regular(&artifact_path, "proof artifact")?;
-    let executable = std::env::current_exe().map_err(display_error)?;
-    let output_arg = format!("type=bind,src={},dst=/evidence", attempt.display());
-    let artifact_arg = format!(
-        "type=bind,src={},dst=/input/{},ro",
-        artifact_path.display(),
-        artifact.path
-    );
-    let runner_arg = format!(
-        "type=bind,src={},dst=/proof-runner,ro",
-        executable.display()
-    );
-    let mut args = vec![
-        "run".into(),
-        "--rm".into(),
-        "--pull=never".into(),
-        "--network=none".into(),
-        "--mount".into(),
-        output_arg,
-        "--mount".into(),
-        artifact_arg,
-        "--mount".into(),
-        runner_arg,
-    ];
-    if request.platform == "tar-x86_64" {
-        args.extend([
+    let attempt_metadata = fs::symlink_metadata(&attempt).map_err(display_error)?;
+    let mut published = false;
+    let mut published_identity = None;
+    let result = (|| {
+        let artifact = proof_artifact(request.ledger, request.platform)?;
+        let artifact_path = request.root.path().join("dist/rust").join(&artifact.path);
+        require_regular(&artifact_path, "proof artifact")?;
+        let executable = std::env::current_exe().map_err(display_error)?;
+        let output_arg = format!("type=bind,src={},dst=/evidence", attempt.display());
+        let artifact_arg = format!(
+            "type=bind,src={},dst=/input/{},ro",
+            artifact_path.display(),
+            artifact.path
+        );
+        let runner_arg = format!(
+            "type=bind,src={},dst=/proof-runner,ro",
+            executable.display()
+        );
+        let mut args = vec![
+            "run".into(),
+            "--rm".into(),
+            "--pull=never".into(),
+            "--network=none".into(),
             "--mount".into(),
-            format!(
-                "type=bind,src={},dst=/input/install.sh,ro",
-                request.root.path().join("scripts/install.sh").display()
-            ),
+            output_arg,
+            "--mount".into(),
+            artifact_arg,
+            "--mount".into(),
+            runner_arg,
+        ];
+        if request.platform == "tar-x86_64" {
+            args.extend([
+                "--mount".into(),
+                format!(
+                    "type=bind,src={},dst=/input/install.sh,ro",
+                    request.root.path().join("scripts/install.sh").display()
+                ),
+            ]);
+        }
+        args.extend([
+            request.image.digest.clone(),
+            "/proof-runner".into(),
+            "proof-handoff".into(),
+            "--platform".into(),
+            request.platform.into(),
+            "--artifact".into(),
+            format!("/input/{}", artifact.path),
+            "--output".into(),
+            "/evidence/proof.json".into(),
+            "--candidate-digest".into(),
+            request.ledger.candidate_digest.clone(),
+            "--ledger-sha256".into(),
+            digest(request.ledger_bytes),
+            "--source-commit".into(),
+            request.ledger.source.commit.clone(),
+            "--cargo-lock-sha256".into(),
+            request.ledger.source.cargo_lock_sha256.clone(),
+            "--proof-image-digest".into(),
+            request.image.digest.clone(),
+            "--version".into(),
+            request.ledger.version.clone(),
         ]);
+        run_success_owned(
+            request.processes,
+            request.root.path(),
+            request.engine.executable(),
+            &args,
+        )?;
+        let produced = attempt.join("proof.json");
+        validate_proof_file(request, &produced)?;
+        let bytes = fs::read(&produced).map_err(display_error)?;
+        fs::remove_dir_all(&attempt).map_err(display_error)?;
+        atomic_write_0644(&final_path, &bytes)?;
+        published = true;
+        let metadata = fs::symlink_metadata(&final_path).map_err(display_error)?;
+        published_identity = Some((metadata.dev(), metadata.ino()));
+        validate_proof_file(request, &final_path)?;
+        Ok(final_path.clone())
+    })();
+    result.map_err(|error| {
+        cleanup_proof_attempt(
+            error,
+            &attempt,
+            (attempt_metadata.dev(), attempt_metadata.ino()),
+            &final_path,
+            published,
+            published_identity,
+        )
+    })
+}
+
+pub(crate) fn cleanup_proof_attempt(
+    error: Error,
+    attempt: &Path,
+    attempt_identity: (u64, u64),
+    published: &Path,
+    was_published: bool,
+    published_identity: Option<(u64, u64)>,
+) -> Error {
+    let mut residue = Vec::new();
+    if same_inode(attempt, attempt_identity) && fs::remove_dir_all(attempt).is_err() {
+        residue.push(attempt.to_owned());
     }
-    args.extend([
-        request.image.digest.clone(),
-        "/proof-runner".into(),
-        "proof-handoff".into(),
-        "--platform".into(),
-        request.platform.into(),
-        "--artifact".into(),
-        format!("/input/{}", artifact.path),
-        "--output".into(),
-        "/evidence/proof.json".into(),
-        "--candidate-digest".into(),
-        request.ledger.candidate_digest.clone(),
-        "--ledger-sha256".into(),
-        digest(request.ledger_bytes),
-        "--source-commit".into(),
-        request.ledger.source.commit.clone(),
-        "--cargo-lock-sha256".into(),
-        request.ledger.source.cargo_lock_sha256.clone(),
-        "--proof-image-digest".into(),
-        request.image.digest.clone(),
-        "--version".into(),
-        request.ledger.version.clone(),
-    ]);
-    let run = run_success_owned(
-        request.processes,
-        request.root.path(),
-        request.engine.executable(),
-        &args,
-    );
-    if let Err(error) = run {
-        let _ = fs::remove_dir_all(&attempt);
-        return Err(error);
+    if let Some(identity) = published_identity
+        && same_inode(published, identity)
+        && fs::remove_file(published).is_err()
+    {
+        residue.push(published.to_owned());
     }
-    let produced = attempt.join("proof.json");
-    let validation = validate_proof_file(request, &produced);
-    if let Err(error) = validation {
-        let _ = fs::remove_dir_all(&attempt);
-        return Err(error);
+    if was_published && published_identity.is_none() && published.symlink_metadata().is_ok() {
+        residue.push(published.to_owned());
     }
-    let bytes = fs::read(&produced).map_err(display_error)?;
-    fs::remove_dir_all(&attempt).map_err(display_error)?;
-    atomic_write_0644(&final_path, &bytes)?;
-    validate_proof_file(request, &final_path)?;
-    Ok(final_path)
+    if residue.is_empty() {
+        error
+    } else {
+        Error::new(format!(
+            "{error}\nerror: proof attempt cleanup mismatch: expected owned paths absent, actual residue at {}\nrepair: remove only the named failed-attempt paths",
+            residue
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+fn same_inode(path: &Path, identity: (u64, u64)) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
 }
 
 pub(crate) fn proof_artifact<'a>(
     ledger: &'a CandidateLedger,
     platform: &str,
 ) -> Result<&'a Artifact> {
-    let kind = match platform {
-        "debian-amd64" => "deb",
-        "rpm-x86_64" => "rpm",
-        "tar-x86_64" => "tar",
-        _ => return Err(Error::new("proof platform mismatch")),
-    };
+    let kind = proof_spec(platform)?.artifact_kind;
     ledger
         .payload
         .iter()
@@ -814,23 +880,19 @@ pub fn validate_proof_file(request: &ProofRequest<'_>, path: &Path) -> Result<Ca
         &serde_json::to_value(&proof).map_err(display_error)?,
         &expected,
     )?;
+    let spec = proof_spec(request.platform)?;
     if proof.network != "none"
         || proof.isolation != "fresh-container"
-        || proof.architecture
-            != if request.platform == "debian-amd64" {
-                "amd64"
-            } else {
-                "x86_64"
-            }
+        || proof.architecture != spec.architecture
     {
         return Err(Error::new("proof environment mismatch"));
     }
-    if request.platform == "tar-x86_64"
+    if spec.artifact_kind == "tar"
         && (proof.dry_run_passed != Some(true) || proof.isolated_prefix_passed != Some(true))
     {
         return Err(Error::new("tar proof installer mismatch"));
     }
-    if request.platform != "tar-x86_64"
+    if spec.artifact_kind != "tar"
         && (proof.dry_run_passed.is_some() || proof.isolated_prefix_passed.is_some())
     {
         return Err(Error::new("native proof fields mismatch"));
@@ -901,11 +963,6 @@ pub fn candidate_status(
             "candidate image policy mismatch: expected ledger build images, actual committed policy differs",
         ));
     }
-    let proof_references = [
-        ("debian-amd64", policy.proof_debian),
-        ("rpm-x86_64", policy.proof_rpm),
-        ("tar-x86_64", policy.proof_tar),
-    ];
     let evidence_root = root.path().join("dist/rust-evidence").join(&ledger.version);
     let proofs_root = evidence_root.join("proofs");
     let evidence_names = directory_names(&evidence_root, "candidate evidence")?;
@@ -914,9 +971,9 @@ pub fn candidate_status(
             "candidate evidence inventory mismatch: expected ledger and proofs, actual different",
         ));
     }
-    let expected_proof_names = PROOF_IDS
+    let expected_proof_names = PROOF_SPECS
         .iter()
-        .map(|id| format!("{id}.json"))
+        .map(|spec| format!("{}.json", spec.id))
         .collect::<BTreeSet<_>>();
     if directory_names(&proofs_root, "candidate proofs")? != expected_proof_names {
         return Err(Error::new(
@@ -924,10 +981,10 @@ pub fn candidate_status(
         ));
     }
     let mut proof_bytes = BTreeMap::new();
-    for (id, reference) in proof_references {
+    for (id, _, reference) in policy.proof_policies() {
         let path = proofs_root.join(format!("{id}.json"));
         require_regular(&path, id)?;
-        let image = proof_image_identity(&reference);
+        let image = proof_image_identity(reference);
         validate_proof_file(
             &ProofRequest {
                 root,
@@ -981,7 +1038,7 @@ fn directory_names(path: &Path, label: &str) -> Result<BTreeSet<String>> {
 pub(crate) fn proof_image_identity(reference: &str) -> ImageIdentity {
     let digest = format!("sha256:{}", reference.rsplit_once("sha256:").unwrap().1);
     ImageIdentity {
-        configured_tag: reference.into(),
+        configured_reference: reference.into(),
         digest,
     }
 }
@@ -1308,10 +1365,21 @@ pub fn create_candidate(
 ) -> Result<CandidateStatus> {
     require_expected_commit(root, expected_commit)?;
     let lock = CandidateLock::acquire(root)?;
+    let result = create_candidate_locked(root, expected_commit, descriptor, processes, &lock);
+    finish_candidate_lock(lock, result)
+}
+
+fn create_candidate_locked(
+    root: &RepoRoot,
+    expected_commit: &str,
+    descriptor: &Path,
+    processes: &ProcessEnvironment,
+    lock: &CandidateLock,
+) -> Result<CandidateStatus> {
     let version = workspace_version(root)?;
     require_clean_tree(root.path(), &root.path().join("dist/rust"))?;
     clear_candidate_paths(root, &version)?;
-    let staging = StagingLayout::create(root, &lock)?;
+    let staging = StagingLayout::create(root, lock)?;
     let result = (|| {
         let context = export_immutable_context(root, &staging.context)?;
         if context.commit != expected_commit {
@@ -1403,7 +1471,17 @@ pub fn prove_candidate(
     processes: &ProcessEnvironment,
 ) -> Result<CandidateStatus> {
     validate_version(version)?;
-    let _lock = CandidateLock::acquire(root)?;
+    let lock = CandidateLock::acquire(root)?;
+    let result = prove_candidate_locked(root, version, descriptor, processes);
+    finish_candidate_lock(lock, result)
+}
+
+fn prove_candidate_locked(
+    root: &RepoRoot,
+    version: &str,
+    descriptor: &Path,
+    processes: &ProcessEnvironment,
+) -> Result<CandidateStatus> {
     let (ledger, ledger_bytes) = read_ledger(root, version)?;
     require_clean_tree(root.path(), &root.path().join("dist/rust"))?;
     let commit = command(root.path(), &["git", "rev-parse", "HEAD"])?;
@@ -1471,6 +1549,15 @@ pub fn prove_candidate(
     candidate_status(root, &ledger, &ledger_bytes)
 }
 
+fn finish_candidate_lock<T>(lock: CandidateLock, result: Result<T>) -> Result<T> {
+    match (result, lock.release()) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(release)) => Err(release),
+        (Err(primary), Err(release)) => Err(Error::new(format!("{primary}\n{release}"))),
+    }
+}
+
 fn preflight_existing_proofs(
     root: &RepoRoot,
     ledger: &CandidateLedger,
@@ -1488,7 +1575,10 @@ fn preflight_existing_proofs(
         return Ok(());
     }
     require_directory(&proofs_root, "candidate proofs")?;
-    let allowed = BTreeSet::from(PROOF_IDS.map(|id| format!("{id}.json")));
+    let allowed = PROOF_SPECS
+        .iter()
+        .map(|spec| format!("{}.json", spec.id))
+        .collect::<BTreeSet<_>>();
     for entry in fs::read_dir(&proofs_root).map_err(display_error)? {
         let name = entry
             .map_err(display_error)?
@@ -1523,9 +1613,9 @@ fn preflight_existing_proofs(
 
 fn proof_images(images: &ResolvedImages) -> [(&'static str, &ImageIdentity); 3] {
     [
-        ("debian-amd64", &images.proof_debian),
-        ("rpm-x86_64", &images.proof_rpm),
-        ("tar-x86_64", &images.proof_tar),
+        (PROOF_SPECS[0].id, &images.proof_debian),
+        (PROOF_SPECS[1].id, &images.proof_rpm),
+        (PROOF_SPECS[2].id, &images.proof_tar),
     ]
 }
 fn recheck_all_images(
@@ -1540,7 +1630,7 @@ fn recheck_all_images(
         &images.proof_rpm,
         &images.proof_tar,
     ] {
-        let actual = inspect_image(processes, engine, &image.configured_tag)?;
+        let actual = inspect_image(processes, engine, &image.configured_reference)?;
         if actual.digest != image.digest {
             return Err(Error::new(format!(
                 "image identity mismatch: expected {}, actual {}",

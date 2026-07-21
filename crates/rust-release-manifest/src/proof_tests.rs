@@ -2,10 +2,40 @@
 // Copyright (c) 2026 sol pbc
 
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 const CANDIDATE_VECTOR: &str = "27e7dd62da4e0022b755f669dd00118a57715aaf088ff7f2a6c322951238494e";
 const BUNDLE_VECTOR: &str = "cd214a005b2186a7eb25e9fd756561fb9c6e47e02004047c1cd5132106580a3e";
+
+fn proof_ids() -> [&'static str; 3] {
+    [PROOF_SPECS[0].id, PROOF_SPECS[1].id, PROOF_SPECS[2].id]
+}
+
+#[test]
+fn failed_proof_attempt_removes_only_owned_attempt_and_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let attempt = temp.path().join("attempt");
+    let published = temp.path().join("proof.json");
+    let foreign = temp.path().join("foreign.tmp");
+    fs::create_dir(&attempt).unwrap();
+    fs::write(attempt.join("partial"), b"partial").unwrap();
+    fs::write(&published, b"published").unwrap();
+    fs::write(&foreign, b"foreign").unwrap();
+    let attempt_metadata = fs::symlink_metadata(&attempt).unwrap();
+    let published_metadata = fs::symlink_metadata(&published).unwrap();
+    let error = cleanup_proof_attempt(
+        Error::new("primary"),
+        &attempt,
+        (attempt_metadata.dev(), attempt_metadata.ino()),
+        &published,
+        true,
+        Some((published_metadata.dev(), published_metadata.ino())),
+    );
+    assert_eq!(error.to_string(), "primary");
+    assert!(!attempt.exists());
+    assert!(!published.exists());
+    assert_eq!(fs::read(foreign).unwrap(), b"foreign");
+}
 
 #[test]
 fn candidate_schemas_are_digest_and_identity_pinned() {
@@ -373,7 +403,7 @@ fn fixed_payload_and_ledger_serialization_are_reproducible() {
         tools: BTreeMap::new(),
         payload,
         package_members: Vec::new(),
-        expected_proof_ids: PROOF_IDS.map(str::to_owned).to_vec(),
+        expected_proof_ids: proof_ids().map(str::to_owned).to_vec(),
         candidate_digest: candidate,
     };
     let first = canonical_json(&serde_json::to_value(&ledger).unwrap()).unwrap();
@@ -502,14 +532,14 @@ fn retained_fixture_from(repo: crate::candidate_tests::TestRepo) -> RetainedFixt
         tools,
         payload: artifacts.clone(),
         package_members: members,
-        expected_proof_ids: PROOF_IDS.map(str::to_owned).to_vec(),
+        expected_proof_ids: proof_ids().map(str::to_owned).to_vec(),
         candidate_digest: candidate_digest(&artifacts).unwrap(),
     };
     let ledger_bytes = ledger_bytes(&repo.root, &payload, &ledger).unwrap();
     let evidence = repo.root.path().join("dist/rust-evidence/1.0.0");
     fs::create_dir_all(evidence.join("proofs")).unwrap();
     atomic_write_0644(&evidence.join("ledger.json"), &ledger_bytes).unwrap();
-    for id in PROOF_IDS {
+    for id in proof_ids() {
         write_valid_proof(&repo.root, &ledger, &ledger_bytes, id);
     }
     RetainedFixture {
@@ -598,7 +628,10 @@ fn bundle_digest_callsite_invariant_requires_validated_exact_inventory() {
     let fixture = retained_fixture();
     let status =
         candidate_status(&fixture.repo.root, &fixture.ledger, &fixture.ledger_bytes).unwrap();
-    assert_eq!(status.proofs.keys().cloned().collect::<Vec<_>>(), PROOF_IDS);
+    assert_eq!(
+        status.proofs.keys().cloned().collect::<Vec<_>>(),
+        proof_ids()
+    );
     assert_eq!(
         status.candidate_digest,
         candidate_digest(&fixture.ledger.payload).unwrap()
@@ -694,7 +727,7 @@ fn status_and_recovery_reject_every_retained_binding_mutation() {
         "network",
         "isolation",
     ];
-    for id in PROOF_IDS {
+    for id in proof_ids() {
         let path = fixture
             .repo
             .root
@@ -781,7 +814,7 @@ fn status_and_recovery_reject_every_retained_binding_mutation() {
     .into_iter()
     .map(str::to_owned)
     .collect::<Vec<_>>();
-    ledger_pointers.extend(TOOL_KEYS.map(|key| format!("/tools/{key}")));
+    ledger_pointers.extend(TOOL_SPECS.iter().map(|spec| format!("/tools/{}", spec.key)));
     for index in 0..fixture.ledger.payload.len() {
         for field in ["path", "bytes", "sha256"] {
             ledger_pointers.push(format!("/payload/{index}/{field}"));
@@ -1027,7 +1060,7 @@ fn prove_candidate_rejects_source_change_during_first_proof_run() {
         .path()
         .join("dist/rust-evidence/1.0.0/proofs");
     let templates = tempfile::tempdir().unwrap();
-    for id in PROOF_IDS {
+    for id in proof_ids() {
         fs::copy(
             proofs.join(format!("{id}.json")),
             templates.path().join(format!("{id}.json")),
@@ -1081,7 +1114,7 @@ fn prove_resume_preserves_payload_ledger_and_first_proof_without_rebuild() {
         .path()
         .join("dist/rust-evidence/1.0.0/proofs");
     let templates = tempfile::tempdir().unwrap();
-    for id in PROOF_IDS {
+    for id in proof_ids() {
         fs::copy(
             proofs.join(format!("{id}.json")),
             templates.path().join(format!("{id}.json")),
@@ -1161,7 +1194,7 @@ fn create_readiness_ledger_replacement_rolls_back_promoted_candidate() {
         &finalized.ledger,
         &finalized.ledger_bytes,
     );
-    let owned = PROOF_IDS.map(|id| {
+    let owned = proof_ids().map(|id| {
         finalized
             .evidence_root
             .join("proofs")
@@ -1265,7 +1298,7 @@ fn docker_identity_is_normalized_and_retained_validation_is_provider_neutral() {
         &fixture.ledger_bytes,
     )
     .unwrap();
-    for id in PROOF_IDS {
+    for id in proof_ids() {
         let path = fixture
             .repo
             .root
@@ -1416,7 +1449,7 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path) {
             target: TARGET_TRIPLE.into(),
             profile: "release".into(),
             features: vec![],
-            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef012\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
+            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
             cargo: "cargo 1.97.1 (abcdef012 2026-06-30)".into(),
             baseline_executable_sha256: "d".repeat(64),
             image_digest: "@IMAGE@".into(),
@@ -1436,7 +1469,7 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path) {
         };
         fs::write(directory.join(name), serde_json::to_vec(&evidence).unwrap()).unwrap();
     }
-    for id in PROOF_IDS {
+    for id in proof_ids() {
         let platform = policy.proof_policy(id).unwrap();
         let artifact_name = match id {
             "debian-amd64" => "solstone-linux_1.0.0-1_amd64.deb",
@@ -1596,7 +1629,7 @@ exit 94
     }
     let processes = ProcessEnvironment::with_path(stubs.path().as_os_str());
     for (marker, class) in [(&fail_producer, "producer"), (&fail_validator, "validator")] {
-        for id in PROOF_IDS {
+        for id in proof_ids() {
             fs::write(marker, id).unwrap();
             let failed = crate::candidate_tests::fixture();
             let descriptor_dir = tempfile::tempdir().unwrap();

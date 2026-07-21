@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Read};
-use std::net::IpAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -31,6 +30,8 @@ pub const CHECKSUM_NAME: &str = "SHA256SUMS";
 pub const PRODUCT: &str = "solstone-linux";
 pub const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 pub const CARGO_DENY_VERSION: &str = "0.20.2";
+pub(crate) const CONTEXT_BINDING_NAME: &str = ".release-context.json";
+pub(crate) const CONTEXT_ARCHIVE_NAME: &str = ".release-context.tar";
 pub const MANIFEST_OK_MESSAGE: &str =
     "Named manifest and artifacts verified; this is NOT candidate-readiness classification.";
 pub const RELEASE_DIR_OK_MESSAGE: &str =
@@ -63,29 +64,126 @@ const EXPECTED_LAYOUT: [&str; 9] = [
     "crates/solstone-linux/Cargo.toml",
     "crates/rust-release-manifest/Cargo.toml",
 ];
-const TOOL_KEYS: [&str; 18] = [
-    "cargo_deb",
-    "cargo_generate_rpm",
-    "container_engine",
-    "dpkg_deb",
-    "fedora_image_digest",
-    "fedora_os",
-    "manifest_validator",
-    "rpm",
-    "signing_mode",
-    "ubuntu_cargo",
-    "ubuntu_compiler",
-    "ubuntu_glibc",
-    "ubuntu_gzip",
-    "ubuntu_image_digest",
-    "ubuntu_linker",
-    "ubuntu_os",
-    "ubuntu_rustc",
-    "ubuntu_tar",
-];
-#[cfg(test)]
-const EXCEPTIONS: [&str; 2] = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolSource {
+    Host,
+    Ubuntu,
+    Fedora,
+    BothLanes,
+}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ToolSpec {
+    pub key: &'static str,
+    pub source: ToolSource,
+}
+
+pub(crate) const TOOL_SPECS: [ToolSpec; 18] = [
+    ToolSpec {
+        key: "cargo_deb",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "cargo_generate_rpm",
+        source: ToolSource::Fedora,
+    },
+    ToolSpec {
+        key: "container_engine",
+        source: ToolSource::Host,
+    },
+    ToolSpec {
+        key: "dpkg_deb",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "fedora_image_digest",
+        source: ToolSource::Fedora,
+    },
+    ToolSpec {
+        key: "fedora_os",
+        source: ToolSource::Fedora,
+    },
+    ToolSpec {
+        key: "manifest_validator",
+        source: ToolSource::Host,
+    },
+    ToolSpec {
+        key: "rpm",
+        source: ToolSource::Fedora,
+    },
+    ToolSpec {
+        key: "signing_mode",
+        source: ToolSource::BothLanes,
+    },
+    ToolSpec {
+        key: "ubuntu_cargo",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_compiler",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_glibc",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_gzip",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_image_digest",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_linker",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_os",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_rustc",
+        source: ToolSource::Ubuntu,
+    },
+    ToolSpec {
+        key: "ubuntu_tar",
+        source: ToolSource::Ubuntu,
+    },
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProofSpec {
+    pub id: &'static str,
+    pub artifact_kind: &'static str,
+    pub architecture: &'static str,
+}
+
+pub const PROOF_SPECS: [ProofSpec; 3] = [
+    ProofSpec {
+        id: "debian-amd64",
+        artifact_kind: "deb",
+        architecture: "amd64",
+    },
+    ProofSpec {
+        id: "rpm-x86_64",
+        artifact_kind: "rpm",
+        architecture: "x86_64",
+    },
+    ProofSpec {
+        id: "tar-x86_64",
+        artifact_kind: "tar",
+        architecture: "x86_64",
+    },
+];
+
+pub fn proof_spec(id: &str) -> Result<ProofSpec> {
+    PROOF_SPECS
+        .into_iter()
+        .find(|spec| spec.id == id)
+        .ok_or_else(|| Error::new("proof platform mismatch: expected known proof ID"))
+}
 #[derive(Debug)]
 pub struct Error(String);
 
@@ -157,6 +255,7 @@ impl RepoRoot {
 pub struct CandidateLock {
     path: PathBuf,
     file: File,
+    released: bool,
 }
 
 impl CandidateLock {
@@ -171,19 +270,47 @@ impl CandidateLock {
             .open(&path)
             .map_err(|error| {
                 Error::new(format!(
-                    "release candidate lock mismatch: expected exclusive owner, actual {error}"
+                    "release candidate lock mismatch: expected exclusive owner, actual {error}\nrepair: confirm no candidate process is running, then remove only dist/.rust-release-candidate.lock"
                 ))
             })?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            released: false,
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn release(mut self) -> Result<()> {
+        self.remove_owned()?;
+        self.released = true;
+        Ok(())
+    }
+
+    fn remove_owned(&self) -> Result<()> {
+        let owned = self.file.metadata().map_err(display_error)?;
+        let metadata = fs::symlink_metadata(&self.path).map_err(display_error)?;
+        if metadata.dev() != owned.dev() || metadata.ino() != owned.ino() {
+            return Err(Error::new(
+                "release candidate lock cleanup mismatch: expected owned lock, actual replaced\nrepair: inspect dist/.rust-release-candidate.lock and remove it only after confirming no candidate process is running",
+            ));
+        }
+        fs::remove_file(&self.path).map_err(|error| {
+            Error::new(format!(
+                "release candidate lock cleanup mismatch: expected owned lock removed, actual {error}\nrepair: remove only dist/.rust-release-candidate.lock after confirming no candidate process is running"
+            ))
+        })
+    }
 }
 
 impl Drop for CandidateLock {
     fn drop(&mut self) {
+        if self.released {
+            return;
+        }
         let owned = self.file.metadata();
         let same_file = fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
             owned
@@ -204,8 +331,6 @@ pub struct StagingLayout {
     pub rpm_lane: PathBuf,
     pub advisory_db: PathBuf,
     pub payload: PathBuf,
-    pub proofs: PathBuf,
-    pub ledger_temp: PathBuf,
 }
 
 impl StagingLayout {
@@ -234,8 +359,6 @@ impl StagingLayout {
             rpm_lane: staging.join("lane-rpm"),
             advisory_db: staging.join("advisory-db"),
             payload: staging.join("payload"),
-            proofs: staging.join("proofs"),
-            ledger_temp: staging.join("ledger.json.tmp"),
             root: staging.clone(),
         };
         let setup = (|| {
@@ -245,7 +368,6 @@ impl StagingLayout {
                 &layout.rpm_lane,
                 &layout.advisory_db,
                 &layout.payload,
-                &layout.proofs,
             ] {
                 fs::create_dir_all(directory).map_err(display_error)?;
             }
@@ -272,29 +394,12 @@ pub struct ImmutableContext {
     pub path: PathBuf,
 }
 
-pub fn owner_emptying_allowlist(
-    root: &RepoRoot,
-    version: &str,
-    transaction_id: &str,
-) -> Result<BTreeSet<PathBuf>> {
-    validate_version(version)?;
-    if transaction_id.len() != 32
-        || !transaction_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(Error::new(
-            "transaction ID mismatch: expected 32 lowercase hexadecimal characters, actual invalid",
-        ));
-    }
-    let dist = root.path().join("dist");
-    Ok(BTreeSet::from([
-        dist.join("rust"),
-        dist.join("rust-evidence").join(version),
-        dist.join("rust-drift"),
-        dist.join(".rust-release-candidate-staging")
-            .join(transaction_id),
-    ]))
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContextBinding {
+    pub source_commit: String,
+    pub source_archive_sha256: String,
+    pub cargo_lock_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -617,7 +722,10 @@ pub fn bundle_digest_input(
             "candidate digest mismatch: expected sha256, actual invalid",
         ));
     }
-    let expected = BTreeSet::from(["debian-amd64", "rpm-x86_64", "tar-x86_64"]);
+    let expected = PROOF_SPECS
+        .iter()
+        .map(|spec| spec.id)
+        .collect::<BTreeSet<_>>();
     let actual = proofs.keys().map(String::as_str).collect::<BTreeSet<_>>();
     if actual != expected {
         return Err(Error::new(format!(
@@ -786,9 +894,9 @@ pub fn validate_candidate_proof(value: &Value, expected: &ProofBindings) -> Resu
     let proof_time = object["proof_time"]
         .as_str()
         .ok_or_else(|| Error::new("proof proof_time mismatch"))?;
-    validate_timestamp(proof_time)?;
-    validate_timestamp(&expected.policy_checked_at)?;
-    validate_timestamp(&expected.validation_time)?;
+    validate_timestamp("proof_time", proof_time)?;
+    validate_timestamp("policy checked_at", &expected.policy_checked_at)?;
+    validate_timestamp("proof validation time", &expected.validation_time)?;
     let proof_time = DateTime::parse_from_rfc3339(proof_time).map_err(display_error)?;
     let checked_at =
         DateTime::parse_from_rfc3339(&expected.policy_checked_at).map_err(display_error)?;
@@ -839,6 +947,11 @@ pub fn export_immutable_context(root: &RepoRoot, destination: &Path) -> Result<I
         ));
     }
     let archive = command_bytes(root.path(), &["git", "archive", "--format=tar", "HEAD"])?;
+    if git_archive_commit(&archive)? != commit {
+        return Err(Error::new(
+            "git archive commit mismatch: expected checkout HEAD, actual archive differs",
+        ));
+    }
     extract_context(&archive, destination, &commit)?;
     let source_lock = digest(&fs::read(root.path().join("Cargo.lock")).map_err(display_error)?);
     let extracted_lock = digest(&fs::read(destination.join("Cargo.lock")).map_err(display_error)?);
@@ -850,12 +963,47 @@ pub fn export_immutable_context(root: &RepoRoot, destination: &Path) -> Result<I
     for relative in EXPECTED_LAYOUT {
         require_regular(&destination.join(relative), relative)?;
     }
+    let binding = ContextBinding {
+        source_commit: commit.clone(),
+        source_archive_sha256: digest(&archive),
+        cargo_lock_sha256: source_lock.clone(),
+    };
+    let binding_bytes = canonical_json(&serde_json::to_value(binding).map_err(display_error)?)?;
+    fs::write(destination.join(CONTEXT_BINDING_NAME), binding_bytes).map_err(display_error)?;
+    fs::write(destination.join(CONTEXT_ARCHIVE_NAME), &archive).map_err(display_error)?;
     Ok(ImmutableContext {
         commit,
         archive_sha256: digest(&archive),
         cargo_lock_sha256: source_lock,
         path: destination.to_owned(),
     })
+}
+
+pub(crate) fn git_archive_commit(archive: &[u8]) -> Result<String> {
+    if archive.len() < 1024 || archive[156] != b'g' {
+        return Err(Error::new(
+            "git archive identity mismatch: expected global PAX header",
+        ));
+    }
+    let size = std::str::from_utf8(&archive[124..136])
+        .map_err(display_error)?
+        .trim_matches(['\0', ' ']);
+    let size = usize::from_str_radix(size, 8).map_err(display_error)?;
+    let body = archive
+        .get(512..512 + size)
+        .ok_or_else(|| Error::new("git archive identity mismatch: expected complete PAX header"))?;
+    let body = std::str::from_utf8(body).map_err(display_error)?;
+    let commits = body
+        .lines()
+        .filter_map(|line| line.split_once(" comment=").map(|(_, value)| value))
+        .filter(|value| is_git_commit(value))
+        .collect::<Vec<_>>();
+    if commits.len() != 1 {
+        return Err(Error::new(
+            "git archive identity mismatch: expected one commit comment",
+        ));
+    }
+    Ok(commits[0].to_owned())
 }
 
 fn validate_evidence(root: &RepoRoot, evidence: &Evidence) -> Result<()> {
@@ -871,7 +1019,10 @@ fn validate_evidence(root: &RepoRoot, evidence: &Evidence) -> Result<()> {
     validate_evidence_text("rust.rustc_verbose", &evidence.rust.rustc_verbose)?;
     validate_evidence_text("rust.cargo_version", &evidence.rust.cargo_version)?;
     validate_native_tools(root, &evidence.native_tools)?;
-    validate_timestamp(&evidence.dependency_policy.advisory_checked_at)
+    validate_timestamp(
+        "advisory checked_at",
+        &evidence.dependency_policy.advisory_checked_at,
+    )
 }
 
 fn validate_manifest_policy(root: &RepoRoot, manifest: &Manifest) -> Result<()> {
@@ -879,7 +1030,10 @@ fn validate_manifest_policy(root: &RepoRoot, manifest: &Manifest) -> Result<()> 
     validate_evidence_text("rust.rustc_verbose", &manifest.rust.rustc_verbose)?;
     validate_evidence_text("rust.cargo_version", &manifest.rust.cargo_version)?;
     validate_native_tools(root, &manifest.native_tools)?;
-    validate_timestamp(&manifest.dependency_policy.advisory_checked_at)?;
+    validate_timestamp(
+        "advisory checked_at",
+        &manifest.dependency_policy.advisory_checked_at,
+    )?;
     validate_artifact_set(&manifest.artifacts)?;
     for artifact in &manifest.artifacts {
         artifact_kind(&artifact.path, Some(&manifest.version))?;
@@ -888,6 +1042,10 @@ fn validate_manifest_policy(root: &RepoRoot, manifest: &Manifest) -> Result<()> 
 }
 
 fn validate_evidence_text(field: &str, value: &str) -> Result<()> {
+    validate_privacy(field, value, true)
+}
+
+fn validate_privacy(field: &str, value: &str, allow_multiline: bool) -> Result<()> {
     let lower = value.to_ascii_lowercase();
     let forbidden = [
         "token",
@@ -897,6 +1055,11 @@ fn validate_evidence_text(field: &str, value: &str) -> Result<()> {
         "localhost",
         ".local",
         ".internal",
+        "staging",
+        "sandbox",
+        "preview",
+        " dev ",
+        " test ",
         "socket",
         "pipe:",
         "ipc:",
@@ -921,18 +1084,24 @@ fn validate_evidence_text(field: &str, value: &str) -> Result<()> {
         };
         ipv4 || ipv6
     });
+    let compiler_commit = value.lines().find_map(|line| {
+        line.strip_prefix("commit-hash: ")
+            .filter(|hash| is_git_commit(hash))
+    });
     let opaque_blob = tokens.iter().any(|token| {
-        token.len() >= 20
-            && *token != TARGET_TRIPLE
-            && token.chars().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(character, '+' | '/' | '=' | '_' | '-')
-            })
+        (token.len() >= 12 && token.chars().all(|character| character.is_ascii_digit()))
+            || (token.len() >= 20
+                && *token != TARGET_TRIPLE
+                && Some(*token) != compiler_commit
+                && token.chars().all(|character| {
+                    character.is_ascii_alphanumeric()
+                        || matches!(character, '+' | '/' | '=' | '_' | '-')
+                }))
     });
     let bad = value.is_empty()
-        || value
-            .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        || value.chars().any(|character| {
+            character.is_control() && !(allow_multiline && matches!(character, '\n' | '\t'))
+        })
         || value.contains(['$', '%', '\\', '/', '@'])
         || value.contains("://")
         || forbidden.iter().any(|word| lower.contains(word))
@@ -946,19 +1115,39 @@ fn validate_evidence_text(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_timestamp(value: &str) -> Result<()> {
-    DateTime::parse_from_rfc3339(value).map_err(|_| Error::new("advisory time mismatch"))?;
-    if !value.ends_with('Z') {
-        return Err(Error::new(
-            "advisory time mismatch: expected canonical UTC Z suffix",
-        ));
+fn validate_timestamp(field: &str, value: &str) -> Result<()> {
+    let bytes = value.as_bytes();
+    let canonical_shape = bytes.len() == 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'Z'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        });
+    if !canonical_shape {
+        return Err(Error::new(format!(
+            "{field} mismatch: expected canonical UTC seconds with Z suffix"
+        )));
+    }
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .map_err(|_| Error::new(format!("{field} mismatch: expected canonical UTC time")))?;
+    if parsed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true) != value {
+        return Err(Error::new(format!(
+            "{field} mismatch: expected canonical UTC seconds with Z suffix"
+        )));
     }
     Ok(())
 }
 
 fn validate_native_tools(root: &RepoRoot, tools: &BTreeMap<String, String>) -> Result<()> {
     let actual = tools.keys().map(String::as_str).collect::<BTreeSet<_>>();
-    let expected = TOOL_KEYS.into_iter().collect::<BTreeSet<_>>();
+    let expected = TOOL_SPECS
+        .iter()
+        .map(|spec| spec.key)
+        .collect::<BTreeSet<_>>();
     if actual != expected {
         return Err(Error::new(format!(
             "native tools mismatch: expected 18 keys, actual {}",
@@ -978,7 +1167,7 @@ fn validate_native_tools(root: &RepoRoot, tools: &BTreeMap<String, String>) -> R
             return Err(Error::new(format!("native tool {key} mismatch")));
         }
     }
-    for key in TOOL_KEYS {
+    for key in TOOL_SPECS.iter().map(|spec| spec.key) {
         if !matches!(
             key,
             "cargo_deb"
@@ -1006,24 +1195,8 @@ fn exact_tool(tools: &BTreeMap<String, String>, key: &str, expected: &str) -> Re
 }
 
 pub(crate) fn validate_identity(key: &str, value: &str) -> Result<()> {
-    let lower = value.to_ascii_lowercase();
-    let forbidden = [
-        "token",
-        "secret",
-        "password",
-        "bearer",
-        "localhost",
-        ".local",
-        ".internal",
-        "staging",
-        "sandbox",
-        "preview",
-        " dev ",
-        " test ",
-        "socket",
-        "pipe:",
-        "ipc:",
-    ];
+    validate_privacy(&format!("native tool {key}"), value, false)
+        .map_err(|_| Error::new(format!("native tool {key} identity mismatch")))?;
     let approved_prefixes: &[&str] = match key {
         "container_engine" => &["podman ", "docker "],
         "ubuntu_os" => &["Ubuntu "],
@@ -1037,31 +1210,12 @@ pub(crate) fn validate_identity(key: &str, value: &str) -> Result<()> {
         "rpm" => &["RPM ", "rpm "],
         _ => &[],
     };
-    let tokens = value.split_whitespace().collect::<Vec<_>>();
-    let private_identifier = tokens.iter().any(|token| {
-        token.parse::<IpAddr>().is_ok()
-            || (token.len() >= 32
-                && token.contains('-')
-                && token
-                    .chars()
-                    .all(|character| character.is_ascii_hexdigit() || character == '-'))
-            || (token.len() >= 12 && token.chars().all(|character| character.is_ascii_digit()))
-            || (token.len() >= 20
-                && token.chars().all(|character| {
-                    character.is_ascii_alphanumeric()
-                        || matches!(character, '+' | '/' | '=' | '_' | '-')
-                }))
-    });
     let bad = !approved_prefixes
         .iter()
         .any(|prefix| value.starts_with(prefix))
         || value.trim() != value
         || value.contains("  ")
         || value.chars().any(|character| character.is_control())
-        || value.contains(['$', '%', '@', '/', '\\'])
-        || value.contains("://")
-        || forbidden.iter().any(|word| lower.contains(word))
-        || private_identifier
         || !value.chars().any(|character| character.is_ascii_digit())
         || value.split_whitespace().count() > 6;
     if bad {
@@ -1129,6 +1283,18 @@ fn artifact_kind(name: &str, expected_version: Option<&str>) -> Result<&'static 
         )));
     }
     Ok(kind)
+}
+
+pub(crate) fn artifact_name(kind: &str, version: &str) -> Result<String> {
+    validate_version(version)?;
+    match kind {
+        "tar" => Ok(format!("solstone-linux-{version}-linux-x86_64.tar.gz")),
+        "deb" => Ok(format!("solstone-linux_{version}-1_amd64.deb")),
+        "rpm" => Ok(format!("solstone-linux-{version}-1.x86_64.rpm")),
+        _ => Err(Error::new(
+            "artifact kind mismatch: expected tar, deb, or rpm",
+        )),
+    }
 }
 
 fn artifact_paths(root: &Path, version: &str) -> Result<Vec<PathBuf>> {

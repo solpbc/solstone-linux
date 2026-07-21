@@ -95,7 +95,6 @@ trap 'rm -rf "$OUTPUT_TMP"' EXIT
   "$REPO_ROOT"
 
 OUTPUT_DIR=dist/rust-drift
-mkdir -p "$OUTPUT_DIR"
 shopt -s nullglob
 OUTPUTS=("$OUTPUT_TMP"/* "$OUTPUT_TMP"/.[!.]*)
 shopt -u nullglob
@@ -104,6 +103,13 @@ if [[ ${#OUTPUTS[@]} -ne 3 ]]; then
   echo "repair: inspect the selected local build image and packaging/Containerfile" >&2
   exit 1
 fi
+if [[ -L "$OUTPUT_DIR" ]]; then
+  echo "error: drift output mismatch: expected owned directory or absent, actual symlink" >&2
+  echo "repair: remove the dist/rust-drift symlink after preserving any needed data" >&2
+  exit 1
+fi
+rm -rf -- "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR"
 for SOURCE in "${OUTPUTS[@]}"; do
   install -m 0644 "$SOURCE" "$OUTPUT_DIR/${SOURCE##*/}"
 done
