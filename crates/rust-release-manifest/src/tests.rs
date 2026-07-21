@@ -87,6 +87,25 @@ fn tarball(root: &Path, version: &str) -> PathBuf {
     path
 }
 
+fn raw_tarball(root: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+    let path = root.join(name);
+    let encoder = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    for (entry_path, body) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        let name_bytes = entry_path.as_bytes();
+        assert!(name_bytes.len() < 100);
+        header.as_mut_bytes()[..100].fill(0);
+        header.as_mut_bytes()[..name_bytes.len()].copy_from_slice(name_bytes);
+        header.set_cksum();
+        builder.append(&header, *body).unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap();
+    path
+}
+
 fn control_tar(version: &str) -> Vec<u8> {
     let mut archive = tar::Builder::new(Vec::new());
     let body = format!("Package: solstone-linux\nVersion: {version}-1\nArchitecture: amd64\n");
@@ -98,6 +117,36 @@ fn control_tar(version: &str) -> Vec<u8> {
         .append_data(&mut header, "./control", body.as_bytes())
         .unwrap();
     archive.into_inner().unwrap()
+}
+
+fn control_tar_bodies(bodies: &[String]) -> Vec<u8> {
+    let mut archive = tar::Builder::new(Vec::new());
+    for body in bodies {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "./control", body.as_bytes())
+            .unwrap();
+    }
+    archive.into_inner().unwrap()
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn deb_members(root: &Path, name: &str, members: &[(&str, &[u8])]) -> PathBuf {
+    let path = root.join(name);
+    let mut archive = ar::Builder::new(File::create(&path).unwrap());
+    for (member_name, bytes) in members {
+        let header = ar::Header::new(member_name.as_bytes().to_vec(), bytes.len() as u64);
+        archive.append(&header, *bytes).unwrap();
+    }
+    path
 }
 
 fn deb(root: &Path, version: &str) -> PathBuf {
@@ -161,6 +210,18 @@ fn rust_release_manifest_conformance() {
         descriptor["schema_id"],
         "https://solpbc.org/schemas/rust-release-manifest/v1.json"
     );
+    assert_eq!(
+        descriptor["schema_dialect"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(
+        descriptor["schema_path"],
+        "rust-release-manifest.schema.json"
+    );
+    assert_eq!(descriptor["vendored_root"], "vendor/rust-release-manifest");
+    assert!(descriptor.get("authority_repository").is_none());
+    assert!(descriptor.get("authority_commit").is_none());
+    assert_eq!(descriptor.as_object().unwrap().len(), 6);
     let temp = release_fixture();
     let first = render_manifest(evidence(), temp.path()).unwrap();
     let second = render_manifest(evidence(), temp.path()).unwrap();
@@ -212,6 +273,8 @@ fn rust_release_manifest_conformance() {
     }
     for canary in [
         "$VERSION",
+        "${VERSION}",
+        "%VERSION%",
         "tool 1.0 token=abc",
         "tool 1.0 builder.internal",
         "tool 1.0 /usr/bin/tool",
@@ -232,6 +295,47 @@ fn rust_release_manifest_conformance() {
 }
 
 #[test]
+fn named_manifest_requires_versioned_basename() {
+    let temp = release_fixture();
+    let version = evidence().version;
+    write_rendered(evidence(), temp.path()).unwrap();
+    let correct = temp.path().join(manifest_name(&version));
+    verify_manifest(&correct, false).unwrap();
+
+    for wrong_name in [
+        "rust-release-manifest.json".to_owned(),
+        manifest_name("9.9.9"),
+    ] {
+        let wrong = temp.path().join(wrong_name);
+        fs::copy(&correct, &wrong).unwrap();
+        let error = verify_manifest(&wrong, false).unwrap_err();
+        assert!(error.to_string().contains("manifest basename mismatch"));
+    }
+}
+
+#[test]
+fn renderer_requires_authoritative_ordered_exceptions() {
+    let temp = release_fixture();
+    let mut cases = Vec::new();
+
+    let mut dropped = evidence();
+    dropped.active_exceptions.pop();
+    cases.push(dropped);
+
+    let mut added = evidence();
+    added.active_exceptions.push("RUSTSEC-2026-9999".to_owned());
+    cases.push(added);
+
+    let mut reordered = evidence();
+    reordered.active_exceptions.reverse();
+    cases.push(reordered);
+
+    for candidate in cases {
+        assert!(render_manifest(candidate, temp.path()).is_err());
+    }
+}
+
+#[test]
 fn package_readers_reject_malformed_and_stale_bytes() {
     let temp = release_fixture();
     let version = evidence().version;
@@ -245,6 +349,75 @@ fn package_readers_reject_malformed_and_stale_bytes() {
     let bad_rpm = temp.path().join("solstone-linux-9.9.9-1.x86_64.rpm");
     fs::write(&bad_rpm, b"truncated").unwrap();
     assert!(rpm_identity(&bad_rpm).is_err());
+
+    for (name, entries) in [
+        ("traversal.tar.gz", vec![("../evil", &b"x"[..])]),
+        ("absolute.tar.gz", vec![("/etc/passwd", &b"x"[..])]),
+        (
+            "multiple-roots.tar.gz",
+            vec![("one/file", &b"x"[..]), ("two/file", &b"y"[..])],
+        ),
+    ] {
+        assert!(tar_version(&raw_tarball(temp.path(), name, &entries)).is_err());
+    }
+
+    let body = format!("Package: solstone-linux\nVersion: {version}-1\nArchitecture: amd64\n");
+    let control = gzip(&control_tar_bodies(std::slice::from_ref(&body)));
+    let marker = b"2.0\n";
+    assert!(
+        deb_identity(&deb_members(
+            temp.path(),
+            "missing-marker.deb",
+            &[("control.tar.gz", &control)],
+        ))
+        .is_err()
+    );
+    assert!(
+        deb_identity(&deb_members(
+            temp.path(),
+            "wrong-marker.deb",
+            &[("debian-binary", b"2.1\n"), ("control.tar.gz", &control)],
+        ))
+        .is_err()
+    );
+    assert!(
+        deb_identity(&deb_members(
+            temp.path(),
+            "duplicate-control-archive.deb",
+            &[
+                ("debian-binary", marker),
+                ("control.tar.gz", &control),
+                ("control.tar.gz", &control),
+            ],
+        ))
+        .is_err()
+    );
+
+    let duplicate_entries = gzip(&control_tar_bodies(&[body.clone(), body.clone()]));
+    assert!(
+        deb_identity(&deb_members(
+            temp.path(),
+            "duplicate-control-entry.deb",
+            &[
+                ("debian-binary", marker),
+                ("control.tar.gz", &duplicate_entries),
+            ],
+        ))
+        .is_err()
+    );
+    let duplicate_field = format!("{body}Version: {version}-1\n");
+    let duplicate_field = gzip(&control_tar_bodies(&[duplicate_field]));
+    assert!(
+        deb_identity(&deb_members(
+            temp.path(),
+            "duplicate-control-field.deb",
+            &[
+                ("debian-binary", marker),
+                ("control.tar.gz", &duplicate_field),
+            ],
+        ))
+        .is_err()
+    );
 }
 
 #[test]
@@ -252,7 +425,8 @@ fn checksum_and_complete_inventory_mutations_fail() {
     let temp = release_fixture();
     let text = render_manifest(evidence(), temp.path()).unwrap();
     let manifest = validate_manifest_bytes(text.as_bytes()).unwrap();
-    fs::write(temp.path().join(MANIFEST_NAME), text).unwrap();
+    let manifest_path = temp.path().join(manifest_name(&manifest.version));
+    fs::write(&manifest_path, text).unwrap();
     fs::write(
         temp.path().join(CHECKSUM_NAME),
         render_sha256sums(&manifest.artifacts).unwrap(),
@@ -263,6 +437,10 @@ fn checksum_and_complete_inventory_mutations_fail() {
     }
     verify_checksums(&manifest, temp.path()).unwrap();
     classify_release(temp.path(), false).unwrap();
+    let stale_manifest = temp.path().join(manifest_name("2.0.0"));
+    fs::rename(&manifest_path, &stale_manifest).unwrap();
+    assert!(classify_release(temp.path(), false).is_err());
+    fs::rename(stale_manifest, &manifest_path).unwrap();
     let original = fs::read_to_string(temp.path().join(CHECKSUM_NAME)).unwrap();
     let mut lines = original.lines().collect::<Vec<_>>();
     lines.swap(0, 1);
@@ -358,6 +536,9 @@ fn live_semantic_drift_is_rejected_field_by_field() {
     let mut candidate = manifest.clone();
     candidate.active_exceptions[0] = "RUSTSEC-2026-9998".into();
     reject(&candidate);
+    let mut candidate = manifest.clone();
+    candidate.active_exceptions.reverse();
+    reject(&candidate);
 
     for target in [
         TargetEvidence::Compiled {
@@ -404,6 +585,8 @@ fn native_tool_exact_identity_and_digest_mutations_fail() {
         ("cargo_generate_rpm", "0.21.1"),
         ("manifest_validator", "9.9.9"),
         ("signing_mode", "signed"),
+        ("ubuntu_rustc", "rustc 1.97.2"),
+        ("ubuntu_cargo", "cargo 1.97.2"),
     ] {
         let mut value = original.clone();
         value["native_tools"][key] = Value::String(wrong.into());
@@ -412,8 +595,6 @@ fn native_tool_exact_identity_and_digest_mutations_fail() {
     for key in [
         "container_engine",
         "ubuntu_os",
-        "ubuntu_rustc",
-        "ubuntu_cargo",
         "ubuntu_compiler",
         "ubuntu_linker",
         "ubuntu_glibc",
@@ -445,7 +626,7 @@ fn native_tool_exact_identity_and_digest_mutations_fail() {
 fn artifact_file_path_and_checksum_mutations_fail() {
     let (temp, manifest) = rendered_manifest();
     fs::write(
-        temp.path().join(MANIFEST_NAME),
+        temp.path().join(manifest_name(&manifest.version)),
         serde_json::to_string_pretty(&manifest).unwrap() + "\n",
     )
     .unwrap();
@@ -453,12 +634,11 @@ fn artifact_file_path_and_checksum_mutations_fail() {
     fs::write(temp.path().join(CHECKSUM_NAME), &sums).unwrap();
 
     let artifact_path = temp.path().join(&manifest.artifacts[0].path);
+    let artifact_bytes = fs::read(&artifact_path).unwrap();
     fs::write(&artifact_path, b"mutated after render").unwrap();
     assert!(verify_artifacts(&manifest, temp.path()).is_err());
-    assert!(
-        verify_checksums(&manifest, temp.path()).is_err()
-            || verify_artifacts(&manifest, temp.path()).is_err()
-    );
+    assert!(verify_checksums(&manifest, temp.path()).is_err());
+    fs::write(&artifact_path, artifact_bytes).unwrap();
 
     let (missing, missing_manifest) = rendered_manifest();
     fs::remove_file(missing.path().join(&missing_manifest.artifacts[0].path)).unwrap();
@@ -553,4 +733,96 @@ fn schema_target_commit_and_datetime_boundaries_are_enforced() {
 #[test]
 fn manifest_mode_success_message_disclaims_candidate_readiness() {
     assert!(MANIFEST_OK_MESSAGE.contains("NOT candidate-readiness classification"));
+}
+
+#[test]
+fn strict_semver_and_canonical_artifact_names_are_enforced() {
+    for version in [
+        "0.0.0",
+        "1.2.3",
+        "1.2.3-alpha.1",
+        "1.2.3+build.5",
+        "1.2.3-alpha+build",
+    ] {
+        validate_version(version).unwrap();
+        artifact_kind(
+            &format!("solstone-linux-{version}-linux-x86_64.tar.gz"),
+            Some(version),
+        )
+        .unwrap();
+    }
+    for version in [
+        "1", "1.2", "01.2.3", "1.02.3", "1.2.03", "1.2.3-01", "1.2.3-", "1.2.3+", " 1.2.3",
+        "-1.2.3",
+    ] {
+        assert!(validate_version(version).is_err(), "accepted {version}");
+    }
+    assert!(
+        artifact_kind(
+            "prefix-solstone-linux-1.0.0-linux-x86_64.tar.gz",
+            Some("1.0.0")
+        )
+        .is_err()
+    );
+    assert!(artifact_kind("solstone-linux-2.0.0-linux-x86_64.tar.gz", Some("1.0.0")).is_err());
+}
+
+#[test]
+fn privacy_canaries_reject_network_account_and_opaque_tokens() {
+    let (temp, _) = rendered_manifest();
+    let original: Value =
+        serde_json::from_str(&render_manifest(evidence(), temp.path()).unwrap()).unwrap();
+    for canary in [
+        "podman 5.4.0 10.0.0.1",
+        "podman 5.4.0 2001:db8::1",
+        "podman 5.4.0 123e4567-e89b-12d3-a456-426614174000",
+        "podman 5.4.0 YWJjZGVmZ2hpamtsbW5vcHFyc3R1",
+        "podman 5.4.0 ${ENGINE_VERSION}",
+        "podman 5.4.0 %ENGINE_VERSION%",
+    ] {
+        let mut value = original.clone();
+        value["native_tools"]["container_engine"] = Value::String(canary.into());
+        assert!(
+            validate_manifest_bytes(serde_json::to_string(&value).unwrap().as_bytes()).is_err(),
+            "accepted {canary}"
+        );
+    }
+}
+
+#[test]
+fn clean_tree_policy_distinguishes_source_from_ignored_outputs() {
+    let repo = tempfile::tempdir().unwrap();
+    command(repo.path(), &["git", "init"]).unwrap();
+    command(
+        repo.path(),
+        &["git", "config", "user.email", "fixture@example.com"],
+    )
+    .unwrap();
+    command(repo.path(), &["git", "config", "user.name", "Fixture User"]).unwrap();
+    fs::write(repo.path().join(".gitignore"), "dist/\n").unwrap();
+    fs::write(repo.path().join("source.txt"), "committed\n").unwrap();
+    command(repo.path(), &["git", "add", ".gitignore", "source.txt"]).unwrap();
+    command(repo.path(), &["git", "commit", "-m", "fixture"]).unwrap();
+
+    let payload = repo.path().join("dist/rust");
+    fs::create_dir_all(&payload).unwrap();
+    fs::write(payload.join("artifact"), "ignored\n").unwrap();
+    require_clean_tree(repo.path(), &payload).unwrap();
+
+    fs::write(repo.path().join("source.txt"), "modified\n").unwrap();
+    assert!(require_clean_tree(repo.path(), &payload).is_err());
+    fs::write(repo.path().join("source.txt"), "committed\n").unwrap();
+
+    let untracked = repo.path().join("untracked.txt");
+    fs::write(&untracked, "untracked\n").unwrap();
+    assert!(require_clean_tree(repo.path(), &payload).is_err());
+    fs::remove_file(untracked).unwrap();
+
+    let outside = tempfile::tempdir().unwrap();
+    assert!(require_clean_tree(repo.path(), outside.path()).is_err());
+
+    fs::write(repo.path().join(".gitignore"), "other/\n").unwrap();
+    command(repo.path(), &["git", "add", ".gitignore"]).unwrap();
+    command(repo.path(), &["git", "commit", "-m", "change ignores"]).unwrap();
+    assert!(require_clean_tree(repo.path(), &payload).is_err());
 }

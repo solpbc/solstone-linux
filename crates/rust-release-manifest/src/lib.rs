@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{BufReader, Cursor, Read};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::net::IpAddr;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use tar::Archive;
@@ -20,7 +21,6 @@ use xz2::read::XzDecoder;
 
 pub const SCHEMA_VERSION: u64 = 1;
 pub const SCHEMA_SHA256: &str = "d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c";
-pub const MANIFEST_NAME: &str = "rust-release-manifest.json";
 pub const CHECKSUM_NAME: &str = "SHA256SUMS";
 pub const PRODUCT: &str = "solstone-linux";
 pub const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -29,6 +29,10 @@ pub const MANIFEST_OK_MESSAGE: &str =
     "Named manifest and artifacts verified; this is NOT candidate-readiness classification.";
 pub const RELEASE_DIR_OK_MESSAGE: &str =
     "Release directory verified as a complete five-file candidate.";
+
+pub fn manifest_name(version: &str) -> String {
+    format!("solstone-linux-{version}-linux-x86_64.rust-release-manifest.json")
+}
 
 const SCHEMA_BYTES: &[u8] =
     include_bytes!("../../../vendor/rust-release-manifest/rust-release-manifest.schema.json");
@@ -146,7 +150,8 @@ struct PackageIdentity {
 
 pub fn render_manifest(evidence: Evidence, release_dir: &Path) -> Result<String> {
     validate_evidence(&evidence)?;
-    let artifacts = artifact_paths(release_dir)?
+    validate_version(&evidence.version)?;
+    let artifacts = artifact_paths(release_dir, &evidence.version)?
         .into_iter()
         .map(|path| artifact(&path))
         .collect::<Result<Vec<_>>>()?;
@@ -206,6 +211,12 @@ fn verify_manifest(path: &Path, bind_live: bool) -> Result<()> {
         .parent()
         .ok_or_else(|| Error::new("manifest parent missing"))?;
     let manifest = validate_manifest_bytes(&fs::read(path).map_err(display_error)?)?;
+    let expected_name = manifest_name(&manifest.version);
+    if path.file_name().and_then(OsStr::to_str) != Some(expected_name.as_str()) {
+        return Err(Error::new(format!(
+            "manifest basename mismatch: expected {expected_name}"
+        )));
+    }
     if bind_live {
         validate_live(&manifest, root)?;
     }
@@ -232,24 +243,29 @@ fn classify_release(root: &Path, bind_live: bool) -> Result<()> {
             return Err(Error::new(format!("duplicate release path: {name}")));
         }
     }
-    let manifests: Vec<_> = names
+    let manifests = names
         .iter()
-        .filter(|name| name.as_str() == MANIFEST_NAME)
-        .collect();
+        .filter(|name| name.ends_with(".rust-release-manifest.json"))
+        .collect::<Vec<_>>();
     if manifests.len() != 1 || names.len() != 5 {
         return Err(Error::new(format!(
             "release inventory mismatch: expected 5 files, actual {}",
             names.len()
         )));
     }
-    verify_manifest(&root.join(MANIFEST_NAME), bind_live)
+    let manifest_path = root.join(manifests[0]);
+    verify_manifest(&manifest_path, bind_live)
 }
 
 pub fn write_rendered(evidence: Evidence, release_dir: &Path) -> Result<()> {
     let manifest_text = render_manifest(evidence, release_dir)?;
     let manifest = validate_manifest_bytes(manifest_text.as_bytes())?;
     let sums = render_sha256sums(&manifest.artifacts)?;
-    fs::write(release_dir.join(MANIFEST_NAME), manifest_text).map_err(display_error)?;
+    fs::write(
+        release_dir.join(manifest_name(&manifest.version)),
+        manifest_text,
+    )
+    .map_err(display_error)?;
     fs::write(release_dir.join(CHECKSUM_NAME), sums).map_err(display_error)
 }
 
@@ -264,14 +280,22 @@ fn validate_evidence(evidence: &Evidence) -> Result<()> {
     {
         return Err(Error::new("release evidence identity mismatch"));
     }
+    if evidence.active_exceptions != ordered_exceptions()? {
+        return Err(Error::new("release evidence active_exceptions mismatch"));
+    }
     validate_native_tools(&evidence.native_tools)?;
     validate_timestamp(&evidence.dependency_policy.advisory_checked_at)
 }
 
 fn validate_manifest_policy(manifest: &Manifest) -> Result<()> {
+    validate_version(&manifest.version)?;
     validate_native_tools(&manifest.native_tools)?;
     validate_timestamp(&manifest.dependency_policy.advisory_checked_at)?;
-    validate_artifact_set(&manifest.artifacts)
+    validate_artifact_set(&manifest.artifacts)?;
+    for artifact in &manifest.artifacts {
+        artifact_kind(&artifact.path, Some(&manifest.version))?;
+    }
+    Ok(())
 }
 
 fn validate_timestamp(value: &str) -> Result<()> {
@@ -297,6 +321,9 @@ fn validate_native_tools(tools: &BTreeMap<String, String>) -> Result<()> {
     exact_tool(tools, "cargo_generate_rpm", "0.21.0")?;
     exact_tool(tools, "manifest_validator", env!("CARGO_PKG_VERSION"))?;
     exact_tool(tools, "signing_mode", "unsigned")?;
+    let rust_pin = rust_pin()?;
+    exact_tool(tools, "ubuntu_rustc", &format!("rustc {rust_pin}"))?;
+    exact_tool(tools, "ubuntu_cargo", &format!("cargo {rust_pin}"))?;
     for key in ["ubuntu_image_digest", "fedora_image_digest"] {
         let value = &tools[key];
         if !is_sha256(value) {
@@ -310,6 +337,8 @@ fn validate_native_tools(tools: &BTreeMap<String, String>) -> Result<()> {
                 | "cargo_generate_rpm"
                 | "manifest_validator"
                 | "signing_mode"
+                | "ubuntu_rustc"
+                | "ubuntu_cargo"
                 | "ubuntu_image_digest"
                 | "fedora_image_digest"
         ) {
@@ -322,8 +351,7 @@ fn validate_native_tools(tools: &BTreeMap<String, String>) -> Result<()> {
 fn exact_tool(tools: &BTreeMap<String, String>, key: &str, expected: &str) -> Result<()> {
     if tools[key] != expected {
         return Err(Error::new(format!(
-            "native tool {key} mismatch: expected {expected}, actual {}",
-            tools[key]
+            "native tool {key} mismatch: expected {expected}"
         )));
     }
     Ok(())
@@ -351,8 +379,6 @@ fn validate_identity(key: &str, value: &str) -> Result<()> {
     let approved_prefixes: &[&str] = match key {
         "container_engine" => &["podman ", "docker "],
         "ubuntu_os" => &["Ubuntu "],
-        "ubuntu_rustc" => &["rustc "],
-        "ubuntu_cargo" => &["cargo "],
         "ubuntu_compiler" => &["gcc ", "cc "],
         "ubuntu_linker" => &["GNU ld ", "ld "],
         "ubuntu_glibc" => &["glibc "],
@@ -363,6 +389,21 @@ fn validate_identity(key: &str, value: &str) -> Result<()> {
         "rpm" => &["RPM ", "rpm "],
         _ => &[],
     };
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    let private_identifier = tokens.iter().any(|token| {
+        token.parse::<IpAddr>().is_ok()
+            || (token.len() >= 32
+                && token.contains('-')
+                && token
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit() || character == '-'))
+            || (token.len() >= 12 && token.chars().all(|character| character.is_ascii_digit()))
+            || (token.len() >= 20
+                && token.chars().all(|character| {
+                    character.is_ascii_alphanumeric()
+                        || matches!(character, '+' | '/' | '=' | '_' | '-')
+                }))
+    });
     let bad = !approved_prefixes
         .iter()
         .any(|prefix| value.starts_with(prefix))
@@ -372,6 +413,7 @@ fn validate_identity(key: &str, value: &str) -> Result<()> {
         || value.contains(['$', '%', '@', '/', '\\'])
         || value.contains("://")
         || forbidden.iter().any(|word| lower.contains(word))
+        || private_identifier
         || !value.chars().any(|character| character.is_ascii_digit())
         || value.split_whitespace().count() > 6;
     if bad {
@@ -404,7 +446,7 @@ fn validate_artifact_set(artifacts: &[Artifact]) -> Result<()> {
             return Err(Error::new("artifact ordering mismatch"));
         }
         previous = Some(&artifact.path);
-        kinds.insert(artifact_kind(&artifact.path)?);
+        kinds.insert(artifact_kind(&artifact.path, None)?);
     }
     if kinds != BTreeSet::from(["deb", "rpm", "tar"]) {
         return Err(Error::new("artifact type inventory mismatch"));
@@ -412,19 +454,36 @@ fn validate_artifact_set(artifacts: &[Artifact]) -> Result<()> {
     Ok(())
 }
 
-fn artifact_kind(name: &str) -> Result<&'static str> {
-    if name.starts_with("solstone-linux-") && name.ends_with("-linux-x86_64.tar.gz") {
-        Ok("tar")
-    } else if name.starts_with("solstone-linux_") && name.ends_with("-1_amd64.deb") {
-        Ok("deb")
-    } else if name.starts_with("solstone-linux-") && name.ends_with("-1.x86_64.rpm") {
-        Ok("rpm")
+fn artifact_kind(name: &str, expected_version: Option<&str>) -> Result<&'static str> {
+    let (kind, version) = if let Some(version) = name
+        .strip_prefix("solstone-linux-")
+        .and_then(|value| value.strip_suffix("-linux-x86_64.tar.gz"))
+    {
+        ("tar", version)
+    } else if let Some(version) = name
+        .strip_prefix("solstone-linux_")
+        .and_then(|value| value.strip_suffix("-1_amd64.deb"))
+    {
+        ("deb", version)
+    } else if let Some(version) = name
+        .strip_prefix("solstone-linux-")
+        .and_then(|value| value.strip_suffix("-1.x86_64.rpm"))
+    {
+        ("rpm", version)
     } else {
-        Err(Error::new(format!("artifact basename mismatch: {name}")))
+        return Err(Error::new(format!("artifact basename mismatch: {name}")));
+    };
+    validate_version(version)?;
+    if expected_version.is_some_and(|expected| version != expected) {
+        return Err(Error::new(format!(
+            "artifact version mismatch: expected {}",
+            expected_version.unwrap()
+        )));
     }
+    Ok(kind)
 }
 
-fn artifact_paths(root: &Path) -> Result<Vec<PathBuf>> {
+fn artifact_paths(root: &Path, version: &str) -> Result<Vec<PathBuf>> {
     require_directory(root, "release root")?;
     let mut paths = Vec::new();
     for entry in fs::read_dir(root).map_err(display_error)? {
@@ -433,7 +492,7 @@ fn artifact_paths(root: &Path) -> Result<Vec<PathBuf>> {
             .file_name()
             .into_string()
             .map_err(|_| Error::new("artifact path is not UTF-8"))?;
-        if artifact_kind(&name).is_ok() {
+        if artifact_kind(&name, Some(version)).is_ok() {
             require_regular(&entry.path(), &name)?;
             paths.push(entry.path());
         }
@@ -479,6 +538,15 @@ fn verify_artifacts(manifest: &Manifest, root: &Path) -> Result<()> {
 }
 
 pub fn verify_checksums(manifest: &Manifest, root: &Path) -> Result<()> {
+    for expected in &manifest.artifacts {
+        let actual = artifact(&root.join(&expected.path))?;
+        if actual != *expected {
+            return Err(Error::new(format!(
+                "artifact checksum mismatch: {}",
+                expected.path
+            )));
+        }
+    }
     let path = root.join(CHECKSUM_NAME);
     require_regular(&path, CHECKSUM_NAME)?;
     let actual = fs::read_to_string(path).map_err(display_error)?;
@@ -492,7 +560,7 @@ pub fn verify_checksums(manifest: &Manifest, root: &Path) -> Result<()> {
 fn verify_package_identity(path: &Path, version: &str) -> Result<()> {
     let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
     validate_version(version)?;
-    let expected = match artifact_kind(name)? {
+    let expected = match artifact_kind(name, Some(version))? {
         "tar" => PackageIdentity {
             name: PRODUCT.to_owned(),
             version: tar_version(path)?,
@@ -523,10 +591,13 @@ fn tar_version(path: &Path) -> Result<String> {
     for entry in archive.entries().map_err(display_error)? {
         let entry = entry.map_err(display_error)?;
         let path = entry.path().map_err(display_error)?;
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| Error::new("tar path mismatch: expected UTF-8"))?;
+        portable_path(path_text)?;
         let root = path
             .components()
-            .next()
-            .and_then(|part| match part {
+            .find_map(|part| match part {
                 Component::Normal(value) => value.to_str(),
                 _ => None,
             })
@@ -547,17 +618,37 @@ fn deb_identity(path: &Path) -> Result<PackageIdentity> {
     let file = File::open(path).map_err(display_error)?;
     let mut archive = ar::Archive::new(file);
     let mut control = None;
+    let mut marker_count = 0;
+    let mut control_count = 0;
     while let Some(entry) = archive.next_entry() {
         let mut entry = entry.map_err(display_error)?;
         let name = std::str::from_utf8(entry.header().identifier())
             .map_err(display_error)?
             .trim_end_matches('/')
             .to_owned();
-        if name.starts_with("control.tar.") {
+        if name == "debian-binary" {
+            marker_count += 1;
+            let mut marker = Vec::new();
+            entry.read_to_end(&mut marker).map_err(display_error)?;
+            if marker != b"2.0\n" {
+                return Err(Error::new("deb format marker mismatch: expected 2.0"));
+            }
+        } else if name.starts_with("control.tar.") {
+            control_count += 1;
             let mut compressed = Vec::new();
             entry.read_to_end(&mut compressed).map_err(display_error)?;
             control = Some(read_control_archive(&name, compressed)?);
         }
+    }
+    if marker_count != 1 {
+        return Err(Error::new(format!(
+            "deb format marker count mismatch: expected 1, actual {marker_count}"
+        )));
+    }
+    if control_count != 1 {
+        return Err(Error::new(format!(
+            "deb control archive count mismatch: expected 1, actual {control_count}"
+        )));
     }
     parse_deb_control(&control.ok_or_else(|| Error::new("deb control archive missing"))?)
 }
@@ -573,24 +664,36 @@ fn read_control_archive(name: &str, bytes: Vec<u8>) -> Result<String> {
         return Err(Error::new("deb control compression mismatch"));
     };
     let mut archive = Archive::new(reader);
+    let mut control = None;
+    let mut control_count = 0;
     for entry in archive.entries().map_err(display_error)? {
         let mut entry = entry.map_err(display_error)?;
         let path = entry.path().map_err(display_error)?;
         if matches!(path.to_str(), Some("control" | "./control")) {
+            control_count += 1;
             let mut body = String::new();
             entry.read_to_string(&mut body).map_err(display_error)?;
-            return Ok(body);
+            control = Some(body);
         }
     }
-    Err(Error::new("deb control metadata missing"))
+    if control_count != 1 {
+        return Err(Error::new(format!(
+            "deb control metadata count mismatch: expected 1, actual {control_count}"
+        )));
+    }
+    control.ok_or_else(|| Error::new("deb control metadata missing"))
 }
 
 fn parse_deb_control(body: &str) -> Result<PackageIdentity> {
-    let fields = body
-        .lines()
-        .filter_map(|line| line.split_once(":"))
-        .map(|(key, value)| (key, value.trim()))
-        .collect::<BTreeMap<_, _>>();
+    let mut fields = BTreeMap::new();
+    for line in body.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if fields.insert(key, value.trim()).is_some() {
+            return Err(Error::new(format!("deb control field duplicate: {key}")));
+        }
+    }
     let version = field(&fields, "Version")?;
     let (version, release) = version
         .rsplit_once('-')
@@ -653,43 +756,82 @@ fn validate_live(manifest: &Manifest, payload_root: &Path) -> Result<()> {
         .lines()
         .find_map(|line| line.strip_prefix("CARGO_DENY_VERSION := "))
         .ok_or_else(|| Error::new("cargo-deny version authority missing"))?;
+    let active_exceptions = ordered_exceptions()?;
+    let checks = [
+        (manifest.product == product, "product"),
+        (manifest.version == version, "version"),
+        (manifest.source_commit == commit, "source_commit"),
+        (!manifest.source_dirty, "source_dirty"),
+        (
+            manifest.cargo_lock_sha256 == lock_digest,
+            "cargo_lock_sha256",
+        ),
+        (
+            manifest.dependency_policy.cargo_deny_version == cargo_deny_version,
+            "cargo_deny_version",
+        ),
+        (
+            manifest.dependency_policy.deterministic_gate == "pass",
+            "deterministic_gate",
+        ),
+        (
+            manifest.active_exceptions == active_exceptions,
+            "active_exceptions",
+        ),
+        (
+            matches!(&manifest.target, TargetEvidence::Compiled { triple, profile, features }
+                if triple == TARGET_TRIPLE && profile == "release" && features.is_empty()),
+            "target",
+        ),
+    ];
+    if let Some((_, field)) = checks.into_iter().find(|(matches, _)| !matches) {
+        return Err(Error::new(format!(
+            "live release evidence mismatch: {field}"
+        )));
+    }
+    require_clean_tree(&root, payload_root)
+}
+
+fn ordered_exceptions() -> Result<Vec<String>> {
+    let root = workspace_root()?;
     let deny: toml::Value =
         toml::from_str(&fs::read_to_string(root.join("deny.toml")).map_err(display_error)?)
             .map_err(display_error)?;
-    let active_exceptions = deny["advisories"]["ignore"]
+    deny["advisories"]["ignore"]
         .as_array()
         .ok_or_else(|| Error::new("advisory exception authority missing"))?
         .iter()
         .map(|entry| {
             entry["id"]
                 .as_str()
+                .map(str::to_owned)
                 .ok_or_else(|| Error::new("advisory exception id missing"))
         })
-        .collect::<Result<BTreeSet<_>>>()?;
-    if manifest.product != product
-        || manifest.version != version
-        || manifest.source_commit != commit
-        || manifest.source_dirty
-        || manifest.cargo_lock_sha256 != lock_digest
-        || manifest.dependency_policy.cargo_deny_version != cargo_deny_version
-        || manifest.dependency_policy.deterministic_gate != "pass"
-        || manifest
-            .active_exceptions
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>()
-            != active_exceptions
-        || !matches!(&manifest.target, TargetEvidence::Compiled { triple, profile, features }
-            if triple == TARGET_TRIPLE && profile == "release" && features.is_empty())
-    {
-        return Err(Error::new("live release evidence mismatch"));
-    }
-    require_clean_tree(&root, payload_root)
+        .collect()
 }
 
 fn require_clean_tree(root: &Path, payload_root: &Path) -> Result<()> {
+    let root = root.canonicalize().map_err(display_error)?;
+    let payload_root = payload_root.canonicalize().map_err(display_error)?;
+    let dist = root.join("dist");
+    if payload_root != dist && !payload_root.starts_with(&dist) {
+        return Err(Error::new(
+            "release payload root mismatch: expected repository dist path",
+        ));
+    }
+    let ignored = Command::new("git")
+        .args(["check-ignore", "--quiet", "--"])
+        .arg(&payload_root)
+        .current_dir(&root)
+        .status()
+        .map_err(display_error)?;
+    if !ignored.success() {
+        return Err(Error::new(
+            "release payload ignore mismatch: expected git-ignored dist path",
+        ));
+    }
     let status = command(
-        root,
+        &root,
         &[
             "git",
             "status",
@@ -698,18 +840,8 @@ fn require_clean_tree(root: &Path, payload_root: &Path) -> Result<()> {
             "--ignored=no",
         ],
     )?;
-    if status.is_empty() {
-        return Ok(());
-    }
-    let allowed = payload_root
-        .canonicalize()
-        .unwrap_or_else(|_| payload_root.to_owned());
-    for line in status.lines() {
-        let relative = line.get(3..).unwrap_or_default().trim_matches('"');
-        let path = root.join(relative);
-        if !path.starts_with(&allowed) {
-            return Err(Error::new("source dirty mismatch: expected clean tree"));
-        }
+    if !status.is_empty() {
+        return Err(Error::new("source dirty mismatch: expected clean tree"));
     }
     Ok(())
 }
@@ -719,6 +851,18 @@ fn workspace_root() -> Result<PathBuf> {
         .join("../..")
         .canonicalize()
         .map_err(display_error)
+}
+
+fn rust_pin() -> Result<String> {
+    let root = workspace_root()?;
+    let toolchain: toml::Value = toml::from_str(
+        &fs::read_to_string(root.join("rust-toolchain.toml")).map_err(display_error)?,
+    )
+    .map_err(display_error)?;
+    toolchain["toolchain"]["channel"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new("Rust pin authority missing"))
 }
 
 fn command(root: &Path, args: &[&str]) -> Result<String> {
@@ -806,27 +950,57 @@ fn require_directory(path: &Path, label: &str) -> Result<()> {
             "{label} mismatch: expected no-follow directory"
         )));
     }
-    if metadata.file_type().is_socket()
-        || metadata.file_type().is_fifo()
-        || metadata.file_type().is_block_device()
-        || metadata.file_type().is_char_device()
-    {
-        return Err(Error::new(format!("{label} special file mismatch")));
-    }
     Ok(())
 }
 
 fn validate_version(value: &str) -> Result<()> {
-    let valid = !value.is_empty()
-        && !value.starts_with('-')
-        && value.trim() == value
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '+' | '-')
+    if value.is_empty()
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || value.matches('+').count() > 1
+    {
+        return Err(Error::new("version mismatch"));
+    }
+    let (without_build, build) = value
+        .split_once('+')
+        .map_or((value, None), |(core, build)| (core, Some(build)));
+    if build.is_some_and(|identifiers| !valid_semver_identifiers(identifiers, false)) {
+        return Err(Error::new("version mismatch"));
+    }
+    let (core, prerelease) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(core, prerelease)| {
+            (core, Some(prerelease))
         });
-    if !valid {
+    if prerelease.is_some_and(|identifiers| !valid_semver_identifiers(identifiers, true)) {
+        return Err(Error::new("version mismatch"));
+    }
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+                || part.parse::<u64>().is_err()
+        })
+    {
         return Err(Error::new("version mismatch"));
     }
     Ok(())
+}
+
+fn valid_semver_identifiers(value: &str, reject_numeric_leading_zero: bool) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|identifier| {
+            !identifier.is_empty()
+                && identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && (!reject_numeric_leading_zero
+                    || !identifier.bytes().all(|byte| byte.is_ascii_digit())
+                    || identifier.len() == 1
+                    || !identifier.starts_with('0'))
+        })
 }
 
 fn is_sha256(value: &str) -> bool {

@@ -1367,7 +1367,7 @@ fn repository_unsafe_inventory_matches_reviewed_seams() {
     assert!(inventory.files_inspected >= 50, "{inventory:#?}");
     assert!(inventory.nested_src_files >= 10, "{inventory:#?}");
     assert!(inventory.build_scripts >= 1, "{inventory:#?}");
-    assert_eq!(inventory.members, 1);
+    assert_eq!(inventory.members, 2);
     if let Err(error) = reviewed_seams_error(&inventory) {
         panic!("{error}");
     }

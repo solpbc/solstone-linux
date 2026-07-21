@@ -94,10 +94,13 @@ check-observer-contract: rust-preflight
 check-rust-release-manifest: rust-preflight
 	@echo "Rust release manifest schema: 1"
 	@echo "Rust release manifest schema SHA-256: d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c"
-	@if [ -n "$(MANIFEST)" ] && [ -n "$(RELEASE_DIR)" ]; then echo "error: release manifest mode mismatch: expected one selector, actual two" >&2; exit 1; \
-	elif [ -n "$(MANIFEST)" ]; then \
+	@manifest_set=$(if $(filter environment%,$(origin MANIFEST)),1,$(if $(findstring command line,$(origin MANIFEST)),1,0)); \
+	release_dir_set=$(if $(filter environment%,$(origin RELEASE_DIR)),1,$(if $(findstring command line,$(origin RELEASE_DIR)),1,0)); \
+	if { [ "$$manifest_set" -eq 1 ] && [ -z "$(strip $(MANIFEST))" ]; } || { [ "$$release_dir_set" -eq 1 ] && [ -z "$(strip $(RELEASE_DIR))" ]; }; then echo "error: release manifest selector empty" >&2; exit 1; \
+	elif [ "$$manifest_set" -eq 1 ] && [ "$$release_dir_set" -eq 1 ]; then echo "error: release manifest mode mismatch: expected one selector, actual two" >&2; exit 1; \
+	elif [ "$$manifest_set" -eq 1 ]; then \
 		CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- validate --manifest "$(MANIFEST)"; \
-	elif [ -n "$(RELEASE_DIR)" ]; then \
+	elif [ "$$release_dir_set" -eq 1 ]; then \
 		CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- validate --release-dir "$(RELEASE_DIR)"; \
 	else \
 		inventory=$$(CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest tests::rust_release_manifest_conformance -- --list); \
@@ -107,9 +110,10 @@ check-rust-release-manifest: rust-preflight
 		[ "$$actual" -eq 1 ] || { echo "error: release manifest test inventory mismatch: expected 1, actual $$actual" >&2; exit 1; }; \
 		output=$$(mktemp); \
 		trap 'rm -f "$$output"' EXIT; \
-		CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest tests::rust_release_manifest_conformance -- --exact >"$$output" 2>&1 || { status=$$?; tail -50 "$$output"; exit $$status; }; \
+		CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest >"$$output" 2>&1 || { status=$$?; tail -50 "$$output"; exit $$status; }; \
 		tail -50 "$$output"; \
-		grep -Eq 'test result: ok\. 1 passed; 0 failed' "$$output" || { echo "error: release manifest named test did not execute" >&2; exit 1; }; \
+		results=$$(grep '^test result:' "$$output" || true); \
+		[ -n "$$results" ] && ! printf '%s\n' "$$results" | grep -Ev '^test result: ok\..*0 failed' >/dev/null && ! grep -F 'FAILED' "$$output" >/dev/null || { echo "error: release manifest test suite did not pass" >&2; exit 1; }; \
 	fi
 
 shellcheck:
