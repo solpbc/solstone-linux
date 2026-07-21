@@ -1,205 +1,160 @@
-# Native Rust release rail
+# Native Rust release candidate rail
 
-The shipping Rust release rail is operator-run. It produces portable, Debian,
-and RPM artifacts; it does not publish, tag, or create a hosted release. The
-retained Python/PyPI rail is not part of the shipping product rail, though its
-commands remain functional and can publish when credentials are present.
+The native rail creates local release-candidate evidence. It does not tag, sign,
+upload, publish, or approve publication. Publication is unavailable in this rail.
+Only x86_64 is supported.
 
-## 1. Host prerequisites
+Four evidence activities remain deliberately separate:
 
-Run from a clean checkout with Git and either Podman or Docker. ShellCheck is
-required by `make ci`. The canonical `make release` path also runs the host
-Rust preflight, so it requires rustup plus the compiler and Cargo selected by
-`rust-toolchain.toml`. Invoking `scripts/build-release.sh` directly requires
-Git and the container engine but not host Cargo; the crate version is read
-inside the build container.
+1. The offline release-manifest validator checks a named manifest or an exact
+   five-file payload directory.
+2. The candidate transaction builds tar, Debian, and RPM artifacts from one
+   committed immutable context and atomically promotes the five-file payload.
+3. Three package-bound proofs install and verify the Debian, RPM, and tar
+   artifacts in separate network-disabled environments.
+4. The live FLAC checkpoint exercises the observer on a desktop after candidate
+   proof. It is not part of `candidate-proven`.
 
-Only x86_64 is supported. The build and install scripts refuse every other
-architecture rather than placing an x86_64 binary under a misleading name.
+## Operator preconditions
 
-The compiler authority is `rust-toolchain.toml` (`1.97.1`). Native package
-tools are pinned to cargo-deb `3.7.0` and cargo-generate-rpm `0.21.0`; their
-exact single-line version banners are asserted in the build container before
-packaging starts.
+Use a clean checkout at the exact release commit. The compiler authority is
+`rust-toolchain.toml`; Cargo operations use `Cargo.lock`.
 
-## 2. Version source and output names
+Provision all five images locally before transaction entry: Ubuntu and Fedora
+build-tool images plus the Debian, RPM, and tar proof images. Record their exact
+immutable digest references in `packaging/release-policy.toml`. For each proof
+image, observe and commit the exact normalized OS release, package-manager output,
+install argv, version argv, executable path, and executable mode. Commit those
+values before selecting `EXPECTED_RELEASE_COMMIT`. The proof producer observes the
+same values inside the selected image and fails closed when committed policy is
+wrong. The transaction never pulls an image.
 
-The Rust version comes from `[workspace.package].version` and the member's
-`version.workspace = true`. It is independent of the Python package version.
-Every artifact is written below `dist/rust/` and contains the Rust version:
+Acquire the advisory database outside the transaction. It must be a clean local Git
+worktree, including no untracked or ignored changes. Write a strict descriptor with
+exactly these private operator inputs:
 
-- `solstone-linux-<VERSION>-linux-x86_64.tar.gz`
-- `solstone-linux_<VERSION>-1_amd64.deb`
-- `solstone-linux-<VERSION>-1.x86_64.rpm`
-
-## 3. Build commands
-
-The canonical command builds both native package families after its host
-toolchain preflight:
-
-```bash
-make release
+```json
+{
+  "schema_version": 1,
+  "source_id": "privacy-safe cohort identifier",
+  "db_path": "/absolute/canonical/path/to/local/advisory-db",
+  "acquired_at": "2026-07-21T00:00:00Z"
+}
 ```
 
-To invoke either container build directly without the host preflight, build
-each package family explicitly:
+The descriptor and database paths never enter public candidate evidence. Candidate
+creation requires acquisition within 24 hours. Proof resume validates the retained
+database identity without reapplying that freshness window.
+
+## Candidate commands
+
+Create the complete candidate and all three proofs:
 
 ```bash
-scripts/build-release.sh deb
-scripts/build-release.sh rpm
+make release-candidate \
+  EXPECTED_RELEASE_COMMIT=<full-lowercase-git-commit> \
+  ADVISORY_DESCRIPTOR=<descriptor.json>
 ```
 
-Both commands also produce the same Ubuntu 22.04 baseline tarball. The whole
-repository is the container build context because the Rust build script reads
-and rasterizes `contrib/icons/`.
+`make release` delegates to this same target and requires the same variables. There
+is no second native release state machine.
 
-The Debian package is built inside Ubuntu. In particular, cargo-deb's
-`depends = "$auto"` must run where `dpkg-shlibdeps` exists; an openSUSE host
-does not provide it. The RPM stage runs cargo-generate-rpm's automatic
-requirements scan in its native packaging environment but packages the binary
-copied from the Ubuntu stage, preserving the glibc 2.35 floor.
-
-## 4. Inspect artifacts
-
-Before distributing anything, inspect metadata and contents:
+Resume missing proofs without rebuilding or changing valid retained evidence:
 
 ```bash
-tar -tzf dist/rust/solstone-linux-*-linux-x86_64.tar.gz
-dpkg-deb -I dist/rust/solstone-linux_*-1_amd64.deb
-dpkg-deb -c dist/rust/solstone-linux_*-1_amd64.deb
-rpm -qpi dist/rust/solstone-linux-*-1.x86_64.rpm
-rpm -qpl dist/rust/solstone-linux-*-1.x86_64.rpm
-sha256sum dist/rust/*
+make release-candidate-prove \
+  VERSION=<version> \
+  ADVISORY_DESCRIPTOR=<descriptor.json>
 ```
 
-Confirm that each artifact contains the binary, LICENSE, INSTALL-NOTES, and the
-icon set declared in the member package manifest. It must contain no systemd
-unit and no desktop file.
+Read-only recovery validation requires no advisory descriptor:
 
-### Render and validate the release manifest
+```bash
+make release-candidate-recover VERSION=<version>
+```
 
-After all three product artifacts exist, provide explicit release evidence to
-the repository-local renderer. It writes
-`solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json` and
-`SHA256SUMS` without discovering tool versions or contacting a service. Both
-files list the tarball, Debian package, and RPM in POSIX-basename order.
-Checksum rows use lowercase SHA-256, two spaces, the basename, and LF; neither
-companion file lists itself or the other.
+All mutating candidate commands use `dist/.rust-release-candidate.lock`. Commands do
+not auto-clear a stale lock. After confirming no candidate process is running, the
+operator may remove that exact lock file and retry. Do not remove any broader
+directory as lock recovery.
 
-Run the inert offline fixture gate with no payload selector:
+## Outputs and meanings
+
+The promoted payload is exactly:
+
+- `dist/rust/solstone-linux-<VERSION>-linux-x86_64.tar.gz`
+- `dist/rust/solstone-linux_<VERSION>-1_amd64.deb`
+- `dist/rust/solstone-linux-<VERSION>-1.x86_64.rpm`
+- `dist/rust/SHA256SUMS`
+- `dist/rust/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json`
+
+Retained evidence is versioned and disjoint from the payload:
+
+- `dist/rust-evidence/<VERSION>/ledger.json`
+- `dist/rust-evidence/<VERSION>/proofs/debian-amd64.json`
+- `dist/rust-evidence/<VERSION>/proofs/rpm-x86_64.json`
+- `dist/rust-evidence/<VERSION>/proofs/tar-x86_64.json`
+
+`candidate-proven` means all local payload, ledger, policy, image, source, and three
+package-install/version proofs validated together. `retained-candidate-valid` means
+the retained candidate validates read-only in the matching clean checkout. Both are
+local evidence statuses. Neither is publication approval, and neither includes the
+live FLAC checkpoint.
+
+The Debian and RPM proofs install only their bound local package. The tar proof runs
+both installer dry-run and isolated-prefix installation. All three validate the
+installed executable path, mode, hash, and exact version output with networking
+disabled.
+
+## Validator
+
+Run the offline fixture and schema gate:
 
 ```bash
 make check-rust-release-manifest
 ```
 
-Verify one named manifest and its exact artifact bytes with:
+Validate a named manifest or classify an exact payload:
 
 ```bash
-make check-rust-release-manifest MANIFEST=dist/rust/solstone-linux-1.0.0-linux-x86_64.rust-release-manifest.json
-```
-
-This mode is not candidate-readiness classification because it does not reject
-unrelated directory entries. Classify a complete candidate with:
-
-```bash
+make check-rust-release-manifest MANIFEST=dist/rust/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json
 make check-rust-release-manifest RELEASE_DIR=dist/rust
 ```
 
-Candidate classification requires exactly five regular, non-symlink files:
-the tarball, Debian package, RPM, `SHA256SUMS`, and versioned manifest. Release
-validation requires the repository to be clean except for the supplied,
-git-ignored payload under `dist/`. Active advisory exceptions retain their
-exact `deny.toml` file order. The renderer and validator are offline and
-provider-neutral; signing and publication remain separate operator actions.
+Named-manifest validation does not imply candidate readiness. Directory
+classification requires exactly five regular files and rejects stale or extra
+entries.
 
-## 5. Blocking first-release FLAC validation
+## Non-candidate drift helper
 
-This checkpoint is mandatory. Do not release based only on a successful link.
-
-The release binary statically links the bundled libFLAC, so it has no direct
-cross-distribution libFLAC runtime dependency. A distro's PulseAudio stack may
-independently load its own libFLAC through libsndfile. The pre-release soak must
-still exercise real encoded output through the shipped binary:
-
-1. Install the produced artifact on a test Linux desktop with the runtime
-   dependencies from `packaging/INSTALL-NOTES`.
-2. Run the packaged `solstone-linux` observer long enough to produce a new
-   audio segment.
-3. Confirm the observer remains alive and validate that exact segment with
-   `flac -t path/to/new/audio.flac` (or each split mono FLAC).
-4. Treat any encoder crash or decode failure as a release blocker.
-
-If the checkpoint fails, stop and diagnose the bundled encoder before release.
-
-## 6. Portable installer
-
-Preview a local tarball installation without writes:
+The individual lane helper is deliberately outside candidate state:
 
 ```bash
-scripts/install.sh --dry-run "dist/rust/solstone-linux-<VERSION>-linux-x86_64.tar.gz"
+bash scripts/build-release.sh deb
+bash scripts/build-release.sh rpm
 ```
 
-Install to the default `$HOME/.local` prefix:
+It writes only `dist/rust-drift/`, labels its output as drift evidence, and cannot
+create or replace the candidate payload or readiness evidence. Drift output is not
+retained candidate evidence.
 
-```bash
-scripts/install.sh "dist/rust/solstone-linux-<VERSION>-linux-x86_64.tar.gz"
-```
+## Blocking live FLAC checkpoint
 
-The script reports when `$HOME/.local/bin` is not on PATH. A different prefix
-requires explicit `--prefix PATH`; the script never silently invokes sudo.
-Unknown distribution families stop without making changes.
+After `candidate-proven`, install the relevant candidate artifact on a test Linux
+desktop with the runtime dependencies in `packaging/INSTALL-NOTES`. Run the packaged
+observer long enough to produce a new audio segment, confirm the observer remains
+alive, and validate that exact segment with `flac -t` (including each split mono
+FLAC when applicable). An encoder crash or decode failure blocks release handling.
 
-Run `solstone-linux install-service` after installing the binary. The native
-command writes the user unit and desktop autostart entry, reloads systemd, and
-enables and starts the observer service.
+This live checkpoint is separate operator evidence. It does not modify the ledger,
+proofs, bundle digest, or candidate status.
 
-## 7. Runtime dependencies
+## Host and advisory gates
 
-The canonical cross-distribution list is committed once in
-`packaging/INSTALL-NOTES` and is included in every artifact. Verify it against
-the intended test machine before the soak.
+`make ci` produces host evidence: formatting, lint, tests, shell checks, and the
+offline licenses/bans/sources policy. It does not run target package proofs or the
+live FLAC checkpoint.
 
-## 8. Manual release handoff
-
-After both builds, artifact inspection, checksums, and the blocking FLAC soak
-succeed, upload the three versioned files and checksum list through the chosen
-manual release surface. Do not reuse the Python version, Python tag/publish
-script, or PyPI release artifacts.
-
-Release-note bodies come only from the matching `CHANGELOG.md` block. Extract
-that block with `scripts/extract_changelog.sh <VERSION>`; do not create a
-separate engineering-tone release-note template here.
-
-## 9. Known constraints
-
-- x86_64 only
-- glibc 2.35 baseline
-- no packaged unit file or desktop file
-- native service files are installed at runtime rather than packaged
-- release panics unwind; reconsider abort only at the Rust cutover
-
-## 10. Failure recovery
-
-Container builds and local installs do not publish, tag, or push. Fix the
-reported problem, remove only the affected files under `dist/rust/`, and rerun
-the relevant `deb` or `rpm` command. Never relabel an artifact built for a
-different architecture or version.
-
-## 11. Evidence classes
-
-| Evidence class | What it proves | What it does not prove |
-|---|---|---|
-| Host evidence | Source formatting, lint, tests, and offline dependency policy | Target-distribution packaging or runtime behavior |
-| Target-package drift evidence | Container compiler/tool pins and distro-native package construction | Installed-artifact behavior or the release soak |
-| Shipped-artifact proof | Artifact contents, linkage, installation, and the manual FLAC soak | Behavior outside the tested artifact and environment |
-
-`make ci` names itself as host evidence. Container package gates name the
-target-package class. Neither may claim the blocking FLAC soak ran; only the
-operator completing section 5 has shipped-artifact proof.
-
-## 12. Dependency policy
-
-`make ci` runs cargo-deny offline for licenses, bans, and sources. It does not
-fetch or inspect advisories. `make audit` first refreshes the RustSec database
-and stops nonzero if refresh fails, then performs the locked advisory check.
-This prevents stale cached data from being presented as freshly audited.
+`make audit` refreshes advisory data for a separate operator audit. Candidate
+creation instead consumes the explicitly acquired descriptor cohort and leaves the
+repository `deny.toml` unchanged.

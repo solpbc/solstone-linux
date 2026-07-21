@@ -7,7 +7,43 @@ use flate2::write::GzEncoder;
 use std::io::Write;
 use std::os::unix::fs::symlink;
 
-fn tools() -> BTreeMap<String, String> {
+fn validate_manifest_bytes(bytes: &[u8]) -> Result<Manifest> {
+    let repo = crate::candidate_tests::fixture();
+    super::validate_manifest_bytes(&repo.root, bytes)
+}
+
+fn render_manifest(evidence: Evidence, release_dir: &Path) -> Result<String> {
+    let repo = crate::candidate_tests::fixture();
+    super::render_manifest(&repo.root, evidence, release_dir)
+}
+
+fn verify_manifest(path: &Path, bind_live: bool) -> Result<()> {
+    let repo = crate::candidate_tests::fixture();
+    super::verify_manifest(&repo.root, path, bind_live)
+}
+
+fn classify_release(path: &Path, bind_live: bool) -> Result<()> {
+    let repo = crate::candidate_tests::fixture();
+    super::classify_release(&repo.root, path, bind_live)
+}
+
+fn classify_release_dir(path: &Path) -> Result<()> {
+    let repo = crate::candidate_tests::fixture();
+    super::classify_release_dir(&repo.root, path)
+}
+
+pub(super) fn write_rendered(evidence: Evidence, release_dir: &Path) -> Result<()> {
+    let text = render_manifest(evidence, release_dir)?;
+    let manifest = validate_manifest_bytes(text.as_bytes())?;
+    fs::write(release_dir.join(manifest_name(&manifest.version)), text).map_err(display_error)?;
+    fs::write(
+        release_dir.join(CHECKSUM_NAME),
+        render_sha256sums(&manifest.artifacts)?,
+    )
+    .map_err(display_error)
+}
+
+pub(super) fn tools() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("container_engine".into(), "podman 5.4.0".into()),
         ("ubuntu_image_digest".into(), "a".repeat(64)),
@@ -33,8 +69,9 @@ fn tools() -> BTreeMap<String, String> {
     ])
 }
 
-fn evidence() -> Evidence {
-    let root = workspace_root().unwrap();
+pub(super) fn evidence() -> Evidence {
+    let repo = crate::candidate_tests::fixture();
+    let root = repo.root.path();
     let version: toml::Value =
         toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
     Evidence {
@@ -44,7 +81,7 @@ fn evidence() -> Evidence {
             .as_str()
             .unwrap()
             .into(),
-        source_commit: command(&root, &["git", "rev-parse", "HEAD"]).unwrap(),
+        source_commit: command(root, &["git", "rev-parse", "HEAD"]).unwrap(),
         source_dirty: false,
         cargo_lock_sha256: digest(&fs::read(root.join("Cargo.lock")).unwrap()),
         rust: RustEvidence {
@@ -210,6 +247,19 @@ fn control_tar_bodies(bodies: &[String]) -> Vec<u8> {
     archive.into_inner().unwrap()
 }
 
+fn data_tar() -> Vec<u8> {
+    let mut archive = tar::Builder::new(Vec::new());
+    let bytes = b"fixture executable";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "./usr/bin/solstone-linux", &bytes[..])
+        .unwrap();
+    archive.into_inner().unwrap()
+}
+
 fn gzip(bytes: &[u8]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(bytes).unwrap();
@@ -237,19 +287,45 @@ fn deb(root: &Path, version: &str) -> PathBuf {
     let compressed = encoder.finish().unwrap();
     let header = ar::Header::new(b"control.tar.gz".to_vec(), compressed.len() as u64);
     archive.append(&header, &compressed[..]).unwrap();
+    let compressed = gzip(&data_tar());
+    let header = ar::Header::new(b"data.tar.gz".to_vec(), compressed.len() as u64);
+    archive.append(&header, &compressed[..]).unwrap();
     path
 }
 
 fn rpm_file(root: &Path, version: &str) -> PathBuf {
     let path = root.join(format!("solstone-linux-{version}-1.x86_64.rpm"));
     let package = rpm::PackageBuilder::new(PRODUCT, version, "AGPL-3.0-only", "x86_64", "fixture")
+        .with_file_contents(
+            b"fixture executable".as_slice(),
+            rpm::FileOptions::new("/usr/bin/solstone-linux").permissions(0o755),
+        )
+        .unwrap()
         .build()
         .unwrap();
     package.write(&mut File::create(&path).unwrap()).unwrap();
     path
 }
 
-fn release_fixture() -> tempfile::TempDir {
+#[test]
+fn package_member_evidence_is_bound_to_all_three_formats() {
+    let fixture = release_fixture();
+    for path in artifact_paths(fixture.path(), "1.0.0").unwrap() {
+        let member = package_member_evidence(&path, "1.0.0").unwrap();
+        assert_eq!(member.mode, 0o755);
+        assert_eq!(
+            member.sha256,
+            digest(if member.format == "tar" {
+                b"fixture"
+            } else {
+                b"fixture executable"
+            })
+        );
+        assert!(member.installed_path.ends_with("/bin/solstone-linux"));
+    }
+}
+
+pub(super) fn release_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let version = evidence().version;
     producer_tarball(temp.path(), &version);
@@ -261,9 +337,8 @@ fn release_fixture() -> tempfile::TempDir {
 #[test]
 fn rust_release_manifest_conformance() {
     verify_schema().unwrap();
-    let vendor = workspace_root()
-        .unwrap()
-        .join("vendor/rust-release-manifest");
+    let repo = crate::candidate_tests::fixture();
+    let vendor = repo.root.path().join("vendor/rust-release-manifest");
     let entries = fs::read_dir(&vendor)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -274,8 +349,8 @@ fn rust_release_manifest_conformance() {
     );
     let descriptor: Value = serde_json::from_slice(
         &fs::read(
-            workspace_root()
-                .unwrap()
+            repo.root
+                .path()
                 .join("contracts/rust-release-manifest-import.json"),
         )
         .unwrap(),
@@ -1049,8 +1124,9 @@ fn rendered_manifest() -> (tempfile::TempDir, Manifest) {
 #[test]
 fn live_semantic_drift_is_rejected_field_by_field() {
     let (outside, manifest) = rendered_manifest();
+    let repo = crate::candidate_tests::fixture();
     let reject = |candidate: &Manifest| {
-        assert!(validate_live(candidate, outside.path()).is_err());
+        assert!(validate_live(&repo.root, candidate, outside.path()).is_err());
     };
 
     let mut candidate = manifest.clone();

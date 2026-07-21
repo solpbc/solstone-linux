@@ -1,42 +1,38 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-FROM ubuntu:22.04 AS baseline
+ARG UBUNTU_TOOL_BASE
+ARG FEDORA_TOOL_BASE
+FROM ${UBUNTU_TOOL_BASE} AS baseline
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_VERSION=1.97.1
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        cmake \
-        curl \
-        libglib2.0-dev \
-        libgstreamer1.0-dev \
-        libpulse-dev \
-        pkg-config \
-        xz-utils \
-    && rm -rf /var/lib/apt/lists/*
-
-# flac-bound builds libFLAC without Ogg and links it statically. CMake and the C
-# toolchain are build-only requirements; no system libFLAC is used at runtime.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+ARG UBUNTU_TOOL_BASE
+RUN case "$UBUNTU_TOOL_BASE" in \
+        sha256:*) suffix="${UBUNTU_TOOL_BASE#sha256:}" ;; \
+        *@sha256:*) suffix="${UBUNTU_TOOL_BASE##*@sha256:}" ;; \
+        *) exit 1 ;; \
+    esac \
+    && test "${#suffix}" -eq 64 \
+    && case "$suffix" in *[!0-9a-f]*) exit 1 ;; *) ;; esac
 ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_NET_OFFLINE=true
 
 WORKDIR /src
 # The full repository is required: build.rs rasterizes contrib/icons and
 # deliberately panics if those canonical source files cannot be read.
 COPY . .
 
-RUN actual="$(rustc --version --verbose | sed -n 's/^release: //p')" \
-    && test "${actual}" = "${RUST_VERSION}" \
-    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION}, actual ${actual:-unavailable}" >&2; \
+RUN rustc --version --verbose > /tmp/rustc-verbose \
+    && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
+    && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
+    && grep -Eq "^rustc ${RUST_VERSION} \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)$" /tmp/rustc-verbose \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
          echo "repair: rustup toolchain install ${RUST_VERSION} --profile minimal" >&2; exit 1; }
 
 # Cargo currently serializes package name immediately before version. Keep the
 # non-empty guard below so any JSON ordering change fails the build.
-RUN cargo build --locked --release -p solstone-linux \
+RUN cargo build --locked --release -p solstone-linux -p rust-release-manifest \
     && VERSION=$(cargo metadata --locked --format-version 1 --no-deps \
         | sed -n 's/.*"name":"solstone-linux","version":"\([^"]*\)".*/\1/p') \
     && { test -n "$VERSION" \
@@ -54,53 +50,103 @@ RUN cargo build --locked --release -p solstone-linux \
 FROM baseline AS deb-build
 
 ARG CARGO_DEB_VERSION=3.7.0
-RUN cargo install cargo-deb --version "${CARGO_DEB_VERSION}" --locked \
-    && actual="$(cargo deb --version)" \
+ARG INVOCATION_ID
+ARG SOURCE_COMMIT
+ARG SOURCE_ARCHIVE_SHA256
+ARG CARGO_LOCK_SHA256
+ARG RELEASE_VERSION
+ARG UBUNTU_TOOL_BASE
+RUN actual="$(cargo deb --version)" \
     && { test "${actual}" = "cargo-deb ${CARGO_DEB_VERSION}" \
         || { echo "error: cargo-deb mismatch: expected 'cargo-deb ${CARGO_DEB_VERSION}', actual '${actual:-unavailable}'" >&2; \
-             echo "repair: cargo install cargo-deb --version ${CARGO_DEB_VERSION} --locked" >&2; exit 1; }; } \
+             echo "repair: provision the local Ubuntu tool image with cargo-deb ${CARGO_DEB_VERSION}" >&2; exit 1; }; } \
     && cargo deb --locked -p solstone-linux \
     && VERSION=$(cat /release/VERSION) \
+    && test "$VERSION" = "$RELEASE_VERSION" \
     && DEB="target/debian/solstone-linux_${VERSION}-1_amd64.deb" \
     && { test -f "$DEB" \
         || { echo "error: Debian artifact mismatch: expected ${DEB}, actual missing" >&2; \
              echo "repair: cargo deb --locked -p solstone-linux" >&2; exit 1; }; } \
-    && cp "$DEB" "/release/solstone-linux_${VERSION}-1_amd64.deb" \
+    && DEB_OUT="/release/solstone-linux_${VERSION}-1_amd64.deb" \
+    && TAR_OUT="/release/solstone-linux-${VERSION}-linux-x86_64.tar.gz" \
+    && cp "$DEB" "$DEB_OUT" \
+    && target/release/rust-release-manifest lane-handoff \
+        --lane deb \
+        --invocation-id "$INVOCATION_ID" \
+        --source-commit "$SOURCE_COMMIT" \
+        --source-archive-sha256 "$SOURCE_ARCHIVE_SHA256" \
+        --cargo-lock-sha256 "$CARGO_LOCK_SHA256" \
+        --version "$VERSION" \
+        --target x86_64-unknown-linux-gnu \
+        --profile release \
+        --image-digest "$UBUNTU_TOOL_BASE" \
+        --baseline-executable target/release/solstone-linux \
+        --artifact "$TAR_OUT" \
+        --artifact "$DEB_OUT" \
+        --output /release/.lane-evidence-handoff.json \
     && rm /release/VERSION
 
 FROM scratch AS deb
 COPY --from=deb-build /release/ /
 
-FROM fedora:42 AS rpm-build
+FROM ${FEDORA_TOOL_BASE} AS rpm-build
 
 ARG RUST_VERSION=1.97.1
 ARG CARGO_GENERATE_RPM_VERSION=0.21.0
-RUN dnf install -y ca-certificates curl gcc glibc-devel rpm-build \
-    && dnf clean all \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-       | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+ARG FEDORA_TOOL_BASE
+RUN case "$FEDORA_TOOL_BASE" in \
+        sha256:*) suffix="${FEDORA_TOOL_BASE#sha256:}" ;; \
+        *@sha256:*) suffix="${FEDORA_TOOL_BASE##*@sha256:}" ;; \
+        *) exit 1 ;; \
+    esac \
+    && test "${#suffix}" -eq 64 \
+    && case "$suffix" in *[!0-9a-f]*) exit 1 ;; *) ;; esac
 ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_NET_OFFLINE=true
 WORKDIR /src
 COPY --from=baseline /src /src
 COPY --from=baseline /release /release
 
-RUN actual="$(rustc --version --verbose | sed -n 's/^release: //p')" \
-    && test "${actual}" = "${RUST_VERSION}" \
-    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION}, actual ${actual:-unavailable}" >&2; \
+RUN rustc --version --verbose > /tmp/rustc-verbose \
+    && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
+    && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
+    && grep -Eq "^rustc ${RUST_VERSION} \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)$" /tmp/rustc-verbose \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
          echo "repair: rustup toolchain install ${RUST_VERSION} --profile minimal" >&2; exit 1; }
 
-RUN cargo install cargo-generate-rpm --version "${CARGO_GENERATE_RPM_VERSION}" --locked \
-    && actual="$(cargo generate-rpm --version)" \
+ARG INVOCATION_ID
+ARG SOURCE_COMMIT
+ARG SOURCE_ARCHIVE_SHA256
+ARG CARGO_LOCK_SHA256
+ARG RELEASE_VERSION
+RUN actual="$(CARGO_NET_OFFLINE=true cargo-generate-rpm --version)" \
     && { test "${actual}" = "cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}" \
         || { echo "error: cargo-generate-rpm mismatch: expected 'cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}', actual '${actual:-unavailable}'" >&2; \
-             echo "repair: cargo install cargo-generate-rpm --version ${CARGO_GENERATE_RPM_VERSION} --locked" >&2; exit 1; }; } \
-    && cargo generate-rpm -p crates/solstone-linux \
+             echo "repair: provision the local Fedora tool image with cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}" >&2; exit 1; }; } \
+    && CARGO_NET_OFFLINE=true cargo-generate-rpm -p crates/solstone-linux \
     && VERSION=$(cat /release/VERSION) \
+    && test "$VERSION" = "$RELEASE_VERSION" \
     && RPM="target/generate-rpm/solstone-linux-${VERSION}-1.x86_64.rpm" \
     && { test -f "$RPM" \
         || { echo "error: RPM artifact mismatch: expected ${RPM}, actual missing" >&2; \
-             echo "repair: cargo generate-rpm -p crates/solstone-linux" >&2; exit 1; }; } \
-    && cp "$RPM" "/release/solstone-linux-${VERSION}-1.x86_64.rpm" \
+             echo "repair: CARGO_NET_OFFLINE=true cargo-generate-rpm -p crates/solstone-linux" >&2; exit 1; }; } \
+    && RPM_OUT="/release/solstone-linux-${VERSION}-1.x86_64.rpm" \
+    && TAR_OUT="/release/solstone-linux-${VERSION}-linux-x86_64.tar.gz" \
+    && cp "$RPM" "$RPM_OUT" \
+    && target/release/rust-release-manifest lane-handoff \
+        --lane rpm \
+        --invocation-id "$INVOCATION_ID" \
+        --source-commit "$SOURCE_COMMIT" \
+        --source-archive-sha256 "$SOURCE_ARCHIVE_SHA256" \
+        --cargo-lock-sha256 "$CARGO_LOCK_SHA256" \
+        --version "$VERSION" \
+        --target x86_64-unknown-linux-gnu \
+        --profile release \
+        --image-digest "$FEDORA_TOOL_BASE" \
+        --baseline-executable target/release/solstone-linux \
+        --artifact "$TAR_OUT" \
+        --artifact "$RPM_OUT" \
+        --output /release/.lane-evidence-handoff.json \
     && rm /release/VERSION
 
 FROM scratch AS rpm

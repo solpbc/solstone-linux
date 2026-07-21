@@ -20,6 +20,7 @@ struct ScanCounts {
     resolving: usize,
     nested_container: usize,
     make_wrapper: usize,
+    direct_generate_rpm: usize,
 }
 
 fn toolchain() -> toml::Value {
@@ -355,6 +356,17 @@ fn scan_policy(
                 if matches!(command.trim_matches(['@', '{', '}']), "echo" | "printf") {
                     continue;
                 }
+                if PathBuf::from(command.trim_matches(['@', '{', '}']))
+                    .file_name()
+                    .is_some_and(|name| name == "cargo-generate-rpm")
+                {
+                    if !expanded.contains("CARGO_NET_OFFLINE=true") {
+                        return Err(format!(
+                            "{source}:{line_number}: direct cargo-generate-rpm invocation lacks CARGO_NET_OFFLINE=true"
+                        ));
+                    }
+                    counts.direct_generate_rpm += 1;
+                }
                 for cargo in cargo_commands(&fragment) {
                     counts.inspected += 1;
                     if was_wrapper {
@@ -369,11 +381,9 @@ fn scan_policy(
                     if resolving {
                         counts.resolving += 1;
                     }
-                    let exempt = matches!(
-                        cargo.subcommand,
-                        "fmt" | "generate-rpm" | "clean" | "update"
-                    ) || (cargo.subcommand == "deny"
-                        && (cargo.deny_fetch || cargo.version_query))
+                    let exempt = matches!(cargo.subcommand, "fmt" | "clean" | "update")
+                        || (cargo.subcommand == "deny"
+                            && (cargo.deny_fetch || cargo.version_query))
                         || cargo.version_query
                         || cargo.subcommand == "--version";
                     if resolving && !cargo.locked {
@@ -394,6 +404,7 @@ fn scan_policy(
         || counts.resolving == 0
         || counts.nested_container == 0
         || counts.make_wrapper == 0
+        || counts.direct_generate_rpm == 0
     {
         return Err("policy scan did not inspect required command classes".into());
     }
@@ -522,9 +533,68 @@ fn locked_policy_fails_closed_on_unresolved_command_wrapper() {
 #[test]
 fn locked_policy_requires_a_resolving_invocation() {
     let makefile = "CARGO := cargo\nprobe:\n\t$(CARGO) fmt\n";
-    let container = "RUN cargo fmt && cargo generate-rpm -p crates/solstone-linux\n";
+    let container =
+        "RUN cargo fmt && CARGO_NET_OFFLINE=true cargo-generate-rpm -p crates/solstone-linux\n";
     let error = scan_policy(makefile, container, &[]).unwrap_err();
     assert!(error.contains("required command classes"));
+}
+
+#[test]
+fn cargo_generate_rpm_is_direct_offline_and_never_a_cargo_subcommand() {
+    let (makefile, container, scripts) = policy_sources();
+    let counts = scan_policy(&makefile, &container, &scripts).unwrap();
+    assert_eq!(counts.direct_generate_rpm, 2);
+    let error = scan_policy(
+        &makefile,
+        &(container + "\nRUN cargo generate-rpm -p crates/solstone-linux\n"),
+        &scripts,
+    )
+    .unwrap_err();
+    assert!(error.contains("unclassified Cargo invocation"));
+}
+
+#[test]
+fn direct_generate_rpm_path_stub_records_exact_offline_argv() {
+    let temp = tempfile::tempdir().unwrap();
+    let argv = temp.path().join("argv");
+    let tripwire = temp.path().join("cargo-tripwire");
+    let direct = temp.path().join("cargo-generate-rpm");
+    fs::write(
+        &direct,
+        format!(
+            "#!/bin/sh\n[ \"$CARGO_NET_OFFLINE\" = true ] || exit 90\nprintf '%s\\0' \"$@\" >> '{}'\n",
+            argv.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&direct, fs::Permissions::from_mode(0o755)).unwrap();
+    let cargo = temp.path().join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/bin/sh\nprintf called > '{}'\nexit 99\n",
+            tripwire.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", temp.path().display());
+    for args in [&["--version"][..], &["-p", "crates/solstone-linux"][..]] {
+        assert!(
+            Command::new("cargo-generate-rpm")
+                .args(args)
+                .env("PATH", &path)
+                .env("CARGO_NET_OFFLINE", "true")
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    assert_eq!(
+        fs::read(argv).unwrap(),
+        b"--version\0-p\0crates/solstone-linux\0"
+    );
+    assert!(!tripwire.exists());
 }
 
 // AC: shell variables, Make wrappers, paths, and compound commands cannot evade inspection.

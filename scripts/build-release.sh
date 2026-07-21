@@ -2,15 +2,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 #
-# Build the Rust release rail in its distro-native packaging container.
+# Build one non-candidate package lane for drift inspection.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
 Usage: scripts/build-release.sh <deb|rpm> [x86_64]
 
-Build the requested native package and the portable baseline tarball into
-dist/rust/. Only x86_64 is currently supported.
+Build one package lane into the fixed dist/rust-drift/ directory. This helper
+produces drift evidence only; it cannot create or promote a release candidate.
 EOF
 }
 
@@ -21,97 +21,91 @@ fi
 
 FORMAT="$1"
 ARCH="${2:-$(uname -m)}"
-
 case "$FORMAT" in
   deb|rpm) ;;
   *)
-    echo "error: unsupported package format '$FORMAT'; expected deb or rpm" >&2
-    usage >&2
+    echo "error: package format mismatch: expected deb or rpm, actual '$FORMAT'" >&2
+    echo "repair: scripts/build-release.sh <deb|rpm> [x86_64]" >&2
     exit 2
     ;;
 esac
-
 if [[ "$ARCH" != "x86_64" ]]; then
-  echo "error: unsupported architecture '$ARCH'; this release rail only builds x86_64" >&2
+  echo "error: package architecture mismatch: expected x86_64, actual '$ARCH'" >&2
+  echo "repair: run this drift helper on x86_64" >&2
   exit 2
 fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
-  echo "error: run this script from a solstone-linux Git checkout" >&2
+  echo "error: repository root mismatch: expected solstone-linux Git checkout, actual unavailable" >&2
+  echo "repair: run from the solstone-linux checkout" >&2
   exit 1
 }
 cd "$REPO_ROOT"
-
 if ! git diff --quiet HEAD || [[ -n "$(git status --porcelain)" ]]; then
-  echo "error: working tree dirty; commit or stash changes before building release artifacts" >&2
+  echo "error: working tree mismatch: expected clean, actual dirty" >&2
+  echo "repair: commit or restore changes before building drift evidence" >&2
   exit 1
 fi
 
 if command -v podman >/dev/null 2>&1; then
-  ENGINE="podman"
+  ENGINE=(podman build --pull=never --network=none)
 elif command -v docker >/dev/null 2>&1; then
-  ENGINE="docker"
+  docker buildx version >/dev/null 2>&1 || {
+    echo "error: Docker build capability mismatch: expected buildx, actual unavailable" >&2
+    echo "repair: provision Docker buildx before building drift evidence" >&2
+    exit 1
+  }
+  ENGINE=(docker buildx build --pull=false --network=none)
 else
-  echo "error: podman or docker is required to build Rust release artifacts" >&2
+  echo "error: container engine mismatch: expected podman or docker, actual unavailable" >&2
+  echo "repair: provision a supported local container engine" >&2
   exit 1
 fi
 
+policy_value() {
+  sed -n "s/^$1 = \"\([^\"]*\)\"/\1/p" packaging/release-policy.toml
+}
+UBUNTU_TOOL_BASE=$(policy_value build_ubuntu)
+FEDORA_TOOL_BASE=$(policy_value build_fedora)
+if [[ -z "$UBUNTU_TOOL_BASE" || -z "$FEDORA_TOOL_BASE" ]]; then
+  echo "error: release image policy mismatch: expected committed build digests, actual missing" >&2
+  echo "repair: restore packaging/release-policy.toml from the release commit" >&2
+  exit 1
+fi
+
+SOURCE_COMMIT=$(git rev-parse HEAD)
+SOURCE_ARCHIVE_SHA256=$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)
+CARGO_LOCK_SHA256=$(sha256sum Cargo.lock | cut -d' ' -f1)
+RELEASE_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+INVOCATION_ID=${SOURCE_COMMIT:0:32}
 OUTPUT_TMP=$(mktemp -d)
 trap 'rm -rf "$OUTPUT_TMP"' EXIT
 
-# Keep the root CWD: cargo-generate-rpm resolves asset sources there first.
-# Deb packaging stays inside Ubuntu because openSUSE hosts lack dpkg-shlibdeps;
-# cargo-deb's depends="$auto" must be resolved in the Debian container.
-"$ENGINE" build \
+"${ENGINE[@]}" \
   --file packaging/Containerfile \
   --target "$FORMAT" \
   --output "type=local,dest=$OUTPUT_TMP" \
+  --build-arg "UBUNTU_TOOL_BASE=$UBUNTU_TOOL_BASE" \
+  --build-arg "FEDORA_TOOL_BASE=$FEDORA_TOOL_BASE" \
+  --build-arg "INVOCATION_ID=$INVOCATION_ID" \
+  --build-arg "SOURCE_COMMIT=$SOURCE_COMMIT" \
+  --build-arg "SOURCE_ARCHIVE_SHA256=$SOURCE_ARCHIVE_SHA256" \
+  --build-arg "CARGO_LOCK_SHA256=$CARGO_LOCK_SHA256" \
+  --build-arg "RELEASE_VERSION=$RELEASE_VERSION" \
   "$REPO_ROOT"
 
+OUTPUT_DIR=dist/rust-drift
+mkdir -p "$OUTPUT_DIR"
 shopt -s nullglob
-TARBALLS=("$OUTPUT_TMP"/solstone-linux-*-linux-x86_64.tar.gz)
-case "$FORMAT" in
-  deb) PACKAGES=("$OUTPUT_TMP"/solstone-linux_*-1_amd64.deb) ;;
-  rpm) PACKAGES=("$OUTPUT_TMP"/solstone-linux-*-1.x86_64.rpm) ;;
-esac
+OUTPUTS=("$OUTPUT_TMP"/* "$OUTPUT_TMP"/.[!.]*)
 shopt -u nullglob
-
-if [[ ${#TARBALLS[@]} -ne 1 || ${#PACKAGES[@]} -ne 1 ]]; then
-  echo "error: container output must contain exactly one baseline tarball and one $FORMAT package" >&2
+if [[ ${#OUTPUTS[@]} -ne 3 ]]; then
+  echo "error: drift output inventory mismatch: expected two artifacts and lane evidence, actual ${#OUTPUTS[@]}" >&2
+  echo "repair: inspect the selected local build image and packaging/Containerfile" >&2
   exit 1
 fi
-
-TARBALL_VERSION=${TARBALLS[0]##*/solstone-linux-}
-TARBALL_VERSION=${TARBALL_VERSION%-linux-x86_64.tar.gz}
-case "$FORMAT" in
-  deb) EXPECTED_PACKAGE="solstone-linux_${TARBALL_VERSION}-1_amd64.deb" ;;
-  rpm) EXPECTED_PACKAGE="solstone-linux-${TARBALL_VERSION}-1.x86_64.rpm" ;;
-esac
-if [[ "${PACKAGES[0]##*/}" != "$EXPECTED_PACKAGE" ]]; then
-  echo "error: package and tarball versions do not match" >&2
-  exit 1
-fi
-
-check_artifact() {
-  local source="$1"
-  local destination="dist/rust/${source##*/}"
-  if [[ -e "$destination" ]] && ! cmp -s "$source" "$destination"; then
-    echo "error: refusing to overwrite existing artifact with different bytes: $destination" >&2
-    exit 1
-  fi
-}
-
-mkdir -p dist/rust
-ARTIFACTS=("${TARBALLS[0]}" "${PACKAGES[0]}")
-for ARTIFACT in "${ARTIFACTS[@]}"; do
-  check_artifact "$ARTIFACT"
+for SOURCE in "${OUTPUTS[@]}"; do
+  install -m 0644 "$SOURCE" "$OUTPUT_DIR/${SOURCE##*/}"
 done
-for ARTIFACT in "${ARTIFACTS[@]}"; do
-  DESTINATION="dist/rust/${ARTIFACT##*/}"
-  if [[ -e "$DESTINATION" ]]; then
-    echo "keeping byte-identical existing artifact: $DESTINATION"
-  else
-    install -m 0644 "$ARTIFACT" "$DESTINATION"
-  fi
-done
-echo "built Rust $FORMAT artifacts for version $TARBALL_VERSION in dist/rust/"
+echo "built non-candidate $FORMAT drift evidence in $OUTPUT_DIR/"
+echo "candidate status: unavailable; use make release-candidate for the atomic candidate transaction"

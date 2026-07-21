@@ -11,14 +11,19 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::net::IpAddr;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use tar::{Archive, Entry, EntryType};
 use xz2::read::XzDecoder;
+
+mod candidate;
+pub use candidate::*;
+mod transaction;
+pub use transaction::*;
 
 pub const SCHEMA_VERSION: u64 = 1;
 pub const SCHEMA_SHA256: &str = "d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c";
@@ -30,6 +35,10 @@ pub const MANIFEST_OK_MESSAGE: &str =
     "Named manifest and artifacts verified; this is NOT candidate-readiness classification.";
 pub const RELEASE_DIR_OK_MESSAGE: &str =
     "Release directory verified as a complete five-file candidate.";
+pub const LEDGER_SCHEMA_SHA256: &str =
+    "c93e189b2e7bc1c65d38f52f924c74a101a4b3f39acbe73ba626b4f59e180533";
+pub const PROOF_SCHEMA_SHA256: &str =
+    "3009eab983eea832961220406f19c7459ed1db7fffc352af6ffaf664f9cd7dcf";
 
 pub fn manifest_name(version: &str) -> String {
     format!("solstone-linux-{version}-linux-x86_64.rust-release-manifest.json")
@@ -37,6 +46,23 @@ pub fn manifest_name(version: &str) -> String {
 
 const SCHEMA_BYTES: &[u8] =
     include_bytes!("../../../vendor/rust-release-manifest/rust-release-manifest.schema.json");
+const LEDGER_SCHEMA_BYTES: &[u8] = include_bytes!(
+    "../../../vendor/rust-release-candidate-ledger/rust-release-candidate-ledger.schema.json"
+);
+const PROOF_SCHEMA_BYTES: &[u8] = include_bytes!(
+    "../../../vendor/rust-release-candidate-proof/rust-release-candidate-proof.schema.json"
+);
+const EXPECTED_LAYOUT: [&str; 9] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "deny.toml",
+    "Makefile",
+    "rust-toolchain.toml",
+    "packaging/Containerfile",
+    "packaging/release-policy.toml",
+    "crates/solstone-linux/Cargo.toml",
+    "crates/rust-release-manifest/Cargo.toml",
+];
 const TOOL_KEYS: [&str; 18] = [
     "cargo_deb",
     "cargo_generate_rpm",
@@ -79,8 +105,200 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Debug)]
+pub struct RepoRoot(PathBuf);
+
+impl RepoRoot {
+    pub fn resolve() -> Result<Self> {
+        let cwd = std::env::current_dir().map_err(display_error)?;
+        let value = command(&cwd, &["git", "rev-parse", "--show-toplevel"]).map_err(|error| {
+            Error::new(format!(
+                "repository root mismatch: expected solstone-linux Git checkout, actual {error}\nrepair: run from the expected solstone-linux checkout"
+            ))
+        })?;
+        Self::validate_path(Path::new(&value)).map_err(|error| {
+            Error::new(format!(
+                "{error}\nrepair: run from the expected solstone-linux checkout"
+            ))
+        })
+    }
+
+    fn validate_path(path: &Path) -> Result<Self> {
+        let root = path.canonicalize().map_err(display_error)?;
+        for relative in EXPECTED_LAYOUT {
+            require_regular(&root.join(relative), relative)?;
+        }
+        let workspace: toml::Value =
+            toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).map_err(display_error)?)
+                .map_err(display_error)?;
+        let members = workspace["workspace"]["members"]
+            .as_array()
+            .ok_or_else(|| {
+                Error::new("workspace layout mismatch: expected members, actual missing")
+            })?
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected = BTreeSet::from(["crates/solstone-linux", "crates/rust-release-manifest"]);
+        if !expected.is_subset(&members) {
+            return Err(Error::new(
+                "workspace layout mismatch: expected release workspace members, actual incomplete",
+            ));
+        }
+        Ok(Self(root))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+pub struct CandidateLock {
+    path: PathBuf,
+    file: File,
+}
+
+impl CandidateLock {
+    pub fn acquire(root: &RepoRoot) -> Result<Self> {
+        let dist = root.path().join("dist");
+        fs::create_dir_all(&dist).map_err(display_error)?;
+        let path = dist.join(".rust-release-candidate.lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| {
+                Error::new(format!(
+                    "release candidate lock mismatch: expected exclusive owner, actual {error}"
+                ))
+            })?;
+        Ok(Self { path, file })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CandidateLock {
+    fn drop(&mut self) {
+        let owned = self.file.metadata();
+        let same_file = fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            owned
+                .as_ref()
+                .is_ok_and(|owned| metadata.dev() == owned.dev() && metadata.ino() == owned.ino())
+        });
+        if same_file {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct StagingLayout {
+    pub root: PathBuf,
+    pub context: PathBuf,
+    pub deb_lane: PathBuf,
+    pub rpm_lane: PathBuf,
+    pub advisory_db: PathBuf,
+    pub payload: PathBuf,
+    pub proofs: PathBuf,
+    pub ledger_temp: PathBuf,
+}
+
+impl StagingLayout {
+    pub fn create(root: &RepoRoot, _lock: &CandidateLock) -> Result<Self> {
+        let transaction_id = transaction_id()?;
+        let staging = root
+            .path()
+            .join("dist/.rust-release-candidate-staging")
+            .join(transaction_id);
+        Self::create_owned(staging)
+    }
+
+    pub(crate) fn create_owned(staging: PathBuf) -> Result<Self> {
+        let parent = staging
+            .parent()
+            .ok_or_else(|| Error::new("candidate staging parent mismatch"))?;
+        fs::create_dir_all(parent).map_err(display_error)?;
+        fs::create_dir(&staging).map_err(display_error)?;
+        Self::initialize_owned(staging)
+    }
+
+    pub(crate) fn initialize_owned(staging: PathBuf) -> Result<Self> {
+        let layout = Self {
+            context: staging.join("context"),
+            deb_lane: staging.join("lane-deb"),
+            rpm_lane: staging.join("lane-rpm"),
+            advisory_db: staging.join("advisory-db"),
+            payload: staging.join("payload"),
+            proofs: staging.join("proofs"),
+            ledger_temp: staging.join("ledger.json.tmp"),
+            root: staging.clone(),
+        };
+        let setup = (|| {
+            for directory in [
+                &layout.context,
+                &layout.deb_lane,
+                &layout.rpm_lane,
+                &layout.advisory_db,
+                &layout.payload,
+                &layout.proofs,
+            ] {
+                fs::create_dir_all(directory).map_err(display_error)?;
+            }
+            Ok(layout)
+        })();
+        match setup {
+            Ok(layout) => Ok(layout),
+            Err(primary) => match fs::remove_dir_all(&staging) {
+                Ok(()) => Err(primary),
+                Err(cleanup) => Err(Error::new(format!(
+                    "{primary}\nerror: candidate staging setup cleanup mismatch: expected owned root absent, actual residue\nrepair: remove {} after confirming no release-candidate process holds dist/.rust-release-candidate.lock: {cleanup}",
+                    staging.display()
+                ))),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImmutableContext {
+    pub commit: String,
+    pub archive_sha256: String,
+    pub cargo_lock_sha256: String,
+    pub path: PathBuf,
+}
+
+pub fn owner_emptying_allowlist(
+    root: &RepoRoot,
+    version: &str,
+    transaction_id: &str,
+) -> Result<BTreeSet<PathBuf>> {
+    validate_version(version)?;
+    if transaction_id.len() != 32
+        || !transaction_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(Error::new(
+            "transaction ID mismatch: expected 32 lowercase hexadecimal characters, actual invalid",
+        ));
+    }
+    let dist = root.path().join("dist");
+    Ok(BTreeSet::from([
+        dist.join("rust"),
+        dist.join("rust-evidence").join(version),
+        dist.join("rust-drift"),
+        dist.join(".rust-release-candidate-staging")
+            .join(transaction_id),
+    ]))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Evidence {
+pub(crate) struct Evidence {
     pub schema_version: u64,
     pub product: String,
     pub version: String,
@@ -149,8 +367,22 @@ struct PackageIdentity {
     arch: String,
 }
 
-pub fn render_manifest(evidence: Evidence, release_dir: &Path) -> Result<String> {
-    validate_evidence(&evidence)?;
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PackageMemberEvidence {
+    pub package_file: String,
+    pub format: String,
+    pub installed_path: String,
+    pub mode: u64,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+pub(crate) fn render_manifest(
+    root: &RepoRoot,
+    evidence: Evidence,
+    release_dir: &Path,
+) -> Result<String> {
+    validate_evidence(root, &evidence)?;
     validate_version(&evidence.version)?;
     let artifacts = artifact_paths(release_dir, &evidence.version)?
         .into_iter()
@@ -172,7 +404,7 @@ pub fn render_manifest(evidence: Evidence, release_dir: &Path) -> Result<String>
     };
     let mut output = serde_json::to_string_pretty(&manifest).map_err(display_error)?;
     output.push('\n');
-    validate_manifest_bytes(output.as_bytes())?;
+    validate_manifest_bytes(root, output.as_bytes())?;
     Ok(output)
 }
 
@@ -186,7 +418,7 @@ pub fn render_sha256sums(artifacts: &[Artifact]) -> Result<String> {
         .collect())
 }
 
-pub fn validate_manifest_bytes(bytes: &[u8]) -> Result<Manifest> {
+pub fn validate_manifest_bytes(root: &RepoRoot, bytes: &[u8]) -> Result<Manifest> {
     verify_schema()?;
     let value: Value = serde_json::from_slice(bytes).map_err(display_error)?;
     let schema: Value = serde_json::from_slice(SCHEMA_BYTES).map_err(display_error)?;
@@ -198,20 +430,20 @@ pub fn validate_manifest_bytes(bytes: &[u8]) -> Result<Manifest> {
         return Err(Error::new(format!("manifest schema mismatch: {error}")));
     }
     let manifest: Manifest = serde_json::from_value(value).map_err(display_error)?;
-    validate_manifest_policy(&manifest)?;
+    validate_manifest_policy(root, &manifest)?;
     Ok(manifest)
 }
 
-pub fn verify_manifest_mode(path: &Path) -> Result<()> {
-    verify_manifest(path, true)
+pub fn verify_manifest_mode(repo: &RepoRoot, path: &Path) -> Result<()> {
+    verify_manifest(repo, path, true)
 }
 
-fn verify_manifest(path: &Path, bind_live: bool) -> Result<()> {
+fn verify_manifest(repo: &RepoRoot, path: &Path, bind_live: bool) -> Result<()> {
     require_regular(path, "manifest")?;
     let root = path
         .parent()
         .ok_or_else(|| Error::new("manifest parent missing"))?;
-    let manifest = validate_manifest_bytes(&fs::read(path).map_err(display_error)?)?;
+    let manifest = validate_manifest_bytes(repo, &fs::read(path).map_err(display_error)?)?;
     let expected_name = manifest_name(&manifest.version);
     if path.file_name().and_then(OsStr::to_str) != Some(expected_name.as_str()) {
         return Err(Error::new(format!(
@@ -219,17 +451,17 @@ fn verify_manifest(path: &Path, bind_live: bool) -> Result<()> {
         )));
     }
     if bind_live {
-        validate_live(&manifest, root)?;
+        validate_live(repo, &manifest, root)?;
     }
     verify_artifacts(&manifest, root)?;
     verify_checksums(&manifest, root)
 }
 
-pub fn classify_release_dir(root: &Path) -> Result<()> {
-    classify_release(root, true)
+pub fn classify_release_dir(repo: &RepoRoot, root: &Path) -> Result<()> {
+    classify_release(repo, root, true)
 }
 
-fn classify_release(root: &Path, bind_live: bool) -> Result<()> {
+fn classify_release(repo: &RepoRoot, root: &Path, bind_live: bool) -> Result<()> {
     require_directory(root, "release root")?;
     let mut names = BTreeSet::new();
     for entry in fs::read_dir(root).map_err(display_error)? {
@@ -255,46 +487,398 @@ fn classify_release(root: &Path, bind_live: bool) -> Result<()> {
         )));
     }
     let manifest_path = root.join(manifests[0]);
-    verify_manifest(&manifest_path, bind_live)
-}
-
-pub fn write_rendered(evidence: Evidence, release_dir: &Path) -> Result<()> {
-    let manifest_text = render_manifest(evidence, release_dir)?;
-    let manifest = validate_manifest_bytes(manifest_text.as_bytes())?;
-    let sums = render_sha256sums(&manifest.artifacts)?;
-    fs::write(
-        release_dir.join(manifest_name(&manifest.version)),
-        manifest_text,
-    )
-    .map_err(display_error)?;
-    fs::write(release_dir.join(CHECKSUM_NAME), sums).map_err(display_error)
+    verify_manifest(repo, &manifest_path, bind_live)
 }
 
 pub fn schema_bytes() -> &'static [u8] {
     SCHEMA_BYTES
 }
 
-fn validate_evidence(evidence: &Evidence) -> Result<()> {
+pub fn ledger_schema_bytes() -> &'static [u8] {
+    LEDGER_SCHEMA_BYTES
+}
+
+pub fn proof_schema_bytes() -> &'static [u8] {
+    PROOF_SCHEMA_BYTES
+}
+
+pub fn verify_candidate_schemas() -> Result<()> {
+    verify_pinned_schema(
+        LEDGER_SCHEMA_BYTES,
+        LEDGER_SCHEMA_SHA256,
+        "https://solpbc.org/schemas/rust-release-candidate-ledger/v1.json",
+        "ledger",
+    )?;
+    verify_pinned_schema(
+        PROOF_SCHEMA_BYTES,
+        PROOF_SCHEMA_SHA256,
+        "https://solpbc.org/schemas/rust-release-candidate-proof/v1.json",
+        "proof",
+    )
+}
+
+pub fn canonical_json(value: &Value) -> Result<Vec<u8>> {
+    fn normalize(value: &Value, field: Option<&str>) -> Result<Value> {
+        match value {
+            Value::Object(object) => Ok(Value::Object(
+                object
+                    .iter()
+                    .map(|(key, value)| Ok((key.clone(), normalize(value, Some(key))?)))
+                    .collect::<Result<_>>()?,
+            )),
+            Value::Array(array) => {
+                let mut normalized = array
+                    .iter()
+                    .map(|value| normalize(value, None))
+                    .collect::<Result<Vec<_>>>()?;
+                match field {
+                    Some("features" | "active_exceptions" | "expected_proof_ids") => {
+                        normalized.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+                    }
+                    Some("payload") => normalized.sort_by(|left, right| {
+                        left.get("path")
+                            .and_then(Value::as_str)
+                            .cmp(&right.get("path").and_then(Value::as_str))
+                    }),
+                    Some("package_members") => normalized.sort_by(|left, right| {
+                        left.get("package_file")
+                            .and_then(Value::as_str)
+                            .cmp(&right.get("package_file").and_then(Value::as_str))
+                    }),
+                    _ => {}
+                }
+                Ok(Value::Array(normalized))
+            }
+            _ => Ok(value.clone()),
+        }
+    }
+
+    let normalized = normalize(value, None)?;
+    let mut bytes = serde_json::to_vec(&normalized).map_err(display_error)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+pub fn candidate_digest_input(payload: &[Artifact]) -> Result<Vec<u8>> {
+    if payload.len() != 5 {
+        return Err(Error::new(format!(
+            "candidate payload mismatch: expected 5 files, actual {}",
+            payload.len()
+        )));
+    }
+    let mut payload = payload.to_vec();
+    payload.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+    let mut previous: Option<&str> = None;
+    let mut output = Vec::new();
+    for file in &payload {
+        portable_path(&file.path)?;
+        if Path::new(&file.path).file_name() != Some(OsStr::new(&file.path)) {
+            return Err(Error::new(
+                "candidate payload path mismatch: expected basename, actual path",
+            ));
+        }
+        if previous == Some(&file.path) {
+            return Err(Error::new(
+                "candidate payload path mismatch: expected unique, actual duplicate",
+            ));
+        }
+        if !is_sha256(&file.sha256) || file.bytes == 0 {
+            return Err(Error::new(format!(
+                "candidate payload metadata mismatch: {}",
+                file.path
+            )));
+        }
+        previous = Some(&file.path);
+        output.extend_from_slice(
+            format!("{}  {}  {}\n", file.sha256, file.bytes, file.path).as_bytes(),
+        );
+    }
+    Ok(output)
+}
+
+pub fn candidate_digest(payload: &[Artifact]) -> Result<String> {
+    Ok(digest(&candidate_digest_input(payload)?))
+}
+
+#[derive(Serialize)]
+struct BundleDigestInput<'a> {
+    candidate_digest: &'a str,
+    ledger_sha256: String,
+    proofs: BTreeMap<&'a str, String>,
+}
+
+pub fn bundle_digest_input(
+    candidate: &str,
+    ledger: &[u8],
+    proofs: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>> {
+    if !is_sha256(candidate) {
+        return Err(Error::new(
+            "candidate digest mismatch: expected sha256, actual invalid",
+        ));
+    }
+    let expected = BTreeSet::from(["debian-amd64", "rpm-x86_64", "tar-x86_64"]);
+    let actual = proofs.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(Error::new(format!(
+            "proof inventory mismatch: expected 3 proof IDs, actual {}",
+            actual.len()
+        )));
+    }
+    let input = BundleDigestInput {
+        candidate_digest: candidate,
+        ledger_sha256: digest(ledger),
+        proofs: proofs
+            .iter()
+            .map(|(id, bytes)| (id.as_str(), digest(bytes)))
+            .collect(),
+    };
+    serde_json::to_vec(&input).map_err(display_error)
+}
+
+pub fn bundle_digest(
+    candidate: &str,
+    ledger: &[u8],
+    proofs: &BTreeMap<String, Vec<u8>>,
+) -> Result<String> {
+    Ok(digest(&bundle_digest_input(candidate, ledger, proofs)?))
+}
+
+#[derive(Clone, Debug)]
+pub struct ProofBindings {
+    pub platform: String,
+    pub candidate_digest: String,
+    pub ledger_sha256: String,
+    pub source_commit: String,
+    pub cargo_lock_sha256: String,
+    pub artifact_basename: String,
+    pub artifact_bytes: u64,
+    pub artifact_sha256: String,
+    pub proof_image_digest: String,
+    pub os_release: String,
+    pub package_manager_version: String,
+    pub install_command: Vec<String>,
+    pub install_exit_status: i64,
+    pub version_command: Vec<String>,
+    pub version_exit_status: i64,
+    pub executable_path: String,
+    pub executable_mode: u64,
+    pub executable_sha256: String,
+    pub version_output: String,
+    pub result: String,
+    pub policy_checked_at: String,
+    pub validation_time: String,
+}
+
+pub fn validate_candidate_proof(value: &Value, expected: &ProofBindings) -> Result<()> {
+    verify_candidate_schemas()?;
+    let schema: Value = serde_json::from_slice(PROOF_SCHEMA_BYTES).map_err(display_error)?;
+    let validator = jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .map_err(display_error)?;
+    if let Err(error) = validator.validate(value) {
+        return Err(Error::new(format!("proof schema mismatch: {error}")));
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| Error::new("proof mismatch: expected object, actual other"))?;
+    let expected_fields = [
+        ("platform", Value::String(expected.platform.clone())),
+        (
+            "candidate_digest",
+            Value::String(expected.candidate_digest.clone()),
+        ),
+        (
+            "ledger_sha256",
+            Value::String(expected.ledger_sha256.clone()),
+        ),
+        (
+            "source_commit",
+            Value::String(expected.source_commit.clone()),
+        ),
+        (
+            "cargo_lock_sha256",
+            Value::String(expected.cargo_lock_sha256.clone()),
+        ),
+        (
+            "artifact_basename",
+            Value::String(expected.artifact_basename.clone()),
+        ),
+        ("artifact_bytes", Value::from(expected.artifact_bytes)),
+        (
+            "artifact_sha256",
+            Value::String(expected.artifact_sha256.clone()),
+        ),
+        (
+            "proof_image_digest",
+            Value::String(expected.proof_image_digest.clone()),
+        ),
+        ("os_release", Value::String(expected.os_release.clone())),
+        (
+            "package_manager_version",
+            Value::String(expected.package_manager_version.clone()),
+        ),
+        (
+            "install_command",
+            serde_json::to_value(&expected.install_command).map_err(display_error)?,
+        ),
+        (
+            "install_exit_status",
+            Value::from(expected.install_exit_status),
+        ),
+        (
+            "version_command",
+            serde_json::to_value(&expected.version_command).map_err(display_error)?,
+        ),
+        (
+            "version_exit_status",
+            Value::from(expected.version_exit_status),
+        ),
+        (
+            "executable_path",
+            Value::String(expected.executable_path.clone()),
+        ),
+        ("executable_mode", Value::from(expected.executable_mode)),
+        (
+            "executable_sha256",
+            Value::String(expected.executable_sha256.clone()),
+        ),
+        (
+            "version_output",
+            Value::String(expected.version_output.clone()),
+        ),
+        ("result", Value::String(expected.result.clone())),
+    ];
+    for (field, expected_value) in expected_fields {
+        if object.get(field) != Some(&expected_value) {
+            return Err(Error::new(format!("proof {field} mismatch")));
+        }
+    }
+    let os_release = object["os_release"]
+        .as_str()
+        .ok_or_else(|| Error::new("proof os_release mismatch"))?;
+    validate_identity(
+        if expected.platform == "rpm-x86_64" {
+            "fedora_os"
+        } else {
+            "ubuntu_os"
+        },
+        os_release,
+    )?;
+    let manager = object["package_manager_version"]
+        .as_str()
+        .ok_or_else(|| Error::new("proof package_manager_version mismatch"))?;
+    let manager_ok = match expected.platform.as_str() {
+        "debian-amd64" => {
+            manager.starts_with("Debian 'dpkg' package management program version ")
+                || manager.starts_with("dpkg ")
+        }
+        "rpm-x86_64" => manager.starts_with("RPM version ") || manager.starts_with("rpm "),
+        "tar-x86_64" => manager == "installer portable-tar",
+        _ => false,
+    };
+    if !manager_ok {
+        return Err(Error::new(
+            "proof package manager mismatch: expected platform policy, actual different",
+        ));
+    }
+    let proof_time = object["proof_time"]
+        .as_str()
+        .ok_or_else(|| Error::new("proof proof_time mismatch"))?;
+    validate_timestamp(proof_time)?;
+    validate_timestamp(&expected.policy_checked_at)?;
+    validate_timestamp(&expected.validation_time)?;
+    let proof_time = DateTime::parse_from_rfc3339(proof_time).map_err(display_error)?;
+    let checked_at =
+        DateTime::parse_from_rfc3339(&expected.policy_checked_at).map_err(display_error)?;
+    let validation_time =
+        DateTime::parse_from_rfc3339(&expected.validation_time).map_err(display_error)?;
+    if proof_time < checked_at || proof_time > validation_time {
+        return Err(Error::new(
+            "proof proof_time mismatch: expected advisory window, actual outside",
+        ));
+    }
+    Ok(())
+}
+
+pub fn advisory_db_directory(url: &str) -> Result<String> {
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("file://") {
+        return Err(Error::new(
+            "advisory database URL mismatch: expected file URL, actual other",
+        ));
+    }
+    let name = lower
+        .split('/')
+        .next_back()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("empty_");
+    portable_path_component(name)?;
+    Ok(format!(
+        "{name}-{:016x}",
+        xxh64(0xca80_de71, lower.as_bytes())
+    ))
+}
+
+pub fn export_immutable_context(root: &RepoRoot, destination: &Path) -> Result<ImmutableContext> {
+    require_directory(destination, "immutable context destination")?;
+    if fs::read_dir(destination)
+        .map_err(display_error)?
+        .next()
+        .is_some()
+    {
+        return Err(Error::new(
+            "immutable context mismatch: expected empty destination, actual populated",
+        ));
+    }
+    let commit = command(root.path(), &["git", "rev-parse", "HEAD"])?;
+    if !is_git_commit(&commit) {
+        return Err(Error::new(
+            "release commit mismatch: expected 40 or 64 lowercase hexadecimal characters, actual invalid",
+        ));
+    }
+    let archive = command_bytes(root.path(), &["git", "archive", "--format=tar", "HEAD"])?;
+    extract_context(&archive, destination, &commit)?;
+    let source_lock = digest(&fs::read(root.path().join("Cargo.lock")).map_err(display_error)?);
+    let extracted_lock = digest(&fs::read(destination.join("Cargo.lock")).map_err(display_error)?);
+    if source_lock != extracted_lock {
+        return Err(Error::new(format!(
+            "Cargo.lock digest mismatch: expected {source_lock}, actual {extracted_lock}"
+        )));
+    }
+    for relative in EXPECTED_LAYOUT {
+        require_regular(&destination.join(relative), relative)?;
+    }
+    Ok(ImmutableContext {
+        commit,
+        archive_sha256: digest(&archive),
+        cargo_lock_sha256: source_lock,
+        path: destination.to_owned(),
+    })
+}
+
+fn validate_evidence(root: &RepoRoot, evidence: &Evidence) -> Result<()> {
     if evidence.schema_version != SCHEMA_VERSION
         || evidence.product != PRODUCT
         || evidence.source_dirty
     {
         return Err(Error::new("release evidence identity mismatch"));
     }
-    if evidence.active_exceptions != ordered_exceptions()? {
+    if evidence.active_exceptions != ordered_exceptions(root)? {
         return Err(Error::new("release evidence active_exceptions mismatch"));
     }
     validate_evidence_text("rust.rustc_verbose", &evidence.rust.rustc_verbose)?;
     validate_evidence_text("rust.cargo_version", &evidence.rust.cargo_version)?;
-    validate_native_tools(&evidence.native_tools)?;
+    validate_native_tools(root, &evidence.native_tools)?;
     validate_timestamp(&evidence.dependency_policy.advisory_checked_at)
 }
 
-fn validate_manifest_policy(manifest: &Manifest) -> Result<()> {
+fn validate_manifest_policy(root: &RepoRoot, manifest: &Manifest) -> Result<()> {
     validate_version(&manifest.version)?;
     validate_evidence_text("rust.rustc_verbose", &manifest.rust.rustc_verbose)?;
     validate_evidence_text("rust.cargo_version", &manifest.rust.cargo_version)?;
-    validate_native_tools(&manifest.native_tools)?;
+    validate_native_tools(root, &manifest.native_tools)?;
     validate_timestamp(&manifest.dependency_policy.advisory_checked_at)?;
     validate_artifact_set(&manifest.artifacts)?;
     for artifact in &manifest.artifacts {
@@ -372,7 +956,7 @@ fn validate_timestamp(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_native_tools(tools: &BTreeMap<String, String>) -> Result<()> {
+fn validate_native_tools(root: &RepoRoot, tools: &BTreeMap<String, String>) -> Result<()> {
     let actual = tools.keys().map(String::as_str).collect::<BTreeSet<_>>();
     let expected = TOOL_KEYS.into_iter().collect::<BTreeSet<_>>();
     if actual != expected {
@@ -385,7 +969,7 @@ fn validate_native_tools(tools: &BTreeMap<String, String>) -> Result<()> {
     exact_tool(tools, "cargo_generate_rpm", "0.21.0")?;
     exact_tool(tools, "manifest_validator", env!("CARGO_PKG_VERSION"))?;
     exact_tool(tools, "signing_mode", "unsigned")?;
-    let rust_pin = rust_pin()?;
+    let rust_pin = rust_pin(root)?;
     exact_tool(tools, "ubuntu_rustc", &format!("rustc {rust_pin}"))?;
     exact_tool(tools, "ubuntu_cargo", &format!("cargo {rust_pin}"))?;
     for key in ["ubuntu_image_digest", "fedora_image_digest"] {
@@ -421,7 +1005,7 @@ fn exact_tool(tools: &BTreeMap<String, String>, key: &str, expected: &str) -> Re
     Ok(())
 }
 
-fn validate_identity(key: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_identity(key: &str, value: &str) -> Result<()> {
     let lower = value.to_ascii_lowercase();
     let forbidden = [
         "token",
@@ -934,8 +1518,163 @@ fn rpm_identity(path: &Path) -> Result<PackageIdentity> {
     })
 }
 
-fn validate_live(manifest: &Manifest, payload_root: &Path) -> Result<()> {
-    let root = workspace_root()?;
+pub fn package_member_evidence(path: &Path, version: &str) -> Result<PackageMemberEvidence> {
+    verify_package_identity(path, version)?;
+    let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+    match artifact_kind(name, Some(version))? {
+        "tar" => tar_executable_member(path, name),
+        "deb" => deb_executable_member(path, name),
+        "rpm" => rpm_executable_member(path, name),
+        _ => unreachable!(),
+    }
+}
+
+fn member_record(
+    package: &str,
+    format: &str,
+    installed: &str,
+    mode: u64,
+    bytes: Vec<u8>,
+) -> Result<PackageMemberEvidence> {
+    if mode != 0o755 || bytes.is_empty() {
+        return Err(Error::new(format!(
+            "package executable mismatch: expected mode 0755 and nonempty bytes, actual {mode:o}"
+        )));
+    }
+    Ok(PackageMemberEvidence {
+        package_file: package.into(),
+        format: format.into(),
+        installed_path: installed.into(),
+        mode,
+        bytes: u64::try_from(bytes.len()).map_err(display_error)?,
+        sha256: digest(&bytes),
+    })
+}
+
+fn tar_executable_member(path: &Path, package: &str) -> Result<PackageMemberEvidence> {
+    let decoder = BufGzDecoder::new(BufReader::new(File::open(path).map_err(display_error)?));
+    let mut archive = Archive::new(decoder);
+    let mut found = None;
+    for entry in archive.entries().map_err(display_error)? {
+        let mut entry = entry.map_err(display_error)?;
+        let member = entry
+            .path()
+            .map_err(display_error)?
+            .to_string_lossy()
+            .into_owned();
+        if member.ends_with("/bin/solstone-linux") {
+            if found.is_some() || entry.header().entry_type() != EntryType::Regular {
+                return Err(Error::new(
+                    "tar executable member mismatch: expected unique regular file",
+                ));
+            }
+            let mode = u64::from(entry.header().mode().map_err(display_error)?);
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(display_error)?;
+            found = Some(member_record(
+                package,
+                "tar",
+                "/bin/solstone-linux",
+                mode,
+                bytes,
+            )?);
+        }
+    }
+    found.ok_or_else(|| {
+        Error::new("tar executable member mismatch: expected executable, actual missing")
+    })
+}
+
+fn deb_executable_member(path: &Path, package: &str) -> Result<PackageMemberEvidence> {
+    let mut archive = ar::Archive::new(File::open(path).map_err(display_error)?);
+    let mut found = None;
+    while let Some(entry) = archive.next_entry() {
+        let mut entry = entry.map_err(display_error)?;
+        let name = std::str::from_utf8(entry.header().identifier())
+            .map_err(display_error)?
+            .trim_end_matches('/')
+            .to_owned();
+        if name.starts_with("data.tar.") {
+            if found.is_some() {
+                return Err(Error::new(
+                    "deb data archive mismatch: expected unique member",
+                ));
+            }
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(display_error)?;
+            found = Some((name, bytes));
+        }
+    }
+    let (name, bytes) = found
+        .ok_or_else(|| Error::new("deb data archive mismatch: expected member, actual missing"))?;
+    let reader: Box<dyn Read> = if name.ends_with(".xz") {
+        Box::new(XzDecoder::new(Cursor::new(bytes)))
+    } else if name.ends_with(".gz") {
+        Box::new(GzDecoder::new(Cursor::new(bytes)))
+    } else if name.ends_with(".zst") {
+        Box::new(zstd::stream::read::Decoder::new(Cursor::new(bytes)).map_err(display_error)?)
+    } else {
+        return Err(Error::new("deb data compression mismatch"));
+    };
+    let mut tar = Archive::new(reader);
+    let mut executable = None;
+    for entry in tar.entries().map_err(display_error)? {
+        let mut entry = entry.map_err(display_error)?;
+        let member = entry
+            .path()
+            .map_err(display_error)?
+            .to_string_lossy()
+            .trim_start_matches("./")
+            .to_owned();
+        if member == "usr/bin/solstone-linux" {
+            if executable.is_some() || entry.header().entry_type() != EntryType::Regular {
+                return Err(Error::new("deb executable member mismatch"));
+            }
+            let mode = u64::from(entry.header().mode().map_err(display_error)?);
+            let mut body = Vec::new();
+            entry.read_to_end(&mut body).map_err(display_error)?;
+            executable = Some(member_record(
+                package,
+                "deb",
+                "/usr/bin/solstone-linux",
+                mode,
+                body,
+            )?);
+        }
+    }
+    executable.ok_or_else(|| {
+        Error::new("deb executable member mismatch: expected executable, actual missing")
+    })
+}
+
+fn rpm_executable_member(path: &Path, package: &str) -> Result<PackageMemberEvidence> {
+    let rpm = rpm::Package::open(path).map_err(display_error)?;
+    let mut executable = None;
+    for file in rpm.files().map_err(display_error)? {
+        let file = file.map_err(display_error)?;
+        if file.metadata.path == Path::new("/usr/bin/solstone-linux") {
+            if executable.is_some() {
+                return Err(Error::new(
+                    "rpm executable member mismatch: expected unique file",
+                ));
+            }
+            let mode = u64::from(file.metadata.mode.permissions());
+            executable = Some(member_record(
+                package,
+                "rpm",
+                "/usr/bin/solstone-linux",
+                mode,
+                file.content,
+            )?);
+        }
+    }
+    executable.ok_or_else(|| {
+        Error::new("rpm executable member mismatch: expected executable, actual missing")
+    })
+}
+
+fn validate_live(repo: &RepoRoot, manifest: &Manifest, payload_root: &Path) -> Result<()> {
+    let root = repo.path();
     let root_toml: toml::Value =
         toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).map_err(display_error)?)
             .map_err(display_error)?;
@@ -950,14 +1689,14 @@ fn validate_live(manifest: &Manifest, payload_root: &Path) -> Result<()> {
     let product = member_toml["package"]["name"]
         .as_str()
         .ok_or_else(|| Error::new("product name missing"))?;
-    let commit = command(&root, &["git", "rev-parse", "HEAD"])?;
+    let commit = command(root, &["git", "rev-parse", "HEAD"])?;
     let lock_digest = digest(&fs::read(root.join("Cargo.lock")).map_err(display_error)?);
     let makefile = fs::read_to_string(root.join("Makefile")).map_err(display_error)?;
     let cargo_deny_version = makefile
         .lines()
         .find_map(|line| line.strip_prefix("CARGO_DENY_VERSION := "))
         .ok_or_else(|| Error::new("cargo-deny version authority missing"))?;
-    let active_exceptions = ordered_exceptions()?;
+    let active_exceptions = ordered_exceptions(repo)?;
     let checks = [
         (manifest.product == product, "product"),
         (manifest.version == version, "version"),
@@ -990,11 +1729,11 @@ fn validate_live(manifest: &Manifest, payload_root: &Path) -> Result<()> {
             "live release evidence mismatch: {field}"
         )));
     }
-    require_clean_tree(&root, payload_root)
+    require_clean_tree(root, payload_root)
 }
 
-fn ordered_exceptions() -> Result<Vec<String>> {
-    let root = workspace_root()?;
+fn ordered_exceptions(repo: &RepoRoot) -> Result<Vec<String>> {
+    let root = repo.path();
     let deny: toml::Value =
         toml::from_str(&fs::read_to_string(root.join("deny.toml")).map_err(display_error)?)
             .map_err(display_error)?;
@@ -1013,8 +1752,21 @@ fn ordered_exceptions() -> Result<Vec<String>> {
 
 fn require_clean_tree(root: &Path, payload_root: &Path) -> Result<()> {
     let root = root.canonicalize().map_err(display_error)?;
-    let payload_root = payload_root.canonicalize().map_err(display_error)?;
-    let dist = root.join("dist");
+    let dist = root.join("dist").canonicalize().map_err(display_error)?;
+    let payload_root = if payload_root.symlink_metadata().is_ok() {
+        payload_root.canonicalize().map_err(display_error)?
+    } else {
+        let parent = payload_root
+            .parent()
+            .ok_or_else(|| Error::new("release payload parent mismatch"))?
+            .canonicalize()
+            .map_err(display_error)?;
+        parent.join(
+            payload_root
+                .file_name()
+                .ok_or_else(|| Error::new("release payload basename mismatch"))?,
+        )
+    };
     if payload_root != dist && !payload_root.starts_with(&dist) {
         return Err(Error::new(
             "release payload root mismatch: expected repository dist path",
@@ -1047,15 +1799,8 @@ fn require_clean_tree(root: &Path, payload_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn workspace_root() -> Result<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .map_err(display_error)
-}
-
-fn rust_pin() -> Result<String> {
-    let root = workspace_root()?;
+fn rust_pin(repo: &RepoRoot) -> Result<String> {
+    let root = repo.path();
     let toolchain: toml::Value = toml::from_str(
         &fs::read_to_string(root.join("rust-toolchain.toml")).map_err(display_error)?,
     )
@@ -1091,6 +1836,191 @@ fn verify_schema() -> Result<()> {
         return Err(Error::new("vendored schema identity mismatch"));
     }
     Ok(())
+}
+
+fn verify_pinned_schema(bytes: &[u8], expected_digest: &str, id: &str, label: &str) -> Result<()> {
+    if digest(bytes) != expected_digest {
+        return Err(Error::new(format!("{label} schema bytes mismatch")));
+    }
+    let schema: Value = serde_json::from_slice(bytes).map_err(display_error)?;
+    if schema["$schema"] != "https://json-schema.org/draft/2020-12/schema" || schema["$id"] != id {
+        return Err(Error::new(format!("{label} schema identity mismatch")));
+    }
+    jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .map_err(display_error)?;
+    Ok(())
+}
+
+fn transaction_id() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(display_error)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn extract_context(bytes: &[u8], destination: &Path, expected_commit: &str) -> Result<()> {
+    let mut archive = Archive::new(Cursor::new(bytes));
+    let mut paths = BTreeSet::new();
+    for entry in archive.entries().map_err(display_error)? {
+        let mut entry = entry.map_err(display_error)?;
+        if entry.header().entry_type().is_pax_global_extensions() {
+            let mut body = String::new();
+            entry.read_to_string(&mut body).map_err(display_error)?;
+            let record_length = expected_commit.len() + 12;
+            if body != format!("{record_length} comment={expected_commit}\n") {
+                return Err(Error::new(
+                    "immutable context metadata mismatch: expected commit binding, actual other",
+                ));
+            }
+            continue;
+        }
+        let path = entry.path().map_err(display_error)?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| Error::new("immutable context path mismatch: expected UTF-8"))?;
+        let path = if entry.header().entry_type().is_dir() {
+            path.strip_suffix('/').unwrap_or(path)
+        } else {
+            path
+        };
+        portable_path(path)?;
+        if !paths.insert(path.to_owned()) {
+            return Err(Error::new(format!(
+                "immutable context path mismatch: expected unique, actual duplicate {path}"
+            )));
+        }
+        let output = destination.join(path);
+        if !output.starts_with(destination) {
+            return Err(Error::new("immutable context path mismatch"));
+        }
+        let mode = entry.header().mode().map_err(display_error)? & 0o7777;
+        if mode & 0o6000 != 0 {
+            return Err(Error::new("immutable context mode mismatch"));
+        }
+        match entry.header().entry_type() {
+            EntryType::Directory => {
+                fs::create_dir_all(&output).map_err(display_error)?;
+                fs::set_permissions(&output, fs::Permissions::from_mode(mode))
+                    .map_err(display_error)?;
+            }
+            EntryType::Regular => {
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent).map_err(display_error)?;
+                }
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(mode)
+                    .open(&output)
+                    .map_err(display_error)?;
+                std::io::copy(&mut entry, &mut file).map_err(display_error)?;
+            }
+            EntryType::Symlink => {
+                let target = entry
+                    .link_name()
+                    .map_err(display_error)?
+                    .ok_or_else(|| Error::new("immutable context symlink target missing"))?;
+                let target = target
+                    .to_str()
+                    .ok_or_else(|| Error::new("immutable context symlink target mismatch"))?;
+                portable_path(target)?;
+                if target.contains('/') {
+                    return Err(Error::new("immutable context symlink target mismatch"));
+                }
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent).map_err(display_error)?;
+                }
+                symlink(target, output).map_err(display_error)?;
+            }
+            other => {
+                return Err(Error::new(format!(
+                    "immutable context member type mismatch: actual {}",
+                    other.as_byte()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn command_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(root)
+        .output()
+        .map_err(display_error)?;
+    if !output.status.success() {
+        return Err(Error::new(format!("command mismatch: {}", args[0])));
+    }
+    Ok(output.stdout)
+}
+
+fn xxh64(seed: u64, bytes: &[u8]) -> u64 {
+    const P1: u64 = 11_400_714_785_074_694_791;
+    const P2: u64 = 14_029_467_366_897_019_727;
+    const P3: u64 = 1_609_587_929_392_839_161;
+    const P4: u64 = 9_650_029_242_287_828_579;
+    const P5: u64 = 2_870_177_450_012_600_261;
+
+    fn round(accumulator: u64, lane: u64) -> u64 {
+        (accumulator.wrapping_add(lane.wrapping_mul(P2)))
+            .rotate_left(31)
+            .wrapping_mul(P1)
+    }
+
+    let mut offset = 0;
+    let mut hash = if bytes.len() >= 32 {
+        let mut lanes = [
+            seed.wrapping_add(P1).wrapping_add(P2),
+            seed.wrapping_add(P2),
+            seed,
+            seed.wrapping_sub(P1),
+        ];
+        while offset + 32 <= bytes.len() {
+            for lane in &mut lanes {
+                let value = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+                *lane = round(*lane, value);
+                offset += 8;
+            }
+        }
+        let mut value = lanes[0]
+            .rotate_left(1)
+            .wrapping_add(lanes[1].rotate_left(7))
+            .wrapping_add(lanes[2].rotate_left(12))
+            .wrapping_add(lanes[3].rotate_left(18));
+        for lane in lanes {
+            value ^= round(0, lane);
+            value = value.wrapping_mul(P1).wrapping_add(P4);
+        }
+        value
+    } else {
+        seed.wrapping_add(P5)
+    };
+    hash = hash.wrapping_add(bytes.len() as u64);
+    while offset + 8 <= bytes.len() {
+        let lane = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        hash ^= round(0, lane);
+        hash = hash.rotate_left(27).wrapping_mul(P1).wrapping_add(P4);
+        offset += 8;
+    }
+    if offset + 4 <= bytes.len() {
+        let lane = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        hash ^= u64::from(lane).wrapping_mul(P1);
+        hash = hash.rotate_left(23).wrapping_mul(P2).wrapping_add(P3);
+        offset += 4;
+    }
+    for byte in &bytes[offset..] {
+        hash ^= u64::from(*byte).wrapping_mul(P5);
+        hash = hash.rotate_left(11).wrapping_mul(P1);
+    }
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(P2);
+    hash ^= hash >> 29;
+    hash = hash.wrapping_mul(P3);
+    hash ^ (hash >> 32)
 }
 
 fn portable_path(path: &str) -> Result<()> {
@@ -1214,6 +2144,13 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+pub(crate) fn is_git_commit(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -1222,5 +2159,9 @@ fn display_error(error: impl std::fmt::Display) -> Error {
     Error::new(error.to_string())
 }
 
+#[cfg(test)]
+mod candidate_tests;
+#[cfg(test)]
+mod proof_tests;
 #[cfg(test)]
 mod tests;

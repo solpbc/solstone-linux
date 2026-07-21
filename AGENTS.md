@@ -13,7 +13,7 @@ This is **not** part of the solstone monorepo. It is a standalone Rust package w
 ```
 crates/solstone-linux/src/  Shipping Rust observer, CLI, service, sync, and capture code
 packaging/                  Native package Containerfile and install notes
-scripts/build-release.sh    Operator-run native package build
+scripts/build-release.sh    Non-candidate native package drift helper
 scripts/install.sh          Portable archive installer
 
 src/solstone_linux/         Retained former Python implementation
@@ -80,6 +80,9 @@ make install        # Establish pinned Rust/tools and install the observer
 make format         # Format Rust source
 make test           # Run locked Rust tests
 make check-rust-release-manifest  # Validate release-manifest fixtures offline
+make release-candidate  # Create and locally prove one atomic candidate
+make release-candidate-prove  # Resume only missing package proofs
+make release-candidate-recover  # Read-only retained-candidate validation
 make ci             # Host evidence: Rust format, lint, tests, offline policy
 make audit          # Refresh RustSec data, then check advisories
 make update-deps    # Sole unlocked Cargo dependency-update path
@@ -109,19 +112,20 @@ The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains th
 
 ## Releasing
 
-solstone-linux ships as portable, Debian, and RPM artifacts through the
-operator-run native release rail. There is no automated publish path.
+The native rail creates portable, Debian, and RPM candidate artifacts plus three
+package-bound local proofs. Publication is unavailable.
 
 ```bash
-make release        # build native Debian and RPM release artifacts
+make release-candidate EXPECTED_RELEASE_COMMIT=<commit> ADVISORY_DESCRIPTOR=<descriptor>
 ```
 
-The build refuses a dirty tree and does not upload, tag, or publish. Follow
-`RELEASING.md` for artifact inspection, the blocking FLAC soak, and handoff.
-`scripts/release.sh` and its `legacy-python-release*` Make targets remain
-functional and can publish, tag, push, and create a GitHub release when
-credentials are present. They are retained for the former Python rail and are
-not part of the shipping product rail.
+`make release` enters the same transaction. The manifest validator, candidate
+transaction, Debian/RPM/tar install proofs, and blocking live FLAC checkpoint are
+distinct evidence activities. `candidate-proven` and
+`retained-candidate-valid` are local evidence, not publication approval. The
+individual `scripts/build-release.sh` lanes write only non-candidate drift evidence.
+Follow `RELEASING.md` for image and advisory preconditions, stale-lock recovery,
+proof resume, read-only recovery, and the separate FLAC checkpoint.
 
 ## Legacy Python development principles
 

@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-candidate release-candidate-prove release-candidate-recover legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -94,6 +94,10 @@ check-observer-contract: rust-preflight
 check-rust-release-manifest: rust-preflight
 	@echo "Rust release manifest schema: 1"
 	@echo "Rust release manifest schema SHA-256: d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c"
+	@echo "Rust release candidate ledger schema: 1"
+	@echo "Rust release candidate ledger schema SHA-256: c93e189b2e7bc1c65d38f52f924c74a101a4b3f39acbe73ba626b4f59e180533"
+	@echo "Rust release candidate proof schema: 1"
+	@echo "Rust release candidate proof schema SHA-256: 3009eab983eea832961220406f19c7459ed1db7fffc352af6ffaf664f9cd7dcf"
 	@manifest_set=$(if $(filter environment%,$(origin MANIFEST)),1,$(if $(findstring command line,$(origin MANIFEST)),1,0)); \
 	release_dir_set=$(if $(filter environment%,$(origin RELEASE_DIR)),1,$(if $(findstring command line,$(origin RELEASE_DIR)),1,0)); \
 	if { [ "$$manifest_set" -eq 1 ] && [ -z "$(strip $(MANIFEST))" ]; } || { [ "$$release_dir_set" -eq 1 ] && [ -z "$(strip $(RELEASE_DIR))" ]; }; then echo "error: release manifest selector empty" >&2; exit 1; \
@@ -157,10 +161,21 @@ versions: rust-preflight check-cargo-deny
 	cargo deny --version
 	@command -v $(APP) >/dev/null 2>&1 && $(APP) --version || true
 
-release: rust-preflight
-	@echo "Evidence class: target-package drift evidence. This does not run the release FLAC soak."
-	@bash scripts/build-release.sh deb
-	@bash scripts/build-release.sh rpm
+release: release-candidate
+
+release-candidate: rust-preflight
+	@test -n "$(strip $(EXPECTED_RELEASE_COMMIT))" || { echo "error: expected release commit mismatch: expected EXPECTED_RELEASE_COMMIT, actual missing" >&2; echo "repair: make release-candidate EXPECTED_RELEASE_COMMIT=<full-commit> ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }
+	@test -n "$(strip $(ADVISORY_DESCRIPTOR))" || { echo "error: advisory descriptor mismatch: expected ADVISORY_DESCRIPTOR, actual missing" >&2; echo "repair: make release-candidate EXPECTED_RELEASE_COMMIT=$(EXPECTED_RELEASE_COMMIT) ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- candidate create --expected-release-commit "$(EXPECTED_RELEASE_COMMIT)" --advisory-descriptor "$(ADVISORY_DESCRIPTOR)"
+
+release-candidate-prove: rust-preflight
+	@test -n "$(strip $(VERSION))" || { echo "error: candidate version mismatch: expected VERSION, actual missing" >&2; echo "repair: make release-candidate-prove VERSION=<version> ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }
+	@test -n "$(strip $(ADVISORY_DESCRIPTOR))" || { echo "error: advisory descriptor mismatch: expected ADVISORY_DESCRIPTOR, actual missing" >&2; echo "repair: make release-candidate-prove VERSION=$(VERSION) ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- candidate prove --version "$(VERSION)" --advisory-descriptor "$(ADVISORY_DESCRIPTOR)"
+
+release-candidate-recover: rust-preflight
+	@test -n "$(strip $(VERSION))" || { echo "error: candidate version mismatch: expected VERSION, actual missing" >&2; echo "repair: make release-candidate-recover VERSION=<version>" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- candidate recover --version "$(VERSION)"
 
 clean:
 	@echo "Cleaning build artifacts and cache files..."

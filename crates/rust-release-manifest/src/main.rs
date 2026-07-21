@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use rust_release_manifest::{
-    Evidence, MANIFEST_OK_MESSAGE, RELEASE_DIR_OK_MESSAGE, classify_release_dir,
-    verify_manifest_mode, write_rendered,
+    Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE, ProcessEnvironment, ProofHandoffInput,
+    RELEASE_DIR_OK_MESSAGE, RepoRoot, classify_release_dir, create_candidate, emit_lane_handoff,
+    emit_proof_handoff, prove_candidate, recover_candidate, verify_manifest_mode,
 };
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -23,38 +23,181 @@ enum Command {
         #[arg(long, conflicts_with = "manifest")]
         release_dir: Option<PathBuf>,
     },
-    Render {
-        #[arg(long)]
-        evidence: PathBuf,
-        #[arg(long)]
-        release_dir: PathBuf,
+    #[command(hide = true)]
+    LaneHandoff(Box<LaneHandoffArgs>),
+    #[command(hide = true)]
+    ProofHandoff(Box<ProofHandoffArgs>),
+    Candidate {
+        #[command(subcommand)]
+        command: CandidateCommand,
     },
 }
 
+#[derive(Subcommand)]
+enum CandidateCommand {
+    Create {
+        #[arg(long)]
+        expected_release_commit: String,
+        #[arg(long)]
+        advisory_descriptor: PathBuf,
+    },
+    Prove {
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        advisory_descriptor: PathBuf,
+    },
+    Recover {
+        #[arg(long)]
+        version: String,
+    },
+}
+
+#[derive(Args)]
+struct LaneHandoffArgs {
+    #[arg(long)]
+    lane: String,
+    #[arg(long)]
+    invocation_id: String,
+    #[arg(long)]
+    source_commit: String,
+    #[arg(long)]
+    source_archive_sha256: String,
+    #[arg(long)]
+    cargo_lock_sha256: String,
+    #[arg(long)]
+    version: String,
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    profile: String,
+    #[arg(long)]
+    feature: Vec<String>,
+    #[arg(long)]
+    image_digest: String,
+    #[arg(long)]
+    baseline_executable: PathBuf,
+    #[arg(long)]
+    artifact: Vec<PathBuf>,
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(Args)]
+struct ProofHandoffArgs {
+    #[arg(long)]
+    platform: String,
+    #[arg(long)]
+    artifact: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long)]
+    candidate_digest: String,
+    #[arg(long)]
+    ledger_sha256: String,
+    #[arg(long)]
+    source_commit: String,
+    #[arg(long)]
+    cargo_lock_sha256: String,
+    #[arg(long)]
+    proof_image_digest: String,
+    #[arg(long)]
+    version: String,
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    match command {
         Command::Validate {
             manifest: Some(path),
             release_dir: None,
         } => {
-            verify_manifest_mode(&path)?;
+            let root = RepoRoot::resolve()?;
+            verify_manifest_mode(&root, &path)?;
             println!("{MANIFEST_OK_MESSAGE}");
         }
         Command::Validate {
             manifest: None,
             release_dir: Some(path),
         } => {
-            classify_release_dir(&path)?;
+            let root = RepoRoot::resolve()?;
+            classify_release_dir(&root, &path)?;
             println!("{RELEASE_DIR_OK_MESSAGE}");
         }
         Command::Validate { .. } => return Err("exactly one validation path is required".into()),
-        Command::Render {
-            evidence,
-            release_dir,
-        } => {
-            let evidence: Evidence = serde_json::from_slice(&fs::read(evidence)?)?;
-            write_rendered(evidence, &release_dir)?;
-            println!("Rendered deterministic release manifest and SHA256SUMS.");
+        Command::LaneHandoff(args) => {
+            let LaneHandoffArgs {
+                lane,
+                invocation_id,
+                source_commit,
+                source_archive_sha256,
+                cargo_lock_sha256,
+                version,
+                target,
+                profile,
+                feature,
+                image_digest,
+                baseline_executable,
+                artifact,
+                output,
+            } = *args;
+            let lane = match lane.as_str() {
+                "deb" => Lane::Deb,
+                "rpm" => Lane::Rpm,
+                _ => return Err("lane mismatch: expected deb or rpm, actual invalid".into()),
+            };
+            emit_lane_handoff(&LaneEmitRequest {
+                lane,
+                invocation_id: &invocation_id,
+                source_commit: &source_commit,
+                source_archive_sha256: &source_archive_sha256,
+                expected_cargo_lock_sha256: &cargo_lock_sha256,
+                version: &version,
+                target: &target,
+                profile: &profile,
+                features: feature,
+                image_digest: &image_digest,
+                baseline_executable: &baseline_executable,
+                artifacts: artifact,
+                output: &output,
+            })?;
+        }
+        Command::ProofHandoff(args) => {
+            emit_proof_handoff(&ProofHandoffInput {
+                platform: &args.platform,
+                artifact: &args.artifact,
+                output: &args.output,
+                candidate_digest: &args.candidate_digest,
+                ledger_sha256: &args.ledger_sha256,
+                source_commit: &args.source_commit,
+                cargo_lock_sha256: &args.cargo_lock_sha256,
+                proof_image_digest: &args.proof_image_digest,
+                version: &args.version,
+            })?;
+        }
+        Command::Candidate { command } => {
+            let root = RepoRoot::resolve()?;
+            let processes = ProcessEnvironment::default();
+            let status = match command {
+                CandidateCommand::Create {
+                    expected_release_commit,
+                    advisory_descriptor,
+                } => create_candidate(
+                    &root,
+                    &expected_release_commit,
+                    &advisory_descriptor,
+                    &processes,
+                )?,
+                CandidateCommand::Prove {
+                    version,
+                    advisory_descriptor,
+                } => prove_candidate(&root, &version, &advisory_descriptor, &processes)?,
+                CandidateCommand::Recover { version } => {
+                    println!("{}", recover_candidate(&root, &version)?);
+                    return Ok(());
+                }
+            };
+            println!("{}", serde_json::to_string(&status)?);
         }
     }
     Ok(())

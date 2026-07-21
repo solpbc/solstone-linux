@@ -1,0 +1,34 @@
+build_ubuntu = "sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890"
+build_fedora = "sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56"
+proof_debian = "sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890"
+proof_rpm = "sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56"
+proof_tar = "sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890"
+
+# Operator-owned values: verify these inside the provisioned digest images and
+# commit any corrections before selecting EXPECTED_RELEASE_COMMIT.
+[debian-amd64]
+image_digest = "sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890"
+os_release = "Ubuntu 22.04.5 LTS"
+package_manager_version = "Debian 'dpkg' package management program version 1.21.1 (amd64)."
+install_command = ["dpkg", "--root=/proof-root", "--install", "/input/solstone-linux_1.0.0-1_amd64.deb"]
+version_command = ["/usr/bin/solstone-linux", "--version"]
+executable_path = "/usr/bin/solstone-linux"
+executable_mode = 493
+
+[rpm-x86_64]
+image_digest = "sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56"
+os_release = "Fedora Linux 42 (Container Image)"
+package_manager_version = "RPM version 4.20.1"
+install_command = ["rpm", "--root", "/proof-root", "--install", "/input/solstone-linux-1.0.0-1.x86_64.rpm"]
+version_command = ["/usr/bin/solstone-linux", "--version"]
+executable_path = "/usr/bin/solstone-linux"
+executable_mode = 493
+
+[tar-x86_64]
+image_digest = "sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890"
+os_release = "Ubuntu 22.04.5 LTS"
+package_manager_version = "installer portable-tar"
+install_command = ["/input/install.sh", "--prefix", "/proof-root", "/input/solstone-linux-1.0.0-linux-x86_64.tar.gz"]
+version_command = ["/bin/solstone-linux", "--version"]
+executable_path = "/bin/solstone-linux"
+executable_mode = 493
