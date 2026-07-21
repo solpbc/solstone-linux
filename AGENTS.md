@@ -79,6 +79,7 @@ make bootstrap      # Install rustup if needed, then establish pinned tools
 make install        # Establish pinned Rust/tools and install the observer
 make format         # Format Rust source
 make test           # Run locked Rust tests
+make check-rust-release-manifest  # Validate release-manifest fixtures offline
 make ci             # Host evidence: Rust format, lint, tests, offline policy
 make audit          # Refresh RustSec data, then check advisories
 make update-deps    # Sole unlocked Cargo dependency-update path

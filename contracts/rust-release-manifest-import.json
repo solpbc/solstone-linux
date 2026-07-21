@@ -1,0 +1,10 @@
+{
+  "authority_repository": "https://github.com/solpbc/solstone-linux",
+  "authority_commit": "977ecc43588d93ba81b9e67327888543492c153a",
+  "schema_version": 1,
+  "schema_path": "rust-release-manifest.schema.json",
+  "schema_sha256": "d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c",
+  "vendored_root": "vendor/rust-release-manifest",
+  "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "schema_id": "https://solpbc.org/schemas/rust-release-manifest/v1.json"
+}

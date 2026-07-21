@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/rust-release-manifest",
     "crates/solstone-linux",
 ]
 resolver = "3"

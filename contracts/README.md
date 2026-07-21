@@ -12,3 +12,9 @@ To adopt an authority revision:
 6. Run `make check-observer-contract` to verify provenance, frozen bytes, identities, and Linux production behavior offline.
 
 Bundle versions, solstone-linux application releases, and observer wire-protocol versions evolve independently. If conformance exposes an incompatibility, resolve it against the journal authority before changing consumer behavior. Never edit authority fixtures or vectors to fit the observer.
+
+## Rust release manifest schema import
+
+solstone-linux keeps a frozen, byte-exact copy of the Rust release manifest schema in `vendor/rust-release-manifest/`. The repository-local renderer and validator use that copy to produce and verify release evidence fully offline.
+
+To adopt an authority revision, verify the schema identity, dialect, byte length, and SHA-256 before replacing the vendored file. Then update `rust-release-manifest-import.json` with the public authority revision and exact schema provenance. Do not reformat or regenerate the schema during import. Run `make check-rust-release-manifest` to verify the frozen schema, renderer, checksums, package metadata, and release-directory classifier offline.

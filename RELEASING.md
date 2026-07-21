@@ -76,6 +76,39 @@ Confirm that each artifact contains the binary, LICENSE, INSTALL-NOTES, and the
 icon set declared in the member package manifest. It must contain no systemd
 unit and no desktop file.
 
+### Render and validate the release manifest
+
+After all three product artifacts exist, provide explicit release evidence to
+the repository-local renderer. It writes `rust-release-manifest.json` and
+`SHA256SUMS` without discovering tool versions or contacting a service. Both
+files list the tarball, Debian package, and RPM in POSIX-basename order.
+Checksum rows use lowercase SHA-256, two spaces, the basename, and LF; neither
+companion file lists itself or the other.
+
+Run the inert offline fixture gate with no payload selector:
+
+```bash
+make check-rust-release-manifest
+```
+
+Verify one named manifest and its exact artifact bytes with:
+
+```bash
+make check-rust-release-manifest MANIFEST=dist/rust/rust-release-manifest.json
+```
+
+This mode is not candidate-readiness classification because it does not reject
+unrelated directory entries. Classify a complete candidate with:
+
+```bash
+make check-rust-release-manifest RELEASE_DIR=dist/rust
+```
+
+Candidate classification requires exactly five regular, non-symlink files:
+the tarball, Debian package, RPM, `SHA256SUMS`, and manifest. The renderer and
+validator are offline and provider-neutral; signing and publication remain
+separate operator actions.
+
 ## 5. Blocking first-release FLAC validation
 
 This checkpoint is mandatory. Do not release based only on a successful link.

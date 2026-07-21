@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -91,10 +91,31 @@ check-observer-contract: rust-preflight
 	tail -50 "$$output"; \
 	grep -Eq 'test result: ok\. 1 passed; 0 failed' "$$output" || { echo "error: observer contract named test did not execute" >&2; exit 1; }
 
+check-rust-release-manifest: rust-preflight
+	@echo "Rust release manifest schema: 1"
+	@echo "Rust release manifest schema SHA-256: d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c"
+	@if [ -n "$(MANIFEST)" ] && [ -n "$(RELEASE_DIR)" ]; then echo "error: release manifest mode mismatch: expected one selector, actual two" >&2; exit 1; \
+	elif [ -n "$(MANIFEST)" ]; then \
+		CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- validate --manifest "$(MANIFEST)"; \
+	elif [ -n "$(RELEASE_DIR)" ]; then \
+		CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- validate --release-dir "$(RELEASE_DIR)"; \
+	else \
+		inventory=$$(CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest tests::rust_release_manifest_conformance -- --list); \
+		printf '%s\n' "$$inventory"; \
+		printf '%s\n' "$$inventory" | grep -Fx 'tests::rust_release_manifest_conformance: test' >/dev/null || { echo "error: release manifest test inventory mismatch" >&2; exit 1; }; \
+		actual=$$(printf '%s\n' "$$inventory" | grep -c '^tests::rust_release_manifest_conformance:'); \
+		[ "$$actual" -eq 1 ] || { echo "error: release manifest test inventory mismatch: expected 1, actual $$actual" >&2; exit 1; }; \
+		output=$$(mktemp); \
+		trap 'rm -f "$$output"' EXIT; \
+		CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest tests::rust_release_manifest_conformance -- --exact >"$$output" 2>&1 || { status=$$?; tail -50 "$$output"; exit $$status; }; \
+		tail -50 "$$output"; \
+		grep -Eq 'test result: ok\. 1 passed; 0 failed' "$$output" || { echo "error: release manifest named test did not execute" >&2; exit 1; }; \
+	fi
+
 shellcheck:
 	shellcheck $(SHELLCHECK_SCRIPTS)
 
-ci: rust-preflight check-cargo-deny check-observer-contract
+ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest
 	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check
