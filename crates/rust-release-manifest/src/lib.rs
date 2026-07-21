@@ -9,6 +9,8 @@ use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -294,7 +296,7 @@ impl VersionComponent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct TransactionComponent(String);
+pub(crate) struct TransactionComponent(pub(crate) String);
 
 impl TransactionComponent {
     pub(crate) fn new(value: &str) -> Result<Self> {
@@ -460,7 +462,34 @@ impl ReservedPath {
                     | Self::ProofAttempt(_, _, _)
                     | Self::Quarantine(_, _) => ExpectedLeaf::Directory,
                 };
-                ReservedPathCase { path, expected }
+                let action = match &path {
+                    Self::Dist
+                    | Self::Payload
+                    | Self::EvidenceParent
+                    | Self::EvidenceVersion(_)
+                    | Self::StagingParent
+                    | Self::StagingInvocation(_)
+                    | Self::StagingContext(_)
+                    | Self::StagingDebLane(_)
+                    | Self::StagingRpmLane(_)
+                    | Self::StagingAdvisoryDb(_)
+                    | Self::StagingPayload(_) => ReservedPathAction::Create,
+                    Self::EvidenceLedger(_) | Self::Proofs(_) | Self::Proof(_, _) => {
+                        ReservedPathAction::Status
+                    }
+                    Self::Lock => ReservedPathAction::Recover,
+                    Self::ProofAttempt(_, _, _) | Self::ProofAttemptOutput(_, _, _) => {
+                        ReservedPathAction::Prove
+                    }
+                    Self::Quarantine(_, _) => ReservedPathAction::Unreachable(
+                        "quarantine names are transaction-scoped cleanup internals and are reached only after a production command has atomically renamed an owned target",
+                    ),
+                };
+                ReservedPathCase {
+                    path,
+                    expected,
+                    action,
+                }
             })
             .collect()
     }
@@ -470,6 +499,17 @@ impl ReservedPath {
 pub(crate) struct ReservedPathCase {
     pub(crate) path: ReservedPath,
     pub(crate) expected: ExpectedLeaf,
+    pub(crate) action: ReservedPathAction,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReservedPathAction {
+    Create,
+    Prove,
+    Recover,
+    Status,
+    Unreachable(&'static str),
 }
 
 fn child(parent: ReservedPath, name: &str) -> Vec<OsString> {
@@ -480,6 +520,7 @@ fn child(parent: ReservedPath, name: &str) -> Vec<OsString> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExpectedLeaf {
+    Any,
     Absent,
     Directory,
     RegularFile,
@@ -497,6 +538,19 @@ pub(crate) struct ResolvedReservedPath {
     pub(crate) absolute: PathBuf,
     pub(crate) parent_identity: FileIdentity,
     pub(crate) identity: Option<FileIdentity>,
+}
+
+pub(crate) enum ReservedPathPresence {
+    Absent(ResolvedReservedPath),
+    Present(ResolvedReservedPath),
+}
+
+impl ReservedPathPresence {
+    pub(crate) fn resolved(self) -> ResolvedReservedPath {
+        match self {
+            Self::Absent(path) | Self::Present(path) => path,
+        }
+    }
 }
 
 pub(crate) struct ReservedReleaseBoundary<'a> {
@@ -524,11 +578,12 @@ impl<'a> ReservedReleaseBoundary<'a> {
         }
     }
 
-    fn resolve(
+    fn resolve_presence(
         &self,
         reserved: ReservedPath,
         expected: ExpectedLeaf,
-    ) -> Result<ResolvedReservedPath> {
+        allow_absent: bool,
+    ) -> Result<ReservedPathPresence> {
         let root_metadata = fs::symlink_metadata(self.root.path()).map_err(display_error)?;
         if !root_metadata.is_dir() || !same_file_identity(&root_metadata, self.root.identity) {
             return Err(Error::new(
@@ -566,6 +621,15 @@ impl<'a> ReservedReleaseBoundary<'a> {
             let leaf = index + 1 == components.len();
             match (leaf, state) {
                 (false, MetadataState::Present(identity, true, _)) => parent_identity = identity,
+                (false, MetadataState::Absent) if allow_absent => {
+                    current.extend(&components[index + 1..]);
+                    return Ok(ReservedPathPresence::Absent(ResolvedReservedPath {
+                        relative,
+                        absolute: current,
+                        parent_identity,
+                        identity: None,
+                    }));
+                }
                 (false, MetadataState::Absent) => {
                     return Err(boundary_type_error(
                         &component_relative,
@@ -582,33 +646,43 @@ impl<'a> ReservedReleaseBoundary<'a> {
                         false,
                     ));
                 }
-                (true, MetadataState::Absent) if expected == ExpectedLeaf::Absent => {
-                    return Ok(ResolvedReservedPath {
+                (true, MetadataState::Absent)
+                    if expected == ExpectedLeaf::Absent || allow_absent =>
+                {
+                    return Ok(ReservedPathPresence::Absent(ResolvedReservedPath {
                         relative,
                         absolute: current,
                         parent_identity,
                         identity: None,
-                    });
+                    }));
                 }
                 (true, MetadataState::Present(identity, true, _))
                     if expected == ExpectedLeaf::Directory =>
                 {
-                    return Ok(ResolvedReservedPath {
+                    return Ok(ReservedPathPresence::Present(ResolvedReservedPath {
                         relative,
                         absolute: current,
                         parent_identity,
                         identity: Some(identity),
-                    });
+                    }));
                 }
                 (true, MetadataState::Present(identity, _, true))
                     if expected == ExpectedLeaf::RegularFile =>
                 {
-                    return Ok(ResolvedReservedPath {
+                    return Ok(ReservedPathPresence::Present(ResolvedReservedPath {
                         relative,
                         absolute: current,
                         parent_identity,
                         identity: Some(identity),
-                    });
+                    }));
+                }
+                (true, MetadataState::Present(identity, _, _)) if expected == ExpectedLeaf::Any => {
+                    return Ok(ReservedPathPresence::Present(ResolvedReservedPath {
+                        relative,
+                        absolute: current,
+                        parent_identity,
+                        identity: Some(identity),
+                    }));
                 }
                 (true, MetadataState::Absent) => {
                     return Err(boundary_type_error(
@@ -631,19 +705,31 @@ impl<'a> ReservedReleaseBoundary<'a> {
         unreachable!()
     }
 
+    pub(crate) fn presence(
+        &self,
+        path: ReservedPath,
+        leaf: ExpectedLeaf,
+    ) -> Result<ReservedPathPresence> {
+        self.resolve_presence(path, leaf, true)
+    }
+
     pub(crate) fn resolve_for_read(
         &self,
         path: ReservedPath,
         leaf: ExpectedLeaf,
     ) -> Result<ResolvedReservedPath> {
-        self.resolve(path, leaf)
+        match self.resolve_presence(path, leaf, false)? {
+            ReservedPathPresence::Present(path) | ReservedPathPresence::Absent(path) => Ok(path),
+        }
     }
     pub(crate) fn resolve_for_create(
         &self,
         path: ReservedPath,
         leaf: ExpectedLeaf,
     ) -> Result<ResolvedReservedPath> {
-        self.resolve(path, leaf)
+        match self.resolve_presence(path, leaf, false)? {
+            ReservedPathPresence::Present(path) | ReservedPathPresence::Absent(path) => Ok(path),
+        }
     }
     pub(crate) fn resolve_for_replace(
         &self,
@@ -668,7 +754,9 @@ impl<'a> ReservedReleaseBoundary<'a> {
         leaf: ExpectedLeaf,
         expected: FileIdentity,
     ) -> Result<ResolvedReservedPath> {
-        let resolved = self.resolve(path, leaf)?;
+        let resolved = match self.resolve_presence(path, leaf, false)? {
+            ReservedPathPresence::Present(path) | ReservedPathPresence::Absent(path) => path,
+        };
         if resolved.identity != Some(expected) {
             return Err(boundary_type_error(
                 &resolved.relative,
@@ -679,14 +767,11 @@ impl<'a> ReservedReleaseBoundary<'a> {
         }
         Ok(resolved)
     }
-
-    pub(crate) fn path(&self, path: ReservedPath) -> PathBuf {
-        self.root.path().join(path.relative())
-    }
 }
 
 fn leaf_name(expected: ExpectedLeaf) -> &'static str {
     match expected {
+        ExpectedLeaf::Any => "reserved leaf",
         ExpectedLeaf::Absent => "absent leaf",
         ExpectedLeaf::Directory => "directory",
         ExpectedLeaf::RegularFile => "regular file",
@@ -700,20 +785,11 @@ fn boundary_type_error(path: &Path, expected: &str, actual: &str, cleanup_begun:
     ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OwnershipEvidence {
-    Created,
-    Promoted,
-    Published,
-    RetainedCandidate,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct CleanupEntry {
     pub(crate) path: ReservedPath,
     pub(crate) expected_type: ExpectedLeaf,
     pub(crate) expected_identity: FileIdentity,
-    pub(crate) ownership: OwnershipEvidence,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -768,7 +844,6 @@ impl CleanupPlan {
                     false,
                 ));
             }
-            let _ = entry.ownership;
             boundary.resolve_for_delete(
                 entry.path.clone(),
                 entry.expected_type,
@@ -863,7 +938,9 @@ impl ValidatedCleanupPlan<'_> {
                     ExpectedLeaf::RegularFile => {
                         fs::remove_file(&quarantined.absolute).map_err(display_error)?
                     }
-                    ExpectedLeaf::Absent => unreachable!("cleanup entries are present"),
+                    ExpectedLeaf::Any | ExpectedLeaf::Absent => {
+                        unreachable!("cleanup entries have exact types")
+                    }
                 }
                 report.deleted.push(entry.path.clone());
                 Ok(())
@@ -909,18 +986,15 @@ pub struct CandidateLock {
 impl CandidateLock {
     pub fn acquire(root: &RepoRoot) -> Result<Self> {
         let boundary = ReservedReleaseBoundary::new(root);
-        let dist = boundary.path(ReservedPath::Dist);
-        match fs::symlink_metadata(&dist) {
-            Ok(_) => {
-                boundary.resolve_for_read(ReservedPath::Dist, ExpectedLeaf::Directory)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                boundary.resolve_for_create(ReservedPath::Dist, ExpectedLeaf::Absent)?;
+        match boundary.presence(ReservedPath::Dist, ExpectedLeaf::Directory)? {
+            ReservedPathPresence::Present(path) => path.absolute,
+            ReservedPathPresence::Absent(path) => {
+                let dist = path.absolute;
                 fs::create_dir(&dist).map_err(display_error)?;
                 boundary.resolve_for_read(ReservedPath::Dist, ExpectedLeaf::Directory)?;
+                dist
             }
-            Err(error) => return Err(display_error(error)),
-        }
+        };
         let path = boundary
             .resolve_for_create(ReservedPath::Lock, ExpectedLeaf::Absent)?
             .absolute;
@@ -1000,13 +1074,13 @@ impl StagingLayout {
     pub fn create(root: &RepoRoot, _lock: &CandidateLock) -> Result<Self> {
         let transaction = TransactionComponent::new(&transaction_id()?)?;
         let boundary = ReservedReleaseBoundary::new(root);
-        let parent = boundary.path(ReservedPath::StagingParent);
-        if parent.symlink_metadata().is_ok() {
-            boundary.resolve_for_read(ReservedPath::StagingParent, ExpectedLeaf::Directory)?;
-        } else {
-            boundary.resolve_for_create(ReservedPath::StagingParent, ExpectedLeaf::Absent)?;
-            fs::create_dir(&parent).map_err(display_error)?;
-        }
+        match boundary.presence(ReservedPath::StagingParent, ExpectedLeaf::Directory)? {
+            ReservedPathPresence::Present(path) => path.absolute,
+            ReservedPathPresence::Absent(path) => {
+                fs::create_dir(&path.absolute).map_err(display_error)?;
+                path.absolute
+            }
+        };
         let staging = boundary
             .resolve_for_create(
                 ReservedPath::StagingInvocation(transaction.clone()),
@@ -1021,6 +1095,8 @@ impl StagingLayout {
             )?
             .identity
             .expect("present staging identity");
+        #[cfg(test)]
+        run_staging_test_barrier(root, &transaction);
         Self::initialize_reserved(root, staging, transaction, root_identity)
     }
 
@@ -1037,11 +1113,41 @@ impl StagingLayout {
             root_identity,
         )?;
         let layout = Self {
-            context: boundary.path(ReservedPath::StagingContext(transaction.clone())),
-            deb_lane: boundary.path(ReservedPath::StagingDebLane(transaction.clone())),
-            rpm_lane: boundary.path(ReservedPath::StagingRpmLane(transaction.clone())),
-            advisory_db: boundary.path(ReservedPath::StagingAdvisoryDb(transaction.clone())),
-            payload: boundary.path(ReservedPath::StagingPayload(transaction.clone())),
+            context: boundary
+                .presence(
+                    ReservedPath::StagingContext(transaction.clone()),
+                    ExpectedLeaf::Any,
+                )?
+                .resolved()
+                .absolute,
+            deb_lane: boundary
+                .presence(
+                    ReservedPath::StagingDebLane(transaction.clone()),
+                    ExpectedLeaf::Any,
+                )?
+                .resolved()
+                .absolute,
+            rpm_lane: boundary
+                .presence(
+                    ReservedPath::StagingRpmLane(transaction.clone()),
+                    ExpectedLeaf::Any,
+                )?
+                .resolved()
+                .absolute,
+            advisory_db: boundary
+                .presence(
+                    ReservedPath::StagingAdvisoryDb(transaction.clone()),
+                    ExpectedLeaf::Any,
+                )?
+                .resolved()
+                .absolute,
+            payload: boundary
+                .presence(
+                    ReservedPath::StagingPayload(transaction.clone()),
+                    ExpectedLeaf::Any,
+                )?
+                .resolved()
+                .absolute,
             root: staging,
             transaction: Some(transaction.clone()),
             root_identity,
@@ -1081,7 +1187,6 @@ impl StagingLayout {
                     path: ReservedPath::StagingInvocation(transaction),
                     expected_type: ExpectedLeaf::Directory,
                     expected_identity: root_identity,
-                    ownership: OwnershipEvidence::Created,
                 }])
                 .and_then(|plan| plan.preflight(boundary))
                 .and_then(ValidatedCleanupPlan::execute);
@@ -2781,11 +2886,64 @@ fn verify_pinned_schema(bytes: &[u8], expected_digest: &str, id: &str, label: &s
 }
 
 fn transaction_id() -> Result<String> {
+    #[cfg(test)]
+    if let Some(value) = TEST_TRANSACTION_ID.with(|slot| slot.borrow_mut().take()) {
+        return Ok(value);
+    }
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(display_error)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(test)]
+type StagingTestBarrier = Box<dyn FnOnce(&RepoRoot, &TransactionComponent)>;
+#[cfg(test)]
+type ProofAttemptTestBarrier = Box<dyn FnOnce(&RepoRoot, &ReservedPath)>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_TRANSACTION_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+    static STAGING_TEST_BARRIER: RefCell<Option<StagingTestBarrier>> = const { RefCell::new(None) };
+    static PROOF_ATTEMPT_TEST_BARRIER: RefCell<Option<ProofAttemptTestBarrier>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_boundary_test_transaction(value: &str) {
+    TEST_TRANSACTION_ID.with(|slot| *slot.borrow_mut() = Some(value.to_owned()));
+}
+
+#[cfg(test)]
+pub(crate) fn set_staging_test_barrier(
+    barrier: impl FnOnce(&RepoRoot, &TransactionComponent) + 'static,
+) {
+    STAGING_TEST_BARRIER.with(|slot| *slot.borrow_mut() = Some(Box::new(barrier)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_proof_attempt_test_barrier(
+    barrier: impl FnOnce(&RepoRoot, &ReservedPath) + 'static,
+) {
+    PROOF_ATTEMPT_TEST_BARRIER.with(|slot| *slot.borrow_mut() = Some(Box::new(barrier)));
+}
+
+#[cfg(test)]
+pub(crate) fn run_proof_attempt_test_barrier(root: &RepoRoot, attempt: &ReservedPath) {
+    PROOF_ATTEMPT_TEST_BARRIER.with(|slot| {
+        if let Some(barrier) = slot.borrow_mut().take() {
+            barrier(root, attempt);
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_staging_test_barrier(root: &RepoRoot, transaction: &TransactionComponent) {
+    STAGING_TEST_BARRIER.with(|slot| {
+        if let Some(barrier) = slot.borrow_mut().take() {
+            barrier(root, transaction);
+        }
+    });
 }
 
 fn extract_context(bytes: &[u8], destination: &Path, expected_commit: &str) -> Result<()> {

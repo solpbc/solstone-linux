@@ -1027,7 +1027,9 @@ pub fn build_lane(request: &LaneRequest<'_>) -> Result<LaneEvidence> {
     if request.context.path == request.repo.path()
         || request.context.path.starts_with(request.repo.path())
             && !request.context.path.starts_with(
-                ReservedReleaseBoundary::new(request.repo).path(ReservedPath::StagingParent),
+                ReservedReleaseBoundary::new(request.repo)
+                    .resolve_for_read(ReservedPath::StagingParent, ExpectedLeaf::Directory)?
+                    .absolute,
             )
     {
         return Err(Error::new(
@@ -1414,7 +1416,9 @@ pub fn reconcile_lanes(
         ),
     ] {
         if !matches {
-            return Err(Error::new(format!("lane reconciliation {field} mismatch")));
+            return Err(Error::new(format!(
+                "lane reconciliation {field} mismatch: expected equal lane declarations, actual different"
+            )));
         }
     }
     let deb_tar = artifact_by_kind(&deb.artifacts, "tar")?;
@@ -1429,16 +1433,14 @@ pub fn reconcile_lanes(
     }
     let member = package_member_evidence(&deb_root.join(&deb_tar.path), version)?;
     if member.sha256 != deb.baseline_executable_sha256 {
-        return Err(Error::new(format!(
-            "lane baseline executable mismatch: expected staged tar executable sha256 {}, actual deb declaration {}",
-            member.sha256, deb.baseline_executable_sha256
-        )));
+        return Err(Error::new(
+            "lane baseline executable mismatch: expected staged tar executable digest, actual deb declaration differs",
+        ));
     }
     if member.sha256 != rpm.baseline_executable_sha256 {
-        return Err(Error::new(format!(
-            "lane baseline executable mismatch: expected staged tar executable sha256 {}, actual rpm declaration {}",
-            member.sha256, rpm.baseline_executable_sha256
-        )));
+        return Err(Error::new(
+            "lane baseline executable mismatch: expected staged tar executable digest, actual rpm declaration differs",
+        ));
     }
     Ok(ExecutableIdentity {
         sha256: member.sha256,

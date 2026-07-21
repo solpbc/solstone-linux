@@ -243,7 +243,9 @@ pub fn validate_ledger(
     if ledger.package_members.len() != PROOF_SPECS.len()
         || ledger.expected_proof_ids != expected_proofs
     {
-        return Err(Error::new("ledger evidence inventory mismatch"));
+        return Err(Error::new(
+            "ledger evidence inventory mismatch: expected three package members and three proof IDs, actual different",
+        ));
     }
     let mut members = package_members(payload_root, &ledger.version)?;
     members.sort_by(|a, b| a.package_file.as_bytes().cmp(b.package_file.as_bytes()));
@@ -503,14 +505,20 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
         .identity
         .expect("present payload identity");
     let version = VersionComponent::new(input.version)?;
-    let evidence_parent = boundary.path(ReservedPath::EvidenceParent);
-    if evidence_parent.symlink_metadata().is_ok() {
-        boundary.resolve_for_read(ReservedPath::EvidenceParent, ExpectedLeaf::Directory)?;
-    } else {
-        boundary.resolve_for_create(ReservedPath::EvidenceParent, ExpectedLeaf::Absent)?;
-        fs::create_dir(&evidence_parent).map_err(display_error)?;
-    }
-    let evidence_root = boundary.path(ReservedPath::EvidenceVersion(version.clone()));
+    match boundary.presence(ReservedPath::EvidenceParent, ExpectedLeaf::Directory)? {
+        ReservedPathPresence::Present(path) => path.absolute,
+        ReservedPathPresence::Absent(path) => {
+            fs::create_dir(&path.absolute).map_err(display_error)?;
+            path.absolute
+        }
+    };
+    let evidence_root = boundary
+        .presence(
+            ReservedPath::EvidenceVersion(version.clone()),
+            ExpectedLeaf::Directory,
+        )?
+        .resolved()
+        .absolute;
     let mut evidence_identity = None;
     let result = (|| {
         classify_release(input.root, &payload_root, false)?;
@@ -579,14 +587,12 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
                 path: ReservedPath::Payload,
                 expected_type: ExpectedLeaf::Directory,
                 expected_identity: payload_identity,
-                ownership: OwnershipEvidence::Promoted,
             }];
             if let Some(identity) = evidence_identity {
                 entries.push(CleanupEntry {
                     path: ReservedPath::EvidenceVersion(version),
                     expected_type: ExpectedLeaf::Directory,
                     expected_identity: identity,
-                    ownership: OwnershipEvidence::Published,
                 });
             }
             match CleanupPlan::new(entries)
@@ -767,23 +773,24 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
     let proof = ProofId::new(request.platform)?;
     let version = VersionComponent::new(&request.ledger.version)?;
     let boundary = ReservedReleaseBoundary::new(request.root);
-    let proofs_root = boundary.path(ReservedPath::Proofs(version.clone()));
-    match boundary.resolve_for_create(ReservedPath::Proofs(version.clone()), ExpectedLeaf::Absent) {
-        Ok(_) => fs::create_dir(&proofs_root).map_err(display_error)?,
-        Err(_) => {
-            boundary.resolve_for_read(
-                ReservedPath::Proofs(version.clone()),
-                ExpectedLeaf::Directory,
-            )?;
+    match boundary.presence(
+        ReservedPath::Proofs(version.clone()),
+        ExpectedLeaf::Directory,
+    )? {
+        ReservedPathPresence::Present(path) => path.absolute,
+        ReservedPathPresence::Absent(path) => {
+            fs::create_dir(&path.absolute).map_err(display_error)?;
+            path.absolute
         }
-    }
+    };
     let final_reserved = ReservedPath::Proof(version.clone(), proof.clone());
-    let final_path = boundary.path(final_reserved.clone());
-    if final_path.symlink_metadata().is_ok() {
-        boundary.resolve_for_read(final_reserved, ExpectedLeaf::RegularFile)?;
-        validate_proof_file(request, &final_path)?;
-        return Ok(final_path);
-    }
+    let final_path = match boundary.presence(final_reserved, ExpectedLeaf::RegularFile)? {
+        ReservedPathPresence::Present(path) => {
+            validate_proof_file(request, &path.absolute)?;
+            return Ok(path.absolute);
+        }
+        ReservedPathPresence::Absent(path) => path.absolute,
+    };
     let transaction = TransactionComponent::new(&transaction_id()?)?;
     let attempt_reserved =
         ReservedPath::ProofAttempt(version.clone(), proof.clone(), transaction.clone());
@@ -795,6 +802,8 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
         .resolve_for_read(attempt_reserved.clone(), ExpectedLeaf::Directory)?
         .identity
         .expect("present proof attempt identity");
+    #[cfg(test)]
+    run_proof_attempt_test_barrier(request.root, &attempt_reserved);
     let mut published_identity = None;
     let result = (|| {
         let artifact = proof_artifact(request.ledger, request.platform)?;
@@ -880,7 +889,6 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             path: attempt_reserved.clone(),
             expected_type: ExpectedLeaf::Directory,
             expected_identity: attempt_identity,
-            ownership: OwnershipEvidence::Created,
         }])?
         .preflight(ReservedReleaseBoundary::new(request.root))?
         .execute()?;
@@ -910,26 +918,32 @@ pub(crate) fn finish_proof_attempt_cleanup(
 ) -> Error {
     let boundary = ReservedReleaseBoundary::new(root);
     let mut entries = Vec::new();
-    if fs::symlink_metadata(boundary.path(attempt.clone()))
-        .is_ok_and(|metadata| same_file_identity(&metadata, attempt_identity))
-    {
+    let attempt_owned = match boundary.presence(attempt.clone(), ExpectedLeaf::Directory) {
+        Ok(ReservedPathPresence::Present(path)) => path.identity == Some(attempt_identity),
+        Ok(ReservedPathPresence::Absent(_)) => false,
+        Err(boundary_error) => return Error::new(format!("{error}\n{boundary_error}")),
+    };
+    if attempt_owned {
         entries.push(CleanupEntry {
             path: attempt,
             expected_type: ExpectedLeaf::Directory,
             expected_identity: attempt_identity,
-            ownership: OwnershipEvidence::Created,
         });
     }
-    if let Some(identity) = published_identity
-        && fs::symlink_metadata(boundary.path(published.clone()))
-            .is_ok_and(|metadata| same_file_identity(&metadata, identity))
-    {
-        entries.push(CleanupEntry {
-            path: published,
-            expected_type: ExpectedLeaf::RegularFile,
-            expected_identity: identity,
-            ownership: OwnershipEvidence::Published,
-        });
+    if let Some(identity) = published_identity {
+        let published_owned = match boundary.presence(published.clone(), ExpectedLeaf::RegularFile)
+        {
+            Ok(ReservedPathPresence::Present(path)) => path.identity == Some(identity),
+            Ok(ReservedPathPresence::Absent(_)) => false,
+            Err(boundary_error) => return Error::new(format!("{error}\n{boundary_error}")),
+        };
+        if published_owned {
+            entries.push(CleanupEntry {
+                path: published,
+                expected_type: ExpectedLeaf::RegularFile,
+                expected_identity: identity,
+            });
+        }
     }
     if entries.is_empty() {
         error
@@ -1194,8 +1208,9 @@ pub(crate) fn proof_image_identity(reference: &str) -> ImageIdentity {
 
 pub fn recover_candidate(root: &RepoRoot, version: &str) -> Result<String> {
     let boundary = ReservedReleaseBoundary::new(root);
-    if boundary.path(ReservedPath::Lock).symlink_metadata().is_ok() {
-        boundary.resolve_for_read(ReservedPath::Lock, ExpectedLeaf::RegularFile)?;
+    if let ReservedPathPresence::Present(_) =
+        boundary.presence(ReservedPath::Lock, ExpectedLeaf::RegularFile)?
+    {
         return Err(Error::new(
             "candidate recovery lock mismatch: expected absent, actual present",
         ));
@@ -1476,7 +1491,6 @@ pub(crate) fn finish_candidate_staging_owned<T>(
         path: ReservedPath::StagingInvocation(transaction),
         expected_type: ExpectedLeaf::Directory,
         expected_identity: staging.root_identity,
-        ownership: OwnershipEvidence::Created,
     }])
     .and_then(|plan| plan.preflight(ReservedReleaseBoundary::new(root)))
     .and_then(ValidatedCleanupPlan::execute);
@@ -1508,13 +1522,11 @@ pub(crate) fn finish_created_candidate<T>(
                 path: ReservedPath::Payload,
                 expected_type: ExpectedLeaf::Directory,
                 expected_identity: finalized.payload_identity,
-                ownership: OwnershipEvidence::Promoted,
             },
             CleanupEntry {
                 path: ReservedPath::EvidenceVersion(version),
                 expected_type: ExpectedLeaf::Directory,
                 expected_identity: finalized.evidence_identity,
-                ownership: OwnershipEvidence::Published,
             },
         ];
         match CleanupPlan::new(entries)
@@ -1547,7 +1559,10 @@ fn create_candidate_locked(
     lock: &CandidateLock,
 ) -> Result<CandidateStatus> {
     let version = workspace_version(root)?;
-    let payload = ReservedReleaseBoundary::new(root).path(ReservedPath::Payload);
+    let payload = ReservedReleaseBoundary::new(root)
+        .presence(ReservedPath::Payload, ExpectedLeaf::Any)?
+        .resolved()
+        .absolute;
     require_clean_tree(root.path(), &payload)?;
     clear_candidate_paths(root, &version)?;
     let staging = StagingLayout::create(root, lock)?;
@@ -1746,14 +1761,13 @@ fn preflight_existing_proofs(
 ) -> Result<()> {
     let boundary = ReservedReleaseBoundary::new(root);
     let version = VersionComponent::new(&ledger.version)?;
-    let proofs_root = boundary.path(ReservedPath::Proofs(version.clone()));
-    if proofs_root.symlink_metadata().is_err() {
-        return Ok(());
-    }
-    boundary.resolve_for_read(
+    let proofs_root = match boundary.presence(
         ReservedPath::Proofs(version.clone()),
         ExpectedLeaf::Directory,
-    )?;
+    )? {
+        ReservedPathPresence::Absent(_) => return Ok(()),
+        ReservedPathPresence::Present(path) => path.absolute,
+    };
     let allowed = PROOF_SPECS
         .iter()
         .map(|spec| format!("{}.json", spec.id))
@@ -1772,9 +1786,9 @@ fn preflight_existing_proofs(
     }
     for (id, image) in images.proof_images() {
         let reserved = ReservedPath::Proof(version.clone(), ProofId::new(id)?);
-        let path = boundary.path(reserved.clone());
-        if path.symlink_metadata().is_ok() {
-            boundary.resolve_for_read(reserved, ExpectedLeaf::RegularFile)?;
+        if let ReservedPathPresence::Present(path) =
+            boundary.presence(reserved, ExpectedLeaf::RegularFile)?
+        {
             validate_proof_file(
                 &ProofRequest {
                     root,
@@ -1785,7 +1799,7 @@ fn preflight_existing_proofs(
                     engine,
                     processes,
                 },
-                &path,
+                &path.absolute,
             )?;
         }
     }
@@ -1838,19 +1852,32 @@ pub(crate) fn require_expected_commit(root: &RepoRoot, expected: &str) -> Result
 fn clear_candidate_paths(root: &RepoRoot, version: &str) -> Result<()> {
     let version = VersionComponent::new(version)?;
     let boundary = ReservedReleaseBoundary::new(root);
-    let payload_path = boundary.path(ReservedPath::Payload);
-    let evidence_path = boundary.path(ReservedPath::EvidenceVersion(version.clone()));
-    let payload_present = payload_path.symlink_metadata().is_ok();
-    let evidence_present = evidence_path.symlink_metadata().is_ok();
-    if !payload_present && !evidence_present {
-        return Ok(());
-    }
     let ownership_error = || {
         Error::new(format!(
             "existing release candidate ownership mismatch: expected complete validated solstone-linux candidate {}, actual unowned or invalid reserved paths\nrepair: run candidate recover --version {} to inspect a retained candidate; move or remove only the named dist/rust and dist/rust-evidence/{} paths after independently confirming ownership",
             version.0, version.0, version.0
         ))
     };
+    let ownership_presence = |result: Result<ReservedPathPresence>| {
+        result.map_err(|error| {
+            if error.to_string().contains("wrong type or symlink") {
+                ownership_error()
+            } else {
+                error
+            }
+        })
+    };
+    let payload_presence =
+        ownership_presence(boundary.presence(ReservedPath::Payload, ExpectedLeaf::Directory))?;
+    let evidence_presence = ownership_presence(boundary.presence(
+        ReservedPath::EvidenceVersion(version.clone()),
+        ExpectedLeaf::Directory,
+    ))?;
+    let payload_present = matches!(payload_presence, ReservedPathPresence::Present(_));
+    let evidence_present = matches!(evidence_presence, ReservedPathPresence::Present(_));
+    if !payload_present && !evidence_present {
+        return Ok(());
+    }
     if !payload_present || !evidence_present {
         return Err(ownership_error());
     }
@@ -1887,13 +1914,11 @@ fn clear_candidate_paths(root: &RepoRoot, version: &str) -> Result<()> {
             path: ReservedPath::Payload,
             expected_type: ExpectedLeaf::Directory,
             expected_identity: payload.identity.expect("payload identity"),
-            ownership: OwnershipEvidence::RetainedCandidate,
         },
         CleanupEntry {
             path: ReservedPath::EvidenceVersion(version),
             expected_type: ExpectedLeaf::Directory,
             expected_identity: evidence.identity.expect("evidence identity"),
-            ownership: OwnershipEvidence::RetainedCandidate,
         },
     ])?
     .preflight(boundary)?

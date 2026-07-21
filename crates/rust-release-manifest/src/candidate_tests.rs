@@ -389,13 +389,11 @@ fn controlled_rollback_removes_only_owned_payload_and_evidence() {
             path: ReservedPath::Payload,
             expected_type: ExpectedLeaf::Directory,
             expected_identity: payload_identity,
-            ownership: OwnershipEvidence::Promoted,
         },
         CleanupEntry {
             path: ReservedPath::EvidenceVersion(VersionComponent::new("1.0.0").unwrap()),
             expected_type: ExpectedLeaf::Directory,
             expected_identity: evidence_identity,
-            ownership: OwnershipEvidence::Published,
         },
     ])
     .unwrap()
@@ -421,7 +419,6 @@ fn controlled_rollback_reports_exact_residue() {
         path: ReservedPath::Payload,
         expected_type: ExpectedLeaf::Directory,
         expected_identity: identity,
-        ownership: OwnershipEvidence::Promoted,
     }])
     .unwrap()
     .finish_error(

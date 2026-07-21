@@ -20,13 +20,19 @@ fn failed_proof_attempt_removes_only_owned_attempt_and_publication() {
     let attempt_reserved = ReservedPath::ProofAttempt(version.clone(), proof.clone(), transaction);
     let published_reserved = ReservedPath::Proof(version, proof);
     let boundary = ReservedReleaseBoundary::new(&repo.root);
-    let attempt = boundary.path(attempt_reserved.clone());
-    let published = boundary.path(published_reserved.clone());
+    fs::create_dir_all(repo.root.path().join("dist/rust-evidence/1.0.0/proofs")).unwrap();
+    let attempt = boundary
+        .resolve_for_create(attempt_reserved.clone(), ExpectedLeaf::Absent)
+        .unwrap()
+        .absolute;
+    let published = boundary
+        .resolve_for_create(published_reserved.clone(), ExpectedLeaf::Absent)
+        .unwrap()
+        .absolute;
     let foreign = repo
         .root
         .path()
         .join("dist/rust-evidence/1.0.0/proofs/foreign.tmp");
-    fs::create_dir_all(attempt.parent().unwrap()).unwrap();
     fs::create_dir(&attempt).unwrap();
     fs::write(attempt.join("partial"), b"partial").unwrap();
     fs::write(&published, b"published").unwrap();
@@ -531,7 +537,7 @@ pub(super) struct RetainedFixture {
     pub(super) repo: crate::candidate_tests::TestRepo,
     advisory_db: tempfile::TempDir,
     _descriptor_dir: tempfile::TempDir,
-    descriptor: PathBuf,
+    pub(super) descriptor: PathBuf,
     pub(super) ledger: CandidateLedger,
     pub(super) ledger_bytes: Vec<u8>,
 }
@@ -841,7 +847,7 @@ fn ledger_rejects_baseline_digest_or_byte_count_drift() {
 fn lane_reconciliation_rejects_declared_baseline_not_matching_staged_tar() {
     let repo = crate::candidate_tests::fixture();
     let templates = tempfile::tempdir().unwrap();
-    docker_create_templates(&repo.root, templates.path());
+    docker_create_templates(&repo.root, templates.path(), None);
     let mut deb: LaneEvidence =
         serde_json::from_slice(&fs::read(templates.path().join("deb-lane.json")).unwrap()).unwrap();
     let mut rpm: LaneEvidence =
@@ -1214,7 +1220,7 @@ fn directory_digest_map(root: &Path) -> BTreeMap<PathBuf, String> {
     out
 }
 
-fn proof_processes(tripwire: &Path) -> (tempfile::TempDir, ProcessEnvironment) {
+pub(super) fn proof_processes(tripwire: &Path) -> (tempfile::TempDir, ProcessEnvironment) {
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("podman");
     fs::write(
@@ -1739,8 +1745,10 @@ fn sha256_git_fixture_flows_through_context_lane_status_and_recovery() {
     );
 }
 
-fn docker_create_templates(root: &RepoRoot, directory: &Path) {
-    let products = crate::tests::release_fixture();
+fn docker_create_templates(root: &RepoRoot, directory: &Path, executables: Option<[&[u8]; 3]>) {
+    let products = executables.map_or_else(crate::tests::release_fixture, |values| {
+        crate::tests::release_fixture_with(values)
+    });
     for entry in fs::read_dir(products.path()).unwrap() {
         let entry = entry.unwrap();
         fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
@@ -1839,6 +1847,10 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path) {
 
 #[test]
 fn docker_create_candidate_is_offline_normalized_and_recoverable() {
+    docker_create_candidate_harness(None);
+}
+
+fn docker_create_candidate_harness(divergent: Option<[&[u8]; 3]>) {
     let repo = crate::candidate_tests::fixture();
     let db = crate::candidate_tests::git_repo();
     let descriptor_dir = tempfile::tempdir().unwrap();
@@ -1850,7 +1862,7 @@ fn docker_create_candidate_is_offline_normalized_and_recoverable() {
     );
     let stubs = tempfile::tempdir().unwrap();
     let templates = tempfile::tempdir().unwrap();
-    docker_create_templates(&repo.root, templates.path());
+    docker_create_templates(&repo.root, templates.path(), divergent);
     let fail_producer = stubs.path().join("fail-producer");
     let fail_validator = stubs.path().join("fail-validator");
     let mutate_source = stubs.path().join("mutate-source");
@@ -1945,6 +1957,17 @@ exit 94
         fs::set_permissions(stubs.path().join(name), fs::Permissions::from_mode(0o755)).unwrap();
     }
     let processes = ProcessEnvironment::with_path(stubs.path().as_os_str());
+    if divergent.is_some() {
+        let error = create_candidate(&repo.root, &repo.commit, &descriptor, &processes)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("candidate executable identity mismatch"),
+            "unexpected creation error: {error}"
+        );
+        assert!(!error.contains("candidate-proven"));
+        return;
+    }
     for (marker, class) in [(&fail_producer, "producer"), (&fail_validator, "validator")] {
         for id in proof_ids() {
             fs::write(marker, id).unwrap();
@@ -2034,4 +2057,19 @@ exit 94
         recover_candidate(&repo.root, "1.0.0").unwrap(),
         "retained-candidate-valid"
     );
+}
+
+#[test]
+fn production_creation_rejects_divergent_tar_executable() {
+    docker_create_candidate_harness(Some(divergent_executables(0)));
+}
+
+#[test]
+fn production_creation_rejects_divergent_deb_executable() {
+    docker_create_candidate_harness(Some(divergent_executables(1)));
+}
+
+#[test]
+fn production_creation_rejects_divergent_rpm_executable() {
+    docker_create_candidate_harness(Some(divergent_executables(2)));
 }
