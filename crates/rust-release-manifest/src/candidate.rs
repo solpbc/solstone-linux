@@ -1027,10 +1027,7 @@ pub fn build_lane(request: &LaneRequest<'_>) -> Result<LaneEvidence> {
     if request.context.path == request.repo.path()
         || request.context.path.starts_with(request.repo.path())
             && !request.context.path.starts_with(
-                request
-                    .repo
-                    .path()
-                    .join("dist/.rust-release-candidate-staging"),
+                ReservedReleaseBoundary::new(request.repo).path(ReservedPath::StagingParent),
             )
     {
         return Err(Error::new(
@@ -1389,7 +1386,8 @@ pub fn reconcile_lanes(
     rpm: &LaneEvidence,
     deb_root: &Path,
     rpm_root: &Path,
-) -> Result<()> {
+    version: &str,
+) -> Result<ExecutableIdentity> {
     if deb.lane != Lane::Deb || rpm.lane != Lane::Rpm || deb.invocation_id != rpm.invocation_id {
         return Err(Error::new(
             "lane reconciliation mismatch: expected paired lanes",
@@ -1429,7 +1427,23 @@ pub fn reconcile_lanes(
             "lane tar mismatch: expected byte-identical, actual different",
         ));
     }
-    Ok(())
+    let member = package_member_evidence(&deb_root.join(&deb_tar.path), version)?;
+    if member.sha256 != deb.baseline_executable_sha256 {
+        return Err(Error::new(format!(
+            "lane baseline executable mismatch: expected staged tar executable sha256 {}, actual deb declaration {}",
+            member.sha256, deb.baseline_executable_sha256
+        )));
+    }
+    if member.sha256 != rpm.baseline_executable_sha256 {
+        return Err(Error::new(format!(
+            "lane baseline executable mismatch: expected staged tar executable sha256 {}, actual rpm declaration {}",
+            member.sha256, rpm.baseline_executable_sha256
+        )));
+    }
+    Ok(ExecutableIdentity {
+        sha256: member.sha256,
+        bytes: member.bytes,
+    })
 }
 
 pub fn recheck_images(

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use super::*;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 const CANDIDATE_VECTOR: &str = "27e7dd62da4e0022b755f669dd00118a57715aaf088ff7f2a6c322951238494e";
 const BUNDLE_VECTOR: &str = "cd214a005b2186a7eb25e9fd756561fb9c6e47e02004047c1cd5132106580a3e";
@@ -13,25 +13,34 @@ fn proof_ids() -> [&'static str; 3] {
 
 #[test]
 fn failed_proof_attempt_removes_only_owned_attempt_and_publication() {
-    let temp = tempfile::tempdir().unwrap();
-    let attempt = temp.path().join("attempt");
-    let published = temp.path().join("proof.json");
-    let foreign = temp.path().join("foreign.tmp");
+    let repo = crate::candidate_tests::fixture();
+    let version = VersionComponent::new("1.0.0").unwrap();
+    let proof = ProofId::new("debian-amd64").unwrap();
+    let transaction = TransactionComponent::new("proof-cleanup-test").unwrap();
+    let attempt_reserved = ReservedPath::ProofAttempt(version.clone(), proof.clone(), transaction);
+    let published_reserved = ReservedPath::Proof(version, proof);
+    let boundary = ReservedReleaseBoundary::new(&repo.root);
+    let attempt = boundary.path(attempt_reserved.clone());
+    let published = boundary.path(published_reserved.clone());
+    let foreign = repo
+        .root
+        .path()
+        .join("dist/rust-evidence/1.0.0/proofs/foreign.tmp");
+    fs::create_dir_all(attempt.parent().unwrap()).unwrap();
     fs::create_dir(&attempt).unwrap();
     fs::write(attempt.join("partial"), b"partial").unwrap();
     fs::write(&published, b"published").unwrap();
     fs::write(&foreign, b"foreign").unwrap();
-    let attempt_metadata = fs::symlink_metadata(&attempt).unwrap();
-    let published_metadata = fs::symlink_metadata(&published).unwrap();
-    let error = cleanup_proof_attempt(
+    let attempt_identity = FileIdentity::from_metadata(&fs::symlink_metadata(&attempt).unwrap());
+    let published_identity =
+        FileIdentity::from_metadata(&fs::symlink_metadata(&published).unwrap());
+    let error = finish_proof_attempt_cleanup(
+        &repo.root,
         Error::new("primary"),
-        &attempt,
-        (attempt_metadata.dev(), attempt_metadata.ino()),
-        &published,
-        Some(FileIdentity {
-            device: published_metadata.dev(),
-            inode: published_metadata.ino(),
-        }),
+        attempt_reserved,
+        attempt_identity,
+        published_reserved,
+        Some(published_identity),
     );
     assert_eq!(error.to_string(), "primary");
     assert!(!attempt.exists());
@@ -54,6 +63,28 @@ fn candidate_schemas_are_digest_and_identity_pinned() {
     assert_eq!(
         ledger_schema["properties"]["expected_proof_ids"]["const"],
         serde_json::json!(ids)
+    );
+    assert!(
+        ledger_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("baseline_executable".into()))
+    );
+    assert_eq!(
+        ledger_schema["properties"]["baseline_executable"]["required"],
+        serde_json::json!(["sha256", "bytes"])
+    );
+    assert_eq!(
+        ledger_schema["properties"]["baseline_executable"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        ledger_schema["properties"]["baseline_executable"]["properties"]["sha256"]["pattern"],
+        "^[0-9a-f]{64}$"
+    );
+    assert_eq!(
+        ledger_schema["properties"]["baseline_executable"]["properties"]["bytes"]["minimum"],
+        1
     );
 }
 
@@ -476,6 +507,10 @@ fn fixed_payload_and_ledger_serialization_are_reproducible() {
         tools: BTreeMap::new(),
         payload,
         package_members: Vec::new(),
+        baseline_executable: ExecutableIdentity {
+            sha256: "0".repeat(64),
+            bytes: 1,
+        },
         expected_proof_ids: proof_ids().map(str::to_owned).to_vec(),
         candidate_digest: candidate,
     };
@@ -492,23 +527,38 @@ fn fixed_payload_and_ledger_serialization_are_reproducible() {
     assert!(serde_json::from_value::<CandidateLedger>(foreign).is_err());
 }
 
-struct RetainedFixture {
-    repo: crate::candidate_tests::TestRepo,
+pub(super) struct RetainedFixture {
+    pub(super) repo: crate::candidate_tests::TestRepo,
     advisory_db: tempfile::TempDir,
     _descriptor_dir: tempfile::TempDir,
     descriptor: PathBuf,
-    ledger: CandidateLedger,
-    ledger_bytes: Vec<u8>,
+    pub(super) ledger: CandidateLedger,
+    pub(super) ledger_bytes: Vec<u8>,
 }
 
-fn retained_fixture() -> RetainedFixture {
+pub(super) fn retained_fixture() -> RetainedFixture {
     retained_fixture_from(crate::candidate_tests::fixture())
 }
 
 fn retained_fixture_from(repo: crate::candidate_tests::TestRepo) -> RetainedFixture {
+    retained_fixture_from_products(repo, crate::tests::release_fixture(), true)
+}
+
+fn retained_fixture_with(executables: [&[u8]; 3]) -> RetainedFixture {
+    retained_fixture_from_products(
+        crate::candidate_tests::fixture(),
+        crate::tests::release_fixture_with(executables),
+        false,
+    )
+}
+
+fn retained_fixture_from_products(
+    repo: crate::candidate_tests::TestRepo,
+    products: tempfile::TempDir,
+    validate: bool,
+) -> RetainedFixture {
     let payload = repo.root.path().join("dist/rust");
     fs::create_dir_all(&payload).unwrap();
-    let products = crate::tests::release_fixture();
     for entry in fs::read_dir(products.path()).unwrap() {
         let entry = entry.unwrap();
         fs::copy(entry.path(), payload.join(entry.file_name())).unwrap();
@@ -559,6 +609,10 @@ fn retained_fixture_from(repo: crate::candidate_tests::TestRepo) -> RetainedFixt
         "fedora_image_digest".into(),
         fedora.strip_prefix("sha256:").unwrap().into(),
     );
+    let baseline_executable = ExecutableIdentity {
+        sha256: digest(crate::tests::FIXTURE_EXECUTABLE_BYTES),
+        bytes: crate::tests::FIXTURE_EXECUTABLE_BYTES.len() as u64,
+    };
     let ledger = CandidateLedger {
         schema_version: 1,
         product: PRODUCT.into(),
@@ -605,10 +659,15 @@ fn retained_fixture_from(repo: crate::candidate_tests::TestRepo) -> RetainedFixt
         tools,
         payload: artifacts.clone(),
         package_members: members,
+        baseline_executable,
         expected_proof_ids: proof_ids().map(str::to_owned).to_vec(),
         candidate_digest: candidate_digest(&artifacts).unwrap(),
     };
-    let ledger_bytes = ledger_bytes(&repo.root, &payload, &ledger).unwrap();
+    let ledger_bytes = if validate {
+        ledger_bytes(&repo.root, &payload, &ledger).unwrap()
+    } else {
+        canonical_json(&serde_json::to_value(&ledger).unwrap()).unwrap()
+    };
     let evidence = repo.root.path().join("dist/rust-evidence/1.0.0");
     fs::create_dir_all(evidence.join("proofs")).unwrap();
     atomic_write_0644(&evidence.join("ledger.json"), &ledger_bytes).unwrap();
@@ -623,6 +682,178 @@ fn retained_fixture_from(repo: crate::candidate_tests::TestRepo) -> RetainedFixt
         ledger,
         ledger_bytes,
     }
+}
+
+const DIVERGENT_EXECUTABLE: &[u8] = b"plausible alternate executable";
+
+fn divergent_executables(index: usize) -> [&'static [u8]; 3] {
+    let mut executables = [crate::tests::FIXTURE_EXECUTABLE_BYTES; 3];
+    executables[index] = DIVERGENT_EXECUTABLE;
+    executables
+}
+
+fn creation_rejects_divergence(index: usize) {
+    let fixture = retained_fixture_with(divergent_executables(index));
+    let payload = fixture.repo.root.path().join("dist/rust");
+    let lock = CandidateLock::acquire(&fixture.repo.root).unwrap();
+    let staging = StagingLayout::create(&fixture.repo.root, &lock).unwrap();
+    let context = export_immutable_context(&fixture.repo.root, &staging.context).unwrap();
+    let descriptor_dir = tempfile::tempdir().unwrap();
+    let descriptor = crate::candidate_tests::descriptor(
+        descriptor_dir.path(),
+        fixture.advisory_db.path(),
+        None,
+        &crate::candidate_tests::current_time(),
+    );
+    let (_bin, processes) =
+        crate::candidate_tests::process_bin(crate::candidate_tests::CARGO_DENY_ASSERTIONS, None);
+    let cohort = run_advisory_cohort(&context, &staging, &descriptor, &processes).unwrap();
+    let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
+    let members = fixture.ledger.package_members.clone();
+    let error = construct_ledger(LedgerInput {
+        root: &fixture.repo.root,
+        context: &context,
+        version: "1.0.0",
+        payload_root: &payload,
+        package_members: members,
+        baseline_executable: fixture.ledger.baseline_executable.clone(),
+        cohort: &cohort,
+        ubuntu: &proof_image_identity(&policy.build_ubuntu),
+        fedora: &proof_image_identity(&policy.build_fedora),
+        engine: ContainerEngine::Podman,
+        engine_identity: "podman version 5.8.3".into(),
+        tools: fixture.ledger.tools.clone(),
+    })
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("candidate executable identity mismatch")
+    );
+}
+
+fn retained_rejects_divergence(index: usize) {
+    let fixture = retained_fixture_with(divergent_executables(index));
+    let payload = fixture.repo.root.path().join("dist/rust");
+    let error = validate_ledger(&fixture.repo.root, &payload, &fixture.ledger).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("candidate executable identity mismatch")
+    );
+}
+
+#[test]
+fn creation_rejects_divergent_tar_executable() {
+    creation_rejects_divergence(0);
+}
+
+#[test]
+fn creation_rejects_divergent_deb_executable() {
+    creation_rejects_divergence(1);
+}
+
+#[test]
+fn creation_rejects_divergent_rpm_executable() {
+    creation_rejects_divergence(2);
+}
+
+#[test]
+fn retained_validation_rejects_divergent_tar_executable() {
+    retained_rejects_divergence(0);
+}
+
+#[test]
+fn retained_validation_rejects_divergent_deb_executable() {
+    retained_rejects_divergence(1);
+}
+
+#[test]
+fn retained_validation_rejects_divergent_rpm_executable() {
+    retained_rejects_divergence(2);
+}
+
+#[test]
+fn resume_rejects_each_divergent_package_executable() {
+    for index in 0..3 {
+        let fixture = retained_fixture_with(divergent_executables(index));
+        assert!(
+            prove_candidate(
+                &fixture.repo.root,
+                "1.0.0",
+                &fixture.descriptor,
+                &ProcessEnvironment::default(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("candidate executable identity mismatch")
+        );
+    }
+}
+
+#[test]
+fn status_rejects_each_divergent_package_executable() {
+    for index in 0..3 {
+        let fixture = retained_fixture_with(divergent_executables(index));
+        assert!(
+            candidate_status(&fixture.repo.root, &fixture.ledger, &fixture.ledger_bytes,)
+                .unwrap_err()
+                .to_string()
+                .contains("candidate executable identity mismatch")
+        );
+    }
+}
+
+#[test]
+fn recovery_rejects_each_divergent_package_executable() {
+    for index in 0..3 {
+        let fixture = retained_fixture_with(divergent_executables(index));
+        assert!(
+            recover_candidate(&fixture.repo.root, "1.0.0")
+                .unwrap_err()
+                .to_string()
+                .contains("candidate executable identity mismatch")
+        );
+    }
+}
+
+#[test]
+fn ledger_rejects_baseline_digest_or_byte_count_drift() {
+    for field in ["sha256", "bytes"] {
+        let fixture = retained_fixture();
+        let mut ledger = fixture.ledger;
+        if field == "sha256" {
+            ledger.baseline_executable.sha256 = "0".repeat(64);
+        } else {
+            ledger.baseline_executable.bytes += 1;
+        }
+        let payload = fixture.repo.root.path().join("dist/rust");
+        assert!(
+            validate_ledger(&fixture.repo.root, &payload, &ledger)
+                .unwrap_err()
+                .to_string()
+                .contains("candidate executable baseline mismatch")
+        );
+    }
+}
+
+#[test]
+fn lane_reconciliation_rejects_declared_baseline_not_matching_staged_tar() {
+    let repo = crate::candidate_tests::fixture();
+    let templates = tempfile::tempdir().unwrap();
+    docker_create_templates(&repo.root, templates.path());
+    let mut deb: LaneEvidence =
+        serde_json::from_slice(&fs::read(templates.path().join("deb-lane.json")).unwrap()).unwrap();
+    let mut rpm: LaneEvidence =
+        serde_json::from_slice(&fs::read(templates.path().join("rpm-lane.json")).unwrap()).unwrap();
+    deb.baseline_executable_sha256 = "0".repeat(64);
+    rpm.baseline_executable_sha256 = "0".repeat(64);
+    assert!(
+        reconcile_lanes(&deb, &rpm, templates.path(), templates.path(), "1.0.0",)
+            .unwrap_err()
+            .to_string()
+            .contains("lane baseline executable mismatch")
+    );
 }
 
 fn write_valid_proof(root: &RepoRoot, ledger: &CandidateLedger, ledger_bytes: &[u8], id: &str) {
@@ -681,6 +912,8 @@ fn candidate_status_requires_three_fully_valid_proofs() {
     let status =
         candidate_status(&fixture.repo.root, &fixture.ledger, &fixture.ledger_bytes).unwrap();
     assert_eq!(status.status, "candidate-proven");
+    assert!(status.local_evidence_only);
+    assert!(!status.publication_approval);
     let proof = fixture
         .repo
         .root
@@ -1256,12 +1489,13 @@ fn create_readiness_ledger_replacement_rolls_back_promoted_candidate() {
     let mut value: Value = serde_json::from_slice(&fixture.ledger_bytes).unwrap();
     value["advisory_cohort"]["source_id"] = Value::String("replacement cohort".into());
     fs::write(&path, canonical_json(&value).unwrap()).unwrap();
-    let finalized = FinalizedCandidate {
-        ledger: fixture.ledger.clone(),
-        ledger_bytes: fixture.ledger_bytes.clone(),
-        payload_root: fixture.repo.root.path().join("dist/rust"),
-        evidence_root: fixture.repo.root.path().join("dist/rust-evidence/1.0.0"),
-    };
+    let finalized = FinalizedCandidate::new(
+        fixture.ledger.clone(),
+        fixture.ledger_bytes.clone(),
+        fixture.repo.root.path().join("dist/rust"),
+        fixture.repo.root.path().join("dist/rust-evidence/1.0.0"),
+    )
+    .unwrap();
     let readiness = candidate_status(
         &fixture.repo.root,
         &finalized.ledger,
@@ -1294,33 +1528,41 @@ fn package_member_enumeration_propagates_entry_errors() {
 #[test]
 fn candidate_staging_cleanup_is_owned_reported_and_sibling_safe() {
     let fixture = retained_fixture();
-    let staging_parent = fixture
-        .repo
-        .root
-        .path()
-        .join("dist/.rust-release-candidate-staging");
-    fs::create_dir_all(&staging_parent).unwrap();
-    let owned = staging_parent.join("owned");
+    let lock = CandidateLock::acquire(&fixture.repo.root).unwrap();
+    let staging = StagingLayout::create(&fixture.repo.root, &lock).unwrap();
+    let staging_parent = staging.root.parent().unwrap().to_owned();
     let sibling = staging_parent.join("foreign");
-    fs::create_dir(&owned).unwrap();
     fs::create_dir(&sibling).unwrap();
     fs::write(sibling.join("canary"), b"foreign").unwrap();
-    finish_candidate_staging(&fixture.repo.root, "1.0.0", &owned, Ok(())).unwrap();
-    assert!(!owned.exists());
+    finish_candidate_staging_owned(&fixture.repo.root, &staging, Ok(())).unwrap();
+    assert!(!staging.root.exists());
     assert_eq!(fs::read(sibling.join("canary")).unwrap(), b"foreign");
 
-    let residue = staging_parent.join("residue");
-    fs::write(&residue, b"not a directory").unwrap();
-    let error = finish_candidate_staging::<()>(
-        &fixture.repo.root,
-        "1.0.0",
-        &residue,
-        Err(Error::new("primary failure")),
+    let staging = StagingLayout::create(&fixture.repo.root, &lock).unwrap();
+    let finalized = FinalizedCandidate::new(
+        fixture.ledger.clone(),
+        fixture.ledger_bytes.clone(),
+        fixture.repo.root.path().join("dist/rust"),
+        fixture.repo.root.path().join("dist/rust-evidence/1.0.0"),
     )
-    .unwrap_err();
+    .unwrap();
+    let primary =
+        finish_created_candidate::<()>(&finalized, &[], Err(Error::new("primary failure")))
+            .unwrap_err();
+    let displaced = staging_parent.join("displaced");
+    fs::rename(&staging.root, &displaced).unwrap();
+    fs::write(&staging.root, b"foreign replacement").unwrap();
+    let error = finish_candidate_staging_owned::<()>(&fixture.repo.root, &staging, Err(primary))
+        .unwrap_err();
     assert!(error.to_string().contains("primary failure"));
-    assert!(error.to_string().contains("repair: remove"));
-    assert!(residue.exists());
+    assert!(error.to_string().contains("repair: inspect only"));
+    assert!(
+        !error
+            .to_string()
+            .contains(fixture.repo.root.path().to_str().unwrap())
+    );
+    assert_eq!(fs::read(&staging.root).unwrap(), b"foreign replacement");
+    assert!(displaced.is_dir());
     assert!(!fixture.repo.root.path().join("dist/rust").exists());
     assert!(
         !fixture
@@ -1504,6 +1746,8 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path) {
         fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
     }
     let policy = ReleaseImages::from_root(root.path()).unwrap();
+    let tar = directory.join("solstone-linux-1.0.0-linux-x86_64.tar.gz");
+    let baseline = package_member_evidence(&tar, "1.0.0").unwrap();
     for (lane, image, name) in [
         (Lane::Deb, &policy.build_ubuntu, "deb-lane.json"),
         (Lane::Rpm, &policy.build_fedora, "rpm-lane.json"),
@@ -1524,7 +1768,7 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path) {
             features: vec![],
             rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
             cargo: "cargo 1.97.1 (abcdef012 2026-06-30)".into(),
-            baseline_executable_sha256: "d".repeat(64),
+            baseline_executable_sha256: baseline.sha256.clone(),
             image_digest: "@IMAGE@".into(),
             packaging_tool: match lane {
                 Lane::Deb => "cargo-deb 3.7.0",

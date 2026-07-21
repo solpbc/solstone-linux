@@ -213,7 +213,9 @@ fn raw_tarball(root: &Path, name: &str, entries: &[RawTarEntry<'_>]) -> PathBuf 
     gz_file(root, name, &tar_bytes(entries))
 }
 
-fn producer_tar_bytes(version: &str) -> Vec<u8> {
+pub(super) const FIXTURE_EXECUTABLE_BYTES: &[u8] = b"fixture executable";
+
+fn producer_tar_bytes_with(version: &str, executable: &[u8]) -> Vec<u8> {
     let member_root = format!("solstone-linux-{version}-linux-x86_64");
     let names = [
         format!("{member_root}/"),
@@ -230,7 +232,13 @@ fn producer_tar_bytes(version: &str) -> Vec<u8> {
         .enumerate()
         .map(|(index, name)| RawTarEntry {
             name: name.as_bytes(),
-            body: if index < 4 { b"" } else { b"fixture" },
+            body: if index < 4 {
+                b""
+            } else if index == 4 {
+                executable
+            } else {
+                b"fixture"
+            },
             entry_type: if index < 4 { b'5' } else { b'0' },
             mode: if index == 4 { 0o755 } else { 0o644 },
             link_name: b"",
@@ -239,12 +247,20 @@ fn producer_tar_bytes(version: &str) -> Vec<u8> {
     tar_bytes(&entries)
 }
 
-fn producer_tarball(root: &Path, version: &str) -> PathBuf {
+fn producer_tar_bytes(version: &str) -> Vec<u8> {
+    producer_tar_bytes_with(version, FIXTURE_EXECUTABLE_BYTES)
+}
+
+fn producer_tarball_with(root: &Path, version: &str, executable: &[u8]) -> PathBuf {
     gz_file(
         root,
         &format!("solstone-linux-{version}-linux-x86_64.tar.gz"),
-        &producer_tar_bytes(version),
+        &producer_tar_bytes_with(version, executable),
     )
+}
+
+fn producer_tarball(root: &Path, version: &str) -> PathBuf {
+    producer_tarball_with(root, version, FIXTURE_EXECUTABLE_BYTES)
 }
 
 fn control_tar(version: &str) -> Vec<u8> {
@@ -274,15 +290,14 @@ fn control_tar_bodies(bodies: &[String]) -> Vec<u8> {
     archive.into_inner().unwrap()
 }
 
-fn data_tar() -> Vec<u8> {
+fn data_tar(executable: &[u8]) -> Vec<u8> {
     let mut archive = tar::Builder::new(Vec::new());
-    let bytes = b"fixture executable";
     let mut header = tar::Header::new_gnu();
-    header.set_size(bytes.len() as u64);
+    header.set_size(executable.len() as u64);
     header.set_mode(0o755);
     header.set_cksum();
     archive
-        .append_data(&mut header, "./usr/bin/solstone-linux", &bytes[..])
+        .append_data(&mut header, "./usr/bin/solstone-linux", executable)
         .unwrap();
     archive.into_inner().unwrap()
 }
@@ -303,7 +318,7 @@ fn deb_members(root: &Path, name: &str, members: &[(&str, &[u8])]) -> PathBuf {
     path
 }
 
-fn deb(root: &Path, version: &str) -> PathBuf {
+fn deb_with(root: &Path, version: &str, executable: &[u8]) -> PathBuf {
     let path = root.join(format!("solstone-linux_{version}-1_amd64.deb"));
     let mut archive = ar::Builder::new(File::create(&path).unwrap());
     let marker = b"2.0\n";
@@ -314,17 +329,17 @@ fn deb(root: &Path, version: &str) -> PathBuf {
     let compressed = encoder.finish().unwrap();
     let header = ar::Header::new(b"control.tar.gz".to_vec(), compressed.len() as u64);
     archive.append(&header, &compressed[..]).unwrap();
-    let compressed = gzip(&data_tar());
+    let compressed = gzip(&data_tar(executable));
     let header = ar::Header::new(b"data.tar.gz".to_vec(), compressed.len() as u64);
     archive.append(&header, &compressed[..]).unwrap();
     path
 }
 
-fn rpm_file(root: &Path, version: &str) -> PathBuf {
+fn rpm_file_with(root: &Path, version: &str, executable: &[u8]) -> PathBuf {
     let path = root.join(format!("solstone-linux-{version}-1.x86_64.rpm"));
     let package = rpm::PackageBuilder::new(PRODUCT, version, "AGPL-3.0-only", "x86_64", "fixture")
         .with_file_contents(
-            b"fixture executable".as_slice(),
+            executable,
             rpm::FileOptions::new("/usr/bin/solstone-linux").permissions(0o755),
         )
         .unwrap()
@@ -337,27 +352,48 @@ fn rpm_file(root: &Path, version: &str) -> PathBuf {
 #[test]
 fn package_member_evidence_is_bound_to_all_three_formats() {
     let fixture = release_fixture();
-    for path in artifact_paths(fixture.path(), "1.0.0").unwrap() {
-        let member = package_member_evidence(&path, "1.0.0").unwrap();
+    let mut members = artifact_paths(fixture.path(), "1.0.0")
+        .unwrap()
+        .into_iter()
+        .map(|path| package_member_evidence(&path, "1.0.0").unwrap())
+        .collect::<Vec<_>>();
+    members.sort_by(|left, right| left.format.cmp(&right.format));
+    for member in &members {
         assert_eq!(member.mode, 0o755);
-        assert_eq!(
-            member.sha256,
-            digest(if member.format == "tar" {
-                b"fixture"
-            } else {
-                b"fixture executable"
-            })
-        );
-        assert!(member.installed_path.ends_with("/bin/solstone-linux"));
+        let expected_path = if member.format == "tar" {
+            "/bin/solstone-linux"
+        } else {
+            "/usr/bin/solstone-linux"
+        };
+        assert_eq!(member.installed_path, expected_path);
     }
+    assert_eq!(members.len(), 3);
+    assert!(
+        members
+            .iter()
+            .all(|member| member.sha256 == digest(FIXTURE_EXECUTABLE_BYTES))
+    );
+    assert!(
+        members
+            .iter()
+            .all(|member| member.bytes == FIXTURE_EXECUTABLE_BYTES.len() as u64)
+    );
 }
 
 pub(super) fn release_fixture() -> tempfile::TempDir {
+    release_fixture_with([
+        FIXTURE_EXECUTABLE_BYTES,
+        FIXTURE_EXECUTABLE_BYTES,
+        FIXTURE_EXECUTABLE_BYTES,
+    ])
+}
+
+pub(super) fn release_fixture_with(executables: [&[u8]; 3]) -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let version = evidence().version;
-    producer_tarball(temp.path(), &version);
-    deb(temp.path(), &version);
-    rpm_file(temp.path(), &version);
+    producer_tarball_with(temp.path(), &version, executables[0]);
+    deb_with(temp.path(), &version, executables[1]);
+    rpm_file_with(temp.path(), &version, executables[2]);
     temp
 }
 

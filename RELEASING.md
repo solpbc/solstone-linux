@@ -125,6 +125,9 @@ Named-manifest validation does not imply candidate readiness. Directory
 classification requires exactly five regular files and rejects stale or extra
 entries.
 
+Release roots must be real confined directories. The portable, Debian, and RPM
+packages must contain the same executable bytes.
+
 ## Non-candidate drift helper
 
 The individual lane helper is deliberately outside candidate state:

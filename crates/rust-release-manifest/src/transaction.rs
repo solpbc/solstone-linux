@@ -22,8 +22,16 @@ pub struct CandidateLedger {
     pub tools: BTreeMap<String, String>,
     pub payload: Vec<Artifact>,
     pub package_members: Vec<PackageMemberEvidence>,
+    pub baseline_executable: ExecutableIdentity,
     pub expected_proof_ids: Vec<String>,
     pub candidate_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableIdentity {
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -78,6 +86,7 @@ pub struct LedgerInput<'a> {
     pub version: &'a str,
     pub payload_root: &'a Path,
     pub package_members: Vec<PackageMemberEvidence>,
+    pub baseline_executable: ExecutableIdentity,
     pub cohort: &'a AdvisoryCohort,
     pub ubuntu: &'a ImageIdentity,
     pub fedora: &'a ImageIdentity,
@@ -146,6 +155,7 @@ pub fn construct_ledger(input: LedgerInput<'_>) -> Result<CandidateLedger> {
         tools: input.tools,
         payload,
         package_members: members,
+        baseline_executable: input.baseline_executable,
         expected_proof_ids: PROOF_SPECS.iter().map(|spec| spec.id.to_owned()).collect(),
         candidate_digest: candidate,
     };
@@ -242,29 +252,84 @@ pub fn validate_ledger(
             "ledger package member mismatch: expected package bytes, actual different",
         ));
     }
+    validate_shared_executable(ledger)?;
+    Ok(())
+}
+
+fn validate_shared_executable(ledger: &CandidateLedger) -> Result<()> {
+    let expected = [
+        (
+            "tar",
+            "/bin/solstone-linux",
+            format!("solstone-linux-{}-linux-x86_64.tar.gz", ledger.version),
+        ),
+        (
+            "deb",
+            "/usr/bin/solstone-linux",
+            format!("solstone-linux_{}-1_amd64.deb", ledger.version),
+        ),
+        (
+            "rpm",
+            "/usr/bin/solstone-linux",
+            format!("solstone-linux-{}-1.x86_64.rpm", ledger.version),
+        ),
+    ];
+    let mut identities = Vec::new();
+    for (format, installed_path, package_file) in expected {
+        let matches = ledger
+            .package_members
+            .iter()
+            .filter(|member| member.format == format)
+            .collect::<Vec<_>>();
+        if matches.len() != 1
+            || matches[0].installed_path != installed_path
+            || matches[0].package_file != package_file
+            || matches[0].mode != 0o755
+        {
+            return Err(Error::new(
+                "candidate executable inventory mismatch: expected documented tar, deb, and rpm members, actual different",
+            ));
+        }
+        identities.push((matches[0].sha256.as_str(), matches[0].bytes));
+    }
+    if identities[1..]
+        .iter()
+        .any(|identity| *identity != identities[0])
+    {
+        return Err(Error::new(
+            "candidate executable identity mismatch: expected one measured baseline across tar, deb, and rpm, actual divergent package members",
+        ));
+    }
+    let actual = identities[0];
+    if actual.0 != ledger.baseline_executable.sha256 || actual.1 != ledger.baseline_executable.bytes
+    {
+        return Err(Error::new(format!(
+            "candidate executable baseline mismatch: expected measured baseline {}/{}, actual package identity {}/{}",
+            ledger.baseline_executable.sha256, ledger.baseline_executable.bytes, actual.0, actual.1
+        )));
+    }
     Ok(())
 }
 
 pub fn read_ledger(root: &RepoRoot, version: &str) -> Result<(CandidateLedger, Vec<u8>)> {
-    let path = root
-        .path()
-        .join("dist/rust-evidence")
-        .join(version)
-        .join("ledger.json");
-    require_regular(&path, "candidate ledger")?;
+    let version = VersionComponent::new(version)?;
+    let boundary = ReservedReleaseBoundary::new(root);
+    let path = boundary
+        .resolve_for_read(
+            ReservedPath::EvidenceLedger(version),
+            ExpectedLeaf::RegularFile,
+        )?
+        .absolute;
     let bytes = fs::read(&path).map_err(display_error)?;
     let ledger: CandidateLedger = serde_json::from_slice(&bytes).map_err(display_error)?;
     if canonical_json(&serde_json::to_value(&ledger).map_err(display_error)?)? != bytes {
         return Err(Error::new("ledger canonicalization mismatch"));
     }
-    validate_ledger(root, &root.path().join("dist/rust"), &ledger)?;
+    let payload = boundary
+        .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)?
+        .absolute;
+    validate_ledger(root, &payload, &ledger)?;
     Ok((ledger, bytes))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FileIdentity {
-    pub(crate) device: u64,
-    pub(crate) inode: u64,
 }
 
 pub fn atomic_write_0644(path: &Path, bytes: &[u8]) -> Result<FileIdentity> {
@@ -294,10 +359,9 @@ pub(crate) fn atomic_write_0644_with_post_rename(
         .ok_or_else(|| Error::new("atomic output parent mismatch"))?;
     require_directory(parent, "atomic output parent")?;
     if path.symlink_metadata().is_ok() {
-        return Err(Error::new(format!(
-            "atomic output mismatch: expected absent, actual {}",
-            path.display()
-        )));
+        return Err(Error::new(
+            "atomic output mismatch: expected absent, actual present",
+        ));
     }
     let temp = parent.join(format!(
         ".{}.{}.tmp",
@@ -348,8 +412,7 @@ fn reclaim_after_publish_failure(
         if same_file {
             fs::remove_file(path).map_err(|cleanup| {
                 Error::new(format!(
-                    "{error}\nerror: atomic output cleanup mismatch: expected published file absent, actual residue\nrepair: remove {} after confirming it belongs to the failed transaction: {cleanup}",
-                    path.display()
+                    "{error}\nerror: atomic output cleanup mismatch: expected published file absent, actual residue: {cleanup}\nrepair: inspect only the failed atomic output entry"
                 ))
             })?;
         }
@@ -358,17 +421,12 @@ fn reclaim_after_publish_failure(
     Ok(())
 }
 
-fn same_file_identity(metadata: &fs::Metadata, identity: FileIdentity) -> bool {
-    metadata.dev() == identity.device && metadata.ino() == identity.inode
-}
-
 pub(crate) fn finish_atomic_publish(temp: &Path, publish: Result<()>) -> Result<()> {
     if let Err(error) = publish {
         if temp.symlink_metadata().is_ok() {
             fs::remove_file(temp).map_err(|cleanup| {
                 Error::new(format!(
-                    "{error}\nerror: atomic output cleanup mismatch: expected owned temporary absent, actual residue\nrepair: remove the failed transaction temporary file from {}: {cleanup}",
-                    temp.parent().unwrap_or_else(|| Path::new(".")).display()
+                    "{error}\nerror: atomic output cleanup mismatch: expected owned temporary absent, actual residue: {cleanup}\nrepair: inspect only the failed transaction temporary entry"
                 ))
             })?;
         }
@@ -384,6 +442,7 @@ pub struct FinalizeInput<'a> {
     pub version: &'a str,
     pub deb: &'a LaneEvidence,
     pub rpm: &'a LaneEvidence,
+    pub baseline_executable: ExecutableIdentity,
     pub cohort: &'a AdvisoryCohort,
     pub images: &'a ResolvedImages,
     pub engine: ContainerEngine,
@@ -396,15 +455,35 @@ pub struct FinalizedCandidate {
     pub ledger_bytes: Vec<u8>,
     pub payload_root: PathBuf,
     pub evidence_root: PathBuf,
+    payload_identity: FileIdentity,
+    evidence_identity: FileIdentity,
+}
+
+impl FinalizedCandidate {
+    pub(crate) fn new(
+        ledger: CandidateLedger,
+        ledger_bytes: Vec<u8>,
+        payload_root: PathBuf,
+        evidence_root: PathBuf,
+    ) -> Result<Self> {
+        let payload_identity = FileIdentity::from_metadata(
+            &fs::symlink_metadata(&payload_root).map_err(display_error)?,
+        );
+        let evidence_identity = FileIdentity::from_metadata(
+            &fs::symlink_metadata(&evidence_root).map_err(display_error)?,
+        );
+        Ok(Self {
+            ledger,
+            ledger_bytes,
+            payload_root,
+            evidence_root,
+            payload_identity,
+            evidence_identity,
+        })
+    }
 }
 
 pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate> {
-    reconcile_lanes(
-        input.deb,
-        input.rpm,
-        &input.staging.deb_lane,
-        &input.staging.rpm_lane,
-    )?;
     stage_payload(&input)?;
     classify_release(input.root, &input.staging.payload, false)?;
     recheck_source(input.root, input.context, &input.staging.payload)?;
@@ -414,18 +493,25 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
         [&input.images.build_ubuntu, &input.images.build_fedora],
     )?;
     recheck_advisory_cohort(input.cohort, input.processes, Utc::now())?;
-    let payload_root = input.root.path().join("dist/rust");
-    if payload_root.symlink_metadata().is_ok() {
-        return Err(Error::new(
-            "candidate payload mismatch: expected absent before promotion, actual present",
-        ));
-    }
+    let boundary = ReservedReleaseBoundary::new(input.root);
+    let payload_root = boundary
+        .resolve_for_create(ReservedPath::Payload, ExpectedLeaf::Absent)?
+        .absolute;
     fs::rename(&input.staging.payload, &payload_root).map_err(display_error)?;
-    let evidence_root = input
-        .root
-        .path()
-        .join("dist/rust-evidence")
-        .join(input.version);
+    let payload_identity = boundary
+        .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)?
+        .identity
+        .expect("present payload identity");
+    let version = VersionComponent::new(input.version)?;
+    let evidence_parent = boundary.path(ReservedPath::EvidenceParent);
+    if evidence_parent.symlink_metadata().is_ok() {
+        boundary.resolve_for_read(ReservedPath::EvidenceParent, ExpectedLeaf::Directory)?;
+    } else {
+        boundary.resolve_for_create(ReservedPath::EvidenceParent, ExpectedLeaf::Absent)?;
+        fs::create_dir(&evidence_parent).map_err(display_error)?;
+    }
+    let evidence_root = boundary.path(ReservedPath::EvidenceVersion(version.clone()));
+    let mut evidence_identity = None;
     let result = (|| {
         classify_release(input.root, &payload_root, false)?;
         let members = package_members(&payload_root, input.version)?;
@@ -441,6 +527,7 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
             version: input.version,
             payload_root: &payload_root,
             package_members: members,
+            baseline_executable: input.baseline_executable.clone(),
             cohort: input.cohort,
             ubuntu: &input.images.build_ubuntu,
             fedora: &input.images.build_fedora,
@@ -449,8 +536,32 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
             tools,
         })?;
         let bytes = ledger_bytes(input.root, &payload_root, &ledger)?;
-        fs::create_dir_all(&evidence_root).map_err(display_error)?;
-        let ledger_path = evidence_root.join("ledger.json");
+        if boundary
+            .resolve_for_create(
+                ReservedPath::EvidenceVersion(version.clone()),
+                ExpectedLeaf::Absent,
+            )
+            .is_ok()
+        {
+            fs::create_dir_all(&evidence_root).map_err(display_error)?;
+        } else {
+            boundary.resolve_for_read(
+                ReservedPath::EvidenceVersion(version.clone()),
+                ExpectedLeaf::Directory,
+            )?;
+        }
+        evidence_identity = boundary
+            .resolve_for_read(
+                ReservedPath::EvidenceVersion(version.clone()),
+                ExpectedLeaf::Directory,
+            )?
+            .identity;
+        let ledger_path = boundary
+            .resolve_for_create(
+                ReservedPath::EvidenceLedger(version.clone()),
+                ExpectedLeaf::Absent,
+            )?
+            .absolute;
         atomic_write_0644(&ledger_path, &bytes)?;
         recheck_source(input.root, input.context, &payload_root)?;
         recheck_images(
@@ -459,16 +570,33 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
             [&input.images.build_ubuntu, &input.images.build_fedora],
         )?;
         recheck_advisory_cohort(input.cohort, input.processes, Utc::now())?;
-        Ok(FinalizedCandidate {
-            ledger,
-            ledger_bytes: bytes,
-            payload_root: payload_root.clone(),
-            evidence_root: evidence_root.clone(),
-        })
+        FinalizedCandidate::new(ledger, bytes, payload_root.clone(), evidence_root.clone())
     })();
     match result {
         Ok(value) => Ok(value),
-        Err(error) => Err(rollback_error(error, &payload_root, &evidence_root, &[])),
+        Err(error) => {
+            let mut entries = vec![CleanupEntry {
+                path: ReservedPath::Payload,
+                expected_type: ExpectedLeaf::Directory,
+                expected_identity: payload_identity,
+                ownership: OwnershipEvidence::Promoted,
+            }];
+            if let Some(identity) = evidence_identity {
+                entries.push(CleanupEntry {
+                    path: ReservedPath::EvidenceVersion(version),
+                    expected_type: ExpectedLeaf::Directory,
+                    expected_identity: identity,
+                    ownership: OwnershipEvidence::Published,
+                });
+            }
+            match CleanupPlan::new(entries)
+                .and_then(|plan| plan.preflight(boundary))
+                .and_then(ValidatedCleanupPlan::execute)
+            {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(Error::new(format!("{error}\n{cleanup}"))),
+            }
+        }
     }
 }
 
@@ -591,62 +719,6 @@ fn recheck_source(root: &RepoRoot, context: &ImmutableContext, payload: &Path) -
     Ok(())
 }
 
-pub fn rollback_error(
-    original: Error,
-    payload: &Path,
-    evidence_root: &Path,
-    owned_proofs: &[PathBuf],
-) -> Error {
-    let mut residues = Vec::new();
-    if payload.symlink_metadata().is_ok() && fs::remove_dir_all(payload).is_err() {
-        residues.push(payload.to_owned());
-    }
-    for path in owned_proofs
-        .iter()
-        .rev()
-        .chain(std::iter::once(&evidence_root.join("ledger.json")))
-    {
-        if path.symlink_metadata().is_ok() && fs::remove_file(path).is_err() {
-            residues.push(path.to_owned());
-        }
-    }
-    let proofs_root = evidence_root.join("proofs");
-    if proofs_root.is_dir() {
-        match fs::read_dir(&proofs_root) {
-            Ok(mut entries) => match entries.next() {
-                None if fs::remove_dir(&proofs_root).is_err() => residues.push(proofs_root),
-                Some(Err(_)) => residues.push(proofs_root),
-                _ => {}
-            },
-            Err(_) => residues.push(proofs_root),
-        }
-    }
-    if evidence_root.is_dir() {
-        match fs::read_dir(evidence_root) {
-            Ok(mut entries) => match entries.next() {
-                None if fs::remove_dir(evidence_root).is_err() => {
-                    residues.push(evidence_root.to_owned());
-                }
-                Some(Err(_)) => residues.push(evidence_root.to_owned()),
-                _ => {}
-            },
-            Err(_) => residues.push(evidence_root.to_owned()),
-        }
-    }
-    if residues.is_empty() {
-        original
-    } else {
-        let paths = residues
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Error::new(format!(
-            "{original}\nerror: release candidate rollback mismatch: expected owned payload and evidence absent, actual residue at {paths}\nrepair: remove {paths} after confirming no release-candidate process holds dist/.rust-release-candidate.lock"
-        ))
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateProof {
@@ -692,30 +764,44 @@ pub struct ProofRequest<'a> {
 }
 
 pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
-    proof_spec(request.platform)?;
-    let evidence_root = request
-        .root
-        .path()
-        .join("dist/rust-evidence")
-        .join(&request.ledger.version);
-    let proofs_root = evidence_root.join("proofs");
-    fs::create_dir_all(&proofs_root).map_err(display_error)?;
-    let final_path = proofs_root.join(format!("{}.json", request.platform));
+    let proof = ProofId::new(request.platform)?;
+    let version = VersionComponent::new(&request.ledger.version)?;
+    let boundary = ReservedReleaseBoundary::new(request.root);
+    let proofs_root = boundary.path(ReservedPath::Proofs(version.clone()));
+    match boundary.resolve_for_create(ReservedPath::Proofs(version.clone()), ExpectedLeaf::Absent) {
+        Ok(_) => fs::create_dir(&proofs_root).map_err(display_error)?,
+        Err(_) => {
+            boundary.resolve_for_read(
+                ReservedPath::Proofs(version.clone()),
+                ExpectedLeaf::Directory,
+            )?;
+        }
+    }
+    let final_reserved = ReservedPath::Proof(version.clone(), proof.clone());
+    let final_path = boundary.path(final_reserved.clone());
     if final_path.symlink_metadata().is_ok() {
+        boundary.resolve_for_read(final_reserved, ExpectedLeaf::RegularFile)?;
         validate_proof_file(request, &final_path)?;
         return Ok(final_path);
     }
-    let attempt = proofs_root.join(format!(
-        ".{}.{}.attempt",
-        request.platform,
-        transaction_id()?
-    ));
+    let transaction = TransactionComponent::new(&transaction_id()?)?;
+    let attempt_reserved =
+        ReservedPath::ProofAttempt(version.clone(), proof.clone(), transaction.clone());
+    let attempt = boundary
+        .resolve_for_create(attempt_reserved.clone(), ExpectedLeaf::Absent)?
+        .absolute;
     fs::create_dir(&attempt).map_err(display_error)?;
-    let attempt_metadata = fs::symlink_metadata(&attempt).map_err(display_error)?;
+    let attempt_identity = boundary
+        .resolve_for_read(attempt_reserved.clone(), ExpectedLeaf::Directory)?
+        .identity
+        .expect("present proof attempt identity");
     let mut published_identity = None;
     let result = (|| {
         let artifact = proof_artifact(request.ledger, request.platform)?;
-        let artifact_path = request.root.path().join("dist/rust").join(&artifact.path);
+        let payload = boundary
+            .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)?
+            .absolute;
+        let artifact_path = payload.join(&artifact.path);
         require_regular(&artifact_path, "proof artifact")?;
         let executable = std::env::current_exe().map_err(display_error)?;
         let output_arg = format!("type=bind,src={},dst=/evidence", attempt.display());
@@ -778,59 +864,81 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             request.engine.executable(),
             &args,
         )?;
-        let produced = attempt.join("proof.json");
+        let produced = boundary
+            .resolve_for_read(
+                ReservedPath::ProofAttemptOutput(
+                    version.clone(),
+                    proof.clone(),
+                    transaction.clone(),
+                ),
+                ExpectedLeaf::RegularFile,
+            )?
+            .absolute;
         validate_proof_file(request, &produced)?;
         let bytes = fs::read(&produced).map_err(display_error)?;
-        fs::remove_dir_all(&attempt).map_err(display_error)?;
+        CleanupPlan::new(vec![CleanupEntry {
+            path: attempt_reserved.clone(),
+            expected_type: ExpectedLeaf::Directory,
+            expected_identity: attempt_identity,
+            ownership: OwnershipEvidence::Created,
+        }])?
+        .preflight(ReservedReleaseBoundary::new(request.root))?
+        .execute()?;
         published_identity = Some(atomic_write_0644(&final_path, &bytes)?);
         validate_proof_file(request, &final_path)?;
         Ok(final_path.clone())
     })();
     result.map_err(|error| {
-        cleanup_proof_attempt(
+        finish_proof_attempt_cleanup(
+            request.root,
             error,
-            &attempt,
-            (attempt_metadata.dev(), attempt_metadata.ino()),
-            &final_path,
+            attempt_reserved,
+            attempt_identity,
+            ReservedPath::Proof(version, proof),
             published_identity,
         )
     })
 }
 
-pub(crate) fn cleanup_proof_attempt(
+pub(crate) fn finish_proof_attempt_cleanup(
+    root: &RepoRoot,
     error: Error,
-    attempt: &Path,
-    attempt_identity: (u64, u64),
-    published: &Path,
+    attempt: ReservedPath,
+    attempt_identity: FileIdentity,
+    published: ReservedPath,
     published_identity: Option<FileIdentity>,
 ) -> Error {
-    let mut residue = Vec::new();
-    if same_inode(attempt, attempt_identity) && fs::remove_dir_all(attempt).is_err() {
-        residue.push(attempt.to_owned());
+    let boundary = ReservedReleaseBoundary::new(root);
+    let mut entries = Vec::new();
+    if fs::symlink_metadata(boundary.path(attempt.clone()))
+        .is_ok_and(|metadata| same_file_identity(&metadata, attempt_identity))
+    {
+        entries.push(CleanupEntry {
+            path: attempt,
+            expected_type: ExpectedLeaf::Directory,
+            expected_identity: attempt_identity,
+            ownership: OwnershipEvidence::Created,
+        });
     }
     if let Some(identity) = published_identity
-        && fs::symlink_metadata(published)
+        && fs::symlink_metadata(boundary.path(published.clone()))
             .is_ok_and(|metadata| same_file_identity(&metadata, identity))
-        && fs::remove_file(published).is_err()
     {
-        residue.push(published.to_owned());
+        entries.push(CleanupEntry {
+            path: published,
+            expected_type: ExpectedLeaf::RegularFile,
+            expected_identity: identity,
+            ownership: OwnershipEvidence::Published,
+        });
     }
-    if residue.is_empty() {
+    if entries.is_empty() {
         error
     } else {
-        Error::new(format!(
-            "{error}\nerror: proof attempt cleanup mismatch: expected owned paths absent, actual residue at {}\nrepair: remove only the named failed-attempt paths",
-            residue
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
+        match CleanupPlan::new(entries) {
+            Ok(plan) => plan.finish_error(boundary, error),
+            Err(cleanup) => Error::new(format!("{error}\n{cleanup}")),
+        }
     }
-}
-
-fn same_inode(path: &Path, identity: (u64, u64)) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
 }
 
 pub(crate) fn proof_artifact<'a>(
@@ -967,9 +1075,14 @@ pub fn candidate_status(
     expected_ledger_bytes: &[u8],
 ) -> Result<CandidateStatus> {
     validate_version(&expected_ledger.version)?;
+    let version = VersionComponent::new(&expected_ledger.version)?;
+    let boundary = ReservedReleaseBoundary::new(root);
+    let payload = boundary
+        .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)?
+        .absolute;
     let (disk_ledger, disk_ledger_bytes) = read_ledger(root, &expected_ledger.version)?;
     if disk_ledger_bytes != expected_ledger_bytes
-        || disk_ledger_bytes != ledger_bytes(root, &root.path().join("dist/rust"), expected_ledger)?
+        || disk_ledger_bytes != ledger_bytes(root, &payload, expected_ledger)?
     {
         return Err(Error::new(
             "candidate ledger bytes mismatch: expected promoted ledger, actual different",
@@ -985,8 +1098,18 @@ pub fn candidate_status(
             "candidate image policy mismatch: expected ledger build images, actual committed policy differs",
         ));
     }
-    let evidence_root = root.path().join("dist/rust-evidence").join(&ledger.version);
-    let proofs_root = evidence_root.join("proofs");
+    let evidence_root = boundary
+        .resolve_for_read(
+            ReservedPath::EvidenceVersion(version.clone()),
+            ExpectedLeaf::Directory,
+        )?
+        .absolute;
+    let proofs_root = boundary
+        .resolve_for_read(
+            ReservedPath::Proofs(version.clone()),
+            ExpectedLeaf::Directory,
+        )?
+        .absolute;
     let evidence_names = directory_names(&evidence_root, "candidate evidence")?;
     if evidence_names != BTreeSet::from(["ledger.json".into(), "proofs".into()]) {
         return Err(Error::new(
@@ -1004,8 +1127,12 @@ pub fn candidate_status(
     }
     let mut proof_bytes = BTreeMap::new();
     for (id, _, reference) in policy.proof_policies() {
-        let path = proofs_root.join(format!("{id}.json"));
-        require_regular(&path, id)?;
+        let path = boundary
+            .resolve_for_read(
+                ReservedPath::Proof(version.clone(), ProofId::new(id)?),
+                ExpectedLeaf::RegularFile,
+            )?
+            .absolute;
         let image = proof_image_identity(reference);
         validate_proof_file(
             &ProofRequest {
@@ -1066,19 +1193,22 @@ pub(crate) fn proof_image_identity(reference: &str) -> ImageIdentity {
 }
 
 pub fn recover_candidate(root: &RepoRoot, version: &str) -> Result<String> {
-    if root
-        .path()
-        .join("dist/.rust-release-candidate.lock")
-        .symlink_metadata()
-        .is_ok()
-    {
+    let boundary = ReservedReleaseBoundary::new(root);
+    if boundary.path(ReservedPath::Lock).symlink_metadata().is_ok() {
+        boundary.resolve_for_read(ReservedPath::Lock, ExpectedLeaf::RegularFile)?;
         return Err(Error::new(
             "candidate recovery lock mismatch: expected absent, actual present",
         ));
     }
-    let before = tree_snapshot(&root.path().join("dist"))?;
+    let dist = boundary
+        .resolve_for_read(ReservedPath::Dist, ExpectedLeaf::Directory)?
+        .absolute;
+    let payload = boundary
+        .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)?
+        .absolute;
+    let before = tree_snapshot(&dist)?;
     let (ledger, bytes) = read_ledger(root, version)?;
-    require_clean_tree(root.path(), &root.path().join("dist/rust"))?;
+    require_clean_tree(root.path(), &payload)?;
     let commit = command(root.path(), &["git", "rev-parse", "HEAD"])?;
     if commit != ledger.source.commit {
         return Err(Error::new(format!(
@@ -1091,9 +1221,9 @@ pub fn recover_candidate(root: &RepoRoot, version: &str) -> Result<String> {
     {
         return Err(Error::new("recovery Cargo.lock mismatch"));
     }
-    classify_release(root, &root.path().join("dist/rust"), false)?;
+    classify_release(root, &payload, false)?;
     let _ = candidate_status(root, &ledger, &bytes)?;
-    if tree_snapshot(&root.path().join("dist"))? != before {
+    if tree_snapshot(&dist)? != before {
         return Err(Error::new("candidate recovery mutation mismatch"));
     }
     Ok("retained-candidate-valid".into())
@@ -1333,34 +1463,28 @@ fn proof_os_release() -> Result<String> {
         .ok_or_else(|| Error::new("proof OS mismatch"))
 }
 
-pub(crate) fn finish_candidate_staging<T>(
+pub(crate) fn finish_candidate_staging_owned<T>(
     root: &RepoRoot,
-    version: &str,
-    staging_root: &Path,
+    staging: &StagingLayout,
     result: Result<T>,
 ) -> Result<T> {
-    match fs::remove_dir_all(staging_root) {
-        Ok(()) => result,
-        Err(cleanup) => {
-            let primary = result.err().unwrap_or_else(|| {
-                Error::new("candidate staging cleanup mismatch: expected owned root absent")
-            });
-            let evidence_root = root.path().join("dist/rust-evidence").join(version);
-            let mut rolled_back =
-                rollback_error(primary, &root.path().join("dist/rust"), &evidence_root, &[]);
-            if evidence_root.symlink_metadata().is_ok()
-                && let Err(evidence_cleanup) = fs::remove_dir_all(&evidence_root)
-            {
-                rolled_back = Error::new(format!(
-                    "{rolled_back}\nerror: candidate evidence cleanup mismatch: expected owned evidence absent, actual residue\nrepair: remove {}: {evidence_cleanup}",
-                    evidence_root.display()
-                ));
-            }
-            Err(Error::new(format!(
-                "{rolled_back}\nerror: candidate staging cleanup mismatch: expected owned root absent, actual residue\nrepair: remove {} after confirming no release-candidate process holds dist/.rust-release-candidate.lock: {cleanup}",
-                staging_root.display()
-            )))
-        }
+    let transaction = staging
+        .transaction
+        .clone()
+        .expect("production staging has a transaction");
+    let cleanup = CleanupPlan::new(vec![CleanupEntry {
+        path: ReservedPath::StagingInvocation(transaction),
+        expected_type: ExpectedLeaf::Directory,
+        expected_identity: staging.root_identity,
+        ownership: OwnershipEvidence::Created,
+    }])
+    .and_then(|plan| plan.preflight(ReservedReleaseBoundary::new(root)))
+    .and_then(ValidatedCleanupPlan::execute);
+    match (result, cleanup) {
+        (Ok(value), Ok(_)) => Ok(value),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(error), Err(cleanup)) => Err(Error::new(format!("{error}\n{cleanup}"))),
     }
 }
 
@@ -1369,13 +1493,37 @@ pub(crate) fn finish_created_candidate<T>(
     owned_proofs: &[PathBuf],
     result: Result<T>,
 ) -> Result<T> {
+    let _ = owned_proofs;
     result.map_err(|error| {
-        rollback_error(
-            error,
-            &finalized.payload_root,
-            &finalized.evidence_root,
-            owned_proofs,
-        )
+        let root_path = finalized
+            .payload_root
+            .parent()
+            .and_then(Path::parent)
+            .expect("reserved payload is below repository root");
+        let root = RepoRoot::validate_path(root_path).expect("existing validated repository root");
+        let version = VersionComponent::new(&finalized.ledger.version)
+            .expect("finalized version is validated");
+        let entries = vec![
+            CleanupEntry {
+                path: ReservedPath::Payload,
+                expected_type: ExpectedLeaf::Directory,
+                expected_identity: finalized.payload_identity,
+                ownership: OwnershipEvidence::Promoted,
+            },
+            CleanupEntry {
+                path: ReservedPath::EvidenceVersion(version),
+                expected_type: ExpectedLeaf::Directory,
+                expected_identity: finalized.evidence_identity,
+                ownership: OwnershipEvidence::Published,
+            },
+        ];
+        match CleanupPlan::new(entries)
+            .and_then(|plan| plan.preflight(ReservedReleaseBoundary::new(&root)))
+            .and_then(ValidatedCleanupPlan::execute)
+        {
+            Ok(_) => error,
+            Err(cleanup) => Error::new(format!("{error}\n{cleanup}")),
+        }
     })
 }
 
@@ -1399,7 +1547,8 @@ fn create_candidate_locked(
     lock: &CandidateLock,
 ) -> Result<CandidateStatus> {
     let version = workspace_version(root)?;
-    require_clean_tree(root.path(), &root.path().join("dist/rust"))?;
+    let payload = ReservedReleaseBoundary::new(root).path(ReservedPath::Payload);
+    require_clean_tree(root.path(), &payload)?;
     clear_candidate_paths(root, &version)?;
     let staging = StagingLayout::create(root, lock)?;
     let result = (|| {
@@ -1444,6 +1593,8 @@ fn create_candidate_locked(
             output: &staging.rpm_lane,
             processes,
         })?;
+        let baseline_executable =
+            reconcile_lanes(&deb, &rpm, &staging.deb_lane, &staging.rpm_lane, &version)?;
         let finalized = finalize_candidate(FinalizeInput {
             root,
             staging: &staging,
@@ -1451,6 +1602,7 @@ fn create_candidate_locked(
             version: &version,
             deb: &deb,
             rpm: &rpm,
+            baseline_executable,
             cohort: &cohort,
             images: &images,
             engine,
@@ -1483,7 +1635,7 @@ fn create_candidate_locked(
         })();
         finish_created_candidate(&finalized, &owned, proof_result)
     })();
-    finish_candidate_staging(root, &version, &staging.root, result)
+    finish_candidate_staging_owned(root, &staging, result)
 }
 
 pub fn prove_candidate(
@@ -1504,8 +1656,12 @@ fn prove_candidate_locked(
     descriptor: &Path,
     processes: &ProcessEnvironment,
 ) -> Result<CandidateStatus> {
+    let boundary = ReservedReleaseBoundary::new(root);
+    let payload = boundary
+        .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)?
+        .absolute;
     let (ledger, ledger_bytes) = read_ledger(root, version)?;
-    require_clean_tree(root.path(), &root.path().join("dist/rust"))?;
+    require_clean_tree(root.path(), &payload)?;
     let commit = command(root.path(), &["git", "rev-parse", "HEAD"])?;
     let lock_digest = digest(&fs::read(root.path().join("Cargo.lock")).map_err(display_error)?);
     let archive_digest = digest(&command_bytes(
@@ -1520,7 +1676,7 @@ fn prove_candidate_locked(
             "candidate resume source mismatch: expected ledger source, actual checkout differs",
         ));
     }
-    classify_release(root, &root.path().join("dist/rust"), false)?;
+    classify_release(root, &payload, false)?;
     let advisory = validate_resume_advisory_identity(descriptor, processes)?;
     if advisory.source_id != ledger.advisory_cohort.source_id
         || advisory.commit != ledger.advisory_cohort.commit
@@ -1558,7 +1714,7 @@ fn prove_candidate_locked(
         })?;
     }
     recheck_all_images(processes, engine, &images)?;
-    recheck_source(root, &context, &root.path().join("dist/rust"))?;
+    recheck_source(root, &context, &payload)?;
     let final_advisory = validate_resume_advisory_identity(descriptor, processes)?;
     if final_advisory.source_id != advisory.source_id
         || final_advisory.commit != advisory.commit
@@ -1588,15 +1744,16 @@ fn preflight_existing_proofs(
     engine: ContainerEngine,
     processes: &ProcessEnvironment,
 ) -> Result<()> {
-    let proofs_root = root
-        .path()
-        .join("dist/rust-evidence")
-        .join(&ledger.version)
-        .join("proofs");
+    let boundary = ReservedReleaseBoundary::new(root);
+    let version = VersionComponent::new(&ledger.version)?;
+    let proofs_root = boundary.path(ReservedPath::Proofs(version.clone()));
     if proofs_root.symlink_metadata().is_err() {
         return Ok(());
     }
-    require_directory(&proofs_root, "candidate proofs")?;
+    boundary.resolve_for_read(
+        ReservedPath::Proofs(version.clone()),
+        ExpectedLeaf::Directory,
+    )?;
     let allowed = PROOF_SPECS
         .iter()
         .map(|spec| format!("{}.json", spec.id))
@@ -1614,8 +1771,10 @@ fn preflight_existing_proofs(
         }
     }
     for (id, image) in images.proof_images() {
-        let path = proofs_root.join(format!("{id}.json"));
+        let reserved = ReservedPath::Proof(version.clone(), ProofId::new(id)?);
+        let path = boundary.path(reserved.clone());
         if path.symlink_metadata().is_ok() {
+            boundary.resolve_for_read(reserved, ExpectedLeaf::RegularFile)?;
             validate_proof_file(
                 &ProofRequest {
                     root,
@@ -1677,12 +1836,137 @@ pub(crate) fn require_expected_commit(root: &RepoRoot, expected: &str) -> Result
     Ok(())
 }
 fn clear_candidate_paths(root: &RepoRoot, version: &str) -> Result<()> {
-    for path in [
-        root.path().join("dist/rust"),
-        root.path().join("dist/rust-evidence").join(version),
-    ] {
-        if path.symlink_metadata().is_ok() {
-            fs::remove_dir_all(path).map_err(display_error)?;
+    let version = VersionComponent::new(version)?;
+    let boundary = ReservedReleaseBoundary::new(root);
+    let payload_path = boundary.path(ReservedPath::Payload);
+    let evidence_path = boundary.path(ReservedPath::EvidenceVersion(version.clone()));
+    let payload_present = payload_path.symlink_metadata().is_ok();
+    let evidence_present = evidence_path.symlink_metadata().is_ok();
+    if !payload_present && !evidence_present {
+        return Ok(());
+    }
+    let ownership_error = || {
+        Error::new(format!(
+            "existing release candidate ownership mismatch: expected complete validated solstone-linux candidate {}, actual unowned or invalid reserved paths\nrepair: run candidate recover --version {} to inspect a retained candidate; move or remove only the named dist/rust and dist/rust-evidence/{} paths after independently confirming ownership",
+            version.0, version.0, version.0
+        ))
+    };
+    if !payload_present || !evidence_present {
+        return Err(ownership_error());
+    }
+    let payload = boundary
+        .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)
+        .map_err(|_| ownership_error())?;
+    let evidence = boundary
+        .resolve_for_read(
+            ReservedPath::EvidenceVersion(version.clone()),
+            ExpectedLeaf::Directory,
+        )
+        .map_err(|_| ownership_error())?;
+    let (ledger, ledger_bytes) = read_ledger(root, &version.0).map_err(|_| ownership_error())?;
+    validate_ledger(root, &payload.absolute, &ledger).map_err(|_| ownership_error())?;
+    classify_release(root, &payload.absolute, false).map_err(|_| ownership_error())?;
+    validate_retained_status_structure(root, &ledger, &ledger_bytes)
+        .map_err(|_| ownership_error())?;
+    let payload = boundary
+        .resolve_for_replace(
+            ReservedPath::Payload,
+            ExpectedLeaf::Directory,
+            payload.identity.expect("payload identity"),
+        )
+        .map_err(|_| ownership_error())?;
+    let evidence = boundary
+        .resolve_for_replace(
+            ReservedPath::EvidenceVersion(version.clone()),
+            ExpectedLeaf::Directory,
+            evidence.identity.expect("evidence identity"),
+        )
+        .map_err(|_| ownership_error())?;
+    CleanupPlan::new(vec![
+        CleanupEntry {
+            path: ReservedPath::Payload,
+            expected_type: ExpectedLeaf::Directory,
+            expected_identity: payload.identity.expect("payload identity"),
+            ownership: OwnershipEvidence::RetainedCandidate,
+        },
+        CleanupEntry {
+            path: ReservedPath::EvidenceVersion(version),
+            expected_type: ExpectedLeaf::Directory,
+            expected_identity: evidence.identity.expect("evidence identity"),
+            ownership: OwnershipEvidence::RetainedCandidate,
+        },
+    ])?
+    .preflight(boundary)?
+    .execute()?;
+    Ok(())
+}
+
+fn validate_retained_status_structure(
+    root: &RepoRoot,
+    ledger: &CandidateLedger,
+    ledger_bytes: &[u8],
+) -> Result<()> {
+    let version = VersionComponent::new(&ledger.version)?;
+    let boundary = ReservedReleaseBoundary::new(root);
+    let evidence = boundary
+        .resolve_for_read(
+            ReservedPath::EvidenceVersion(version.clone()),
+            ExpectedLeaf::Directory,
+        )?
+        .absolute;
+    let proofs = boundary
+        .resolve_for_read(
+            ReservedPath::Proofs(version.clone()),
+            ExpectedLeaf::Directory,
+        )?
+        .absolute;
+    if directory_names(&evidence, "candidate evidence")?
+        != BTreeSet::from(["ledger.json".into(), "proofs".into()])
+    {
+        return Err(Error::new(
+            "candidate evidence inventory mismatch: expected ledger and proofs, actual different",
+        ));
+    }
+    let policy = ReleaseImages::from_root(root.path())?;
+    let allowed = PROOF_SPECS
+        .iter()
+        .map(|spec| format!("{}.json", spec.id))
+        .collect::<BTreeSet<_>>();
+    let present = directory_names(&proofs, "candidate proofs")?;
+    if !present.is_subset(&allowed) {
+        return Err(Error::new(
+            "candidate proof inventory mismatch: expected retained proof IDs, actual different",
+        ));
+    }
+    for (id, _, reference) in policy.proof_policies() {
+        if !present.contains(&format!("{id}.json")) {
+            continue;
+        }
+        let path = boundary
+            .resolve_for_read(
+                ReservedPath::Proof(version.clone(), ProofId::new(id)?),
+                ExpectedLeaf::RegularFile,
+            )?
+            .absolute;
+        validate_proof_file(
+            &ProofRequest {
+                root,
+                ledger,
+                ledger_bytes,
+                platform: id,
+                image: &proof_image_identity(reference),
+                engine: ContainerEngine::Podman,
+                processes: &ProcessEnvironment::default(),
+            },
+            &path,
+        )?;
+    }
+    if present == allowed {
+        let status = candidate_status(root, ledger, ledger_bytes)?;
+        if !status.local_evidence_only || status.publication_approval {
+            return Err(Error::new(
+                "candidate status mismatch: expected local evidence without publication approval, actual different",
+            ));
         }
     }
     Ok(())

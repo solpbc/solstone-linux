@@ -10,6 +10,20 @@ use std::sync::OnceLock;
 
 static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
 
+fn staged_baseline(staging: &StagingLayout) -> ExecutableIdentity {
+    let member = package_member_evidence(
+        &staging
+            .deb_lane
+            .join("solstone-linux-1.0.0-linux-x86_64.tar.gz"),
+        "1.0.0",
+    )
+    .unwrap();
+    ExecutableIdentity {
+        sha256: member.sha256,
+        bytes: member.bytes,
+    }
+}
+
 pub(super) struct TestRepo {
     _temp: tempfile::TempDir,
     pub root: RepoRoot,
@@ -305,23 +319,47 @@ fn staging_construction_failure_cleans_only_owned_root_and_reports_residue() {
     fs::create_dir(&sibling).unwrap();
     fs::write(sibling.join("canary"), b"foreign").unwrap();
 
+    let transaction = TransactionComponent::new("owned-mid-failure").unwrap();
     let owned = parent.join("owned-mid-failure");
     fs::create_dir(&owned).unwrap();
     fs::write(owned.join("lane-rpm"), b"blocks directory creation").unwrap();
-    assert!(StagingLayout::initialize_owned(owned.clone()).is_err());
+    let identity = FileIdentity::from_metadata(&fs::symlink_metadata(&owned).unwrap());
+    assert!(
+        StagingLayout::initialize_reserved(&repo.root, owned.clone(), transaction, identity)
+            .is_err()
+    );
     assert!(!owned.exists());
     assert_eq!(fs::read(sibling.join("canary")).unwrap(), b"foreign");
     assert!(!repo.root.path().join("dist/rust").exists());
     assert!(!repo.root.path().join("dist/rust-evidence").exists());
 
+    let transaction = TransactionComponent::new("owned-cleanup-failure").unwrap();
     let residue = parent.join("owned-cleanup-failure");
     fs::create_dir(&residue).unwrap();
     fs::write(residue.join("lane-rpm"), b"blocks directory creation").unwrap();
     fs::set_permissions(&residue, fs::Permissions::from_mode(0o555)).unwrap();
-    let error = StagingLayout::initialize_owned(residue.clone()).unwrap_err();
-    fs::set_permissions(&residue, fs::Permissions::from_mode(0o755)).unwrap();
+    let identity = FileIdentity::from_metadata(&fs::symlink_metadata(&residue).unwrap());
+    let error =
+        StagingLayout::initialize_reserved(&repo.root, residue.clone(), transaction, identity)
+            .unwrap_err();
     assert!(error.to_string().contains("Permission denied"));
-    assert!(error.to_string().contains("repair: remove"));
+    assert!(error.to_string().contains("repair: inspect only"));
+    assert!(
+        !error
+            .to_string()
+            .contains(repo.root.path().to_str().unwrap())
+    );
+    let residue = fs::read_dir(&parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("quarantine")
+        })
+        .unwrap();
+    fs::set_permissions(&residue, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(residue.exists());
     assert_eq!(fs::read(sibling.join("canary")).unwrap(), b"foreign");
     fs::remove_dir_all(residue).unwrap();
@@ -329,24 +367,41 @@ fn staging_construction_failure_cleans_only_owned_root_and_reports_residue() {
 
 #[test]
 fn controlled_rollback_removes_only_owned_payload_and_evidence() {
-    let temp = tempfile::tempdir().unwrap();
-    let payload = temp.path().join("dist/rust");
-    let evidence = temp.path().join("dist/rust-evidence/1.0.0");
+    let repo = fixture();
+    let payload = repo.root.path().join("dist/rust");
+    let evidence = repo.root.path().join("dist/rust-evidence/1.0.0");
     let proofs = evidence.join("proofs");
     fs::create_dir_all(&payload).unwrap();
     fs::create_dir_all(&proofs).unwrap();
     fs::write(payload.join("candidate"), b"bytes").unwrap();
     fs::write(evidence.join("ledger.json"), b"ledger").unwrap();
-    let owned = proofs.join("debian-amd64.json");
-    fs::write(&owned, b"proof").unwrap();
-    let unowned = temp.path().join("dist/rust-evidence/other/ledger.json");
+    fs::write(proofs.join("debian-amd64.json"), b"proof").unwrap();
+    let unowned = repo
+        .root
+        .path()
+        .join("dist/rust-evidence/other/ledger.json");
     fs::create_dir_all(unowned.parent().unwrap()).unwrap();
     fs::write(&unowned, b"retain").unwrap();
-    let error = rollback_error(
+    let payload_identity = FileIdentity::from_metadata(&fs::symlink_metadata(&payload).unwrap());
+    let evidence_identity = FileIdentity::from_metadata(&fs::symlink_metadata(&evidence).unwrap());
+    let error = CleanupPlan::new(vec![
+        CleanupEntry {
+            path: ReservedPath::Payload,
+            expected_type: ExpectedLeaf::Directory,
+            expected_identity: payload_identity,
+            ownership: OwnershipEvidence::Promoted,
+        },
+        CleanupEntry {
+            path: ReservedPath::EvidenceVersion(VersionComponent::new("1.0.0").unwrap()),
+            expected_type: ExpectedLeaf::Directory,
+            expected_identity: evidence_identity,
+            ownership: OwnershipEvidence::Published,
+        },
+    ])
+    .unwrap()
+    .finish_error(
+        ReservedReleaseBoundary::new(&repo.root),
         Error::new("controlled failure"),
-        &payload,
-        &evidence,
-        &[owned],
     );
     assert_eq!(error.to_string(), "controlled failure");
     assert!(!payload.exists());
@@ -356,17 +411,29 @@ fn controlled_rollback_removes_only_owned_payload_and_evidence() {
 
 #[test]
 fn controlled_rollback_reports_exact_residue() {
-    let temp = tempfile::tempdir().unwrap();
-    let payload = temp.path().join("dist/rust");
+    let repo = fixture();
+    let payload = repo.root.path().join("dist/rust");
     fs::create_dir_all(&payload).unwrap();
-    fs::set_permissions(payload.parent().unwrap(), fs::Permissions::from_mode(0o555)).unwrap();
-    let evidence = temp.path().join("dist/rust-evidence/1.0.0");
-    let error = rollback_error(Error::new("controlled failure"), &payload, &evidence, &[]);
-    fs::set_permissions(payload.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(payload.join("owned"), b"owned").unwrap();
+    fs::set_permissions(&payload, fs::Permissions::from_mode(0o555)).unwrap();
+    let identity = FileIdentity::from_metadata(&fs::symlink_metadata(&payload).unwrap());
+    let error = CleanupPlan::new(vec![CleanupEntry {
+        path: ReservedPath::Payload,
+        expected_type: ExpectedLeaf::Directory,
+        expected_identity: identity,
+        ownership: OwnershipEvidence::Promoted,
+    }])
+    .unwrap()
+    .finish_error(
+        ReservedReleaseBoundary::new(&repo.root),
+        Error::new("controlled failure"),
+    );
+    assert!(error.to_string().starts_with("controlled failure\n"));
+    assert!(error.to_string().contains("residual=[dist/.rust."));
     assert!(
-        error
+        !error
             .to_string()
-            .contains(&format!("residue at {}", payload.display()))
+            .contains(repo.root.path().to_str().unwrap())
     );
     assert!(error.to_string().contains("repair:"));
 }
@@ -516,7 +583,7 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn process_bin(
+pub(super) fn process_bin(
     cargo_body: &str,
     podman_body: Option<&str>,
 ) -> (tempfile::TempDir, ProcessEnvironment) {
@@ -591,7 +658,7 @@ pub(super) fn current_time() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-const CARGO_DENY_ASSERTIONS: &str = r#"#!/bin/sh
+pub(super) const CARGO_DENY_ASSERTIONS: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$PWD/cargo-deny-argv"
 case " $* " in
   *" deny --locked --offline --config "*" check licenses bans sources "*) ;;
@@ -985,6 +1052,7 @@ fn finalize_candidate_rolls_back_post_promotion_image_recheck_failure() {
         version: "1.0.0",
         deb: &deb,
         rpm: &rpm,
+        baseline_executable: staged_baseline(&staging),
         cohort: &cohort,
         images: &images,
         engine: ContainerEngine::Podman,
@@ -994,8 +1062,7 @@ fn finalize_candidate_rolls_back_post_promotion_image_recheck_failure() {
         Ok(_) => panic!("post-promotion image drift was accepted"),
         Err(error) => error,
     };
-    let error =
-        finish_candidate_staging::<()>(&repo.root, "1.0.0", &staging.root, Err(error)).unwrap_err();
+    let error = finish_candidate_staging_owned::<()>(&repo.root, &staging, Err(error)).unwrap_err();
     assert!(error.to_string().contains("image"));
     assert!(!error.to_string().contains("candidate-proven"));
     assert!(!staging.root.exists());
@@ -1049,6 +1116,7 @@ fn finalize_candidate_rolls_back_post_promotion_ledger_write_failure() {
         version: "1.0.0",
         deb: &deb,
         rpm: &rpm,
+        baseline_executable: staged_baseline(&staging),
         cohort: &cohort,
         images: &images,
         engine: ContainerEngine::Podman,
@@ -1059,8 +1127,7 @@ fn finalize_candidate_rolls_back_post_promotion_ledger_write_failure() {
         Ok(_) => panic!("read-only ledger directory was accepted"),
         Err(error) => error,
     };
-    let error =
-        finish_candidate_staging::<()>(&repo.root, "1.0.0", &staging.root, Err(error)).unwrap_err();
+    let error = finish_candidate_staging_owned::<()>(&repo.root, &staging, Err(error)).unwrap_err();
     assert!(!error.to_string().contains("candidate-proven"));
     assert!(!repo.root.path().join("dist/rust").exists());
     assert!(!repo.root.path().join("dist/rust-evidence/1.0.0").exists());
@@ -1119,6 +1186,7 @@ fn finalize_candidate_rolls_back_promoted_classification_failure() {
         version: "1.0.0",
         deb: &deb,
         rpm: &rpm,
+        baseline_executable: staged_baseline(&staging),
         cohort: &cohort,
         images: &images,
         engine: ContainerEngine::Podman,
@@ -1129,8 +1197,7 @@ fn finalize_candidate_rolls_back_promoted_classification_failure() {
         Ok(_) => panic!("promoted checksum corruption was accepted"),
         Err(error) => error,
     };
-    let error =
-        finish_candidate_staging::<()>(&repo.root, "1.0.0", &staging.root, Err(error)).unwrap_err();
+    let error = finish_candidate_staging_owned::<()>(&repo.root, &staging, Err(error)).unwrap_err();
     assert!(!error.to_string().contains("candidate-proven"));
     assert!(!repo.root.path().join("dist/rust").exists());
     assert!(!repo.root.path().join("dist/rust-evidence/1.0.0").exists());
@@ -1264,6 +1331,7 @@ esac
             version: "1.0.0",
             deb: &deb,
             rpm: &rpm,
+            baseline_executable: staged_baseline(staging),
             cohort: &cohort,
             images: &images,
             engine: ContainerEngine::Podman,
@@ -1975,7 +2043,7 @@ fn lane_evidence_rejects_stale_swapped_crosswired_and_tar_mismatch() {
         serde_json::to_vec(&deb).unwrap(),
     )
     .unwrap();
-    assert!(reconcile_lanes(&deb, &rpm, &staging.deb_lane, &staging.rpm_lane).is_err());
+    assert!(reconcile_lanes(&deb, &rpm, &staging.deb_lane, &staging.rpm_lane, "1.0.0",).is_err());
 }
 
 #[test]

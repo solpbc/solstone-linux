@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
@@ -37,7 +37,7 @@ pub const MANIFEST_OK_MESSAGE: &str =
 pub const RELEASE_DIR_OK_MESSAGE: &str =
     "Release directory verified as a complete five-file candidate.";
 pub const LEDGER_SCHEMA_SHA256: &str =
-    "c93e189b2e7bc1c65d38f52f924c74a101a4b3f39acbe73ba626b4f59e180533";
+    "4b387f19d8018752c6d016a4c0c74343ed80d2b64a3ff9480aa75b04fa66882d";
 pub const PROOF_SCHEMA_SHA256: &str =
     "3009eab983eea832961220406f19c7459ed1db7fffc352af6ffaf664f9cd7dcf";
 
@@ -203,8 +203,30 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+fn same_file_identity(metadata: &fs::Metadata, identity: FileIdentity) -> bool {
+    metadata.dev() == identity.device && metadata.ino() == identity.inode
+}
+
 #[derive(Clone, Debug)]
-pub struct RepoRoot(PathBuf);
+pub struct RepoRoot {
+    path: PathBuf,
+    identity: FileIdentity,
+}
 
 impl RepoRoot {
     pub fn resolve() -> Result<Self> {
@@ -243,12 +265,638 @@ impl RepoRoot {
                 "workspace layout mismatch: expected release workspace members, actual incomplete",
             ));
         }
-        Ok(Self(root))
+        let metadata = fs::symlink_metadata(&root).map_err(display_error)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(Error::new(
+                "repository root mismatch: expected no-follow directory, actual other",
+            ));
+        }
+        Ok(Self {
+            path: root,
+            identity: FileIdentity::from_metadata(&metadata),
+        })
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct VersionComponent(String);
+
+impl VersionComponent {
+    pub(crate) fn new(value: &str) -> Result<Self> {
+        validate_version(value)?;
+        portable_path_component(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TransactionComponent(String);
+
+impl TransactionComponent {
+    pub(crate) fn new(value: &str) -> Result<Self> {
+        portable_path_component(value)?;
+        if value.is_empty()
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(Error::new(
+                "candidate transaction mismatch: expected portable identifier, actual invalid",
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ProofId(String);
+
+impl ProofId {
+    pub(crate) fn new(value: &str) -> Result<Self> {
+        proof_spec(value)?;
+        portable_path_component(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ReservedPath {
+    Dist,
+    Payload,
+    EvidenceParent,
+    EvidenceVersion(VersionComponent),
+    EvidenceLedger(VersionComponent),
+    Lock,
+    StagingParent,
+    StagingInvocation(TransactionComponent),
+    StagingContext(TransactionComponent),
+    StagingDebLane(TransactionComponent),
+    StagingRpmLane(TransactionComponent),
+    StagingAdvisoryDb(TransactionComponent),
+    StagingPayload(TransactionComponent),
+    Proofs(VersionComponent),
+    Proof(VersionComponent, ProofId),
+    ProofAttempt(VersionComponent, ProofId, TransactionComponent),
+    ProofAttemptOutput(VersionComponent, ProofId, TransactionComponent),
+    Quarantine(Box<ReservedPath>, TransactionComponent),
+}
+
+impl ReservedPath {
+    pub(crate) fn components(&self) -> Vec<OsString> {
+        let fixed = |items: &[&str]| items.iter().map(OsString::from).collect();
+        match self {
+            Self::Dist => fixed(&["dist"]),
+            Self::Payload => fixed(&["dist", "rust"]),
+            Self::EvidenceParent => fixed(&["dist", "rust-evidence"]),
+            Self::EvidenceVersion(version) => {
+                let mut value = fixed(&["dist", "rust-evidence"]);
+                value.push((&version.0).into());
+                value
+            }
+            Self::EvidenceLedger(version) => {
+                let mut value = Self::EvidenceVersion(version.clone()).components();
+                value.push("ledger.json".into());
+                value
+            }
+            Self::Lock => fixed(&["dist", ".rust-release-candidate.lock"]),
+            Self::StagingParent => fixed(&["dist", ".rust-release-candidate-staging"]),
+            Self::StagingInvocation(transaction) => {
+                let mut value = Self::StagingParent.components();
+                value.push((&transaction.0).into());
+                value
+            }
+            Self::StagingContext(transaction) => {
+                child(Self::StagingInvocation(transaction.clone()), "context")
+            }
+            Self::StagingDebLane(transaction) => {
+                child(Self::StagingInvocation(transaction.clone()), "lane-deb")
+            }
+            Self::StagingRpmLane(transaction) => {
+                child(Self::StagingInvocation(transaction.clone()), "lane-rpm")
+            }
+            Self::StagingAdvisoryDb(transaction) => {
+                child(Self::StagingInvocation(transaction.clone()), "advisory-db")
+            }
+            Self::StagingPayload(transaction) => {
+                child(Self::StagingInvocation(transaction.clone()), "payload")
+            }
+            Self::Proofs(version) => child(Self::EvidenceVersion(version.clone()), "proofs"),
+            Self::Proof(version, proof) => {
+                child(Self::Proofs(version.clone()), &format!("{}.json", proof.0))
+            }
+            Self::ProofAttempt(version, proof, transaction) => child(
+                Self::Proofs(version.clone()),
+                &format!(".{}.{}.attempt", proof.0, transaction.0),
+            ),
+            Self::ProofAttemptOutput(version, proof, transaction) => child(
+                Self::ProofAttempt(version.clone(), proof.clone(), transaction.clone()),
+                "proof.json",
+            ),
+            Self::Quarantine(path, transaction) => {
+                let mut value = path.components();
+                let name = value.pop().expect("reserved paths are nonempty");
+                value.push(
+                    format!(".{}.{}.quarantine", name.to_string_lossy(), transaction.0).into(),
+                );
+                value
+            }
+        }
+    }
+
+    pub(crate) fn relative(&self) -> PathBuf {
+        self.components().into_iter().collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cases(
+        version: VersionComponent,
+        transaction: TransactionComponent,
+    ) -> Vec<ReservedPathCase> {
+        let proof = ProofId::new("debian-amd64").expect("fixed proof ID");
+        let paths = vec![
+            Self::Dist,
+            Self::Payload,
+            Self::EvidenceParent,
+            Self::EvidenceVersion(version.clone()),
+            Self::EvidenceLedger(version.clone()),
+            Self::Lock,
+            Self::StagingParent,
+            Self::StagingInvocation(transaction.clone()),
+            Self::StagingContext(transaction.clone()),
+            Self::StagingDebLane(transaction.clone()),
+            Self::StagingRpmLane(transaction.clone()),
+            Self::StagingAdvisoryDb(transaction.clone()),
+            Self::StagingPayload(transaction.clone()),
+            Self::Proofs(version.clone()),
+            Self::Proof(version.clone(), proof.clone()),
+            Self::ProofAttempt(version.clone(), proof.clone(), transaction.clone()),
+            Self::ProofAttemptOutput(version, proof, transaction.clone()),
+            Self::Quarantine(Box::new(Self::Payload), transaction),
+        ];
+        paths
+            .into_iter()
+            .map(|path| {
+                let expected = match &path {
+                    Self::EvidenceLedger(_)
+                    | Self::Lock
+                    | Self::Proof(_, _)
+                    | Self::ProofAttemptOutput(_, _, _) => ExpectedLeaf::RegularFile,
+                    Self::Dist
+                    | Self::Payload
+                    | Self::EvidenceParent
+                    | Self::EvidenceVersion(_)
+                    | Self::StagingParent
+                    | Self::StagingInvocation(_)
+                    | Self::StagingContext(_)
+                    | Self::StagingDebLane(_)
+                    | Self::StagingRpmLane(_)
+                    | Self::StagingAdvisoryDb(_)
+                    | Self::StagingPayload(_)
+                    | Self::Proofs(_)
+                    | Self::ProofAttempt(_, _, _)
+                    | Self::Quarantine(_, _) => ExpectedLeaf::Directory,
+                };
+                ReservedPathCase { path, expected }
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ReservedPathCase {
+    pub(crate) path: ReservedPath,
+    pub(crate) expected: ExpectedLeaf,
+}
+
+fn child(parent: ReservedPath, name: &str) -> Vec<OsString> {
+    let mut value = parent.components();
+    value.push(name.into());
+    value
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExpectedLeaf {
+    Absent,
+    Directory,
+    RegularFile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataState {
+    Absent,
+    Present(FileIdentity, bool, bool),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedReservedPath {
+    pub(crate) relative: PathBuf,
+    pub(crate) absolute: PathBuf,
+    pub(crate) parent_identity: FileIdentity,
+    pub(crate) identity: Option<FileIdentity>,
+}
+
+pub(crate) struct ReservedReleaseBoundary<'a> {
+    root: &'a RepoRoot,
+}
+
+impl<'a> ReservedReleaseBoundary<'a> {
+    pub(crate) fn new(root: &'a RepoRoot) -> Self {
+        Self { root }
+    }
+
+    fn metadata(&self, path: &Path, relative: &Path) -> Result<MetadataState> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(MetadataState::Present(
+                FileIdentity::from_metadata(&metadata),
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(MetadataState::Absent),
+            Err(error) => Err(Error::new(format!(
+                "release boundary metadata mismatch: expected readable {}, actual {:?} error\nrepair: inspect only the named reserved path",
+                relative.display(),
+                error.kind()
+            ))),
+        }
+    }
+
+    fn resolve(
+        &self,
+        reserved: ReservedPath,
+        expected: ExpectedLeaf,
+    ) -> Result<ResolvedReservedPath> {
+        let root_metadata = fs::symlink_metadata(self.root.path()).map_err(display_error)?;
+        if !root_metadata.is_dir() || !same_file_identity(&root_metadata, self.root.identity) {
+            return Err(Error::new(
+                "release boundary anchor mismatch: expected original checkout directory, actual replaced",
+            ));
+        }
+        let components = reserved.components();
+        let relative: PathBuf = components.iter().collect();
+        let mut current = self.root.path().to_owned();
+        let mut parent_identity = self.root.identity;
+        for (index, component) in components.iter().enumerate() {
+            portable_path_component(&component.to_string_lossy())?;
+            let parent_before = fs::symlink_metadata(&current).map_err(display_error)?;
+            if !parent_before.is_dir() || !same_file_identity(&parent_before, parent_identity) {
+                return Err(boundary_type_error(
+                    &relative,
+                    "stable directory ancestor",
+                    "replaced",
+                    false,
+                ));
+            }
+            current.push(component);
+            let component_relative: PathBuf = components[..=index].iter().collect();
+            let state = self.metadata(&current, &component_relative)?;
+            let parent_after =
+                fs::symlink_metadata(current.parent().unwrap()).map_err(display_error)?;
+            if !same_file_identity(&parent_after, parent_identity) {
+                return Err(boundary_type_error(
+                    &relative,
+                    "stable directory ancestor",
+                    "replaced",
+                    false,
+                ));
+            }
+            let leaf = index + 1 == components.len();
+            match (leaf, state) {
+                (false, MetadataState::Present(identity, true, _)) => parent_identity = identity,
+                (false, MetadataState::Absent) => {
+                    return Err(boundary_type_error(
+                        &component_relative,
+                        "directory",
+                        "absent",
+                        false,
+                    ));
+                }
+                (false, _) => {
+                    return Err(boundary_type_error(
+                        &component_relative,
+                        "directory",
+                        "non-directory or symlink",
+                        false,
+                    ));
+                }
+                (true, MetadataState::Absent) if expected == ExpectedLeaf::Absent => {
+                    return Ok(ResolvedReservedPath {
+                        relative,
+                        absolute: current,
+                        parent_identity,
+                        identity: None,
+                    });
+                }
+                (true, MetadataState::Present(identity, true, _))
+                    if expected == ExpectedLeaf::Directory =>
+                {
+                    return Ok(ResolvedReservedPath {
+                        relative,
+                        absolute: current,
+                        parent_identity,
+                        identity: Some(identity),
+                    });
+                }
+                (true, MetadataState::Present(identity, _, true))
+                    if expected == ExpectedLeaf::RegularFile =>
+                {
+                    return Ok(ResolvedReservedPath {
+                        relative,
+                        absolute: current,
+                        parent_identity,
+                        identity: Some(identity),
+                    });
+                }
+                (true, MetadataState::Absent) => {
+                    return Err(boundary_type_error(
+                        &relative,
+                        leaf_name(expected),
+                        "absent",
+                        false,
+                    ));
+                }
+                (true, _) => {
+                    return Err(boundary_type_error(
+                        &relative,
+                        leaf_name(expected),
+                        "wrong type or symlink",
+                        false,
+                    ));
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    pub(crate) fn resolve_for_read(
+        &self,
+        path: ReservedPath,
+        leaf: ExpectedLeaf,
+    ) -> Result<ResolvedReservedPath> {
+        self.resolve(path, leaf)
+    }
+    pub(crate) fn resolve_for_create(
+        &self,
+        path: ReservedPath,
+        leaf: ExpectedLeaf,
+    ) -> Result<ResolvedReservedPath> {
+        self.resolve(path, leaf)
+    }
+    pub(crate) fn resolve_for_replace(
+        &self,
+        path: ReservedPath,
+        leaf: ExpectedLeaf,
+        expected: FileIdentity,
+    ) -> Result<ResolvedReservedPath> {
+        self.resolve_identity(path, leaf, expected)
+    }
+    pub(crate) fn resolve_for_delete(
+        &self,
+        path: ReservedPath,
+        leaf: ExpectedLeaf,
+        expected: FileIdentity,
+    ) -> Result<ResolvedReservedPath> {
+        self.resolve_identity(path, leaf, expected)
+    }
+
+    fn resolve_identity(
+        &self,
+        path: ReservedPath,
+        leaf: ExpectedLeaf,
+        expected: FileIdentity,
+    ) -> Result<ResolvedReservedPath> {
+        let resolved = self.resolve(path, leaf)?;
+        if resolved.identity != Some(expected) {
+            return Err(boundary_type_error(
+                &resolved.relative,
+                "owned identity",
+                "replaced",
+                false,
+            ));
+        }
+        Ok(resolved)
+    }
+
+    pub(crate) fn path(&self, path: ReservedPath) -> PathBuf {
+        self.root.path().join(path.relative())
+    }
+}
+
+fn leaf_name(expected: ExpectedLeaf) -> &'static str {
+    match expected {
+        ExpectedLeaf::Absent => "absent leaf",
+        ExpectedLeaf::Directory => "directory",
+        ExpectedLeaf::RegularFile => "regular file",
+    }
+}
+
+fn boundary_type_error(path: &Path, expected: &str, actual: &str, cleanup_begun: bool) -> Error {
+    Error::new(format!(
+        "release boundary {} mismatch: expected {expected}, actual {actual}; cleanup begun: {cleanup_begun}\nrepair: inspect only the named reserved path",
+        path.display()
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnershipEvidence {
+    Created,
+    Promoted,
+    Published,
+    RetainedCandidate,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CleanupEntry {
+    pub(crate) path: ReservedPath,
+    pub(crate) expected_type: ExpectedLeaf,
+    pub(crate) expected_identity: FileIdentity,
+    pub(crate) ownership: OwnershipEvidence,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CleanupReport {
+    pub(crate) attempted: Vec<ReservedPath>,
+    pub(crate) deleted: Vec<ReservedPath>,
+    pub(crate) preserved: Vec<ReservedPath>,
+    pub(crate) residual: Vec<ReservedPath>,
+}
+
+pub(crate) struct CleanupPlan {
+    entries: Vec<CleanupEntry>,
+    transaction: TransactionComponent,
+}
+
+pub(crate) struct ValidatedCleanupPlan<'a> {
+    boundary: ReservedReleaseBoundary<'a>,
+    entries: Vec<CleanupEntry>,
+    transaction: TransactionComponent,
+}
+
+impl CleanupPlan {
+    pub(crate) fn new(entries: Vec<CleanupEntry>) -> Result<Self> {
+        Ok(Self {
+            entries,
+            transaction: TransactionComponent::new(&transaction_id()?)?,
+        })
+    }
+
+    pub(crate) fn preflight<'a>(
+        self,
+        boundary: ReservedReleaseBoundary<'a>,
+    ) -> Result<ValidatedCleanupPlan<'a>> {
+        let mut names = BTreeSet::new();
+        for entry in &self.entries {
+            let relative = entry.path.relative();
+            if !names.insert(relative.clone()) {
+                return Err(boundary_type_error(
+                    &relative,
+                    "unique cleanup target",
+                    "duplicate",
+                    false,
+                ));
+            }
+            if names.iter().any(|other| {
+                other != &relative && (other.starts_with(&relative) || relative.starts_with(other))
+            }) {
+                return Err(boundary_type_error(
+                    &relative,
+                    "non-overlapping cleanup target",
+                    "ancestor or descendant overlap",
+                    false,
+                ));
+            }
+            let _ = entry.ownership;
+            boundary.resolve_for_delete(
+                entry.path.clone(),
+                entry.expected_type,
+                entry.expected_identity,
+            )?;
+        }
+        Ok(ValidatedCleanupPlan {
+            boundary,
+            entries: self.entries,
+            transaction: self.transaction,
+        })
+    }
+
+    pub(crate) fn finish_error(
+        self,
+        boundary: ReservedReleaseBoundary<'_>,
+        original: Error,
+    ) -> Error {
+        match self
+            .preflight(boundary)
+            .and_then(ValidatedCleanupPlan::execute)
+        {
+            Ok(_) => original,
+            Err(cleanup) => Error::new(format!("{original}\n{cleanup}")),
+        }
+    }
+}
+
+impl ValidatedCleanupPlan<'_> {
+    pub(crate) fn execute(self) -> Result<CleanupReport> {
+        self.execute_with(|_, _| Ok(()), |_, _| Ok(()))
+    }
+
+    pub(crate) fn execute_with(
+        self,
+        mut final_barrier: impl FnMut(&ReservedPath, &Path) -> Result<()>,
+        mut quarantine_barrier: impl FnMut(&ReservedPath, &Path) -> Result<()>,
+    ) -> Result<CleanupReport> {
+        let mut report = CleanupReport::default();
+        for (index, entry) in self.entries.iter().enumerate() {
+            report.attempted.push(entry.path.clone());
+            let mut residual_path = entry.path.clone();
+            let result = (|| {
+                let resolved = self.boundary.resolve_for_delete(
+                    entry.path.clone(),
+                    entry.expected_type,
+                    entry.expected_identity,
+                )?;
+                final_barrier(&entry.path, &resolved.absolute)?;
+                let resolved = self.boundary.resolve_for_delete(
+                    entry.path.clone(),
+                    entry.expected_type,
+                    entry.expected_identity,
+                )?;
+                let parent = fs::symlink_metadata(
+                    resolved
+                        .absolute
+                        .parent()
+                        .expect("reserved path has parent"),
+                )
+                .map_err(display_error)?;
+                if !same_file_identity(&parent, resolved.parent_identity) {
+                    return Err(boundary_type_error(
+                        &resolved.relative,
+                        "stable parent identity",
+                        "replaced",
+                        true,
+                    ));
+                }
+                let quarantine = ReservedPath::Quarantine(
+                    Box::new(entry.path.clone()),
+                    self.transaction.clone(),
+                );
+                let quarantine_path = self
+                    .boundary
+                    .resolve_for_create(quarantine.clone(), ExpectedLeaf::Absent)?
+                    .absolute;
+                // Safe std pathname APIs leave a transient rename exposure to a hostile
+                // privileged parent replacement; parent-FD syscalls are out of scope.
+                fs::rename(&resolved.absolute, &quarantine_path).map_err(display_error)?;
+                residual_path = quarantine.clone();
+                quarantine_barrier(&quarantine, &quarantine_path)?;
+                let quarantined = self.boundary.resolve_for_delete(
+                    quarantine.clone(),
+                    entry.expected_type,
+                    entry.expected_identity,
+                )?;
+                match entry.expected_type {
+                    ExpectedLeaf::Directory => {
+                        fs::remove_dir_all(&quarantined.absolute).map_err(display_error)?
+                    }
+                    ExpectedLeaf::RegularFile => {
+                        fs::remove_file(&quarantined.absolute).map_err(display_error)?
+                    }
+                    ExpectedLeaf::Absent => unreachable!("cleanup entries are present"),
+                }
+                report.deleted.push(entry.path.clone());
+                Ok(())
+            })();
+            if let Err(error) = result {
+                report.residual.push(residual_path);
+                report.preserved.extend(
+                    self.entries[index + 1..]
+                        .iter()
+                        .map(|item| item.path.clone()),
+                );
+                return Err(cleanup_error(error, &report));
+            }
+        }
+        Ok(report)
+    }
+}
+
+fn cleanup_error(error: Error, report: &CleanupReport) -> Error {
+    let names = |paths: &[ReservedPath]| {
+        paths
+            .iter()
+            .map(|path| path.relative().display().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    Error::new(format!(
+        "{error}\ncleanup incomplete: attempted=[{}]; deleted=[{}]; preserved=[{}]; residual=[{}]\nrepair: inspect only the preserved and residual reserved paths",
+        names(&report.attempted),
+        names(&report.deleted),
+        names(&report.preserved),
+        names(&report.residual)
+    ))
 }
 
 #[derive(Debug)]
@@ -260,9 +908,22 @@ pub struct CandidateLock {
 
 impl CandidateLock {
     pub fn acquire(root: &RepoRoot) -> Result<Self> {
-        let dist = root.path().join("dist");
-        fs::create_dir_all(&dist).map_err(display_error)?;
-        let path = dist.join(".rust-release-candidate.lock");
+        let boundary = ReservedReleaseBoundary::new(root);
+        let dist = boundary.path(ReservedPath::Dist);
+        match fs::symlink_metadata(&dist) {
+            Ok(_) => {
+                boundary.resolve_for_read(ReservedPath::Dist, ExpectedLeaf::Directory)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                boundary.resolve_for_create(ReservedPath::Dist, ExpectedLeaf::Absent)?;
+                fs::create_dir(&dist).map_err(display_error)?;
+                boundary.resolve_for_read(ReservedPath::Dist, ExpectedLeaf::Directory)?;
+            }
+            Err(error) => return Err(display_error(error)),
+        }
+        let path = boundary
+            .resolve_for_create(ReservedPath::Lock, ExpectedLeaf::Absent)?
+            .absolute;
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -331,57 +992,104 @@ pub struct StagingLayout {
     pub rpm_lane: PathBuf,
     pub advisory_db: PathBuf,
     pub payload: PathBuf,
+    pub(crate) transaction: Option<TransactionComponent>,
+    pub(crate) root_identity: FileIdentity,
 }
 
 impl StagingLayout {
     pub fn create(root: &RepoRoot, _lock: &CandidateLock) -> Result<Self> {
-        let transaction_id = transaction_id()?;
-        let staging = root
-            .path()
-            .join("dist/.rust-release-candidate-staging")
-            .join(transaction_id);
-        Self::create_owned(staging)
-    }
-
-    pub(crate) fn create_owned(staging: PathBuf) -> Result<Self> {
-        let parent = staging
-            .parent()
-            .ok_or_else(|| Error::new("candidate staging parent mismatch"))?;
-        fs::create_dir_all(parent).map_err(display_error)?;
+        let transaction = TransactionComponent::new(&transaction_id()?)?;
+        let boundary = ReservedReleaseBoundary::new(root);
+        let parent = boundary.path(ReservedPath::StagingParent);
+        if parent.symlink_metadata().is_ok() {
+            boundary.resolve_for_read(ReservedPath::StagingParent, ExpectedLeaf::Directory)?;
+        } else {
+            boundary.resolve_for_create(ReservedPath::StagingParent, ExpectedLeaf::Absent)?;
+            fs::create_dir(&parent).map_err(display_error)?;
+        }
+        let staging = boundary
+            .resolve_for_create(
+                ReservedPath::StagingInvocation(transaction.clone()),
+                ExpectedLeaf::Absent,
+            )?
+            .absolute;
         fs::create_dir(&staging).map_err(display_error)?;
-        Self::initialize_owned(staging)
+        let root_identity = boundary
+            .resolve_for_read(
+                ReservedPath::StagingInvocation(transaction.clone()),
+                ExpectedLeaf::Directory,
+            )?
+            .identity
+            .expect("present staging identity");
+        Self::initialize_reserved(root, staging, transaction, root_identity)
     }
 
-    pub(crate) fn initialize_owned(staging: PathBuf) -> Result<Self> {
+    pub(crate) fn initialize_reserved(
+        root: &RepoRoot,
+        staging: PathBuf,
+        transaction: TransactionComponent,
+        root_identity: FileIdentity,
+    ) -> Result<Self> {
+        let boundary = ReservedReleaseBoundary::new(root);
+        boundary.resolve_for_replace(
+            ReservedPath::StagingInvocation(transaction.clone()),
+            ExpectedLeaf::Directory,
+            root_identity,
+        )?;
         let layout = Self {
-            context: staging.join("context"),
-            deb_lane: staging.join("lane-deb"),
-            rpm_lane: staging.join("lane-rpm"),
-            advisory_db: staging.join("advisory-db"),
-            payload: staging.join("payload"),
-            root: staging.clone(),
+            context: boundary.path(ReservedPath::StagingContext(transaction.clone())),
+            deb_lane: boundary.path(ReservedPath::StagingDebLane(transaction.clone())),
+            rpm_lane: boundary.path(ReservedPath::StagingRpmLane(transaction.clone())),
+            advisory_db: boundary.path(ReservedPath::StagingAdvisoryDb(transaction.clone())),
+            payload: boundary.path(ReservedPath::StagingPayload(transaction.clone())),
+            root: staging,
+            transaction: Some(transaction.clone()),
+            root_identity,
         };
         let setup = (|| {
-            for directory in [
-                &layout.context,
-                &layout.deb_lane,
-                &layout.rpm_lane,
-                &layout.advisory_db,
-                &layout.payload,
+            for (reserved, directory) in [
+                (
+                    ReservedPath::StagingContext(transaction.clone()),
+                    &layout.context,
+                ),
+                (
+                    ReservedPath::StagingDebLane(transaction.clone()),
+                    &layout.deb_lane,
+                ),
+                (
+                    ReservedPath::StagingRpmLane(transaction.clone()),
+                    &layout.rpm_lane,
+                ),
+                (
+                    ReservedPath::StagingAdvisoryDb(transaction.clone()),
+                    &layout.advisory_db,
+                ),
+                (
+                    ReservedPath::StagingPayload(transaction.clone()),
+                    &layout.payload,
+                ),
             ] {
-                fs::create_dir_all(directory).map_err(display_error)?;
+                boundary.resolve_for_create(reserved, ExpectedLeaf::Absent)?;
+                fs::create_dir(directory).map_err(display_error)?;
             }
-            Ok(layout)
+            Ok(())
         })();
         match setup {
-            Ok(layout) => Ok(layout),
-            Err(primary) => match fs::remove_dir_all(&staging) {
-                Ok(()) => Err(primary),
-                Err(cleanup) => Err(Error::new(format!(
-                    "{primary}\nerror: candidate staging setup cleanup mismatch: expected owned root absent, actual residue\nrepair: remove {} after confirming no release-candidate process holds dist/.rust-release-candidate.lock: {cleanup}",
-                    staging.display()
-                ))),
-            },
+            Ok(()) => Ok(layout),
+            Err(primary) => {
+                let cleanup = CleanupPlan::new(vec![CleanupEntry {
+                    path: ReservedPath::StagingInvocation(transaction),
+                    expected_type: ExpectedLeaf::Directory,
+                    expected_identity: root_identity,
+                    ownership: OwnershipEvidence::Created,
+                }])
+                .and_then(|plan| plan.preflight(boundary))
+                .and_then(ValidatedCleanupPlan::execute);
+                match cleanup {
+                    Ok(_) => Err(primary),
+                    Err(cleanup) => Err(Error::new(format!("{primary}\n{cleanup}"))),
+                }
+            }
         }
     }
 }
@@ -1991,29 +2699,9 @@ fn ordered_exceptions(repo: &RepoRoot) -> Result<Vec<String>> {
 
 fn require_clean_tree(root: &Path, payload_root: &Path) -> Result<()> {
     let root = root.canonicalize().map_err(display_error)?;
-    let dist = root.join("dist").canonicalize().map_err(display_error)?;
-    let payload_root = if payload_root.symlink_metadata().is_ok() {
-        payload_root.canonicalize().map_err(display_error)?
-    } else {
-        let parent = payload_root
-            .parent()
-            .ok_or_else(|| Error::new("release payload parent mismatch"))?
-            .canonicalize()
-            .map_err(display_error)?;
-        parent.join(
-            payload_root
-                .file_name()
-                .ok_or_else(|| Error::new("release payload basename mismatch"))?,
-        )
-    };
-    if payload_root != dist && !payload_root.starts_with(&dist) {
-        return Err(Error::new(
-            "release payload root mismatch: expected repository dist path",
-        ));
-    }
     let ignored = Command::new("git")
         .args(["check-ignore", "--quiet", "--"])
-        .arg(&payload_root)
+        .arg(payload_root)
         .current_dir(&root)
         .status()
         .map_err(display_error)?;
@@ -2398,6 +3086,8 @@ fn display_error(error: impl std::fmt::Display) -> Error {
     Error::new(error.to_string())
 }
 
+#[cfg(test)]
+mod boundary_tests;
 #[cfg(test)]
 mod candidate_tests;
 #[cfg(test)]

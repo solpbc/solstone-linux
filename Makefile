@@ -95,7 +95,7 @@ check-rust-release-manifest: rust-preflight
 	@echo "Rust release manifest schema: 1"
 	@echo "Rust release manifest schema SHA-256: d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c"
 	@echo "Rust release candidate ledger schema: 1"
-	@echo "Rust release candidate ledger schema SHA-256: c93e189b2e7bc1c65d38f52f924c74a101a4b3f39acbe73ba626b4f59e180533"
+	@echo "Rust release candidate ledger schema SHA-256: 4b387f19d8018752c6d016a4c0c74343ed80d2b64a3ff9480aa75b04fa66882d"
 	@echo "Rust release candidate proof schema: 1"
 	@echo "Rust release candidate proof schema SHA-256: 3009eab983eea832961220406f19c7459ed1db7fffc352af6ffaf664f9cd7dcf"
 	@manifest_set=$(if $(filter environment%,$(origin MANIFEST)),1,$(if $(findstring command line,$(origin MANIFEST)),1,0)); \
