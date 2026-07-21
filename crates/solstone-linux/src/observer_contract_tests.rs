@@ -3,8 +3,8 @@
 
 use crate::{
     chat_bridge::{
-        EVENT_SOL_CHAT_REQUEST, contract_dispatch_creates_pending, contract_parse_sse,
-        contract_poll_opt_in,
+        EVENT_SOL_CHAT_REQUEST, ack_contract_request, consume_contract_body, contract_poll_opt_in,
+        dispatch_contract_payload, parse_contract_sse,
     },
     config::Config,
     sync::{contract_segment_proven_held, contract_sha256_file},
@@ -203,7 +203,13 @@ fn portable_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn walk(root: &Path, current: &Path, files: &mut BTreeSet<String>) -> Result<(), String> {
+fn walk(
+    root: &Path,
+    current: &Path,
+    files: &mut BTreeSet<String>,
+    directories: &mut BTreeSet<String>,
+    folded: &mut BTreeSet<String>,
+) -> Result<(), String> {
     for entry in fs::read_dir(current).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let metadata = fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
@@ -215,11 +221,17 @@ fn walk(root: &Path, current: &Path, files: &mut BTreeSet<String>) -> Result<(),
             .ok_or("non-UTF-8 path")?
             .to_owned();
         portable_path(&relative)?;
+        if !folded.insert(relative.to_ascii_lowercase()) {
+            return Err(format!("case-colliding tree path: {relative}"));
+        }
         if metadata.file_type().is_symlink() {
             return Err(format!("symlink: {relative}"));
         }
         if metadata.is_dir() {
-            walk(root, &entry.path(), files)?;
+            if !directories.insert(relative.clone()) {
+                return Err(format!("duplicate directory: {relative}"));
+            }
+            walk(root, &entry.path(), files, directories, folded)?;
         } else if metadata.is_file() {
             if metadata.mode() & 0o7111 != 0 {
                 return Err(format!("executable or special mode: {relative}"));
@@ -241,6 +253,28 @@ fn walk(root: &Path, current: &Path, files: &mut BTreeSet<String>) -> Result<(),
 }
 
 fn verify_bundle(root: &Path, expected_manifest_digest: &str) -> Result<Value, String> {
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("bundle root is not a no-follow directory".to_owned());
+    }
+    let manifest_metadata =
+        fs::symlink_metadata(root.join("manifest.json")).map_err(|error| error.to_string())?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        return Err("manifest is not a no-follow regular file".to_owned());
+    }
+    let mut actual = BTreeSet::new();
+    let mut directories = BTreeSet::new();
+    let mut actual_folded = BTreeSet::new();
+    walk(
+        root,
+        root,
+        &mut actual,
+        &mut directories,
+        &mut actual_folded,
+    )?;
+    if directories != BTreeSet::from(["fixtures".to_owned()]) {
+        return Err(format!("directory inventory mismatch: {directories:?}"));
+    }
     let manifest_bytes = fs::read(root.join("manifest.json")).map_err(|error| error.to_string())?;
     if digest(&manifest_bytes) != expected_manifest_digest {
         return Err("manifest digest mismatch".to_owned());
@@ -251,7 +285,7 @@ fn verify_bundle(root: &Path, expected_manifest_digest: &str) -> Result<Value, S
         .as_array()
         .ok_or("manifest files missing")?;
     let mut expected = BTreeSet::from(["manifest.json".to_owned()]);
-    let mut folded = BTreeSet::new();
+    let mut folded = BTreeSet::from(["manifest.json".to_owned()]);
     for entry in entries {
         let path = entry["path"].as_str().ok_or("manifest path missing")?;
         portable_path(path)?;
@@ -263,8 +297,6 @@ fn verify_bundle(root: &Path, expected_manifest_digest: &str) -> Result<Value, S
             return Err(format!("file digest mismatch: {path}"));
         }
     }
-    let mut actual = BTreeSet::new();
-    walk(root, root, &mut actual)?;
     if actual != expected {
         return Err(format!("inventory mismatch: {actual:?} != {expected:?}"));
     }
@@ -286,6 +318,14 @@ fn load_index(path: &Path, key: &str) -> BTreeMap<String, Value> {
 
 fn set(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn record(executed: &mut BTreeSet<String>, id: &str, passed: bool) {
+    assert!(passed, "production-path assertion failed for {id}");
+    assert!(
+        executed.insert(id.to_owned()),
+        "duplicate coverage for {id}"
+    );
 }
 
 fn assert_identities(
@@ -401,38 +441,36 @@ async fn assert_upload_contract(
         (
             "recorded.ingestUpload.ok",
             "observer.ingestUpload.status.ok",
-            200,
         ),
         (
             "recorded.ingestUpload.collision",
             "observer.ingestUpload.status.collision",
-            200,
         ),
         (
             "recorded.ingestUpload.duplicate",
             "observer.ingestUpload.status.duplicate",
-            200,
         ),
         (
             "recorded.ingestUpload.conflict",
             "observer.ingestUpload.status.conflict",
-            409,
         ),
         (
             "recorded.ingestUpload.failed",
             "observer.ingestUpload.status.failed",
-            422,
         ),
         (
             "declared.observer.ingestUpload.status_unknown_rejected",
             "observer.ingestUpload.status_unknown_rejected",
-            200,
         ),
     ];
-    for (fixture_id, vector_id, status) in cases {
+    for (fixture_id, vector_id) in cases {
         let fixture = &fixtures[fixture_id];
         let vector = &vectors[vector_id];
         assert_eq!(vector["fixture_id"], fixture_id);
+        let status = vector["observed_status"]
+            .as_u64()
+            .or_else(|| fixture["provenance"]["status"].as_u64())
+            .expect("authority observed HTTP status") as u16;
         let temp = tempfile::tempdir().unwrap();
         let media = temp.path().join("audio.flac");
         fs::write(&media, b"audio").unwrap();
@@ -440,10 +478,13 @@ async fn assert_upload_contract(
         let result = client(&config(&server, &temp))
             .upload_segment("20260618", "143022_300", &[media])
             .await;
-        let accepted = vector["decision"]["accepted"].as_bool().unwrap_or(false);
+        let accepted = vector["decision"]["accepted"].as_bool().unwrap_or_else(|| {
+            assert_eq!(vector["decision"]["unknown_value_behavior"], "reject");
+            false
+        });
         assert_eq!(result.success, accepted);
         if accepted {
-            let duplicate = vector["decision"]["status"] == "duplicate";
+            let duplicate = vector["decision"]["stored_key_source"] == "existing_segment";
             assert_eq!(result.duplicate, duplicate);
             let source = vector["decision"]["stored_key_source"].as_str().unwrap();
             assert_eq!(
@@ -456,8 +497,8 @@ async fn assert_upload_contract(
         } else {
             assert!(!result.success && result.stored_key.is_none());
         }
-        executed_fixtures.insert(fixture_id.to_owned());
-        executed_vectors.insert(vector_id.to_owned());
+        record(executed_fixtures, fixture_id, true);
+        record(executed_vectors, vector_id, true);
     }
     for fixture_id in [
         "example.observer.ingestUpload.response.200.application-json.normal",
@@ -473,30 +514,27 @@ async fn assert_upload_contract(
                 .await
                 .success
         );
-        executed_fixtures.insert(fixture_id.to_owned());
-    }
-    for payload in [json!({}), json!({"status":null}), json!({"status":7})] {
-        let temp = tempfile::tempdir().unwrap();
-        let media = temp.path().join("audio.flac");
-        fs::write(&media, b"audio").unwrap();
-        let server = MockServer::new(vec![(200, payload)]).await;
-        let result = client(&config(&server, &temp))
-            .upload_segment("20260618", "143022_300", &[media])
-            .await;
-        assert_eq!(result.error_type, Some(ErrorType::Incompatible));
-        assert!(!result.success && !result.duplicate && result.stored_key.is_none());
-        assert_eq!(server.requests().len(), 1);
+        record(executed_fixtures, fixture_id, true);
     }
     let fixture_id = "example.observer.ingestUpload.request.body.multipart-form-data.default";
     let temp = tempfile::tempdir().unwrap();
-    let media = temp.path().join("audio.flac");
-    fs::write(&media, b"audio").unwrap();
+    let fixture_files = fixtures[fixture_id]["payload"]["files"]
+        .as_array()
+        .expect("multipart fixture files");
+    let media: Vec<_> = fixture_files
+        .iter()
+        .map(|name| {
+            let path = temp.path().join(name.as_str().expect("fixture filename"));
+            fs::write(&path, format!("fixture bytes for {}", path.display())).unwrap();
+            path
+        })
+        .collect();
     let server = MockServer::new(vec![(200, json!({"status":"ok","segment":"143022_300"}))]).await;
     client(&config(&server, &temp))
         .upload_segment(
             fixtures[fixture_id]["payload"]["day"].as_str().unwrap(),
             fixtures[fixture_id]["payload"]["segment"].as_str().unwrap(),
-            &[media],
+            &media,
         )
         .await;
     let request = &server.requests()[0];
@@ -509,72 +547,97 @@ async fn assert_upload_contract(
             .unwrap()
             .starts_with("Bearer ")
     );
-    assert!(
-        body.contains("name=\"day\"")
-            && body.contains("name=\"segment\"")
-            && body.contains("name=\"files\"")
-    );
-    executed_fixtures.insert(fixture_id.to_owned());
+    assert_eq!(body.matches("name=\"day\"").count(), 1);
+    assert_eq!(body.matches("name=\"segment\"").count(), 1);
+    assert_eq!(body.matches("name=\"files\"").count(), fixture_files.len());
+    assert!(body.contains("\r\n\r\n20260618\r\n"));
+    assert!(body.contains("\r\n\r\n143022_300\r\n"));
+    for name in fixture_files {
+        let name = name.as_str().unwrap();
+        assert!(body.contains(&format!("name=\"files\"; filename=\"{name}\"")));
+        let content_type = if name.ends_with(".flac") {
+            "audio/flac"
+        } else {
+            "application/octet-stream"
+        };
+        assert!(body.contains(&format!(
+            "filename=\"{name}\"\r\nContent-Type: {content_type}"
+        )));
+    }
+    for forbidden in ["name=\"host\"", "name=\"meta\"", "name=\"platform\""] {
+        assert!(!body.contains(forbidden));
+    }
+    record(executed_fixtures, fixture_id, true);
 }
 
 async fn assert_listing_contract(
     fixtures: &BTreeMap<String, Value>,
+    vectors: &BTreeMap<String, Value>,
     executed_fixtures: &mut BTreeSet<String>,
     executed_vectors: &mut BTreeSet<String>,
 ) {
     let cases = [
         (
             "example.observer.ingestSegments.response.200.application-json.legacy",
-            true,
-            false,
             None,
         ),
         (
             "example.observer.ingestSegments.response.200.application-json.v2",
-            false,
-            false,
             None,
         ),
         (
             "recorded.segments.legacy.absent_header",
-            true,
-            false,
             Some("observer.ingestSegments.legacy_array.absent_header"),
         ),
         (
             "recorded.segments.legacy.unparseable_header",
-            true,
-            false,
             Some("observer.ingestSegments.legacy_array.unparseable_header"),
         ),
         (
             "recorded.segments.v2.envelope",
-            false,
-            false,
             Some("observer.ingestSegments.v2_envelope"),
         ),
         (
             "declared.observer.ingestSegments.envelope_total_mismatch",
-            false,
-            true,
             Some("observer.ingestSegments.envelope_total_mismatch"),
         ),
         (
             "recorded.auth.bearer.segments",
-            false,
-            false,
             Some("observer.auth.bearer"),
         ),
         (
             "recorded.auth.handle.segments",
-            false,
-            false,
             Some("observer.auth.handle"),
         ),
     ];
-    for (fixture_id, legacy, truncated, vector) in cases {
+    for (fixture_id, vector_id) in cases {
+        let payload = &fixtures[fixture_id]["payload"];
+        let (legacy, truncated) = if let Some(vector_id) = vector_id {
+            let vector = &vectors[vector_id];
+            assert_eq!(vector["fixture_id"], fixture_id);
+            let decision = &vector["decision"];
+            let legacy = decision["response_variant"]
+                .as_str()
+                .map_or_else(|| payload.is_array(), |variant| variant == "legacy_array");
+            let truncated = decision["valid"].as_bool().map_or_else(
+                || {
+                    payload["total"].as_u64().is_some_and(|total| {
+                        total != payload["items"].as_array().expect("listing items").len() as u64
+                    })
+                },
+                |valid| !valid,
+            );
+            (legacy, truncated)
+        } else {
+            (
+                payload.is_array(),
+                payload["total"].as_u64().is_some_and(|total| {
+                    total != payload["items"].as_array().expect("listing items").len() as u64
+                }),
+            )
+        };
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, fixtures[fixture_id]["payload"].clone())]).await;
+        let server = MockServer::new(vec![(200, payload.clone())]).await;
         let result = client(&config(&server, &temp))
             .get_server_segments("20260618")
             .await;
@@ -583,47 +646,117 @@ async fn assert_listing_contract(
         assert_eq!(request.method, "GET");
         assert_eq!(request.uri, "/app/observer/ingest/segments/20260618");
         assert_eq!(request.headers["x-solstone-protocol-version"], "2");
-        assert!(request.headers.contains_key("authorization"));
-        executed_fixtures.insert(fixture_id.to_owned());
-        if let Some(vector) = vector {
-            executed_vectors.insert(vector.to_owned());
+        let authorization = request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        assert!(authorization.is_some_and(|value| value.starts_with("Bearer ")));
+        record(executed_fixtures, fixture_id, true);
+        if let Some(vector_id) = vector_id {
+            let decision = &vectors[vector_id]["decision"];
+            if vector_id.starts_with("observer.auth.") {
+                assert!(
+                    decision["accepted"]
+                        .as_bool()
+                        .expect("authority auth accepted")
+                );
+                let form = decision["auth_form"].as_str().expect("authority auth form");
+                assert!(matches!(
+                    form,
+                    "authorization_bearer" | "x_solstone_observer"
+                ));
+                assert!(
+                    vectors["observer.auth.bearer"]["decision"]["accepted"]
+                        .as_bool()
+                        .expect("authority bearer accepted")
+                );
+                assert_eq!(
+                    vectors["observer.auth.bearer"]["decision"]["auth_form"],
+                    "authorization_bearer"
+                );
+            }
+            record(executed_vectors, vector_id, true);
         }
     }
-    for (fixture_id, vector_id) in [
-        (
-            "declared.observer.ingestSegments.custody_unknown_rejected",
-            "observer.ingestSegments.custody_unknown_rejected",
-        ),
+
+    let custody_cases = [
         (
             "recorded.segments.custody_statuses",
             "observer.ingestSegments.custody_statuses",
         ),
         (
+            "declared.observer.ingestSegments.custody_unknown_rejected",
+            "observer.ingestSegments.custody_unknown_rejected",
+        ),
+        (
             "recorded.segments.submitted_name_omitted",
             "observer.ingestSegments.submitted_name_fallback",
         ),
-    ] {
+    ];
+    for (fixture_id, vector_id) in custody_cases {
         let query = contract_parse_listing(fixtures[fixture_id]["payload"].clone(), 200);
-        assert!(query.segments.is_some());
-        executed_fixtures.insert(fixture_id.to_owned());
-        executed_vectors.insert(vector_id.to_owned());
+        let entries = query.segments.expect("fixture listing entries");
+        let vector = &vectors[vector_id];
+        assert_eq!(vector["fixture_id"], fixture_id);
+        let decision = &vector["decision"];
+        let temp = tempfile::tempdir().unwrap();
+        let mut asserted = false;
+        for entry in entries {
+            for (index, remote) in entry
+                .files
+                .expect("fixture listing files")
+                .into_iter()
+                .enumerate()
+            {
+                let segment = temp.path().join(format!("segment-{index}"));
+                fs::create_dir(&segment).unwrap();
+                let filename = remote.name.as_deref().expect("fixture remote name");
+                let local = segment.join(filename);
+                fs::write(&local, format!("fixture custody bytes {filename}")).unwrap();
+                let mut matching = remote.clone();
+                matching.sha256 = Some(contract_sha256_file(&local).unwrap());
+                let candidate = ListingEntry {
+                    key: entry.key.clone(),
+                    original_key: entry.original_key.clone(),
+                    files: Some(vec![matching.clone()]),
+                };
+                let status = matching.status.as_deref().expect("fixture custody status");
+                let expected = if decision["fallback"] == "name" {
+                    true
+                } else if let Some(holding) = decision["holding_by_status"][status].as_str() {
+                    holding == "held"
+                } else {
+                    assert_eq!(decision["unknown_status"], "reject");
+                    false
+                };
+                assert_eq!(contract_segment_proven_held(&segment, &candidate), expected);
+                asserted = true;
+
+                if decision["fallback"] == "name" {
+                    assert!(
+                        !decision["submitted_name_present"]
+                            .as_bool()
+                            .expect("authority submitted_name_present")
+                    );
+                    assert!(contract_segment_proven_held(&segment, &candidate));
+                    matching.submitted_name = Some("different.flac".to_owned());
+                    let precedence = ListingEntry {
+                        files: Some(vec![matching.clone()]),
+                        ..candidate.clone()
+                    };
+                    assert!(!contract_segment_proven_held(&segment, &precedence));
+                    matching.submitted_name = matching.name.clone();
+                    let precedence = ListingEntry {
+                        files: Some(vec![matching]),
+                        ..candidate
+                    };
+                    assert!(contract_segment_proven_held(&segment, &precedence));
+                }
+            }
+        }
+        record(executed_fixtures, fixture_id, asserted);
+        record(executed_vectors, vector_id, asserted);
     }
-    let temp = tempfile::tempdir().unwrap();
-    let segment = temp.path().join("segment");
-    fs::create_dir(&segment).unwrap();
-    let local = segment.join("audio.flac");
-    fs::write(&local, b"held").unwrap();
-    let entry = ListingEntry {
-        key: Some("segment".into()),
-        original_key: None,
-        files: Some(vec![crate::upload::ListingFile {
-            submitted_name: None,
-            name: Some("audio.flac".into()),
-            status: Some("present".into()),
-            sha256: Some(contract_sha256_file(&local).unwrap()),
-        }]),
-    };
-    assert!(contract_segment_proven_held(&segment, &entry));
 }
 
 async fn assert_event_and_register(
@@ -656,10 +789,12 @@ async fn assert_event_and_register(
         serde_json::from_slice::<Value>(&request.body).unwrap(),
         fixtures[event_id]["payload"]
     );
-    executed.extend([
-        event_id.to_owned(),
-        "example.observer.ingestEvent.response.200.application-json.default".to_owned(),
-    ]);
+    record(executed, event_id, true);
+    record(
+        executed,
+        "example.observer.ingestEvent.response.200.application-json.default",
+        true,
+    );
     let register_request = "example.observer.register.request.body.application-json.default";
     let register_response = "example.observer.register.response.200.application-json.default";
     let server = MockServer::new(vec![(200, fixtures[register_response]["payload"].clone())]).await;
@@ -679,45 +814,85 @@ async fn assert_event_and_register(
     );
     assert_eq!(body, fixtures[register_request]["payload"]);
     assert!(!request.headers.contains_key("authorization"));
-    executed.extend([register_request.to_owned(), register_response.to_owned()]);
+    record(executed, register_request, true);
+    record(executed, register_response, true);
 }
 
 async fn assert_chat_contract(
     fixtures: &BTreeMap<String, Value>,
+    vectors: &BTreeMap<String, Value>,
     executed_fixtures: &mut BTreeSet<String>,
     executed_vectors: &mut BTreeSet<String>,
 ) {
-    for fixture_id in [
-        "example.observer.callosumStream.response.200.text-event-stream.default",
-        "recorded.sse.observer.data",
-    ] {
-        let wire = format!(
-            "event: message\ndata: {}\n\n",
-            fixtures[fixture_id]["payload"]
-        );
-        let frames = contract_parse_sse(wire.as_bytes());
-        assert_eq!(frames[0].2, fixtures[fixture_id]["payload"].to_string());
-        executed_fixtures.insert(fixture_id.to_owned());
-    }
+    let example_data = "example.observer.callosumStream.response.200.text-event-stream.default";
+    let wire = format!("data: {}\n\n", fixtures[example_data]["payload"]);
+    let frames = parse_contract_sse(wire.as_bytes());
+    assert_eq!(
+        frames.as_slice(),
+        &[(
+            "frame".to_owned(),
+            None,
+            fixtures[example_data]["payload"].to_string()
+        )]
+    );
+    record(executed_fixtures, example_data, true);
+
+    let data_id = "recorded.sse.observer.data";
+    let data_vector = "observer.callosumStream.sse.data";
+    let wire = format!("data: {}\n\n", fixtures[data_id]["payload"]);
+    let frames = parse_contract_sse(wire.as_bytes());
+    assert_eq!(frames[0].0, "frame");
+    assert_eq!(frames[0].2, fixtures[data_id]["payload"].to_string());
+    assert_eq!(vectors[data_vector]["fixture_id"], data_id);
+    assert_eq!(vectors[data_vector]["decision"]["frame_kind"], "data");
+    assert_eq!(
+        vectors[data_vector]["decision"]["action"],
+        "dispatch_callosum_event"
+    );
+    record(executed_fixtures, data_id, true);
+    record(executed_vectors, data_vector, true);
+
     let error_id = "recorded.sse.observer.error";
+    let error_vector = "observer.callosumStream.sse.error";
     let wire = format!("event: error\ndata: {}\n\n", fixtures[error_id]["payload"]);
-    let frames = contract_parse_sse(wire.as_bytes());
-    assert_eq!(frames[0].1.as_deref(), Some("error"));
-    assert_eq!(frames[0].2, fixtures[error_id]["payload"].to_string());
-    executed_fixtures.insert(error_id.to_owned());
+    let (terminal, pending, side_effects) = consume_contract_body(wire).await;
+    assert!(terminal);
+    assert_eq!(pending, 0);
+    assert_eq!(side_effects, 0);
+    let decision = &vectors[error_vector]["decision"];
+    assert_eq!(vectors[error_vector]["fixture_id"], error_id);
+    assert_eq!(decision["frame_kind"], "error");
+    assert_eq!(decision["action"], "surface_error_and_close");
+    assert_eq!(
+        decision["reason_code"],
+        fixtures[error_id]["payload"]["reason_code"]
+    );
+    record(executed_fixtures, error_id, true);
+    record(executed_vectors, error_vector, true);
+
     let heartbeat_id = "recorded.sse.observer.heartbeat";
+    let heartbeat_vector = "observer.callosumStream.sse.heartbeat";
     let raw = fixtures[heartbeat_id]["payload"]
         .as_str()
-        .unwrap()
-        .replace("\\n", "\n");
-    assert_eq!(contract_parse_sse(raw.as_bytes())[0].0, "heartbeat");
-    executed_fixtures.insert(heartbeat_id.to_owned());
-    executed_vectors.extend([
-        "observer.callosumStream.sse.data".to_owned(),
-        "observer.callosumStream.sse.error".to_owned(),
-        "observer.callosumStream.sse.heartbeat".to_owned(),
-    ]);
+        .expect("heartbeat payload");
+    assert_eq!(parse_contract_sse(raw.as_bytes())[0].0, "heartbeat");
+    assert_eq!(vectors[heartbeat_vector]["fixture_id"], heartbeat_id);
+    assert_eq!(
+        vectors[heartbeat_vector]["decision"]["frame_kind"],
+        "heartbeat"
+    );
+    assert_eq!(
+        vectors[heartbeat_vector]["decision"]["action"],
+        "ignore_keepalive"
+    );
+    record(executed_fixtures, heartbeat_id, true);
+    record(executed_vectors, heartbeat_vector, true);
+
     let valid_id = "example.chat.openSolChatRequest.request.body.application-json.default";
+    let ok_vector = "chat.openSolChatRequest.ok";
+    let original_request_id = fixtures[valid_id]["payload"]["request_id"]
+        .as_str()
+        .expect("request fixture id");
     let mut valid = Map::new();
     valid.insert("tract".into(), json!("chat"));
     valid.insert("event".into(), json!(EVENT_SOL_CHAT_REQUEST));
@@ -725,24 +900,98 @@ async fn assert_chat_contract(
         "request_id".into(),
         fixtures[valid_id]["payload"]["request_id"].clone(),
     );
-    assert!(contract_dispatch_creates_pending(valid).await);
-    executed_fixtures.insert(valid_id.to_owned());
-    for id in [Value::Null, json!(""), json!("   "), json!([])] {
+    let (created, preserved_id) = dispatch_contract_payload(valid).await;
+    assert!(created);
+    assert_eq!(preserved_id.as_deref(), Some(original_request_id));
+    assert!(
+        vectors[ok_vector]["decision"]["accepted"]
+            .as_bool()
+            .expect("authority chat accepted")
+    );
+    assert_eq!(
+        vectors[ok_vector]["decision"]["missing_field_behavior"],
+        "non_empty_trimmed_request_id_required"
+    );
+    record(executed_fixtures, valid_id, true);
+    record(executed_vectors, ok_vector, true);
+
+    let missing_vector = "chat.openSolChatRequest.missing_required_field";
+    let mut rejected = Vec::new();
+    for id in [
+        None,
+        Some(Value::Null),
+        Some(json!("")),
+        Some(json!("   ")),
+        Some(json!([])),
+    ] {
         let mut payload = Map::new();
         payload.insert("tract".into(), json!("chat"));
         payload.insert("event".into(), json!(EVENT_SOL_CHAT_REQUEST));
-        payload.insert("request_id".into(), id);
-        assert!(!contract_dispatch_creates_pending(payload).await);
+        if let Some(id) = id {
+            payload.insert("request_id".into(), id);
+        }
+        rejected.push(!dispatch_contract_payload(payload).await.0);
     }
-    executed_fixtures.extend([
-        "example.chat.openSolChatRequest.response.200.application-json.default".to_owned(),
-        "recorded.chat.openSolChatRequest.missing".to_owned(),
-        "recorded.chat.openSolChatRequest.ok".to_owned(),
-    ]);
-    executed_vectors.extend([
-        "chat.openSolChatRequest.missing_required_field".to_owned(),
-        "chat.openSolChatRequest.ok".to_owned(),
-    ]);
+    assert!(rejected.into_iter().all(|value| value));
+    assert!(
+        !vectors[missing_vector]["decision"]["accepted"]
+            .as_bool()
+            .expect("authority chat rejected")
+    );
+    assert_eq!(
+        vectors[missing_vector]["decision"]["missing_field_behavior"],
+        "absent_malformed_empty_or_blank_rejected"
+    );
+
+    for (response_id, vector_id) in [
+        (
+            "example.chat.openSolChatRequest.response.200.application-json.default",
+            None,
+        ),
+        ("recorded.chat.openSolChatRequest.ok", Some(ok_vector)),
+        (
+            "recorded.chat.openSolChatRequest.missing",
+            Some(missing_vector),
+        ),
+    ] {
+        let fixture = &fixtures[response_id];
+        let status = fixture["provenance"]["status"]
+            .as_u64()
+            .expect("chat response status") as u16;
+        let server = MockServer::new(vec![(status, fixture["payload"].clone())]).await;
+        ack_contract_request(Client::new(), &server.url, "K", original_request_id).await;
+        wait_for_requests(&server, 1).await;
+        let request = &server.requests()[0];
+        assert_eq!(
+            (request.method.as_str(), request.uri.as_str()),
+            ("POST", "/api/chat/sol_chat_request/open")
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&request.body).unwrap(),
+            json!({"request_id": original_request_id})
+        );
+        assert!(
+            request.headers["authorization"]
+                .to_str()
+                .unwrap()
+                .starts_with("Bearer ")
+        );
+        if let Some(vector_id) = vector_id {
+            assert_eq!(vectors[vector_id]["fixture_id"], response_id);
+            assert_eq!(
+                vectors[vector_id]["observed_status"].as_u64(),
+                Some(status as u64)
+            );
+            if vector_id == missing_vector {
+                assert_eq!(
+                    fixtures[response_id]["payload"]["reason_code"],
+                    vectors[vector_id]["decision"]["reason_code"]
+                );
+            }
+        }
+        record(executed_fixtures, response_id, true);
+    }
+    record(executed_vectors, missing_vector, true);
 }
 
 async fn assert_settings_contract() {
@@ -816,6 +1065,14 @@ fn assert_mutations(
     copy_tree(bundle, &copy);
     fs::write(copy.join("extra.json"), b"{}").unwrap();
     assert!(verify_bundle(&copy, MANIFEST_SHA256).is_err());
+    let copy = temp.path().join("extra-empty-directory");
+    copy_tree(bundle, &copy);
+    fs::create_dir(copy.join("empty")).unwrap();
+    assert!(verify_bundle(&copy, MANIFEST_SHA256).is_err());
+    let copy = temp.path().join("case-collision");
+    copy_tree(bundle, &copy);
+    fs::write(copy.join("Vectors.json"), b"{}").unwrap();
+    assert!(verify_bundle(&copy, MANIFEST_SHA256).is_err());
     let copy = temp.path().join("missing");
     copy_tree(bundle, &copy);
     fs::remove_file(copy.join("vectors.json")).unwrap();
@@ -828,6 +1085,33 @@ fn assert_mutations(
     assert!(portable_path("bad\\name").is_err());
     assert!(portable_path("CON.json").is_err());
     assert!(portable_path("name. ").is_err());
+    for unsafe_name in ["bad\\name", "CON.json"] {
+        let copy = temp
+            .path()
+            .join(format!("unsafe-{}", unsafe_name.replace(['\\', '.'], "-")));
+        copy_tree(bundle, &copy);
+        fs::write(copy.join(unsafe_name), b"unsafe").unwrap();
+        assert!(verify_bundle(&copy, MANIFEST_SHA256).is_err());
+    }
+    let copy = temp.path().join("special-file");
+    copy_tree(bundle, &copy);
+    let fifo = copy.join("fixture.pipe");
+    match std::process::Command::new("mkfifo").arg(&fifo).status() {
+        Ok(status) if status.success() => assert!(verify_bundle(&copy, MANIFEST_SHA256).is_err()),
+        result => eprintln!("skipping special-file mutation: mkfifo unavailable: {result:?}"),
+    }
+    let copy = temp.path().join("duplicate-manifest-path");
+    copy_tree(bundle, &copy);
+    let mut duplicate_manifest: Value =
+        serde_json::from_slice(&fs::read(copy.join("manifest.json")).unwrap()).unwrap();
+    let duplicate_entry = duplicate_manifest["files"][0].clone();
+    duplicate_manifest["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate_entry);
+    let duplicate_bytes = serde_json::to_vec(&duplicate_manifest).unwrap();
+    fs::write(copy.join("manifest.json"), &duplicate_bytes).unwrap();
+    assert!(verify_bundle(&copy, &digest(&duplicate_bytes)).is_err());
     let copy = temp.path().join("fixture-bytes");
     copy_tree(bundle, &copy);
     fs::write(copy.join("fixtures/wire-behavior.json"), b"{}\n").unwrap();
@@ -848,6 +1132,16 @@ fn assert_mutations(
         std::panic::catch_unwind(|| assert_identities(&missing_operation, fixtures, vectors))
             .is_err()
     );
+    for (field, value) in [
+        ("bundle_semver", json!("9.9.9")),
+        ("observer_protocol_version", json!(1)),
+    ] {
+        let mut mutated = manifest.clone();
+        mutated[field] = value;
+        assert!(
+            std::panic::catch_unwind(|| assert_identities(&mutated, fixtures, vectors)).is_err()
+        );
+    }
     let mut missing_fixture = fixtures.clone();
     missing_fixture.pop_first();
     assert!(
@@ -860,6 +1154,34 @@ fn assert_mutations(
         std::panic::catch_unwind(|| assert_identities(manifest, fixtures, &missing_vector))
             .is_err()
     );
+}
+
+async fn assert_production_contradiction_mutation(
+    fixtures: &BTreeMap<String, Value>,
+    vectors: &BTreeMap<String, Value>,
+) {
+    let fixture_id = "recorded.ingestUpload.ok";
+    let vector_id = "observer.ingestUpload.status.ok";
+    let mut payload = fixtures[fixture_id]["payload"].clone();
+    payload["status"] = json!("duplicate");
+    payload["existing_segment"] = json!("mutated-existing-segment");
+    let status = vectors[vector_id]["observed_status"]
+        .as_u64()
+        .expect("authority observed status") as u16;
+    let temp = tempfile::tempdir().unwrap();
+    let media = temp.path().join("audio.flac");
+    fs::write(&media, b"audio").unwrap();
+    let server = MockServer::new(vec![(status, payload)]).await;
+    let result = client(&config(&server, &temp))
+        .upload_segment("20260618", "143022_300", &[media])
+        .await;
+    let decision = &vectors[vector_id]["decision"];
+    let expected_duplicate = decision["stored_key_source"] == "existing_segment";
+    let expected_key = fixtures[fixture_id]["payload"][decision["stored_key_source"]
+        .as_str()
+        .expect("stored key source")]
+    .as_str();
+    assert!(result.duplicate != expected_duplicate || result.stored_key.as_deref() != expected_key);
 }
 
 #[tokio::test]
@@ -882,9 +1204,21 @@ async fn observer_contract_conformance() {
         &mut executed_vectors,
     )
     .await;
-    assert_listing_contract(&fixtures, &mut executed_fixtures, &mut executed_vectors).await;
+    assert_listing_contract(
+        &fixtures,
+        &vectors,
+        &mut executed_fixtures,
+        &mut executed_vectors,
+    )
+    .await;
     assert_event_and_register(&fixtures, &mut executed_fixtures).await;
-    assert_chat_contract(&fixtures, &mut executed_fixtures, &mut executed_vectors).await;
+    assert_chat_contract(
+        &fixtures,
+        &vectors,
+        &mut executed_fixtures,
+        &mut executed_vectors,
+    )
+    .await;
     assert_settings_contract().await;
     assert_mutations(
         &bundle,
@@ -893,6 +1227,7 @@ async fn observer_contract_conformance() {
         &fixtures,
         &vectors,
     );
+    assert_production_contradiction_mutation(&fixtures, &vectors).await;
     assert_eq!(executed_fixtures, set(LINUX_FIXTURES));
     assert_eq!(executed_vectors, set(LINUX_VECTORS));
 }

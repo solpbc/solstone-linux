@@ -12,8 +12,6 @@ use rustix::{
     fs::{FileType, Mode, OFlags},
     io::Errno,
 };
-#[cfg(test)]
-use serde_json::Map;
 use serde_json::Value;
 use std::{
     env,
@@ -501,52 +499,6 @@ pub(crate) async fn contract_poll_opt_in(
     poll_opt_in(client, server_url, key, stop).await
 }
 
-#[cfg(test)]
-pub(crate) fn contract_parse_sse(chunk: &[u8]) -> Vec<(String, Option<String>, String)> {
-    let (_, items) = parse_sse_chunk(SseParseState::default(), chunk);
-    items
-        .into_iter()
-        .map(|item| match item {
-            SseItem::Heartbeat => ("heartbeat".to_owned(), None, String::new()),
-            SseItem::Frame(frame) => ("frame".to_owned(), frame.event, frame.data),
-        })
-        .collect()
-}
-
-#[cfg(test)]
-pub(crate) async fn contract_dispatch_creates_pending(payload: Map<String, Value>) -> bool {
-    let mut pending = Vec::new();
-    let temp = tempfile::tempdir().unwrap();
-    let deps = BridgeDeps {
-        notify: Arc::new(|_, cancellation| {
-            async move {
-                cancellation.cancelled().await;
-                NotificationOutcome::Cancelled
-            }
-            .boxed()
-        }),
-        ack_open: Arc::new(|_, _, _| async {}.boxed()),
-        open_browser: Arc::new(|_| async {}.boxed()),
-        supports_actions: Arc::new(|| async { true }.boxed()),
-        sleep: Arc::new(|_| async {}.boxed()),
-        monotonic_now: Arc::new(|| Duration::ZERO),
-        local_day: Arc::new(|| "20260101".to_owned()),
-    };
-    dispatch_event(
-        &payload,
-        &mut pending,
-        true,
-        false,
-        &Config::default(),
-        &deps,
-        &temp.path().join("missing"),
-    )
-    .await;
-    let created = !pending.is_empty();
-    cancel_all_pending(&mut pending).await;
-    created
-}
-
 async fn opt_in_loop(
     client: Client,
     server_url: String,
@@ -951,6 +903,11 @@ pub async fn run_chat_bridge(config: &Config, stop: CancellationToken) {
 // test_observer_bridge_task_none_when_disabled: retired-by-wiring; Rust observer wiring is out of scope.
 // test_pending_cap_33rd_entry_evicts_oldest_and_cancels_task -> tests::pending_entry_thirty_three_evicts_oldest.
 // test_constants_forbidden_literals_appear_once_in_src_only_in_chat_bridge_module_level -> tests::canonical_literals_have_one_production_definition.
+
+#[cfg(test)]
+pub(crate) use tests::{
+    ack_contract_request, consume_contract_body, dispatch_contract_payload, parse_contract_sse,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1778,6 +1735,96 @@ mod tests {
         (result, count)
     }
 
+    pub(crate) fn parse_contract_sse(chunk: &[u8]) -> Vec<(String, Option<String>, String)> {
+        let (_, items) = parse_sse_chunk(SseParseState::default(), chunk);
+        items
+            .into_iter()
+            .map(|item| match item {
+                SseItem::Heartbeat => ("heartbeat".to_owned(), None, String::new()),
+                SseItem::Frame(frame) => ("frame".to_owned(), frame.event, frame.data),
+            })
+            .collect()
+    }
+
+    pub(crate) async fn dispatch_contract_payload(
+        payload: serde_json::Map<String, Value>,
+    ) -> (bool, Option<String>) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut pending = Vec::new();
+        dispatch_event(
+            &payload,
+            &mut pending,
+            true,
+            false,
+            &config(),
+            &test_deps(),
+            &temp.path().join("missing"),
+        )
+        .await;
+        let result = (
+            !pending.is_empty(),
+            pending.first().map(|request| request.request_id.clone()),
+        );
+        cancel_all_pending(&mut pending).await;
+        result
+    }
+
+    pub(crate) async fn consume_contract_body(body: String) -> (bool, usize, usize) {
+        let side_effects = Arc::new(AtomicUsize::new(0));
+        let mut deps = test_deps();
+        let seen = Arc::clone(&side_effects);
+        deps.notify = Arc::new(move |_, _| {
+            seen.fetch_add(1, Ordering::AcqRel);
+            async { NotificationOutcome::Cancelled }.boxed()
+        });
+        let seen = Arc::clone(&side_effects);
+        deps.ack_open = Arc::new(move |_, _, _| {
+            seen.fetch_add(1, Ordering::AcqRel);
+            async {}.boxed()
+        });
+        let seen = Arc::clone(&side_effects);
+        deps.open_browser = Arc::new(move |_| {
+            seen.fetch_add(1, Ordering::AcqRel);
+            async {}.boxed()
+        });
+        let server = MockServer::new_actions(vec![Action::OwnedRaw(200, body)]).await;
+        let mut cfg = config();
+        cfg.server_url = server.url.clone();
+        let client = build_sse_client(SSE_CONNECT_TIMEOUT, SSE_READ_TIMEOUT).unwrap();
+        let mut pending = Vec::new();
+        let end = consume_connection(
+            &client,
+            &cfg,
+            &CancellationToken::new(),
+            &deps,
+            &mut pending,
+            &AtomicBool::new(true),
+            &mut ConnectionState::default(),
+        )
+        .await;
+        let pending_count = pending.len();
+        cancel_all_pending(&mut pending).await;
+        (
+            matches!(end, ConnectionEnd::Terminal),
+            pending_count,
+            side_effects.load(Ordering::Acquire),
+        )
+    }
+
+    pub(crate) async fn ack_contract_request(
+        client: Client,
+        server_url: &str,
+        key: &str,
+        request_id: &str,
+    ) {
+        (production_deps(client).ack_open)(
+            server_url.to_owned(),
+            key.to_owned(),
+            request_id.to_owned(),
+        )
+        .await;
+    }
+
     // AC: malformed-frame hardening — non-JSON data is dropped and later data is dispatched.
     #[tokio::test]
     async fn non_json_frame_does_not_break_connection() {
@@ -1806,7 +1853,7 @@ mod tests {
         for request_id in ["", " ", "\t\r\n"] {
             let mut value = payload(EVENT_SOL_CHAT_REQUEST);
             value.insert("request_id".into(), Value::String(request_id.to_owned()));
-            assert!(!contract_dispatch_creates_pending(value).await);
+            assert!(!dispatch_contract_payload(value).await.0);
         }
         let preserved = "  request-id  ";
         let mut value = payload(EVENT_SOL_CHAT_REQUEST);
