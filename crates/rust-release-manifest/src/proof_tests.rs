@@ -28,8 +28,10 @@ fn failed_proof_attempt_removes_only_owned_attempt_and_publication() {
         &attempt,
         (attempt_metadata.dev(), attempt_metadata.ino()),
         &published,
-        true,
-        Some((published_metadata.dev(), published_metadata.ino())),
+        Some(FileIdentity {
+            device: published_metadata.dev(),
+            inode: published_metadata.ino(),
+        }),
     );
     assert_eq!(error.to_string(), "primary");
     assert!(!attempt.exists());
@@ -42,6 +44,17 @@ fn candidate_schemas_are_digest_and_identity_pinned() {
     verify_candidate_schemas().unwrap();
     assert_eq!(digest(ledger_schema_bytes()), LEDGER_SCHEMA_SHA256);
     assert_eq!(digest(proof_schema_bytes()), PROOF_SCHEMA_SHA256);
+    let ids = proof_ids().map(str::to_owned).to_vec();
+    let proof_schema: Value = serde_json::from_slice(proof_schema_bytes()).unwrap();
+    let ledger_schema: Value = serde_json::from_slice(ledger_schema_bytes()).unwrap();
+    assert_eq!(
+        proof_schema["properties"]["platform"]["enum"],
+        serde_json::json!(ids)
+    );
+    assert_eq!(
+        ledger_schema["properties"]["expected_proof_ids"]["const"],
+        serde_json::json!(ids)
+    );
 }
 
 fn payload_vector() -> (tempfile::TempDir, Vec<Artifact>) {
@@ -356,6 +369,66 @@ fn atomic_temp_creation_failure_does_not_mutate_read_only_parent() {
     assert!(result.is_err());
     assert_eq!(fs::read(&foreign).unwrap(), b"foreign");
     assert!(!directory.path().join("ledger.json").exists());
+}
+
+#[test]
+fn post_rename_sync_failure_reclaims_owned_proof_and_preserves_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let proof = directory.path().join("proof.json");
+    let result = atomic_write_0644_with_parent_sync(&proof, b"owned proof\n", |_| {
+        Err(Error::new("injected parent fsync failure"))
+    });
+    assert!(result.is_err());
+    assert!(!proof.exists());
+
+    let result = atomic_write_0644_with_parent_sync(&proof, b"owned proof\n", |_| {
+        fs::remove_file(&proof).unwrap();
+        fs::write(&proof, b"foreign replacement\n").unwrap();
+        Err(Error::new("injected parent fsync failure"))
+    });
+    assert!(result.is_err());
+    assert_eq!(fs::read(&proof).unwrap(), b"foreign replacement\n");
+    assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
+}
+
+#[test]
+fn post_rename_metadata_failure_uses_precomputed_identity_and_preserves_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let proof = directory.path().join("proof.json");
+    let result = atomic_write_0644_with_post_rename(
+        &proof,
+        b"owned proof\n",
+        |_, _| Err(Error::new("injected post-rename metadata failure")),
+        |_| Ok(()),
+    );
+    assert!(result.is_err());
+    assert!(!proof.exists());
+
+    let result = atomic_write_0644_with_post_rename(
+        &proof,
+        b"owned proof\n",
+        |path, _| {
+            fs::remove_file(path).unwrap();
+            fs::write(path, b"foreign replacement\n").unwrap();
+            Err(Error::new("injected post-rename metadata failure"))
+        },
+        |_| Ok(()),
+    );
+    assert!(result.is_err());
+    assert_eq!(fs::read(&proof).unwrap(), b"foreign replacement\n");
+    assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
 }
 
 #[test]
@@ -1449,7 +1522,7 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path) {
             target: TARGET_TRIPLE.into(),
             profile: "release".into(),
             features: vec![],
-            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
+            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
             cargo: "cargo 1.97.1 (abcdef012 2026-06-30)".into(),
             baseline_executable_sha256: "d".repeat(64),
             image_digest: "@IMAGE@".into(),

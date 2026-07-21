@@ -157,6 +157,16 @@ pub struct ResolvedImages {
     pub proof_tar: ImageIdentity,
 }
 
+impl ResolvedImages {
+    pub fn proof_images(&self) -> [(&'static str, &ImageIdentity); 3] {
+        [
+            (PROOF_SPECS[0].id, &self.proof_debian),
+            (PROOF_SPECS[1].id, &self.proof_rpm),
+            (PROOF_SPECS[2].id, &self.proof_tar),
+        ]
+    }
+}
+
 pub fn resolve_release_images(
     processes: &ProcessEnvironment,
     engine: ContainerEngine,
@@ -919,8 +929,13 @@ fn command_evidence(program: &str, args: &[&str]) -> Result<String> {
             output.status
         )));
     }
+    let field = if program == "rustc" && args == ["--version", "--verbose"] {
+        "lane rustc verbose"
+    } else {
+        program
+    };
     normalize_command_evidence(
-        program,
+        field,
         String::from_utf8(output.stdout).map_err(display_error)?,
     )
 }
@@ -1404,16 +1419,8 @@ pub fn reconcile_lanes(
             return Err(Error::new(format!("lane reconciliation {field} mismatch")));
         }
     }
-    let deb_tar = deb
-        .artifacts
-        .iter()
-        .find(|item| artifact_kind(&item.path, None).ok() == Some("tar"))
-        .ok_or_else(|| Error::new("lane tar mismatch: expected deb tar, actual missing"))?;
-    let rpm_tar = rpm
-        .artifacts
-        .iter()
-        .find(|item| artifact_kind(&item.path, None).ok() == Some("tar"))
-        .ok_or_else(|| Error::new("lane tar mismatch: expected rpm tar, actual missing"))?;
+    let deb_tar = artifact_by_kind(&deb.artifacts, "tar")?;
+    let rpm_tar = artifact_by_kind(&rpm.artifacts, "tar")?;
     if deb_tar != rpm_tar
         || fs::read(deb_root.join(&deb_tar.path)).map_err(display_error)?
             != fs::read(rpm_root.join(&rpm_tar.path)).map_err(display_error)?

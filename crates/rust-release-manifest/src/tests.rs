@@ -85,7 +85,7 @@ pub(super) fn evidence() -> Evidence {
         source_dirty: false,
         cargo_lock_sha256: digest(&fs::read(root.join("Cargo.lock")).unwrap()),
         rust: RustEvidence {
-            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
+            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
             cargo_version: "cargo 1.97.1 (c980f4866 2026-06-30)".into(),
         },
         target: TargetEvidence::Compiled {
@@ -108,9 +108,26 @@ pub(super) fn evidence() -> Evidence {
 
 #[test]
 fn real_rustc_verbose_shape_is_privacy_safe() {
-    let banner = "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0";
+    let banner = "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0";
     validate_evidence_text("rust.rustc_verbose", banner).unwrap();
     assert!(validate_evidence_text("other evidence", &"a".repeat(40)).is_err());
+    assert!(
+        validate_evidence_text(
+            "other evidence",
+            &format!("commit-hash: {}", "a".repeat(40)),
+        )
+        .is_err()
+    );
+    for malformed in [
+        banner.replace("host: x86_64-unknown-linux-gnu\n", ""),
+        banner.replace("release: 1.97.1", "release: 1.97.1\nrelease: 1.97.1"),
+        banner.replace(
+            "commit-hash: abcdef0123456789abcdef0123456789abcdef01",
+            "commit-hash: short",
+        ),
+    ] {
+        assert!(validate_evidence_text("rust.rustc_verbose", &malformed).is_err());
+    }
 }
 
 fn tarball(root: &Path, version: &str) -> PathBuf {

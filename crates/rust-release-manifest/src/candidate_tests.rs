@@ -422,6 +422,68 @@ fn release_image_policy_is_digest_only_strict_and_immutable() {
 }
 
 #[test]
+fn typed_release_authorities_match_parallel_serialized_contracts() {
+    let repo = fixture();
+    let destination = tempfile::tempdir().unwrap();
+    let context = export_immutable_context(&repo.root, destination.path()).unwrap();
+    let policy = ReleaseImages::from_context(&context).unwrap();
+    assert_eq!(
+        policy.proof_policies().map(|(id, _, image)| (id, image)),
+        [
+            (PROOF_SPECS[0].id, policy.proof_debian.as_str()),
+            (PROOF_SPECS[1].id, policy.proof_rpm.as_str()),
+            (PROOF_SPECS[2].id, policy.proof_tar.as_str()),
+        ]
+    );
+    let identity = |byte: char| ImageIdentity {
+        configured_reference: format!("sha256:{}", byte.to_string().repeat(64)),
+        digest: format!("sha256:{}", byte.to_string().repeat(64)),
+    };
+    let resolved = ResolvedImages {
+        build_ubuntu: identity('a'),
+        build_fedora: identity('b'),
+        proof_debian: identity('c'),
+        proof_rpm: identity('d'),
+        proof_tar: identity('e'),
+    };
+    assert_eq!(
+        resolved
+            .proof_images()
+            .map(|(id, image)| (id, image.digest.as_str())),
+        [
+            (PROOF_SPECS[0].id, resolved.proof_debian.digest.as_str()),
+            (PROOF_SPECS[1].id, resolved.proof_rpm.digest.as_str()),
+            (PROOF_SPECS[2].id, resolved.proof_tar.digest.as_str()),
+        ]
+    );
+
+    for spec in PROOF_SPECS {
+        let name = artifact_name(spec.artifact_kind, "1.0.0").unwrap();
+        assert_eq!(
+            artifact_kind(&name, Some("1.0.0")).unwrap(),
+            spec.artifact_kind
+        );
+    }
+
+    let tool_keys = crate::tests::tools().into_keys().collect::<BTreeSet<_>>();
+    assert_eq!(
+        tool_keys,
+        TOOL_SPECS
+            .iter()
+            .map(|spec| spec.key.to_owned())
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        TOOL_SPECS
+            .iter()
+            .filter(|spec| spec.source == ToolSource::Host)
+            .map(|spec| spec.key)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["container_engine", "manifest_validator"])
+    );
+}
+
+#[test]
 fn release_image_resolution_rejects_absent_and_mismatched_local_ids() {
     let proof_policy = |image_digest: String| ProofPlatformPolicy {
         image_digest,
@@ -824,7 +886,7 @@ pub(super) fn lane_fixture(
         target: TARGET_TRIPLE.into(),
         profile: "release".into(),
         features: vec![],
-        rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
+        rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
         cargo: "cargo 1.97.1 (abcdef012 2026-06-30)".into(),
         baseline_executable_sha256: "d".repeat(64),
         image_digest: image.into(),
@@ -1339,7 +1401,7 @@ fn lane_build_argv_is_offline_no_pull_and_uses_exported_context() {
         "0123456789abcdef0123456789abcdef",
         &ubuntu.digest,
         b"same tar",
-        "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: 0123456789abcdef0123456789abcdef01234567\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0\n",
+        "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0\n",
     );
     fs::write(
         repo.root.path().join("packaging/Containerfile"),

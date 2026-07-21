@@ -261,7 +261,34 @@ pub fn read_ledger(root: &RepoRoot, version: &str) -> Result<(CandidateLedger, V
     Ok((ledger, bytes))
 }
 
-pub fn atomic_write_0644(path: &Path, bytes: &[u8]) -> Result<()> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+}
+
+pub fn atomic_write_0644(path: &Path, bytes: &[u8]) -> Result<FileIdentity> {
+    atomic_write_0644_with_parent_sync(path, bytes, |parent| {
+        File::open(parent)
+            .and_then(|file| file.sync_all())
+            .map_err(display_error)
+    })
+}
+
+pub(crate) fn atomic_write_0644_with_parent_sync(
+    path: &Path,
+    bytes: &[u8],
+    parent_sync: impl FnOnce(&Path) -> Result<()>,
+) -> Result<FileIdentity> {
+    atomic_write_0644_with_post_rename(path, bytes, |_, _| Ok(()), parent_sync)
+}
+
+pub(crate) fn atomic_write_0644_with_post_rename(
+    path: &Path,
+    bytes: &[u8],
+    post_rename: impl FnOnce(&Path, FileIdentity) -> Result<()>,
+    parent_sync: impl FnOnce(&Path) -> Result<()>,
+) -> Result<FileIdentity> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::new("atomic output parent mismatch"))?;
@@ -283,21 +310,41 @@ pub fn atomic_write_0644(path: &Path, bytes: &[u8]) -> Result<()> {
         .mode(0o644)
         .open(&temp)
         .map_err(display_error)?;
+    // Capture ownership from the open temp handle before publication. After rename,
+    // every failure path already has the token needed to reclaim only this inode.
+    let metadata = match file.metadata().map_err(display_error) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(file);
+            finish_atomic_publish(&temp, Err(error))?;
+            unreachable!("failed metadata lookup cannot publish")
+        }
+    };
+    let owned = FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
     let publish = (|| {
         file.write_all(bytes).map_err(display_error)?;
         file.sync_all().map_err(display_error)?;
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o644)).map_err(display_error)?;
         fs::rename(&temp, path).map_err(display_error)
     })();
-    let owned = file.metadata().map_err(display_error)?;
     drop(file);
     finish_atomic_publish(&temp, publish)?;
-    let synced = File::open(parent)
-        .and_then(|file| file.sync_all())
-        .map_err(display_error);
-    if let Err(error) = synced {
-        let same_file = fs::symlink_metadata(path)
-            .is_ok_and(|metadata| metadata.dev() == owned.dev() && metadata.ino() == owned.ino());
+    reclaim_after_publish_failure(path, owned, post_rename(path, owned))?;
+    reclaim_after_publish_failure(path, owned, parent_sync(parent))?;
+    Ok(owned)
+}
+
+fn reclaim_after_publish_failure(
+    path: &Path,
+    owned: FileIdentity,
+    result: Result<()>,
+) -> Result<()> {
+    if let Err(error) = result {
+        let same_file =
+            fs::symlink_metadata(path).is_ok_and(|metadata| same_file_identity(&metadata, owned));
         if same_file {
             fs::remove_file(path).map_err(|cleanup| {
                 Error::new(format!(
@@ -309,6 +356,10 @@ pub fn atomic_write_0644(path: &Path, bytes: &[u8]) -> Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+fn same_file_identity(metadata: &fs::Metadata, identity: FileIdentity) -> bool {
+    metadata.dev() == identity.device && metadata.ino() == identity.inode
 }
 
 pub(crate) fn finish_atomic_publish(temp: &Path, publish: Result<()>) -> Result<()> {
@@ -432,24 +483,9 @@ fn stage_payload(input: &FinalizeInput<'_>) -> Result<()> {
             "staged payload mismatch: expected empty, actual populated",
         ));
     }
-    let tar = input
-        .deb
-        .artifacts
-        .iter()
-        .find(|item| artifact_kind(&item.path, None).ok() == Some("tar"))
-        .ok_or_else(|| Error::new("deb tar mismatch"))?;
-    let deb = input
-        .deb
-        .artifacts
-        .iter()
-        .find(|item| artifact_kind(&item.path, None).ok() == Some("deb"))
-        .ok_or_else(|| Error::new("deb artifact mismatch"))?;
-    let rpm = input
-        .rpm
-        .artifacts
-        .iter()
-        .find(|item| artifact_kind(&item.path, None).ok() == Some("rpm"))
-        .ok_or_else(|| Error::new("rpm artifact mismatch"))?;
+    let tar = artifact_by_kind(&input.deb.artifacts, "tar")?;
+    let deb = artifact_by_kind(&input.deb.artifacts, "deb")?;
+    let rpm = artifact_by_kind(&input.rpm.artifacts, "rpm")?;
     for (source_root, item) in [
         (&input.staging.deb_lane, tar),
         (&input.staging.deb_lane, deb),
@@ -676,7 +712,6 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
     ));
     fs::create_dir(&attempt).map_err(display_error)?;
     let attempt_metadata = fs::symlink_metadata(&attempt).map_err(display_error)?;
-    let mut published = false;
     let mut published_identity = None;
     let result = (|| {
         let artifact = proof_artifact(request.ledger, request.platform)?;
@@ -747,10 +782,7 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
         validate_proof_file(request, &produced)?;
         let bytes = fs::read(&produced).map_err(display_error)?;
         fs::remove_dir_all(&attempt).map_err(display_error)?;
-        atomic_write_0644(&final_path, &bytes)?;
-        published = true;
-        let metadata = fs::symlink_metadata(&final_path).map_err(display_error)?;
-        published_identity = Some((metadata.dev(), metadata.ino()));
+        published_identity = Some(atomic_write_0644(&final_path, &bytes)?);
         validate_proof_file(request, &final_path)?;
         Ok(final_path.clone())
     })();
@@ -760,7 +792,6 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             &attempt,
             (attempt_metadata.dev(), attempt_metadata.ino()),
             &final_path,
-            published,
             published_identity,
         )
     })
@@ -771,20 +802,17 @@ pub(crate) fn cleanup_proof_attempt(
     attempt: &Path,
     attempt_identity: (u64, u64),
     published: &Path,
-    was_published: bool,
-    published_identity: Option<(u64, u64)>,
+    published_identity: Option<FileIdentity>,
 ) -> Error {
     let mut residue = Vec::new();
     if same_inode(attempt, attempt_identity) && fs::remove_dir_all(attempt).is_err() {
         residue.push(attempt.to_owned());
     }
     if let Some(identity) = published_identity
-        && same_inode(published, identity)
+        && fs::symlink_metadata(published)
+            .is_ok_and(|metadata| same_file_identity(&metadata, identity))
         && fs::remove_file(published).is_err()
     {
-        residue.push(published.to_owned());
-    }
-    if was_published && published_identity.is_none() && published.symlink_metadata().is_ok() {
         residue.push(published.to_owned());
     }
     if residue.is_empty() {
@@ -810,13 +838,7 @@ pub(crate) fn proof_artifact<'a>(
     platform: &str,
 ) -> Result<&'a Artifact> {
     let kind = proof_spec(platform)?.artifact_kind;
-    ledger
-        .payload
-        .iter()
-        .find(|item| artifact_kind(&item.path, None).ok() == Some(kind))
-        .ok_or_else(|| {
-            Error::new("proof artifact mismatch: expected ledger artifact, actual missing")
-        })
+    artifact_by_kind(&ledger.payload, kind)
 }
 
 pub(crate) fn proof_member<'a>(
@@ -1437,7 +1459,7 @@ fn create_candidate_locked(
         })?;
         let mut owned = Vec::new();
         let proof_result = (|| {
-            for (id, image) in proof_images(&images) {
+            for (id, image) in images.proof_images() {
                 owned.push(
                     finalized
                         .evidence_root
@@ -1524,7 +1546,7 @@ fn prove_candidate_locked(
         cargo_lock_sha256: lock_digest,
         path: root.path().to_owned(),
     };
-    for (id, image) in proof_images(&images) {
+    for (id, image) in images.proof_images() {
         produce_or_retain_proof(&ProofRequest {
             root,
             ledger: &ledger,
@@ -1591,7 +1613,7 @@ fn preflight_existing_proofs(
             ));
         }
     }
-    for (id, image) in proof_images(images) {
+    for (id, image) in images.proof_images() {
         let path = proofs_root.join(format!("{id}.json"));
         if path.symlink_metadata().is_ok() {
             validate_proof_file(
@@ -1611,13 +1633,6 @@ fn preflight_existing_proofs(
     Ok(())
 }
 
-fn proof_images(images: &ResolvedImages) -> [(&'static str, &ImageIdentity); 3] {
-    [
-        (PROOF_SPECS[0].id, &images.proof_debian),
-        (PROOF_SPECS[1].id, &images.proof_rpm),
-        (PROOF_SPECS[2].id, &images.proof_tar),
-    ]
-}
 fn recheck_all_images(
     processes: &ProcessEnvironment,
     engine: ContainerEngine,

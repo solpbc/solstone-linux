@@ -1042,10 +1042,80 @@ fn validate_manifest_policy(root: &RepoRoot, manifest: &Manifest) -> Result<()> 
 }
 
 fn validate_evidence_text(field: &str, value: &str) -> Result<()> {
-    validate_privacy(field, value, true)
+    let compiler_commit = if matches!(field, "rust.rustc_verbose" | "lane rustc verbose") {
+        Some(validate_rustc_verbose_banner(field, value)?)
+    } else {
+        None
+    };
+    validate_privacy(field, value, true, compiler_commit.as_deref())
 }
 
-fn validate_privacy(field: &str, value: &str, allow_multiline: bool) -> Result<()> {
+fn validate_rustc_verbose_banner(field: &str, value: &str) -> Result<String> {
+    let mut lines = value.lines();
+    let banner = lines.next().unwrap_or_default();
+    let banner_parts = banner
+        .strip_prefix("rustc ")
+        .and_then(|body| body.strip_suffix(')'))
+        .and_then(|body| body.split_once(" ("));
+    let Some((banner_release, revision)) = banner_parts else {
+        return Err(Error::new(format!(
+            "evidence field {field} mismatch: expected complete rustc verbose banner"
+        )));
+    };
+    let Some((short_commit, banner_date)) = revision.split_once(' ') else {
+        return Err(Error::new(format!(
+            "evidence field {field} mismatch: expected complete rustc verbose banner"
+        )));
+    };
+    let mut fields = BTreeMap::new();
+    for line in lines {
+        let (key, value) = line.split_once(": ").ok_or_else(|| {
+            Error::new(format!(
+                "evidence field {field} mismatch: expected rustc verbose key-value line"
+            ))
+        })?;
+        if fields.insert(key, value).is_some() {
+            return Err(Error::new(format!(
+                "evidence field {field} mismatch: expected unique rustc verbose lines"
+            )));
+        }
+    }
+    let expected = BTreeSet::from([
+        "LLVM version",
+        "binary",
+        "commit-date",
+        "commit-hash",
+        "host",
+        "release",
+    ]);
+    if fields.keys().copied().collect::<BTreeSet<_>>() != expected
+        || fields["binary"] != "rustc"
+        || !is_git_commit(fields["commit-hash"])
+        || short_commit.len() != 9
+        || !short_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !fields["commit-hash"].starts_with(short_commit)
+        || banner_release != fields["release"]
+        || banner_date != fields["commit-date"]
+        || fields["host"].is_empty()
+        || fields["release"].is_empty()
+        || fields["LLVM version"].is_empty()
+        || DateTime::parse_from_rfc3339(&format!("{}T00:00:00Z", fields["commit-date"])).is_err()
+    {
+        return Err(Error::new(format!(
+            "evidence field {field} mismatch: expected complete rustc verbose banner"
+        )));
+    }
+    Ok(fields["commit-hash"].to_owned())
+}
+
+fn validate_privacy(
+    field: &str,
+    value: &str,
+    allow_multiline: bool,
+    allowed_opaque: Option<&str>,
+) -> Result<()> {
     let lower = value.to_ascii_lowercase();
     let forbidden = [
         "token",
@@ -1084,15 +1154,11 @@ fn validate_privacy(field: &str, value: &str, allow_multiline: bool) -> Result<(
         };
         ipv4 || ipv6
     });
-    let compiler_commit = value.lines().find_map(|line| {
-        line.strip_prefix("commit-hash: ")
-            .filter(|hash| is_git_commit(hash))
-    });
     let opaque_blob = tokens.iter().any(|token| {
         (token.len() >= 12 && token.chars().all(|character| character.is_ascii_digit()))
             || (token.len() >= 20
                 && *token != TARGET_TRIPLE
-                && Some(*token) != compiler_commit
+                && Some(*token) != allowed_opaque
                 && token.chars().all(|character| {
                     character.is_ascii_alphanumeric()
                         || matches!(character, '+' | '/' | '=' | '_' | '-')
@@ -1195,7 +1261,7 @@ fn exact_tool(tools: &BTreeMap<String, String>, key: &str, expected: &str) -> Re
 }
 
 pub(crate) fn validate_identity(key: &str, value: &str) -> Result<()> {
-    validate_privacy(&format!("native tool {key}"), value, false)
+    validate_privacy(&format!("native tool {key}"), value, false, None)
         .map_err(|_| Error::new(format!("native tool {key} identity mismatch")))?;
     let approved_prefixes: &[&str] = match key {
         "container_engine" => &["podman ", "docker "],
@@ -1295,6 +1361,13 @@ pub(crate) fn artifact_name(kind: &str, version: &str) -> Result<String> {
             "artifact kind mismatch: expected tar, deb, or rpm",
         )),
     }
+}
+
+pub(crate) fn artifact_by_kind<'a>(artifacts: &'a [Artifact], kind: &str) -> Result<&'a Artifact> {
+    artifacts
+        .iter()
+        .find(|artifact| artifact_kind(&artifact.path, None).ok() == Some(kind))
+        .ok_or_else(|| Error::new(format!("{kind} artifact mismatch: expected present")))
 }
 
 fn artifact_paths(root: &Path, version: &str) -> Result<Vec<PathBuf>> {
