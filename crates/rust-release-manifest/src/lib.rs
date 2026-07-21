@@ -283,17 +283,80 @@ fn validate_evidence(evidence: &Evidence) -> Result<()> {
     if evidence.active_exceptions != ordered_exceptions()? {
         return Err(Error::new("release evidence active_exceptions mismatch"));
     }
+    validate_evidence_text("rust.rustc_verbose", &evidence.rust.rustc_verbose)?;
+    validate_evidence_text("rust.cargo_version", &evidence.rust.cargo_version)?;
     validate_native_tools(&evidence.native_tools)?;
     validate_timestamp(&evidence.dependency_policy.advisory_checked_at)
 }
 
 fn validate_manifest_policy(manifest: &Manifest) -> Result<()> {
     validate_version(&manifest.version)?;
+    validate_evidence_text("rust.rustc_verbose", &manifest.rust.rustc_verbose)?;
+    validate_evidence_text("rust.cargo_version", &manifest.rust.cargo_version)?;
     validate_native_tools(&manifest.native_tools)?;
     validate_timestamp(&manifest.dependency_policy.advisory_checked_at)?;
     validate_artifact_set(&manifest.artifacts)?;
     for artifact in &manifest.artifacts {
         artifact_kind(&artifact.path, Some(&manifest.version))?;
+    }
+    Ok(())
+}
+
+fn validate_evidence_text(field: &str, value: &str) -> Result<()> {
+    let lower = value.to_ascii_lowercase();
+    let forbidden = [
+        "token",
+        "secret",
+        "password",
+        "bearer",
+        "localhost",
+        ".local",
+        ".internal",
+        "socket",
+        "pipe:",
+        "ipc:",
+    ];
+    let tokens = value.split_whitespace().collect::<Vec<_>>();
+    let network_literal = tokens.iter().any(|token| {
+        let token = token
+            .trim_matches(|character: char| matches!(character, '(' | ')' | '[' | ']' | ',' | ';'));
+        let ipv4 = {
+            let groups = token.split('.').collect::<Vec<_>>();
+            groups.len() == 4
+                && groups.iter().all(|group| {
+                    !group.is_empty() && group.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        };
+        let ipv6 = token.contains("::") || {
+            let groups = token.split(':').collect::<Vec<_>>();
+            groups.len() >= 3
+                && groups.iter().all(|group| {
+                    !group.is_empty() && group.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        };
+        ipv4 || ipv6
+    });
+    let opaque_blob = tokens.iter().any(|token| {
+        token.len() >= 20
+            && *token != TARGET_TRIPLE
+            && token.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '+' | '/' | '=' | '_' | '-')
+            })
+    });
+    let bad = value.is_empty()
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        || value.contains(['$', '%', '\\', '/', '@'])
+        || value.contains("://")
+        || forbidden.iter().any(|word| lower.contains(word))
+        || network_literal
+        || opaque_blob;
+    if bad {
+        return Err(Error::new(format!(
+            "evidence field {field} privacy mismatch"
+        )));
     }
     Ok(())
 }
@@ -471,7 +534,7 @@ fn artifact_kind(name: &str, expected_version: Option<&str>) -> Result<&'static 
     {
         ("rpm", version)
     } else {
-        return Err(Error::new(format!("artifact basename mismatch: {name}")));
+        return Err(Error::new("artifact basename mismatch"));
     };
     validate_version(version)?;
     if expected_version.is_some_and(|expected| version != expected) {
@@ -901,14 +964,14 @@ fn portable_path(path: &str) -> Result<()> {
             .components()
             .any(|part| !matches!(part, Component::Normal(_)))
     {
-        return Err(Error::new(format!("unsafe path: {path:?}")));
+        return Err(Error::new("unsafe path"));
     }
     for part in path.split('/') {
         if part.is_empty()
             || part.ends_with(['.', ' '])
             || part.contains(['<', '>', ':', '"', '|', '?', '*'])
         {
-            return Err(Error::new(format!("non-portable path: {path:?}")));
+            return Err(Error::new("non-portable path"));
         }
         let stem = part
             .split('.')
@@ -924,7 +987,7 @@ fn portable_path(path: &str) -> Result<()> {
                     suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9')
                 });
         if reserved {
-            return Err(Error::new(format!("reserved path: {path:?}")));
+            return Err(Error::new("reserved path"));
         }
     }
     Ok(())

@@ -48,8 +48,8 @@ fn evidence() -> Evidence {
         source_dirty: false,
         cargo_lock_sha256: digest(&fs::read(root.join("Cargo.lock")).unwrap()),
         rust: RustEvidence {
-            rustc_verbose: "rustc 1.97.1".into(),
-            cargo_version: "cargo 1.97.1".into(),
+            rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
+            cargo_version: "cargo 1.97.1 (c980f4866 2026-06-30)".into(),
         },
         target: TargetEvidence::Compiled {
             triple: TARGET_TRIPLE.into(),
@@ -787,6 +787,38 @@ fn privacy_canaries_reject_network_account_and_opaque_tokens() {
             "accepted {canary}"
         );
     }
+}
+
+#[test]
+fn rust_evidence_privacy_canaries_are_rejected() {
+    let temp = release_fixture();
+    let canaries = [
+        "builder.internal",
+        "/home/build/rustc",
+        "10.0.0.5",
+        "${RUSTC}",
+        "builder@example.invalid",
+        "YWJjZGVmZ2hpamtsbW5vcHFyc3R1",
+    ];
+    for field in ["rustc_verbose", "cargo_version"] {
+        for canary in canaries {
+            let mut candidate = evidence();
+            if field == "rustc_verbose" {
+                candidate.rust.rustc_verbose = canary.to_owned();
+            } else {
+                candidate.rust.cargo_version = canary.to_owned();
+            }
+            assert!(
+                render_manifest(candidate, temp.path()).is_err(),
+                "accepted {field} canary"
+            );
+        }
+    }
+
+    let rendered = render_manifest(evidence(), temp.path()).unwrap();
+    let mut manifest: Value = serde_json::from_str(&rendered).unwrap();
+    manifest["rust"]["rustc_verbose"] = Value::String("2001:db8::1".into());
+    assert!(validate_manifest_bytes(serde_json::to_string(&manifest).unwrap().as_bytes()).is_err());
 }
 
 #[test]
