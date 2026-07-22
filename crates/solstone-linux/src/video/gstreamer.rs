@@ -287,17 +287,41 @@ fn checked_property_value(
             return Err(incompatible_property_type(element_name, property_name, expected_type).into());
         }
         PropertyValue::I32(value) => {
-            let range = property
-                .downcast_ref::<gst::glib::ParamSpecInt>()
-                .ok_or_else(|| incompatible_property_type(element_name, property_name, expected_type))?;
-            if *value < range.minimum() || *value > range.maximum() {
-                return Err(format!(
-                    "GStreamer element '{element_name}' property '{property_name}' rejects value '{value}' outside {}..={}",
-                    range.minimum(), range.maximum()
-                )
-                .into());
+            if let Some(range) = property.downcast_ref::<gst::glib::ParamSpecInt>() {
+                if *value < range.minimum() || *value > range.maximum() {
+                    return Err(format!(
+                        "GStreamer element '{element_name}' property '{property_name}' rejects value '{value}' outside {}..={}",
+                        range.minimum(), range.maximum()
+                    )
+                    .into());
+                }
+                value.to_value()
+            } else if element_name == "ximagesrc"
+                && matches!(property_name, "startx" | "starty" | "endx" | "endy")
+            {
+                let range = property
+                    .downcast_ref::<gst::glib::ParamSpecUInt>()
+                    .ok_or_else(|| {
+                        incompatible_property_type(element_name, property_name, expected_type)
+                    })?;
+                let value = u32::try_from(*value).map_err(|_| {
+                    format!(
+                        "GStreamer element '{element_name}' property '{property_name}' rejects negative value '{value}'"
+                    )
+                })?;
+                if value < range.minimum() || value > range.maximum() {
+                    return Err(format!(
+                        "GStreamer element '{element_name}' property '{property_name}' rejects value '{value}' outside {}..={}",
+                        range.minimum(), range.maximum()
+                    )
+                    .into());
+                }
+                value.to_value()
+            } else {
+                return Err(
+                    incompatible_property_type(element_name, property_name, expected_type).into(),
+                );
             }
-            value.to_value()
         }
         PropertyValue::U32(value) => {
             let range = property
@@ -401,6 +425,19 @@ mod tests {
         assert!(pipeline.is_healthy());
         assert!(pipeline.send_eos());
         assert_eq!(pipeline.poll_terminal(), Some(Ok(())));
+    }
+
+    #[test]
+    fn signed_nonnegative_coordinate_accepts_ximagesrc_property_type() {
+        ensure_initialized().unwrap();
+        let element = gst::ElementFactory::make("ximagesrc").build().unwrap();
+        let value =
+            checked_property_value(&element, "ximagesrc", "startx", &PropertyValue::I32(1920))
+                .unwrap();
+        assert_eq!(
+            value.type_(),
+            element.find_property("startx").unwrap().value_type()
+        );
     }
 
     struct StoppingFake {
