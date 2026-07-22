@@ -218,6 +218,11 @@ If an entry was uploaded before its pointer, retry the same command; if
 the version was permanently recorded against a superseded chain head, cut the next
 version.
 
+Verifiers fetch the public trust anchor at
+`releases/keys/solpbc-transparency-1.pub`; key rotation increments the numeric suffix
+and publishes cross-signed successor files. `TRANSPARENCY_MINISIGN_PUB` remains the
+operator-supplied local path to that trust anchor.
+
 `make resign-transparency-pointer` is the freeze defense. It first verifies the
 signed pointer, signed tip, product binding, and rollback protection against the
 [transparency head log](transparency-head-log.jsonl), then renews only the pointer

@@ -7,24 +7,57 @@ use super::*;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 pub const TRANSPARENCY_ENTRY_SCHEMA: &str =
     "https://solpbc.org/schemas/transparency-ledger-entry/v1.json";
 pub const TRANSPARENCY_LATEST_SCHEMA: &str =
     "https://solpbc.org/schemas/transparency-latest/v1.json";
 pub const TRANSPARENCY_DEFAULT_BASE_URL: &str = "https://transparency.solstone.app";
+pub const TRANSPARENCY_PUBLIC_KEY_FILENAME: &str = "solpbc-transparency-1.pub";
 pub const TRANSPARENCY_HEAD_LOG: &str = "transparency-head-log.jsonl";
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
 const MUTABLE_CACHE: &str = "no-cache";
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct TemporaryDirectory(PathBuf);
+
+impl TemporaryDirectory {
+    fn create(parent: &Path, prefix: &str) -> Result<Self> {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".{prefix}-{}-{sequence}", std::process::id()));
+        fs::create_dir(&path).map_err(|error| {
+            transparency_error(
+                "retryable",
+                format!("{prefix} temporary directory"),
+                "new writable directory",
+                error,
+                "restore local staging permissions and retry the transparency command",
+            )
+        })?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 pub(crate) fn transparency_error(
     class: &str,
@@ -36,6 +69,16 @@ pub(crate) fn transparency_error(
     Error::new(format!(
         "{class}: {thing} mismatch: expected {expected}, actual {actual}\nrepair: {repair}"
     ))
+}
+
+fn display_error(error: impl std::fmt::Display) -> Error {
+    transparency_error(
+        "retryable",
+        "transparency operation",
+        "successful local or subprocess operation",
+        error,
+        "restore the configured tools and local staging permissions, then retry the transparency command",
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -160,29 +203,77 @@ fn write_transparency_value(value: &Value, output: &mut Vec<u8>) -> Result<()> {
             output.push(b']');
         }
         Value::Object(object) => {
-            output.push(b'{');
-            let mut fields = object.iter().collect::<Vec<_>>();
-            fields.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-            for (index, (key, item)) in fields.into_iter().enumerate() {
-                if index > 0 {
-                    output.push(b',');
-                }
-                output.extend_from_slice(
-                    serde_json::to_string(key)
-                        .map_err(display_error)?
-                        .as_bytes(),
-                );
-                output.push(b':');
-                write_transparency_value(item, output)?;
-            }
-            output.push(b'}');
+            write_transparency_object_fields(object.iter().collect(), output)?;
         }
     }
     Ok(())
 }
 
+fn write_transparency_object_fields(
+    mut fields: Vec<(&String, &Value)>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    fields.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    output.push(b'{');
+    for (index, (key, item)) in fields.into_iter().enumerate() {
+        if index > 0 {
+            output.push(b',');
+        }
+        output.extend_from_slice(
+            serde_json::to_string(key)
+                .map_err(display_error)?
+                .as_bytes(),
+        );
+        output.push(b':');
+        write_transparency_value(item, output)?;
+    }
+    output.push(b'}');
+    Ok(())
+}
+
+pub(crate) fn transparency_canonical_object_fields(fields: &[(String, Value)]) -> Result<Vec<u8>> {
+    for (key, value) in fields {
+        if !key.is_ascii() {
+            return Err(transparency_error(
+                "terminal",
+                "transparency canonical JSON key",
+                "ASCII",
+                "non-ASCII value",
+                "replace the non-ASCII key before retrying",
+            ));
+        }
+        validate_ascii(value)?;
+        if matches!(key.as_str(), "seq" | "bytes" | "chain_length") && value.is_boolean() {
+            return Err(transparency_error(
+                "terminal",
+                format!("transparency {key}"),
+                "integer",
+                "boolean",
+                "provide an integer-valued transparency document",
+            ));
+        }
+        for numeric in ["seq", "bytes", "chain_length"] {
+            reject_boolean_numeric_field(value, numeric)?;
+        }
+    }
+    let mut output = Vec::new();
+    write_transparency_object_fields(
+        fields.iter().map(|(key, value)| (key, value)).collect(),
+        &mut output,
+    )?;
+    output.push(b'\n');
+    Ok(output)
+}
+
 /// Canonicalizes transparency JSON. This is deliberately separate from rail canonical JSON.
 pub fn transparency_canonical_json(value: &Value) -> Result<Vec<u8>> {
+    if let Value::Object(object) = value {
+        let fields = object
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        return transparency_canonical_object_fields(&fields);
+    }
     validate_ascii(value)?;
     for numeric in ["seq", "bytes", "chain_length"] {
         reject_boolean_numeric_field(value, numeric)?;
@@ -276,7 +367,12 @@ pub fn validate_entry(
             "use the transparency chain for solstone-linux",
         ));
     }
-    if !is_git_commit(&entry.source_commit) || !is_sha256(&entry.prev_sha256) {
+    let exact_source_commit = entry.source_commit.len() == 40
+        && entry
+            .source_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    if !exact_source_commit || !is_sha256(&entry.prev_sha256) {
         return Err(transparency_error(
             "terminal",
             "transparency entry binding",
@@ -312,10 +408,18 @@ pub fn validate_entry(
             let expected_digest = digest(&previous_bytes);
             let previous_time = exact_timestamp("previous published_utc", &previous.published_utc)?;
             let current_time = exact_timestamp("transparency published_utc", &entry.published_utc)?;
+            if current_time <= previous_time {
+                return Err(transparency_error(
+                    "retryable",
+                    "transparency published_utc progression",
+                    format!("later than {}", previous.published_utc),
+                    &entry.published_utc,
+                    "wait one second, discard the incomplete staging directory, and retry make publish-transparency",
+                ));
+            }
             if entry.seq != previous.seq + 1
                 || entry.prev_sha256 != expected_digest
                 || entry.prev_version != previous.version
-                || current_time <= previous_time
             {
                 return Err(transparency_error(
                     "terminal",
@@ -419,14 +523,20 @@ pub trait TransparencyTransport {
         &mut self,
         destination: &Destination,
         bytes: &[u8],
-        etag: Option<&str>,
+        etag: &str,
+        cache_control: &str,
+    ) -> Result<TransportResponse>;
+    fn put_mutable(
+        &mut self,
+        destination: &Destination,
+        bytes: &[u8],
         cache_control: &str,
     ) -> Result<TransportResponse>;
     fn list(&mut self, destination: &Destination, prefix: &str) -> Result<TransportResponse>;
 }
 
 pub trait ArchiveChannel {
-    fn archive(&mut self, staging: &Path, manifest_sha256: &str) -> Result<ArchiveResponse>;
+    fn archive(&mut self, staging: &Path, manifest_sha256: &str) -> Result<()>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -561,7 +671,7 @@ impl TransparencyTransport for CurlTransport {
         &mut self,
         destination: &Destination,
         bytes: &[u8],
-        etag: Option<&str>,
+        etag: &str,
         cache_control: &str,
     ) -> Result<TransportResponse> {
         self.assert_s3(destination)?;
@@ -570,15 +680,43 @@ impl TransparencyTransport for CurlTransport {
             .join(format!(".curl-upload-{}", self.sequence + 1));
         fs::write(&upload, bytes).map_err(display_error)?;
         let cache = format!("Cache-Control: {cache_control}");
-        let condition = etag.map_or_else(
-            || "If-None-Match: *".to_owned(),
-            |tag| format!("If-Match: {tag}"),
-        );
+        let condition = format!("If-Match: {etag}");
         let args = [
             OsStr::new("--upload-file"),
             upload.as_os_str(),
             OsStr::new("--header"),
             OsStr::new(&condition),
+            OsStr::new("--header"),
+            OsStr::new(&cache),
+        ];
+        let response = self.execute(destination, &args, false);
+        let _ = fs::remove_file(upload);
+        response
+    }
+
+    fn put_mutable(
+        &mut self,
+        destination: &Destination,
+        bytes: &[u8],
+        cache_control: &str,
+    ) -> Result<TransportResponse> {
+        self.assert_s3(destination)?;
+        let upload = self
+            .response_root
+            .join(format!(".curl-upload-{}", self.sequence + 1));
+        fs::write(&upload, bytes).map_err(|error| {
+            transparency_error(
+                "retryable",
+                "transparency mutable upload staging",
+                "writable temporary file",
+                error,
+                "restore local staging permissions and retry the transparency command",
+            )
+        })?;
+        let cache = format!("Cache-Control: {cache_control}");
+        let args = [
+            OsStr::new("--upload-file"),
+            upload.as_os_str(),
             OsStr::new("--header"),
             OsStr::new(&cache),
         ];
@@ -682,7 +820,7 @@ struct CommandArchive {
 }
 
 impl ArchiveChannel for CommandArchive {
-    fn archive(&mut self, staging: &Path, manifest_sha256: &str) -> Result<ArchiveResponse> {
+    fn archive(&mut self, staging: &Path, manifest_sha256: &str) -> Result<()> {
         let output = Command::new("sh")
             .args(["-c", "exec $1 $2", "transparency-archive", &self.command])
             .arg(staging)
@@ -701,11 +839,15 @@ impl ArchiveChannel for CommandArchive {
                 "retryable",
                 "transparency archive receipt",
                 expected,
-                sanitize_process_stderr(&response.stdout),
+                format!(
+                    "stdout {}; stderr {}",
+                    sanitize_process_stderr(&response.stdout),
+                    sanitize_process_stderr(&response.stderr)
+                ),
                 "repair the archive channel and retry make publish-transparency",
             ));
         }
-        Ok(response)
+        Ok(())
     }
 }
 
@@ -786,6 +928,47 @@ fn ensure_http(response: &TransportResponse, expected: &[u16], label: &str) -> R
     Ok(())
 }
 
+fn s3_list_is_empty(bytes: &[u8]) -> Result<bool> {
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        transparency_error(
+            "retryable",
+            "transparency genesis LIST XML",
+            "UTF-8 ListBucketResult",
+            "non-UTF-8 response",
+            "retry after restoring the transparency S3 plane",
+        )
+    })?;
+    let start = text.find("<KeyCount>").ok_or_else(|| {
+        transparency_error(
+            "retryable",
+            "transparency genesis LIST XML",
+            "one KeyCount element",
+            "missing KeyCount",
+            "retry after restoring the transparency S3 plane",
+        )
+    })? + "<KeyCount>".len();
+    let remainder = &text[start..];
+    let end = remainder.find("</KeyCount>").ok_or_else(|| {
+        transparency_error(
+            "retryable",
+            "transparency genesis LIST XML",
+            "closed KeyCount element",
+            "malformed KeyCount",
+            "retry after restoring the transparency S3 plane",
+        )
+    })?;
+    let count = remainder[..end].parse::<u64>().map_err(|_| {
+        transparency_error(
+            "retryable",
+            "transparency genesis LIST XML",
+            "decimal KeyCount",
+            &remainder[..end],
+            "retry after restoring the transparency S3 plane",
+        )
+    })?;
+    Ok(count == 0 && !text.contains("<Contents>"))
+}
+
 fn verify_minisign_bytes(
     root: &Path,
     public_key: &Path,
@@ -793,10 +976,10 @@ fn verify_minisign_bytes(
     signature: &[u8],
     label: &str,
 ) -> Result<()> {
-    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let message_path = root.join(format!(".transparency-verify-{sequence}.json"));
-    let signature_path = root.join(format!(".transparency-verify-{sequence}.minisig"));
+    let temporary_parent = root.parent().unwrap_or(root);
+    let temporary = TemporaryDirectory::create(temporary_parent, "transparency-verify")?;
+    let message_path = temporary.path().join("message.json");
+    let signature_path = temporary.path().join("message.minisig");
     fs::write(&message_path, message).map_err(display_error)?;
     fs::write(&signature_path, signature).map_err(display_error)?;
     let status = Command::new("minisign")
@@ -808,8 +991,6 @@ fn verify_minisign_bytes(
         .arg(&signature_path)
         .status()
         .map_err(display_error)?;
-    let _ = fs::remove_file(&message_path);
-    let _ = fs::remove_file(&signature_path);
     if !status.success() {
         return Err(transparency_error(
             "terminal",
@@ -927,6 +1108,64 @@ pub(crate) fn validate_transparency_ledger(bytes: &[u8], tip: &TransparencyEntry
     Ok(())
 }
 
+fn parsed_transparency_ledger(bytes: &[u8]) -> Result<Vec<(TransparencyEntry, Vec<u8>)>> {
+    let mut previous = None;
+    let mut parsed = Vec::new();
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !line.ends_with(b"\n") {
+            return Err(transparency_error(
+                "retryable",
+                "transparency ledger structure",
+                "newline-terminated canonical entries",
+                "partial or empty final line",
+                "re-derive the transparency ledger from locked entries",
+            ));
+        }
+        let entry: TransparencyEntry = parse_json(line, "transparency ledger entry")?;
+        let canonical =
+            transparency_canonical_json(&serde_json::to_value(&entry).map_err(display_error)?)?;
+        if canonical != line {
+            return Err(transparency_error(
+                "retryable",
+                "transparency ledger canonical bytes",
+                digest(&canonical),
+                digest(line),
+                "re-derive the transparency ledger from locked entries",
+            ));
+        }
+        validate_entry(&entry, previous.as_ref())?;
+        previous = Some(entry.clone());
+        parsed.push((entry, line.to_vec()));
+    }
+    Ok(parsed)
+}
+
+fn reject_locked_ledger_contradiction(fetched: &[u8], locked: &[u8]) -> Result<()> {
+    let fetched = match parsed_transparency_ledger(fetched) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    let locked = parsed_transparency_ledger(locked)?;
+    let locked_by_seq = locked
+        .into_iter()
+        .map(|(entry, bytes)| (entry.seq, bytes))
+        .collect::<BTreeMap<_, _>>();
+    for (entry, bytes) in fetched {
+        if let Some(expected) = locked_by_seq.get(&entry.seq)
+            && expected != &bytes
+        {
+            return Err(transparency_error(
+                "terminal",
+                "transparency ledger locked entry",
+                digest(expected),
+                format!("seq {} digest {}", entry.seq, digest(&bytes)),
+                "stop and restore the transparency ledger from the signed locked entries",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn transparency_ledger_has_tip(bytes: &[u8], tip_sha256: &str) -> bool {
     bytes
         .split_inclusive(|byte| *byte == b'\n')
@@ -1009,9 +1248,7 @@ pub(crate) fn fetch_verified_chain<T: TransparencyTransport, V: TransparencySign
         }
         let listed = transport.list(&s3(config, ""), &format!("{prefix}/v/"))?;
         ensure_http(&listed, &[200], "transparency genesis LIST")?;
-        if !listed.body.is_empty()
-            && !String::from_utf8_lossy(&listed.body).contains("<KeyCount>0</KeyCount>")
-        {
+        if !s3_list_is_empty(&listed.body)? {
             return Err(transparency_error(
                 "terminal",
                 "transparency genesis prefix",
@@ -1096,14 +1333,20 @@ pub(crate) fn fetch_verified_chain<T: TransparencyTransport, V: TransparencySign
         {
             bytes
         }
-        _ => rederive_transparency_ledger(
-            root,
-            config,
-            transport,
-            verifier,
-            &tip,
-            &tip_response.body,
-        )?,
+        fetched => {
+            let locked = rederive_transparency_ledger(
+                root,
+                config,
+                transport,
+                verifier,
+                &tip,
+                &tip_response.body,
+            )?;
+            if let Some(bytes) = fetched {
+                reject_locked_ledger_contradiction(&bytes, &locked)?;
+            }
+            locked
+        }
     };
     validate_transparency_ledger(&transparency_ledger, &tip)?;
     Ok(VerifiedChain {
@@ -1230,7 +1473,10 @@ fn validate_tools() -> Result<()> {
 
 pub(crate) fn append_head_row(root: &Path, row: &TransparencyHeadRow) -> Result<&'static str> {
     let path = root.join(TRANSPARENCY_HEAD_LOG);
-    let existing = fs::read(&path).map_err(display_error)?;
+    let existing = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok("witness unavailable; gap"),
+    };
     for line in existing
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -1250,11 +1496,13 @@ pub(crate) fn append_head_row(root: &Path, row: &TransparencyHeadRow) -> Result<
         }
     }
     let bytes = transparency_canonical_json(&serde_json::to_value(row).map_err(display_error)?)?;
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .map_err(display_error)?;
-    file.write_all(&bytes).map_err(display_error)?;
+    let mut file = match OpenOptions::new().append(true).open(&path) {
+        Ok(file) => file,
+        Err(_) => return Ok("witness unavailable; gap"),
+    };
+    if file.write_all(&bytes).is_err() {
+        return Ok("witness unavailable; gap");
+    }
     Ok("written uncommitted; gap: git add transparency-head-log.jsonl && git commit")
 }
 
@@ -1335,9 +1583,20 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
         ));
     }
     let policies = ReleaseImages::from_root(root.path())?;
+    let staging = root
+        .path()
+        .join(".transparency-staging")
+        .join(PRODUCT)
+        .join(&manifest.version);
+    let existing_staging = staging.exists();
     let mut proofs = BTreeMap::new();
     for spec in PROOF_SPECS {
-        let path = evidence.join("proofs").join(format!("{}.json", spec.id));
+        let name = format!("{}.json", spec.id);
+        let path = if existing_staging {
+            staging.join(&name)
+        } else {
+            evidence.join("proofs").join(&name)
+        };
         let bytes = fs::read(&path).map_err(|_| {
             transparency_error(
                 "terminal",
@@ -1385,14 +1644,10 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
                 validation_time: proof_time.into(),
             },
         )?;
-        proofs.insert(format!("{}.json", spec.id), bytes);
+        proofs.insert(name, bytes);
     }
-    let staging = root
-        .path()
-        .join(".transparency-staging")
-        .join(PRODUCT)
-        .join(&manifest.version);
-    if staging.exists() {
+    if existing_staging {
+        validate_staged_candidate(root, &staging, &manifest)?;
         return Ok(CandidateSnapshot {
             staging,
             manifest,
@@ -1418,6 +1673,7 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
         temporary.join(manifest_name(&manifest.version)),
     )
     .map_err(display_error)?;
+    validate_staged_candidate(root, &temporary, &manifest)?;
     for (name, bytes) in &proofs {
         fs::write(temporary.join(name), bytes).map_err(display_error)?;
     }
@@ -1428,6 +1684,70 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
         manifest,
         proofs,
     })
+}
+
+fn validate_staged_candidate(root: &RepoRoot, staging: &Path, manifest: &Manifest) -> Result<()> {
+    let manifest_file = manifest_name(&manifest.version);
+    let staged_manifest_bytes = fs::read(staging.join(&manifest_file)).map_err(|error| {
+        transparency_error(
+            "terminal",
+            "staged companion manifest",
+            &manifest_file,
+            error,
+            "discard the staging directory and retry make publish-transparency",
+        )
+    })?;
+    let staged_manifest = validate_manifest_bytes(root, &staged_manifest_bytes)?;
+    if staged_manifest.source_commit != manifest.source_commit
+        || staged_manifest.version != manifest.version
+        || staged_manifest.artifacts != manifest.artifacts
+    {
+        return Err(transparency_error(
+            "terminal",
+            "staged companion manifest binding",
+            format!(
+                "version {} commit {}",
+                manifest.version, manifest.source_commit
+            ),
+            format!(
+                "version {} commit {}",
+                staged_manifest.version, staged_manifest.source_commit
+            ),
+            "discard the staging directory and retry make publish-transparency",
+        ));
+    }
+    for artifact in &manifest.artifacts {
+        let bytes = fs::read(staging.join(&artifact.path)).map_err(|error| {
+            transparency_error(
+                "terminal",
+                "staged candidate file",
+                &artifact.path,
+                error,
+                "discard the staging directory and retry make publish-transparency",
+            )
+        })?;
+        if bytes.len() as u64 != artifact.bytes || digest(&bytes) != artifact.sha256 {
+            return Err(transparency_error(
+                "terminal",
+                "staged candidate artifact",
+                format!("{} bytes sha256 {}", artifact.bytes, artifact.sha256),
+                format!("{} bytes sha256 {}", bytes.len(), digest(&bytes)),
+                "discard the staging directory and retry make publish-transparency",
+            ));
+        }
+    }
+    let checksums = fs::read_to_string(staging.join(CHECKSUM_NAME)).map_err(display_error)?;
+    let expected_checksums = render_sha256sums(&manifest.artifacts)?;
+    if checksums != expected_checksums {
+        return Err(transparency_error(
+            "terminal",
+            "staged SHA256SUMS bytes",
+            digest(expected_checksums.as_bytes()),
+            digest(checksums.as_bytes()),
+            "discard the staging directory and retry make publish-transparency",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn build_entry(
@@ -1514,7 +1834,64 @@ pub(crate) fn build_pointer(
     Ok((pointer, bytes))
 }
 
-fn immutable_objects(
+pub(crate) fn renew_pointer(
+    old: &TransparencyPointer,
+    now: DateTime<Utc>,
+) -> Result<(TransparencyPointer, Vec<u8>)> {
+    let pointer = TransparencyPointer {
+        chain_length: old.chain_length,
+        product: PRODUCT.into(),
+        schema: TRANSPARENCY_LATEST_SCHEMA.into(),
+        signed_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+        tip_sha256: old.tip_sha256.clone(),
+        valid_until: (now + Duration::days(14)).to_rfc3339_opts(SecondsFormat::Secs, true),
+        version: old.version.clone(),
+    };
+    let bytes =
+        transparency_canonical_json(&serde_json::to_value(&pointer).map_err(display_error)?)?;
+    Ok((pointer, bytes))
+}
+
+pub(crate) fn pointer_is_stale(pointer: &TransparencyPointer, now: DateTime<Utc>) -> Result<bool> {
+    Ok(exact_timestamp(
+        "staged transparency pointer valid_until",
+        &pointer.valid_until,
+    )? < now)
+}
+
+pub(crate) fn validate_staged_entry_candidate(
+    entry: &TransparencyEntry,
+    manifest: &Manifest,
+    staging: &Path,
+) -> Result<()> {
+    if entry.version != manifest.version || entry.source_commit != manifest.source_commit {
+        return Err(transparency_error(
+            "terminal",
+            "local transparency staging candidate",
+            format!(
+                "version {} commit {}",
+                manifest.version, manifest.source_commit
+            ),
+            format!("version {} commit {}", entry.version, entry.source_commit),
+            format!(
+                "discard only {} and retry; a never-published local stage is not a poisoned remote version",
+                staging.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn chain_includes_entry(chain: &VerifiedChain, entry_bytes: &[u8]) -> Result<bool> {
+    match &chain.tip {
+        Some(tip) => Ok(transparency_canonical_json(
+            &serde_json::to_value(tip).map_err(display_error)?,
+        )? == entry_bytes),
+        None => Ok(false),
+    }
+}
+
+pub(crate) fn immutable_objects(
     staging: &Path,
     entry: &[u8],
     signature: &[u8],
@@ -1534,7 +1911,7 @@ fn immutable_objects(
 }
 
 pub(crate) fn staging_manifest_v1(staging: &Path) -> Result<(Vec<u8>, String)> {
-    fn visit(root: &Path, directory: &Path, files: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
+    fn visit(root: &Path, directory: &Path, files: &mut Vec<(String, PathBuf)>) -> Result<()> {
         for entry in fs::read_dir(directory).map_err(display_error)? {
             let entry = entry.map_err(display_error)?;
             let path = entry.path();
@@ -1575,10 +1952,7 @@ pub(crate) fn staging_manifest_v1(staging: &Path) -> Result<(Vec<u8>, String)> {
             if file_type.is_dir() {
                 visit(root, &path, files)?;
             } else if file_type.is_file() {
-                files.push((
-                    relative.replace(std::path::MAIN_SEPARATOR, "/"),
-                    fs::read(path).map_err(display_error)?,
-                ));
+                files.push((relative.replace(std::path::MAIN_SEPARATOR, "/"), path));
             }
         }
         Ok(())
@@ -1588,17 +1962,53 @@ pub(crate) fn staging_manifest_v1(staging: &Path) -> Result<(Vec<u8>, String)> {
     visit(staging, staging, &mut files)?;
     files.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     let mut rendered = Vec::new();
-    for (path, bytes) in files {
+    for (path, file_path) in files {
+        let mut file = fs::File::open(&file_path).map_err(|error| {
+            transparency_error(
+                "terminal",
+                "staging-manifest v1 file",
+                "readable regular file",
+                error,
+                "discard the staging directory and retry make publish-transparency",
+            )
+        })?;
+        let bytes = file.metadata().map_err(display_error)?.len();
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(display_error)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
         writeln!(
             rendered,
             "sha256={}\tbytes={}\tpath={path}",
-            digest(&bytes),
-            bytes.len()
+            format_args!("{:x}", hasher.finalize()),
+            bytes
         )
         .map_err(display_error)?;
     }
     let receipt = digest(&rendered);
     Ok((rendered, receipt))
+}
+
+pub(crate) fn remove_obsolete_staging_manifest(staging: &Path) -> Result<()> {
+    let obsolete_manifest = staging.join("staging-manifest.json");
+    match fs::symlink_metadata(&obsolete_manifest) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(transparency_error(
+            "terminal",
+            "staging-manifest v1 file type",
+            "regular file or directory",
+            "symlink at staging-manifest.json",
+            "discard the staging directory and retry make publish-transparency",
+        )),
+        Ok(metadata) if metadata.is_file() => {
+            fs::remove_file(obsolete_manifest).map_err(display_error)
+        }
+        Ok(_) | Err(_) => Ok(()),
+    }
 }
 
 pub(crate) struct StagedPublication<'a> {
@@ -1613,10 +2023,85 @@ pub(crate) struct StagedPublication<'a> {
     pub(crate) proofs: &'a BTreeMap<String, Vec<u8>>,
 }
 
-pub(crate) fn upload_publication<T: TransparencyTransport, A: ArchiveChannel>(
+fn verify_adoptable_remote_entry<V: TransparencySignatureVerifier>(
+    config: &TransparencyConfig,
+    verifier: &mut V,
+    verification_root: &Path,
+    expected: &TransparencyEntry,
+    expected_bytes: &[u8],
+    remote_bytes: &[u8],
+    remote_signature: &[u8],
+) -> Result<String> {
+    let recorded: TransparencyEntry =
+        parse_json(remote_bytes, "remote recorded transparency entry")?;
+    let recorded_identity = digest(remote_bytes);
+    let semantic_match = recorded.product == PRODUCT
+        && recorded.version == expected.version
+        && recorded.seq == expected.seq
+        && recorded.prev_sha256 == expected.prev_sha256
+        && recorded.prev_version == expected.prev_version
+        && recorded.source_commit == expected.source_commit
+        && recorded.artifacts == expected.artifacts
+        && recorded.manifests == expected.manifests
+        && recorded.proofs == expected.proofs;
+    let signature_valid = verifier
+        .verify(
+            verification_root,
+            &config.minisign_pub,
+            remote_bytes,
+            remote_signature,
+            "remote recorded transparency entry signature",
+        )
+        .is_ok()
+        && verify_trusted_comment(
+            remote_signature,
+            &entry_trusted_comment(&recorded, &recorded_identity),
+            "remote recorded transparency entry trusted comment",
+        )
+        .is_ok();
+    if !semantic_match || !signature_valid {
+        return Err(transparency_error(
+            "terminal",
+            "remote poisoned version",
+            format!(
+                "candidate commit {} seq {} entry {}",
+                expected.source_commit,
+                expected.seq,
+                digest(expected_bytes)
+            ),
+            format!(
+                "recorded commit {} seq {} entry {}",
+                recorded.source_commit, recorded.seq, recorded_identity
+            ),
+            "cut the next version because this version key is permanently recorded",
+        ));
+    }
+    Ok(recorded_identity)
+}
+
+fn persist_adopted_entry(staging: &Path, entry_bytes: &[u8], signature_bytes: &[u8]) -> Result<()> {
+    fs::write(staging.join("ledger-entry.json"), entry_bytes).map_err(display_error)?;
+    fs::write(staging.join("ledger-entry.json.minisig"), signature_bytes).map_err(display_error)?;
+    for name in ["latest.json", "latest.json.minisig"] {
+        match fs::remove_file(staging.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(display_error(error)),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn upload_publication<
+    T: TransparencyTransport,
+    A: ArchiveChannel,
+    V: TransparencySignatureVerifier,
+>(
     config: &TransparencyConfig,
     transport: &mut T,
     archive: &mut A,
+    verifier: &mut V,
+    verification_root: &Path,
     publication: &StagedPublication<'_>,
 ) -> Result<String> {
     let StagedPublication {
@@ -1633,7 +2118,58 @@ pub(crate) fn upload_publication<T: TransparencyTransport, A: ArchiveChannel>(
     let objects = immutable_objects(staging, entry_bytes, entry_signature, manifest, proofs)?;
     let prefix = format!("releases/{PRODUCT}/v/{}", entry.version);
     let mut adopted = BTreeSet::new();
+    let remote_entry = transport.get(&s3(config, &format!("{prefix}/ledger-entry.json")), false)?;
+    let remote_signature = transport.get(
+        &s3(config, &format!("{prefix}/ledger-entry.json.minisig")),
+        false,
+    )?;
+    match (remote_entry.http_status, remote_signature.http_status) {
+        (404, 404) => {}
+        (200, 200)
+            if remote_entry.body == *entry_bytes && remote_signature.body == *entry_signature =>
+        {
+            adopted.insert("ledger-entry.json".into());
+            adopted.insert("ledger-entry.json.minisig".into());
+        }
+        (200, 200) => {
+            let recorded_identity = verify_adoptable_remote_entry(
+                config,
+                verifier,
+                verification_root,
+                entry,
+                entry_bytes,
+                &remote_entry.body,
+                &remote_signature.body,
+            )?;
+            persist_adopted_entry(staging, &remote_entry.body, &remote_signature.body)?;
+            return Err(transparency_error(
+                "retryable",
+                "transparency immutable adoption",
+                "staged entry and signature",
+                format!("adopted signed remote entry {recorded_identity}"),
+                "retry make publish-transparency so the pointer pair is signed for the adopted entry before archive and mutable writes",
+            ));
+        }
+        _ => {
+            return Err(transparency_error(
+                "terminal",
+                "remote immutable entry pair",
+                "both entry and signature absent or present",
+                format!(
+                    "entry HTTP {} signature HTTP {}",
+                    remote_entry.http_status, remote_signature.http_status
+                ),
+                "cut the next version because the remote version key contains an incomplete entry pair",
+            ));
+        }
+    }
     for (name, bytes) in &objects {
+        if matches!(
+            name.as_str(),
+            "ledger-entry.json" | "ledger-entry.json.minisig"
+        ) {
+            continue;
+        }
         let destination = s3(config, &format!("{prefix}/{name}"));
         let remote = transport.get(&destination, false)?;
         match remote.http_status {
@@ -1655,10 +2191,7 @@ pub(crate) fn upload_publication<T: TransparencyTransport, A: ArchiveChannel>(
     }
     let transparency_ledger = [chain.transparency_ledger.as_slice(), entry_bytes].concat();
     fs::write(staging.join("ledger.jsonl"), transparency_ledger).map_err(display_error)?;
-    let obsolete_manifest = staging.join("staging-manifest.json");
-    if obsolete_manifest.is_file() {
-        fs::remove_file(obsolete_manifest).map_err(display_error)?;
-    }
+    remove_obsolete_staging_manifest(staging)?;
     let (_, archive_digest) = staging_manifest_v1(staging)?;
     archive.archive(staging, &archive_digest)?;
     // Immutable mutation completes before any public-plane verification begins.
@@ -1672,6 +2205,40 @@ pub(crate) fn upload_publication<T: TransparencyTransport, A: ArchiveChannel>(
         match response.http_status {
             200 | 201 | 204 => {}
             412 => {
+                if matches!(
+                    name.as_str(),
+                    "ledger-entry.json" | "ledger-entry.json.minisig"
+                ) {
+                    let remote_entry = transport
+                        .get(&s3(config, &format!("{prefix}/ledger-entry.json")), false)?;
+                    let remote_signature = transport.get(
+                        &s3(config, &format!("{prefix}/ledger-entry.json.minisig")),
+                        false,
+                    )?;
+                    ensure_http(&remote_entry, &[200], "raced transparency entry GET")?;
+                    ensure_http(
+                        &remote_signature,
+                        &[200],
+                        "raced transparency entry signature GET",
+                    )?;
+                    let identity = verify_adoptable_remote_entry(
+                        config,
+                        verifier,
+                        verification_root,
+                        entry,
+                        entry_bytes,
+                        &remote_entry.body,
+                        &remote_signature.body,
+                    )?;
+                    persist_adopted_entry(staging, &remote_entry.body, &remote_signature.body)?;
+                    return Err(transparency_error(
+                        "retryable",
+                        "transparency immutable adoption",
+                        "preflight adoption before archive",
+                        format!("PUT-time race adopted signed remote entry {identity}"),
+                        "retry make publish-transparency so preflight archives adopted bytes before mutable writes",
+                    ));
+                }
                 let remote = transport.get(&destination, false)?;
                 ensure_http(&remote, &[200], "transparency immutable adoption GET")?;
                 if remote.body != *bytes {
@@ -1734,7 +2301,7 @@ pub(crate) fn upload_publication<T: TransparencyTransport, A: ArchiveChannel>(
     let ledger = [chain.transparency_ledger.as_slice(), entry_bytes].concat();
     let ledger_destination = s3(config, &format!("releases/{PRODUCT}/ledger.jsonl"));
     ensure_http(
-        &transport.put_conditional(&ledger_destination, &ledger, None, MUTABLE_CACHE)?,
+        &transport.put_mutable(&ledger_destination, &ledger, MUTABLE_CACHE)?,
         &[200, 201, 204],
         "transparency ledger PUT",
     )?;
@@ -1755,31 +2322,45 @@ pub(crate) fn upload_publication<T: TransparencyTransport, A: ArchiveChannel>(
     }
     let signature_destination = s3(config, &format!("releases/{PRODUCT}/latest.json.minisig"));
     ensure_http(
-        &transport.put_conditional(
-            &signature_destination,
-            pointer_signature,
-            None,
-            MUTABLE_CACHE,
-        )?,
+        &transport.put_mutable(&signature_destination, pointer_signature, MUTABLE_CACHE)?,
         &[200, 201, 204],
         "transparency pointer signature PUT",
     )?;
+    let signature_remote = transport.get(&signature_destination, true)?;
     ensure_http(
-        &transport.get(&signature_destination, true)?,
+        &signature_remote,
         &[200],
         "transparency pointer signature verification GET",
     )?;
-    let pointer_destination = s3(config, &format!("releases/{PRODUCT}/latest.json"));
-    ensure_http(
-        &transport.put_conditional(
-            &pointer_destination,
-            pointer_bytes,
-            chain.pointer_etag.as_deref(),
-            MUTABLE_CACHE,
-        )?,
-        &[200, 201, 204],
-        "transparency pointer PUT",
+    if signature_remote.body != *pointer_signature {
+        return Err(transparency_error(
+            "retryable",
+            "transparency pointer signature bytes",
+            digest(pointer_signature),
+            digest(&signature_remote.body),
+            "retry after restoring the transparency S3 plane",
+        ));
+    }
+    verifier.verify(
+        verification_root,
+        &config.minisign_pub,
+        pointer_bytes,
+        &signature_remote.body,
+        "uploaded transparency pointer signature",
     )?;
+    verify_trusted_comment(
+        &signature_remote.body,
+        &pointer_trusted_comment(&parse_json(pointer_bytes, "staged transparency pointer")?),
+        "uploaded transparency pointer trusted comment",
+    )?;
+    let pointer_destination = s3(config, &format!("releases/{PRODUCT}/latest.json"));
+    let pointer_put = match chain.pointer_etag.as_deref() {
+        Some(etag) => {
+            transport.put_conditional(&pointer_destination, pointer_bytes, etag, MUTABLE_CACHE)?
+        }
+        None => transport.put_create_only(&pointer_destination, pointer_bytes, MUTABLE_CACHE)?,
+    };
+    ensure_http(&pointer_put, &[200, 201, 204], "transparency pointer PUT")?;
     let pointer_remote = transport.get(&pointer_destination, true)?;
     ensure_http(
         &pointer_remote,
@@ -1795,10 +2376,41 @@ pub(crate) fn upload_publication<T: TransparencyTransport, A: ArchiveChannel>(
             "retry after restoring the transparency S3 plane",
         ));
     }
+    let final_signature = transport.get(&signature_destination, true)?;
+    ensure_http(
+        &final_signature,
+        &[200],
+        "published transparency pointer signature final GET",
+    )?;
+    if final_signature.body != *pointer_signature {
+        return Err(transparency_error(
+            "retryable",
+            "published transparency pointer signature bytes",
+            digest(pointer_signature),
+            digest(&final_signature.body),
+            "retry after restoring the transparency S3 plane",
+        ));
+    }
+    verifier.verify(
+        verification_root,
+        &config.minisign_pub,
+        &pointer_remote.body,
+        &final_signature.body,
+        "published transparency pointer signature",
+    )?;
+    verify_trusted_comment(
+        &final_signature.body,
+        &pointer_trusted_comment(&parse_json(
+            &pointer_remote.body,
+            "published transparency pointer",
+        )?),
+        "published transparency pointer trusted comment",
+    )?;
     Ok(archive_digest)
 }
 
 pub fn publish_transparency(release_dir: &Path) -> Result<()> {
+    let started = Instant::now();
     let root = RepoRoot::resolve()?;
     validate_previous_head_committed(root.path())?;
     validate_tools()?;
@@ -1821,64 +2433,59 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
     let entry_signature_path = staging.join("ledger-entry.json.minisig");
     let pointer_path = staging.join("latest.json");
     let pointer_signature_path = staging.join("latest.json.minisig");
-    let staged_complete = [
-        &entry_path,
-        &entry_signature_path,
-        &pointer_path,
-        &pointer_signature_path,
-    ]
-    .iter()
-    .all(|path| path.is_file());
-    let (entry, entry_bytes, pointer, pointer_bytes) = if staged_complete {
+    let entry_complete = entry_path.is_file() && entry_signature_path.is_file();
+    let pointer_complete = pointer_path.is_file() && pointer_signature_path.is_file();
+    let (entry, entry_bytes, already_published, sign_entry) = if entry_complete {
         let entry_bytes = fs::read(&entry_path).map_err(display_error)?;
-        let pointer_bytes = fs::read(&pointer_path).map_err(display_error)?;
         let entry: TransparencyEntry = parse_json(&entry_bytes, "staged transparency entry")?;
-        let pointer: TransparencyPointer =
-            parse_json(&pointer_bytes, "staged transparency pointer")?;
-        validate_entry(&entry, chain.tip.as_ref())?;
-        validate_pointer(&pointer, &entry)?;
-        if entry.version != manifest.version || entry.source_commit != manifest.source_commit {
-            return Err(transparency_error(
-                "terminal",
-                "local transparency staging candidate",
-                format!(
-                    "version {} commit {}",
-                    manifest.version, manifest.source_commit
-                ),
-                format!("version {} commit {}", entry.version, entry.source_commit),
-                format!(
-                    "discard only {} and retry; a never-published local stage is not a poisoned remote version",
-                    staging.display()
-                ),
-            ));
+        let already_published = chain_includes_entry(&chain, &entry_bytes)?;
+        if !already_published {
+            validate_entry(&entry, chain.tip.as_ref())?;
         }
-        (entry, entry_bytes, pointer, pointer_bytes)
+        validate_staged_entry_candidate(&entry, manifest, staging)?;
+        (entry, entry_bytes, already_published, false)
     } else {
         let (entry, entry_bytes) = build_entry(staging, manifest, proofs, &chain)?;
-        let (pointer, pointer_bytes) = build_pointer(&entry, &entry_bytes)?;
         fs::write(&entry_path, &entry_bytes).map_err(display_error)?;
+        (entry, entry_bytes, false, true)
+    };
+    let (pointer, pointer_bytes, sign_pointer) = if pointer_complete {
+        let pointer_bytes = fs::read(&pointer_path).map_err(display_error)?;
+        let pointer: TransparencyPointer =
+            parse_json(&pointer_bytes, "staged transparency pointer")?;
+        validate_pointer(&pointer, &entry)?;
+        (pointer, pointer_bytes, false)
+    } else {
+        let (pointer, pointer_bytes) = build_pointer(&entry, &entry_bytes)?;
         fs::write(&pointer_path, &pointer_bytes).map_err(display_error)?;
+        (pointer, pointer_bytes, true)
+    };
+    if sign_entry || sign_pointer {
         let mut passphrase = read_passphrase_once()?;
         let signing = (|| {
-            sign_file(
-                &config.minisign_key,
-                &entry_path,
-                &entry_signature_path,
-                &entry_trusted_comment(&entry, &digest(&entry_bytes)),
-                &passphrase,
-            )?;
-            sign_file(
-                &config.minisign_key,
-                &pointer_path,
-                &pointer_signature_path,
-                &pointer_trusted_comment(&pointer),
-                &passphrase,
-            )
+            if sign_entry {
+                sign_file(
+                    &config.minisign_key,
+                    &entry_path,
+                    &entry_signature_path,
+                    &entry_trusted_comment(&entry, &digest(&entry_bytes)),
+                    &passphrase,
+                )?;
+            }
+            if sign_pointer {
+                sign_file(
+                    &config.minisign_key,
+                    &pointer_path,
+                    &pointer_signature_path,
+                    &pointer_trusted_comment(&pointer),
+                    &passphrase,
+                )?;
+            }
+            Ok(())
         })();
         passphrase.fill(0);
         signing?;
-        (entry, entry_bytes, pointer, pointer_bytes)
-    };
+    }
     let entry_signature = fs::read(&entry_signature_path).map_err(display_error)?;
     let pointer_signature = fs::read(&pointer_signature_path).map_err(display_error)?;
     verify_trusted_comment(
@@ -1898,6 +2505,15 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
         &entry_signature,
         "new transparency entry signature",
     )?;
+    if already_published {
+        println!(
+            "already published, chain unchanged: product={PRODUCT} version={} seq={} entry_sha256={}",
+            entry.version,
+            entry.seq,
+            digest(&entry_bytes)
+        );
+        return Ok(());
+    }
     verify_minisign_bytes(
         staging,
         &config.minisign_pub,
@@ -1912,6 +2528,8 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
         &config,
         &mut transport,
         &mut archive,
+        &mut MinisignVerifier,
+        staging,
         &StagedPublication {
             staging,
             chain: &chain,
@@ -1933,21 +2551,23 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
             seq: entry.seq,
             version: entry.version.clone(),
         },
-    )
-    .unwrap_or("witness unavailable; gap");
-    let stale_pointer = exact_timestamp(
-        "staged transparency pointer valid_until",
-        &pointer.valid_until,
-    )? < Utc::now();
+    )?;
+    let stale_pointer = pointer_is_stale(&pointer, Utc::now())?;
     println!(
-        "product: {PRODUCT}\nversion: {}\nseq: {}\nentry_sha256: {}\npublic: {}/releases/{PRODUCT}/v/{}/ledger-entry.json\narchive: {}\nwitness: {}",
+        "product: {PRODUCT}\nversion: {}\nseq: {}\nentry_sha256: {}\npublic_entry: {}/releases/{PRODUCT}/v/{}/ledger-entry.json\npublic_entry_signature: {}/releases/{PRODUCT}/v/{}/ledger-entry.json.minisig\npublic_transparency_ledger: {}/releases/{PRODUCT}/ledger.jsonl\npublic_pointer: {}/releases/{PRODUCT}/latest.json\npublic_pointer_signature: {}/releases/{PRODUCT}/latest.json.minisig\narchive: {}\nwitness: {}\nwall_clock_ms: {}",
         entry.version,
         entry.seq,
         digest(&entry_bytes),
         config.base_url,
         entry.version,
+        config.base_url,
+        entry.version,
+        config.base_url,
+        config.base_url,
+        config.base_url,
         archive_digest,
-        witness
+        witness,
+        started.elapsed().as_millis()
     );
     if stale_pointer {
         println!("pointer renewal: make resign-transparency-pointer");
@@ -1979,30 +2599,20 @@ pub fn resign_transparency_pointer() -> Result<()> {
             "publish genesis before resigning its pointer",
         )
     })?;
-    let now = Utc::now();
-    let pointer = TransparencyPointer {
-        chain_length: old.chain_length,
-        product: PRODUCT.into(),
-        schema: TRANSPARENCY_LATEST_SCHEMA.into(),
-        signed_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
-        tip_sha256: old.tip_sha256,
-        valid_until: (now + Duration::days(14)).to_rfc3339_opts(SecondsFormat::Secs, true),
-        version: old.version,
-    };
-    let bytes =
-        transparency_canonical_json(&serde_json::to_value(&pointer).map_err(display_error)?)?;
+    let (pointer, bytes) = renew_pointer(&old, Utc::now())?;
     let message = temporary.join("latest.json");
     let signature = temporary.join("latest.json.minisig");
     fs::write(&message, &bytes).map_err(display_error)?;
     let mut passphrase = read_passphrase_once()?;
-    sign_file(
+    let signing = sign_file(
         &config.minisign_key,
         &message,
         &signature,
         &pointer_trusted_comment(&pointer),
         &passphrase,
-    )?;
+    );
     passphrase.fill(0);
+    signing?;
     let signature_bytes = fs::read(&signature).map_err(display_error)?;
     verify_minisign_bytes(
         &temporary,
@@ -2024,25 +2634,80 @@ pub fn resign_transparency_pointer() -> Result<()> {
     }
     let signature_destination = s3(&config, &format!("{prefix}/latest.json.minisig"));
     ensure_http(
-        &transport.put_conditional(
-            &signature_destination,
-            &signature_bytes,
-            None,
-            MUTABLE_CACHE,
-        )?,
+        &transport.put_mutable(&signature_destination, &signature_bytes, MUTABLE_CACHE)?,
         &[200, 201, 204],
         "resigned transparency signature PUT",
     )?;
-    let pointer_destination = s3(&config, &format!("{prefix}/latest.json"));
+    let uploaded_signature = transport.get(&signature_destination, true)?;
     ensure_http(
-        &transport.put_conditional(
-            &pointer_destination,
-            &bytes,
-            chain.pointer_etag.as_deref(),
-            MUTABLE_CACHE,
-        )?,
+        &uploaded_signature,
+        &[200],
+        "resigned transparency signature verification GET",
+    )?;
+    if uploaded_signature.body != signature_bytes {
+        return Err(transparency_error(
+            "retryable",
+            "resigned transparency signature bytes",
+            digest(&signature_bytes),
+            digest(&uploaded_signature.body),
+            "retry make resign-transparency-pointer after restoring the transparency S3 plane",
+        ));
+    }
+    verify_minisign_bytes(
+        &temporary,
+        &config.minisign_pub,
+        &bytes,
+        &uploaded_signature.body,
+        "uploaded resigned transparency pointer signature",
+    )?;
+    let pointer_destination = s3(&config, &format!("{prefix}/latest.json"));
+    let pointer_put = match chain.pointer_etag.as_deref() {
+        Some(etag) => {
+            transport.put_conditional(&pointer_destination, &bytes, etag, MUTABLE_CACHE)?
+        }
+        None => transport.put_create_only(&pointer_destination, &bytes, MUTABLE_CACHE)?,
+    };
+    ensure_http(
+        &pointer_put,
         &[200, 201, 204],
         "resigned transparency pointer PUT",
+    )?;
+    let remote_signature = transport.get(&signature_destination, true)?;
+    ensure_http(
+        &remote_signature,
+        &[200],
+        "resigned transparency signature verification GET",
+    )?;
+    if remote_signature.body != signature_bytes {
+        return Err(transparency_error(
+            "retryable",
+            "resigned transparency signature bytes",
+            digest(&signature_bytes),
+            digest(&remote_signature.body),
+            "retry make resign-transparency-pointer after restoring the transparency S3 plane",
+        ));
+    }
+    let remote_pointer = transport.get(&pointer_destination, true)?;
+    ensure_http(
+        &remote_pointer,
+        &[200],
+        "resigned transparency pointer verification GET",
+    )?;
+    if remote_pointer.body != bytes {
+        return Err(transparency_error(
+            "retryable",
+            "resigned transparency pointer bytes",
+            digest(&bytes),
+            digest(&remote_pointer.body),
+            "retry make resign-transparency-pointer after restoring the transparency S3 plane",
+        ));
+    }
+    verify_minisign_bytes(
+        &temporary,
+        &config.minisign_pub,
+        &remote_pointer.body,
+        &remote_signature.body,
+        "remote resigned transparency pointer signature",
     )?;
     println!(
         "product: {PRODUCT}\nchain_length: {}\ntip_sha256: {}\nvalid_until: {}",
