@@ -1422,12 +1422,6 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
         ));
     }
     let root = Path::new("/proof-root");
-    if root.symlink_metadata().is_ok() {
-        return Err(Error::new(
-            "proof isolation root mismatch: expected absent, actual present",
-        ));
-    }
-    fs::create_dir(root).map_err(display_error)?;
     let artifact_name = input
         .artifact
         .file_name()
@@ -1447,7 +1441,6 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
         "debian-amd64" => {
             let command = vec![
                 "dpkg".into(),
-                "--root=/proof-root".into(),
                 "--install".into(),
                 input.artifact.display().to_string(),
             ];
@@ -1455,7 +1448,7 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
             (
                 command,
                 "/usr/bin/solstone-linux",
-                root.join("usr/bin/solstone-linux"),
+                Path::new("/usr/bin/solstone-linux").to_path_buf(),
                 command_line("dpkg", &["--version"])?,
                 "amd64",
                 None,
@@ -1463,16 +1456,8 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
             )
         }
         "rpm-x86_64" => {
-            run_exact(&[
-                "rpm".into(),
-                "--root".into(),
-                "/proof-root".into(),
-                "--initdb".into(),
-            ])?;
             let command = vec![
                 "rpm".into(),
-                "--root".into(),
-                "/proof-root".into(),
                 "--install".into(),
                 input.artifact.display().to_string(),
             ];
@@ -1480,7 +1465,7 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
             (
                 command,
                 "/usr/bin/solstone-linux",
-                root.join("usr/bin/solstone-linux"),
+                Path::new("/usr/bin/solstone-linux").to_path_buf(),
                 command_line("rpm", &["--version"])?,
                 "x86_64",
                 None,
@@ -1488,7 +1473,11 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
             )
         }
         "tar-x86_64" => {
-            fs::remove_dir(root).map_err(display_error)?;
+            if root.symlink_metadata().is_ok() {
+                return Err(Error::new(
+                    "proof isolation root mismatch: expected absent, actual present",
+                ));
+            }
             let script = Path::new("/input/install.sh");
             let dry_command = vec![
                 script.display().to_string(),

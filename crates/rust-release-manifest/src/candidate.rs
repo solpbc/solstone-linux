@@ -882,7 +882,7 @@ pub(crate) fn emit_lane_handoff_in(
             ubuntu_glibc: command_evidence("getconf", &["GNU_LIBC_VERSION"])?,
             ubuntu_gzip: command_first_line("gzip", &["--version"])?,
             ubuntu_image_digest: image_id.into(),
-            ubuntu_linker: command_first_line("ld", &["--version"])?,
+            ubuntu_linker: linker_identity()?,
             ubuntu_os: os_pretty_name()?,
             ubuntu_rustc: two_word_identity(&rustc_verbose, "rustc")?,
             ubuntu_tar: command_first_line("tar", &["--version"])?,
@@ -949,6 +949,16 @@ fn command_evidence(program: &str, args: &[&str]) -> Result<String> {
 }
 
 pub(crate) fn command_first_line(program: &str, args: &[&str]) -> Result<String> {
+    let first_line = raw_command_first_line(program, args)?;
+    let field = if program == "rustc" && args == ["--version", "--verbose"] {
+        "lane rustc verbose"
+    } else {
+        program
+    };
+    normalize_command_evidence(field, first_line)
+}
+
+fn raw_command_first_line(program: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(program)
         .args(args)
         .output()
@@ -966,12 +976,34 @@ pub(crate) fn command_first_line(program: &str, args: &[&str]) -> Result<String>
         .filter(|line| !line.is_empty())
         .ok_or_else(|| Error::new(format!("{program} identity mismatch: expected output")))?
         .to_owned();
-    let field = if program == "rustc" && args == ["--version", "--verbose"] {
-        "lane rustc verbose"
+    Ok(first_line)
+}
+
+pub(crate) fn linker_identity_from_line(line: &str) -> Result<String> {
+    let (prefix, remainder) = if let Some(value) = line.strip_prefix("GNU ld (") {
+        ("GNU ld ", value)
+    } else if let Some(value) = line.strip_prefix("ld (") {
+        ("ld ", value)
     } else {
-        program
+        return Err(Error::new(format!(
+            "ld identity mismatch: expected vendor parenthetical and trailing version, actual {line}"
+        )));
     };
-    normalize_command_evidence(field, first_line)
+    let (_, version) = remainder.rsplit_once(") ").ok_or_else(|| {
+        Error::new(format!(
+            "ld identity mismatch: expected vendor parenthetical and trailing version, actual {line}"
+        ))
+    })?;
+    if version.is_empty() || version.chars().any(char::is_whitespace) {
+        return Err(Error::new(format!(
+            "ld identity mismatch: expected vendor parenthetical and trailing version, actual {line}"
+        )));
+    }
+    normalize_command_evidence("ld", format!("{prefix}{version}"))
+}
+
+fn linker_identity() -> Result<String> {
+    linker_identity_from_line(&raw_command_first_line("ld", &["--version"])?)
 }
 
 fn two_word_identity(value: &str, expected_name: &str) -> Result<String> {
@@ -1633,7 +1665,7 @@ pub(crate) fn run_success_owned(
         let stderr = sanitize_process_stderr(&output.stderr);
         let context = (!stderr.is_empty()).then(|| format!("\nstderr: {stderr}"));
         return Err(Error::new(format!(
-            "{program} command mismatch: expected success, actual {}{}\nrepair: run make release-tool-images",
+            "{program} command mismatch: expected success, actual {}{}\nrepair: run make release-images",
             output.status,
             context.unwrap_or_default()
         )));

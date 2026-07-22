@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-tool-images release-candidate release-candidate-prove release-candidate-recover legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -18,6 +18,9 @@ CARGO_LOCKED := --locked
 CARGO_DENY_VERSION := 0.20.2
 CARGO_DEB_VERSION := 3.7.0
 CARGO_GENERATE_RPM_VERSION := 0.21.0
+# Proof roles are provisioned images now, so keep their immutable stock bases explicit.
+UBUNTU_STOCK_BASE := sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890
+FEDORA_STOCK_BASE := sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56
 SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/install.sh
 
 VENV := .venv
@@ -163,20 +166,18 @@ versions: rust-preflight check-cargo-deny
 
 release: release-candidate
 
-release-tool-images:
-	@# The proof roles pin the stock bases from which build-tool images are provisioned.
-	@UBUNTU_STOCK_BASE=$$(sed -n 's/^proof_debian = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
-	FEDORA_STOCK_BASE=$$(sed -n 's/^proof_rpm = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
-	test -n "$$UBUNTU_STOCK_BASE" && test -n "$$FEDORA_STOCK_BASE" || { echo "error: stock image policy mismatch: expected proof_debian and proof_rpm, actual missing" >&2; exit 1; }; \
+release-images:
+	@# Build and proof images share the same explicitly pinned stock bases.
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target ubuntu-tools --tag localhost/solstone-linux-build-ubuntu \
-		--build-arg "UBUNTU_STOCK_BASE=$$UBUNTU_STOCK_BASE" --build-arg "FEDORA_STOCK_BASE=$$FEDORA_STOCK_BASE" \
+		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" \
 		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_DEB_VERSION=$(CARGO_DEB_VERSION)" .
-	@UBUNTU_STOCK_BASE=$$(sed -n 's/^proof_debian = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
-	FEDORA_STOCK_BASE=$$(sed -n 's/^proof_rpm = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
-	test -n "$$UBUNTU_STOCK_BASE" && test -n "$$FEDORA_STOCK_BASE" || { echo "error: stock image policy mismatch: expected proof_debian and proof_rpm, actual missing" >&2; exit 1; }; \
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target fedora-tools --tag localhost/solstone-linux-build-fedora \
-		--build-arg "UBUNTU_STOCK_BASE=$$UBUNTU_STOCK_BASE" --build-arg "FEDORA_STOCK_BASE=$$FEDORA_STOCK_BASE" \
+		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" \
 		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_GENERATE_RPM_VERSION=$(CARGO_GENERATE_RPM_VERSION)" .
+	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target ubuntu-proof --tag localhost/solstone-linux-proof-ubuntu \
+		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" .
+	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target fedora-proof --tag localhost/solstone-linux-proof-fedora \
+		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" .
 
 release-candidate: rust-preflight
 	@test -n "$(strip $(EXPECTED_RELEASE_COMMIT))" || { echo "error: expected release commit mismatch: expected EXPECTED_RELEASE_COMMIT, actual missing" >&2; echo "repair: make release-candidate EXPECTED_RELEASE_COMMIT=<full-commit> ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }

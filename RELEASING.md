@@ -20,33 +20,41 @@ Four evidence activities remain deliberately separate:
 Use a clean checkout at the exact release commit. The compiler authority is
 `rust-toolchain.toml`; Cargo operations use `Cargo.lock`.
 
-Regenerate the Ubuntu and Fedora build-tool images from the locally pinned stock
+Regenerate all four Ubuntu and Fedora release images from the locally pinned stock
 bases, without pulling, then inspect their bare local image IDs:
 
 ```bash
-make release-tool-images
+make release-images
 podman image inspect --format '{{.Id}}' localhost/solstone-linux-build-ubuntu
 podman image inspect --format '{{.Id}}' localhost/solstone-linux-build-fedora
+podman image inspect --format '{{.Id}}' localhost/solstone-linux-proof-ubuntu
+podman image inspect --format '{{.Id}}' localhost/solstone-linux-proof-fedora
 ```
 
-Commit those IDs as `sha256:<bare-id>` in the `build_ubuntu` and `build_fedora`
-roles of `packaging/release-policy.toml`. Rebuild the tool images when
+Commit those IDs as `sha256:<bare-id>` in the matching build and proof roles of
+`packaging/release-policy.toml`. Rebuild the build-tool images when
 `Cargo.lock`; dependency-affecting workspace or member manifests;
 `rust-toolchain.toml`; the Rust, cargo-deb, or cargo-generate-rpm pins; the stock
 base references; or `packaging/Containerfile.tools` changes. The Ubuntu image
 carries Cargo state warmed for the committed lockfile. The Fedora image
 deliberately carries no warmed Cargo registry because its offline metadata and RPM
-generation path does not require one.
+generation path does not require one. Rebuild the proof images when their stock
+base references, runtime dependency closure, or `packaging/Containerfile.tools`
+changes.
 
 Locally regenerated tool images are not guaranteed to be bit-for-bit reproducible:
 distro repositories, rustup distribution content, and tool build environments can
 change while declared versions remain the same. Prove each freshly regenerated
 image offline before committing its observed ID.
 
-The `proof_debian`, `proof_rpm`, and `proof_tar` roles deliberately remain the
-stock Ubuntu and Fedora bases; they are not placeholders for the build-tool
-images. Keep all five policy images present locally before transaction entry. For
-each proof image, observe and commit the exact normalized OS release,
+The `proof_debian`, `proof_rpm`, and `proof_tar` roles use clean OS images carrying
+only the runtime dependency closure, with no compiler, Rust toolchain, Cargo, or
+other build tooling. Stock bases cannot install or execute the dynamically linked
+observer because it requires GLib, GStreamer, and PulseAudio libraries. Debian and
+RPM proofs install into the disposable proof container's live root, so their
+declared dependencies are genuinely enforced; the tar proof retains its dedicated
+`/proof-root`. Keep all four images backing the five policy roles present locally
+before transaction entry. For each proof image, observe and commit the exact normalized OS release,
 package-manager output, install argv, version argv, executable path, and executable
 mode. Commit those values before selecting `EXPECTED_RELEASE_COMMIT`. The proof
 producer observes the same values inside the selected image and fails closed when

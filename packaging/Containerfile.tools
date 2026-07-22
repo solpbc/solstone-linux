@@ -4,7 +4,7 @@
 ARG UBUNTU_STOCK_BASE
 ARG FEDORA_STOCK_BASE
 
-# Build tooling starts from the proof role because that role pins the stock base.
+# All release images start from explicit stock-base digests supplied by Make.
 FROM ${UBUNTU_STOCK_BASE} AS ubuntu-tools-base
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -13,7 +13,7 @@ ARG CARGO_DEB_VERSION
 RUN test -n "$RUST_VERSION" \
     && test -n "$CARGO_DEB_VERSION" \
     || { echo "error: Ubuntu tool version mismatch: expected nonempty RUST_VERSION and CARGO_DEB_VERSION, actual empty" >&2; \
-         echo "repair: run make release-tool-images" >&2; exit 1; }
+         echo "repair: run make release-images" >&2; exit 1; }
 
 # ca-certificates: rustup and Cargo TLS failed without a trusted certificate set.
 # curl: the stock image had no rustup download client.
@@ -57,11 +57,11 @@ RUN rustc --version --verbose > /tmp/rustc-verbose \
     && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
     && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
     || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
-         echo "repair: run make release-tool-images" >&2; exit 1; }
+         echo "repair: run make release-images" >&2; exit 1; }
 RUN actual="$(cargo deb --version)" \
     && test "$actual" = "cargo-deb ${CARGO_DEB_VERSION}" \
     || { echo "error: cargo-deb mismatch: expected 'cargo-deb ${CARGO_DEB_VERSION}', actual '${actual:-unavailable}'" >&2; \
-         echo "repair: run make release-tool-images" >&2; exit 1; }
+         echo "repair: run make release-images" >&2; exit 1; }
 
 FROM ubuntu-tools-base AS ubuntu-cargo-fetch
 WORKDIR /src
@@ -71,7 +71,7 @@ RUN cargo fetch --locked
 FROM ubuntu-tools-base AS ubuntu-tools
 COPY --from=ubuntu-cargo-fetch /root/.cargo /root/.cargo
 
-# Build tooling starts from the proof role because that role pins the stock base.
+# All release images start from explicit stock-base digests supplied by Make.
 FROM ${FEDORA_STOCK_BASE} AS fedora-tools
 
 ARG RUST_VERSION
@@ -79,7 +79,7 @@ ARG CARGO_GENERATE_RPM_VERSION
 RUN test -n "$RUST_VERSION" \
     && test -n "$CARGO_GENERATE_RPM_VERSION" \
     || { echo "error: Fedora tool version mismatch: expected nonempty RUST_VERSION and CARGO_GENERATE_RPM_VERSION, actual empty" >&2; \
-         echo "repair: run make release-tool-images" >&2; exit 1; }
+         echo "repair: run make release-images" >&2; exit 1; }
 
 # ca-certificates: rustup and Cargo require a trusted TLS certificate set.
 # curl: rustup requires a download client.
@@ -104,11 +104,35 @@ RUN rustc --version --verbose > /tmp/rustc-verbose \
     && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
     && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
     || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
-         echo "repair: run make release-tool-images" >&2; exit 1; }
+         echo "repair: run make release-images" >&2; exit 1; }
 RUN actual="$(cargo-generate-rpm --version)" \
     && test "$actual" = "cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}" \
     || { echo "error: cargo-generate-rpm mismatch: expected 'cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}', actual '${actual:-unavailable}'" >&2; \
-         echo "repair: run make release-tool-images" >&2; exit 1; }
+         echo "repair: run make release-images" >&2; exit 1; }
 
 # Fedora packaging only reads manifests and the Ubuntu-built executable; a cold
 # Cargo registry was empirically verified, so no warmed Cargo state belongs here.
+
+# Proof images are deliberately runtime-only; build tooling does not belong here.
+FROM ${UBUNTU_STOCK_BASE} AS ubuntu-proof
+ARG DEBIAN_FRONTEND=noninteractive
+# libglib2.0-0: the observer dynamically links GLib.
+# libgstreamer1.0-0: the observer dynamically links GStreamer core.
+# libpulse0: the observer dynamically links PulseAudio.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libglib2.0-0 \
+        libgstreamer1.0-0 \
+        libpulse0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Proof images are deliberately runtime-only; build tooling does not belong here.
+FROM ${FEDORA_STOCK_BASE} AS fedora-proof
+# glib2: the observer dynamically links GLib.
+# gstreamer1: the observer dynamically links GStreamer core.
+# pulseaudio-libs: the observer dynamically links PulseAudio.
+RUN dnf install -y \
+        glib2 \
+        gstreamer1 \
+        pulseaudio-libs \
+    && dnf clean all

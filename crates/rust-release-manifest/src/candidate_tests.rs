@@ -613,7 +613,21 @@ fn container_build_failure_reports_sanitized_container_stderr() {
     assert!(error.contains(
         "stderr: error: Rust compiler mismatch: expected 1.97.1 x86_64-unknown-linux-gnu, actual different\\x01"
     ));
-    assert!(error.contains("repair: run make release-tool-images"));
+    assert!(error.contains("repair: run make release-images"));
+}
+
+#[test]
+fn linker_identity_canonicalizes_vendor_parenthetical_and_fails_closed() {
+    let identity = linker_identity_from_line("GNU ld (GNU Binutils for Ubuntu) 2.38").unwrap();
+    assert_eq!(identity, "GNU ld 2.38");
+    validate_identity("ubuntu_linker", &identity).unwrap();
+
+    let error = linker_identity_from_line("GNU ld GNU Binutils for Ubuntu 2.38")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("ld identity mismatch: expected vendor parenthetical and trailing version")
+    );
 }
 
 #[test]
