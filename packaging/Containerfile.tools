@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 sol pbc
+
+ARG UBUNTU_STOCK_BASE
+ARG FEDORA_STOCK_BASE
+
+# Build tooling starts from the proof role because that role pins the stock base.
+FROM ${UBUNTU_STOCK_BASE} AS ubuntu-tools-base
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RUST_VERSION
+ARG CARGO_DEB_VERSION
+RUN test -n "$RUST_VERSION" \
+    && test -n "$CARGO_DEB_VERSION" \
+    || { echo "error: Ubuntu tool version mismatch: expected nonempty RUST_VERSION and CARGO_DEB_VERSION, actual empty" >&2; \
+         echo "repair: run make release-tool-images" >&2; exit 1; }
+
+# ca-certificates: rustup and Cargo TLS failed without a trusted certificate set.
+# curl: the stock image had no rustup download client.
+# gcc: cargo tool installation failed because cc was absent.
+# g++: libflac-sys CMake configuration failed because c++ was absent.
+# libc6-dev: native compilation requires the libc headers and linker inputs.
+# cmake: bundled libflac-sys failed because cmake was absent.
+# pkg-config: glib-sys failed because pkg-config was absent.
+# libglib2.0-dev: glib-sys failed because glib-2.0.pc was absent.
+# libgstreamer1.0-dev: gstreamer-sys failed because gstreamer-1.0.pc was absent.
+# libpulse0: clean linking failed because the unversioned runtime lookup was absent.
+# binutils: lane identity and packaging require ar, ld, and objdump.
+# dpkg-dev: cargo-deb could not run dpkg-shlibdeps for $auto dependencies.
+# gzip: the lane records gzip identity and creates gzip-compressed output.
+# tar: the lane records tar identity and creates the portable archive.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gcc \
+        g++ \
+        libc6-dev \
+        cmake \
+        pkg-config \
+        libglib2.0-dev \
+        libgstreamer1.0-dev \
+        libpulse0 \
+        binutils \
+        dpkg-dev \
+        gzip \
+        tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION" \
+    && /root/.cargo/bin/cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV RUSTUP_TOOLCHAIN="${RUST_VERSION}"
+
+RUN rustc --version --verbose > /tmp/rustc-verbose \
+    && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
+    && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
+         echo "repair: run make release-tool-images" >&2; exit 1; }
+RUN actual="$(cargo deb --version)" \
+    && test "$actual" = "cargo-deb ${CARGO_DEB_VERSION}" \
+    || { echo "error: cargo-deb mismatch: expected 'cargo-deb ${CARGO_DEB_VERSION}', actual '${actual:-unavailable}'" >&2; \
+         echo "repair: run make release-tool-images" >&2; exit 1; }
+
+FROM ubuntu-tools-base AS ubuntu-cargo-fetch
+WORKDIR /src
+COPY . .
+RUN cargo fetch --locked
+
+FROM ubuntu-tools-base AS ubuntu-tools
+COPY --from=ubuntu-cargo-fetch /root/.cargo /root/.cargo
+
+# Build tooling starts from the proof role because that role pins the stock base.
+FROM ${FEDORA_STOCK_BASE} AS fedora-tools
+
+ARG RUST_VERSION
+ARG CARGO_GENERATE_RPM_VERSION
+RUN test -n "$RUST_VERSION" \
+    && test -n "$CARGO_GENERATE_RPM_VERSION" \
+    || { echo "error: Fedora tool version mismatch: expected nonempty RUST_VERSION and CARGO_GENERATE_RPM_VERSION, actual empty" >&2; \
+         echo "repair: run make release-tool-images" >&2; exit 1; }
+
+# ca-certificates: rustup and Cargo require a trusted TLS certificate set.
+# curl: rustup requires a download client.
+# gcc: cargo-generate-rpm requires a linker while it is compiled.
+# rpm: lane identity and package signature inspection invoke rpm directly.
+RUN dnf install -y \
+        ca-certificates \
+        curl \
+        gcc \
+        rpm \
+    && dnf clean all \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION" \
+    && /root/.cargo/bin/cargo install cargo-generate-rpm \
+        --version "$CARGO_GENERATE_RPM_VERSION" --locked \
+    && rm -rf /root/.cargo/registry /root/.cargo/git
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV RUSTUP_TOOLCHAIN="${RUST_VERSION}"
+
+RUN rustc --version --verbose > /tmp/rustc-verbose \
+    && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
+    && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
+         echo "repair: run make release-tool-images" >&2; exit 1; }
+RUN actual="$(cargo-generate-rpm --version)" \
+    && test "$actual" = "cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}" \
+    || { echo "error: cargo-generate-rpm mismatch: expected 'cargo-generate-rpm ${CARGO_GENERATE_RPM_VERSION}', actual '${actual:-unavailable}'" >&2; \
+         echo "repair: run make release-tool-images" >&2; exit 1; }
+
+# Fedora packaging only reads manifests and the Ubuntu-built executable; a cold
+# Cargo registry was empirically verified, so no warmed Cargo state belongs here.

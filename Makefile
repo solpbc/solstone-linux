@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-candidate release-candidate-prove release-candidate-recover legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-tool-images release-candidate release-candidate-prove release-candidate-recover legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -162,6 +162,21 @@ versions: rust-preflight check-cargo-deny
 	@command -v $(APP) >/dev/null 2>&1 && $(APP) --version || true
 
 release: release-candidate
+
+release-tool-images:
+	@# The proof roles pin the stock bases from which build-tool images are provisioned.
+	@UBUNTU_STOCK_BASE=$$(sed -n 's/^proof_debian = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
+	FEDORA_STOCK_BASE=$$(sed -n 's/^proof_rpm = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
+	test -n "$$UBUNTU_STOCK_BASE" && test -n "$$FEDORA_STOCK_BASE" || { echo "error: stock image policy mismatch: expected proof_debian and proof_rpm, actual missing" >&2; exit 1; }; \
+	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target ubuntu-tools --tag localhost/solstone-linux-build-ubuntu \
+		--build-arg "UBUNTU_STOCK_BASE=$$UBUNTU_STOCK_BASE" --build-arg "FEDORA_STOCK_BASE=$$FEDORA_STOCK_BASE" \
+		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_DEB_VERSION=$(CARGO_DEB_VERSION)" .
+	@UBUNTU_STOCK_BASE=$$(sed -n 's/^proof_debian = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
+	FEDORA_STOCK_BASE=$$(sed -n 's/^proof_rpm = "\([^"]*\)"/\1/p' packaging/release-policy.toml); \
+	test -n "$$UBUNTU_STOCK_BASE" && test -n "$$FEDORA_STOCK_BASE" || { echo "error: stock image policy mismatch: expected proof_debian and proof_rpm, actual missing" >&2; exit 1; }; \
+	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target fedora-tools --tag localhost/solstone-linux-build-fedora \
+		--build-arg "UBUNTU_STOCK_BASE=$$UBUNTU_STOCK_BASE" --build-arg "FEDORA_STOCK_BASE=$$FEDORA_STOCK_BASE" \
+		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_GENERATE_RPM_VERSION=$(CARGO_GENERATE_RPM_VERSION)" .
 
 release-candidate: rust-preflight
 	@test -n "$(strip $(EXPECTED_RELEASE_COMMIT))" || { echo "error: expected release commit mismatch: expected EXPECTED_RELEASE_COMMIT, actual missing" >&2; echo "repair: make release-candidate EXPECTED_RELEASE_COMMIT=<full-commit> ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }

@@ -20,14 +20,37 @@ Four evidence activities remain deliberately separate:
 Use a clean checkout at the exact release commit. The compiler authority is
 `rust-toolchain.toml`; Cargo operations use `Cargo.lock`.
 
-Provision all five images locally before transaction entry: Ubuntu and Fedora
-build-tool images plus the Debian, RPM, and tar proof images. Record their exact
-immutable digest references in `packaging/release-policy.toml`. For each proof
-image, observe and commit the exact normalized OS release, package-manager output,
-install argv, version argv, executable path, and executable mode. Commit those
-values before selecting `EXPECTED_RELEASE_COMMIT`. The proof producer observes the
-same values inside the selected image and fails closed when committed policy is
-wrong. The transaction never pulls an image.
+Regenerate the Ubuntu and Fedora build-tool images from the locally pinned stock
+bases, without pulling, then inspect their bare local image IDs:
+
+```bash
+make release-tool-images
+podman image inspect --format '{{.Id}}' localhost/solstone-linux-build-ubuntu
+podman image inspect --format '{{.Id}}' localhost/solstone-linux-build-fedora
+```
+
+Commit those IDs as `sha256:<bare-id>` in the `build_ubuntu` and `build_fedora`
+roles of `packaging/release-policy.toml`. Rebuild the tool images when
+`Cargo.lock`; dependency-affecting workspace or member manifests;
+`rust-toolchain.toml`; the Rust, cargo-deb, or cargo-generate-rpm pins; the stock
+base references; or `packaging/Containerfile.tools` changes. The Ubuntu image
+carries Cargo state warmed for the committed lockfile. The Fedora image
+deliberately carries no warmed Cargo registry because its offline metadata and RPM
+generation path does not require one.
+
+Locally regenerated tool images are not guaranteed to be bit-for-bit reproducible:
+distro repositories, rustup distribution content, and tool build environments can
+change while declared versions remain the same. Prove each freshly regenerated
+image offline before committing its observed ID.
+
+The `proof_debian`, `proof_rpm`, and `proof_tar` roles deliberately remain the
+stock Ubuntu and Fedora bases; they are not placeholders for the build-tool
+images. Keep all five policy images present locally before transaction entry. For
+each proof image, observe and commit the exact normalized OS release,
+package-manager output, install argv, version argv, executable path, and executable
+mode. Commit those values before selecting `EXPECTED_RELEASE_COMMIT`. The proof
+producer observes the same values inside the selected image and fails closed when
+committed policy is wrong. The transaction never pulls an image.
 
 Acquire the advisory database outside the transaction. It must be a clean local Git
 worktree, including no untracked or ignored changes. Write a strict descriptor with

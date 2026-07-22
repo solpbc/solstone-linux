@@ -603,6 +603,19 @@ pub(super) fn process_bin(
     (temp, ProcessEnvironment::with_path(OsStr::new(&path)))
 }
 
+#[test]
+fn container_build_failure_reports_sanitized_container_stderr() {
+    let script = "#!/bin/sh\nprintf 'error: Rust compiler mismatch:\\texpected 1.97.1 x86_64-unknown-linux-gnu, actual different\\001\\n' >&2\nexit 1\n";
+    let (_bin, processes) = process_bin("#!/bin/sh\nexit 97\n", Some(script));
+    let error = run_success_owned(&processes, Path::new("."), "podman", &["build".to_owned()])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(
+        "stderr: error: Rust compiler mismatch: expected 1.97.1 x86_64-unknown-linux-gnu, actual different\\x01"
+    ));
+    assert!(error.contains("repair: run make release-tool-images"));
+}
+
 pub(super) fn git_repo() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     for args in [

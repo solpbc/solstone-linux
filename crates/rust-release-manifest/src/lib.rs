@@ -205,6 +205,30 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
+pub(crate) fn sanitize_process_stderr(bytes: &[u8]) -> String {
+    const LIMIT: usize = 4096;
+    let mut sanitized = String::new();
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if index > 0 && !sanitized.is_empty() {
+            sanitized.push('\n');
+        }
+        for byte in line {
+            let value = match byte {
+                b' '..=b'~' => char::from(*byte).to_string(),
+                b'\t' => " ".into(),
+                other => format!("\\x{other:02x}"),
+            };
+            if sanitized.len() + value.len() > LIMIT {
+                sanitized.push_str("...");
+                return sanitized;
+            }
+            sanitized.push_str(&value);
+        }
+    }
+    sanitized.trim().to_owned()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileIdentity {
     pub(crate) device: u64,

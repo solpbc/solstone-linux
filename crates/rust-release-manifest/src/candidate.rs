@@ -1612,9 +1612,12 @@ pub(crate) fn run_success_owned(
         .output()
         .map_err(display_error)?;
     if !output.status.success() {
+        let stderr = sanitize_process_stderr(&output.stderr);
+        let context = (!stderr.is_empty()).then(|| format!("\nstderr: {stderr}"));
         return Err(Error::new(format!(
-            "{program} command mismatch: expected success, actual {}",
-            output.status
+            "{program} command mismatch: expected success, actual {}{}\nrepair: run make release-tool-images",
+            output.status,
+            context.unwrap_or_default()
         )));
     }
     Ok(())

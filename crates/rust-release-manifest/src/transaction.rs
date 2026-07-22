@@ -1018,30 +1018,18 @@ pub(crate) fn run_proof_runner(
 }
 
 fn sanitize_proof_runner_stderr(bytes: &[u8]) -> String {
-    const LIMIT: usize = 4096;
-    let mut sanitized = String::new();
-    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+    let mut without_marker = Vec::with_capacity(bytes.len());
+    for line in bytes.split(|byte| *byte == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line == PROOF_RUNNER_ENTRY_MARKER.as_bytes() {
             continue;
         }
-        if index > 0 && !sanitized.is_empty() {
-            sanitized.push('\n');
+        if !without_marker.is_empty() {
+            without_marker.push(b'\n');
         }
-        for byte in line {
-            let value = match byte {
-                b' '..=b'~' => char::from(*byte).to_string(),
-                b'\t' => " ".into(),
-                other => format!("\\x{other:02x}"),
-            };
-            if sanitized.len() + value.len() > LIMIT {
-                sanitized.push_str("...");
-                return sanitized;
-            }
-            sanitized.push_str(&value);
-        }
+        without_marker.extend_from_slice(line);
     }
-    sanitized.trim().to_owned()
+    sanitize_process_stderr(&without_marker)
 }
 
 pub(crate) fn finish_proof_attempt_cleanup(

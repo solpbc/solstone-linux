@@ -81,6 +81,7 @@ make format         # Format Rust source
 make test           # Run locked Rust tests
 make check-rust-release-manifest  # Validate release-manifest fixtures offline
 make release-candidate  # Create and locally prove one atomic candidate
+make release-tool-images  # Build the local Ubuntu and Fedora release tool images
 make release-candidate-prove  # Resume only missing package proofs
 make release-candidate-recover  # Read-only retained-candidate validation
 make ci             # Host evidence: Rust format, lint, tests, offline policy
