@@ -2309,6 +2309,7 @@ dependencies = [
  "sha3",
  "thiserror",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]
