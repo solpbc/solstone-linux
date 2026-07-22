@@ -35,8 +35,6 @@ struct DirectoryTransport {
 
 struct FaultTransport {
     inner: DirectoryTransport,
-    fail_at: Option<usize>,
-    calls: usize,
     corrupt_pointer_signature_get: bool,
     reject_uploaded_pointer_signature: bool,
     move_tip_on_latest_get: bool,
@@ -48,8 +46,6 @@ impl FaultTransport {
     fn new() -> Self {
         Self {
             inner: DirectoryTransport::new(),
-            fail_at: None,
-            calls: 0,
             corrupt_pointer_signature_get: false,
             reject_uploaded_pointer_signature: false,
             move_tip_on_latest_get: false,
@@ -58,25 +54,14 @@ impl FaultTransport {
         }
     }
 
-    fn before(&mut self) -> Result<()> {
-        let call = self.calls;
-        self.calls += 1;
-        if self.fail_at == Some(call) {
-            return Err(transparency_error(
-                "retryable",
-                "injected transport seam",
-                "success",
-                format!("failure at call {call}"),
-                "retry the test publication",
-            ));
-        }
-        Ok(())
+    fn before(&mut self, operation: &str) -> Result<()> {
+        operation_seam(operation)
     }
 }
 
 impl TransparencyTransport for FaultTransport {
     fn get(&mut self, destination: &Destination, cache_bypass: bool) -> Result<TransportResponse> {
-        self.before()?;
+        self.before("transport GET")?;
         let key = match destination {
             Destination::S3 { key, .. } | Destination::Public { key, .. } => key,
         };
@@ -114,7 +99,7 @@ impl TransparencyTransport for FaultTransport {
         bytes: &[u8],
         cache_control: &str,
     ) -> Result<TransportResponse> {
-        self.before()?;
+        self.before("transport create-only PUT")?;
         self.inner
             .put_create_only(destination, bytes, cache_control)
     }
@@ -126,7 +111,7 @@ impl TransparencyTransport for FaultTransport {
         etag: &str,
         cache_control: &str,
     ) -> Result<TransportResponse> {
-        self.before()?;
+        self.before("transport conditional PUT")?;
         self.inner
             .put_conditional(destination, bytes, etag, cache_control)
     }
@@ -137,12 +122,12 @@ impl TransparencyTransport for FaultTransport {
         bytes: &[u8],
         cache_control: &str,
     ) -> Result<TransportResponse> {
-        self.before()?;
+        self.before("transport mutable PUT")?;
         self.inner.put_mutable(destination, bytes, cache_control)
     }
 
     fn list(&mut self, destination: &Destination, prefix: &str) -> Result<TransportResponse> {
-        self.before()?;
+        self.before("transport LIST")?;
         self.inner.list(destination, prefix)
     }
 }
@@ -243,7 +228,7 @@ impl TransparencyTransport for DirectoryTransport {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
         Ok(TransportResponse {
-            http_status: 201,
+            http_status: 200,
             body: Vec::new(),
             etag: Some(Self::etag(bytes)),
             process_exit: 0,
@@ -504,9 +489,81 @@ fn s3_destination(key: &str) -> Destination {
     }
 }
 
+fn seed_old_chain(transport: &mut FaultTransport) -> (VerifiedChain, Vec<u8>, Vec<u8>) {
+    let mut entry = genesis_entry();
+    entry.version = "0.9.0".into();
+    let entry_bytes = transparency_canonical_json(&serde_json::to_value(&entry).unwrap()).unwrap();
+    let entry_signature = fake_signature(&entry_trusted_comment(&entry, &digest(&entry_bytes)));
+    let pointer = pointer_for(&entry);
+    let pointer_bytes =
+        transparency_canonical_json(&serde_json::to_value(&pointer).unwrap()).unwrap();
+    let pointer_signature = fake_signature(&pointer_trusted_comment(&pointer));
+    for (key, bytes) in [
+        (
+            "releases/solstone-linux/v/0.9.0/ledger-entry.json",
+            entry_bytes.as_slice(),
+        ),
+        (
+            "releases/solstone-linux/v/0.9.0/ledger-entry.json.minisig",
+            entry_signature.as_slice(),
+        ),
+    ] {
+        transport
+            .inner
+            .put_create_only(&s3_destination(key), bytes, "immutable")
+            .unwrap();
+    }
+    for (key, bytes) in [
+        (
+            "releases/solstone-linux/ledger.jsonl",
+            entry_bytes.as_slice(),
+        ),
+        (
+            "releases/solstone-linux/latest.json.minisig",
+            pointer_signature.as_slice(),
+        ),
+    ] {
+        transport
+            .inner
+            .put_mutable(&s3_destination(key), bytes, "no-cache")
+            .unwrap();
+    }
+    transport
+        .inner
+        .put_create_only(
+            &s3_destination("releases/solstone-linux/latest.json"),
+            &pointer_bytes,
+            "no-cache",
+        )
+        .unwrap();
+    let etag = transport
+        .inner
+        .get(&s3_destination("releases/solstone-linux/latest.json"), true)
+        .unwrap()
+        .etag;
+    transport.inner.log.borrow_mut().clear();
+    transport.inner.destinations.clear();
+    (
+        VerifiedChain {
+            pointer: Some(pointer),
+            pointer_bytes: Some(pointer_bytes.clone()),
+            pointer_etag: etag,
+            tip: Some(entry),
+            transparency_ledger: entry_bytes,
+        },
+        pointer_bytes,
+        pointer_signature,
+    )
+}
+
 enum RemoteEntryMode {
     Adopt,
     Poison,
+    EntryOnly,
+    SignatureOnly,
+    ForeignSchema,
+    NonCanonical,
+    InvalidTimestamp,
 }
 
 fn run_fixture_publication(
@@ -519,57 +576,85 @@ fn run_fixture_publication_with_remote(
     transport: &mut FaultTransport,
     remote_mode: Option<RemoteEntryMode>,
 ) -> (Result<String>, Vec<u8>, std::path::PathBuf) {
+    run_fixture_publication_with_remote_and_chain(transport, remote_mode, None)
+}
+
+fn run_fixture_publication_with_remote_and_chain(
+    transport: &mut FaultTransport,
+    remote_mode: Option<RemoteEntryMode>,
+    chain: Option<VerifiedChain>,
+) -> (Result<String>, Vec<u8>, std::path::PathBuf) {
     let fixture = crate::proof_tests::retained_fixture();
-    let snapshot = snapshot_candidate(
-        &fixture.repo.root,
-        &fixture.repo.root.path().join("dist/rust"),
-    )
-    .unwrap();
-    let chain = VerifiedChain {
+    let chain = chain.unwrap_or(VerifiedChain {
         pointer: None,
         pointer_bytes: None,
         pointer_etag: None,
         tip: None,
         transparency_ledger: Vec::new(),
+    });
+    let mut verifier = FakeVerifier {
+        reject_tip: transport.reject_uploaded_pointer_signature,
     };
-    let (entry, entry_bytes) = build_entry(
-        &snapshot.staging,
-        &snapshot.manifest,
-        &snapshot.proofs,
+    let mut signer = |_: &Path, _: &Path, signature: &Path, comment: &str| {
+        fs::write(signature, fake_signature(comment)).map_err(display_error)
+    };
+    let prepared = match prepare_publication(
+        &fixture.repo.root,
+        &fixture.repo.root.path().join("dist/rust"),
         &chain,
-    )
-    .unwrap();
-    let (pointer, pointer_bytes) = build_pointer(&entry, &entry_bytes).unwrap();
-    let entry_signature = fake_signature(&entry_trusted_comment(&entry, &digest(&entry_bytes)));
-    let pointer_signature = fake_signature(&pointer_trusted_comment(&pointer));
+        Path::new("fixture.pub"),
+        &mut verifier,
+        &mut signer,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return (Err(error), Vec::new(), transport.inner.objects.clone()),
+    };
     if let Some(mode) = remote_mode {
-        let mut remote_entry = entry.clone();
-        remote_entry.published_utc = "2026-01-01T00:00:00Z".into();
+        let mut remote_entry = prepared.entry.clone();
+        if !matches!(
+            mode,
+            RemoteEntryMode::EntryOnly | RemoteEntryMode::SignatureOnly
+        ) {
+            remote_entry.published_utc = "2026-01-01T00:00:00Z".into();
+        }
         if matches!(mode, RemoteEntryMode::Poison) {
             remote_entry.source_commit = "f".repeat(40);
         }
-        let remote_bytes =
+        if matches!(mode, RemoteEntryMode::ForeignSchema) {
+            remote_entry.schema = "https://example.invalid/foreign-schema.json".into();
+        }
+        if matches!(mode, RemoteEntryMode::InvalidTimestamp) {
+            remote_entry.published_utc = "not-a-timestamp".into();
+        }
+        let mut remote_bytes =
             transparency_canonical_json(&serde_json::to_value(&remote_entry).unwrap()).unwrap();
+        if matches!(mode, RemoteEntryMode::NonCanonical) {
+            remote_bytes.insert(0, b' ');
+        }
         let remote_signature = fake_signature(&entry_trusted_comment(
             &remote_entry,
             &digest(&remote_bytes),
         ));
-        transport
-            .inner
-            .put_create_only(
-                &s3_destination("releases/solstone-linux/v/1.0.0/ledger-entry.json"),
-                &remote_bytes,
-                "immutable",
-            )
-            .unwrap();
-        transport
-            .inner
-            .put_create_only(
-                &s3_destination("releases/solstone-linux/v/1.0.0/ledger-entry.json.minisig"),
-                &remote_signature,
-                "immutable",
-            )
-            .unwrap();
+        if !matches!(mode, RemoteEntryMode::SignatureOnly) {
+            transport
+                .inner
+                .put_create_only(
+                    &s3_destination("releases/solstone-linux/v/1.0.0/ledger-entry.json"),
+                    &remote_bytes,
+                    "immutable",
+                )
+                .unwrap();
+        }
+        if !matches!(mode, RemoteEntryMode::EntryOnly) {
+            transport
+                .inner
+                .put_create_only(
+                    &s3_destination("releases/solstone-linux/v/1.0.0/ledger-entry.json.minisig"),
+                    &remote_signature,
+                    "immutable",
+                )
+                .unwrap();
+        }
     }
     let mut archive = FakeArchive {
         log: transport.inner.log.clone(),
@@ -580,23 +665,38 @@ fn run_fixture_publication_with_remote(
         &test_config(),
         transport,
         &mut archive,
-        &mut FakeVerifier {
-            reject_tip: transport.reject_uploaded_pointer_signature,
-        },
-        &snapshot.staging,
+        &mut verifier,
+        &prepared.snapshot.staging,
         &StagedPublication {
-            staging: &snapshot.staging,
+            staging: &prepared.snapshot.staging,
             chain: &chain,
-            entry: &entry,
-            entry_bytes: &entry_bytes,
-            entry_signature: &entry_signature,
-            pointer_bytes: &pointer_bytes,
-            pointer_signature: &pointer_signature,
-            manifest: &snapshot.manifest,
-            proofs: &snapshot.proofs,
+            entry: &prepared.entry,
+            entry_bytes: &prepared.entry_bytes,
+            entry_signature: &prepared.entry_signature,
+            pointer_bytes: &prepared.pointer_bytes,
+            pointer_signature: &prepared.pointer_signature,
+            manifest: &prepared.snapshot.manifest,
+            proofs: &prepared.snapshot.proofs,
         },
     );
-    (result, pointer_bytes, transport.inner.objects.clone())
+    let result = result.and_then(|archive_digest| {
+        append_head_row(
+            fixture.repo.root.path(),
+            &TransparencyHeadRow {
+                entry_sha256: digest(&prepared.entry_bytes),
+                product: PRODUCT.into(),
+                published_utc: prepared.entry.published_utc.clone(),
+                seq: prepared.entry.seq,
+                version: prepared.entry.version.clone(),
+            },
+        )?;
+        Ok(archive_digest)
+    });
+    (
+        result,
+        prepared.pointer_bytes,
+        transport.inner.objects.clone(),
+    )
 }
 
 #[test]
@@ -607,7 +707,7 @@ fn transparency_directory_fake_create_only_and_exact_get() {
         fake.put_create_only(&destination, b"one", "immutable")
             .unwrap()
             .http_status,
-        201
+        200
     );
     assert_eq!(fake.get(&destination, false).unwrap().body, b"one");
     assert_eq!(
@@ -1025,37 +1125,37 @@ fn transparency_publish_order_and_destination_set_are_locked() {
     )
     .unwrap();
     let log = transport.log.borrow();
-    let archive_position = log.iter().position(|item| item == "Archive").unwrap();
-    assert!(
-        log[..archive_position]
-            .iter()
-            .all(|item| item.starts_with("GET-S3"))
-    );
-    let last_immutable_create = log
-        .iter()
-        .rposition(|item| item.starts_with("PUT-CREATE releases/solstone-linux/v/1.0.0/"))
-        .unwrap();
-    let first_public = log
-        .iter()
-        .position(|item| item.starts_with("GET-PUBLIC releases/solstone-linux/v/"))
-        .unwrap();
-    assert!(archive_position < last_immutable_create);
-    assert!(last_immutable_create < first_public);
-    let last_public = log
-        .iter()
-        .rposition(|item| item.starts_with("GET-PUBLIC releases/solstone-linux/v/"))
-        .unwrap();
-    let expected_tail = [
-        "GET-S3 releases/solstone-linux/latest.json",
-        "PUT-MUTABLE releases/solstone-linux/ledger.jsonl",
-        "GET-S3 releases/solstone-linux/ledger.jsonl",
-        "PUT-MUTABLE releases/solstone-linux/latest.json.minisig",
-        "GET-S3 releases/solstone-linux/latest.json.minisig",
-        "PUT-CREATE releases/solstone-linux/latest.json",
-        "GET-S3 releases/solstone-linux/latest.json",
-        "GET-S3 releases/solstone-linux/latest.json.minisig",
+    let manifest_name = manifest_name("1.0.0");
+    let expected = vec![
+        "GET-S3 releases/solstone-linux/v/1.0.0/ledger-entry.json".into(),
+        "GET-S3 releases/solstone-linux/v/1.0.0/ledger-entry.json.minisig".into(),
+        "GET-S3 releases/solstone-linux/v/1.0.0/debian-amd64.json".into(),
+        "GET-S3 releases/solstone-linux/v/1.0.0/rpm-x86_64.json".into(),
+        format!("GET-S3 releases/solstone-linux/v/1.0.0/{manifest_name}"),
+        "GET-S3 releases/solstone-linux/v/1.0.0/tar-x86_64.json".into(),
+        "Archive".into(),
+        "PUT-CREATE releases/solstone-linux/v/1.0.0/debian-amd64.json".into(),
+        "PUT-CREATE releases/solstone-linux/v/1.0.0/ledger-entry.json".into(),
+        "PUT-CREATE releases/solstone-linux/v/1.0.0/ledger-entry.json.minisig".into(),
+        "PUT-CREATE releases/solstone-linux/v/1.0.0/rpm-x86_64.json".into(),
+        format!("PUT-CREATE releases/solstone-linux/v/1.0.0/{manifest_name}"),
+        "PUT-CREATE releases/solstone-linux/v/1.0.0/tar-x86_64.json".into(),
+        "GET-PUBLIC releases/solstone-linux/v/1.0.0/debian-amd64.json".into(),
+        "GET-PUBLIC releases/solstone-linux/v/1.0.0/ledger-entry.json".into(),
+        "GET-PUBLIC releases/solstone-linux/v/1.0.0/ledger-entry.json.minisig".into(),
+        "GET-PUBLIC releases/solstone-linux/v/1.0.0/rpm-x86_64.json".into(),
+        format!("GET-PUBLIC releases/solstone-linux/v/1.0.0/{manifest_name}"),
+        "GET-PUBLIC releases/solstone-linux/v/1.0.0/tar-x86_64.json".into(),
+        "GET-S3 releases/solstone-linux/latest.json".into(),
+        "PUT-MUTABLE releases/solstone-linux/ledger.jsonl".into(),
+        "GET-S3 releases/solstone-linux/ledger.jsonl".into(),
+        "PUT-MUTABLE releases/solstone-linux/latest.json.minisig".into(),
+        "GET-S3 releases/solstone-linux/latest.json.minisig".into(),
+        "PUT-CREATE releases/solstone-linux/latest.json".into(),
+        "GET-S3 releases/solstone-linux/latest.json".into(),
+        "GET-S3 releases/solstone-linux/latest.json.minisig".into(),
     ];
-    assert_eq!(&log[last_public + 1..], expected_tail);
+    assert_eq!(*log, expected);
     let pointer_signature = log
         .iter()
         .rposition(|item| item.contains("PUT-MUTABLE releases/solstone-linux/latest.json.minisig"))
@@ -1110,28 +1210,55 @@ fn transparency_publish_order_and_destination_set_are_locked() {
 #[test]
 fn transparency_crash_injection_table_preserves_pointer_body_commit_boundary() {
     let mut baseline = FaultTransport::new();
-    let (result, _, _) = run_fixture_publication(&mut baseline);
+    let (chain, _, _) = seed_old_chain(&mut baseline);
+    configure_test_operation_seam(None);
+    let (result, _, _) =
+        run_fixture_publication_with_remote_and_chain(&mut baseline, None, Some(chain));
     result.unwrap();
-    let seam_count = baseline.calls;
+    let (seam_count, seam_labels) = test_operation_seam_state();
+    for required in [
+        "snapshot candidate",
+        "sign entry",
+        "sign pointer",
+        "verify local entry signature",
+        "verify local pointer signature",
+        "archive",
+        "transport GET",
+        "transport create-only PUT",
+        "transport conditional PUT",
+        "transport mutable PUT",
+        "head-log append",
+    ] {
+        assert!(
+            seam_labels.iter().any(|label| label == required),
+            "missing {required}"
+        );
+    }
     for seam in 0..seam_count {
         let mut transport = FaultTransport::new();
-        transport.fail_at = Some(seam);
-        let (result, pointer, objects) = run_fixture_publication(&mut transport);
+        let (chain, old_pointer, old_signature) = seed_old_chain(&mut transport);
+        configure_test_operation_seam(Some(seam));
+        let (result, new_pointer, objects) =
+            run_fixture_publication_with_remote_and_chain(&mut transport, None, Some(chain));
         assert!(result.is_err(), "seam {seam} unexpectedly succeeded");
         let pointer_path = objects.join("releases/solstone-linux/latest.json");
-        match fs::read(&pointer_path) {
-            Ok(body) => assert_eq!(body, pointer, "seam {seam} committed other body"),
-            Err(_) => {
-                let signature = objects.join("releases/solstone-linux/latest.json.minisig");
-                if signature.exists() {
-                    assert!(
-                        !pointer_path.exists(),
-                        "signature-first window lost at {seam}"
-                    );
-                }
-            }
+        let body = fs::read(&pointer_path).unwrap();
+        assert!(
+            body == old_pointer || body == new_pointer,
+            "seam {seam} committed neither pointer body"
+        );
+        let signature =
+            fs::read(objects.join("releases/solstone-linux/latest.json.minisig")).unwrap();
+        if body == new_pointer {
+            assert_ne!(
+                signature, old_signature,
+                "new body retained old signature at {seam}"
+            );
+        } else if signature != old_signature {
+            assert_eq!(body, old_pointer, "signature-first window changed the body");
         }
     }
+    configure_test_operation_seam(None);
 }
 
 #[test]
@@ -1241,6 +1368,90 @@ fn transparency_preflight_adopts_valid_signed_remote_entry_before_archive() {
             .borrow()
             .iter()
             .any(|call| call.contains("ledger.jsonl"))
+    );
+}
+
+fn assert_partial_remote_entry_pair_recovers(mode: RemoteEntryMode) {
+    let mut transport = FaultTransport::new();
+    run_fixture_publication_with_remote(&mut transport, Some(mode))
+        .0
+        .unwrap();
+    for name in ["ledger-entry.json", "ledger-entry.json.minisig"] {
+        assert!(
+            transport
+                .inner
+                .objects
+                .join(format!("releases/solstone-linux/v/1.0.0/{name}"))
+                .is_file(),
+            "missing recovered {name}"
+        );
+    }
+}
+
+#[test]
+fn transparency_partial_remote_entry_recovers_missing_signature() {
+    assert_partial_remote_entry_pair_recovers(RemoteEntryMode::EntryOnly);
+}
+
+#[test]
+fn transparency_partial_remote_signature_recovers_missing_entry() {
+    assert_partial_remote_entry_pair_recovers(RemoteEntryMode::SignatureOnly);
+}
+
+fn assert_adoption_rejected(mode: RemoteEntryMode) {
+    let mut transport = FaultTransport::new();
+    let error = run_fixture_publication_with_remote(&mut transport, Some(mode))
+        .0
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("remote poisoned version"));
+    assert!(
+        !transport
+            .inner
+            .log
+            .borrow()
+            .iter()
+            .any(|call| call == "Archive")
+    );
+}
+
+#[test]
+fn transparency_adoption_rejects_foreign_schema() {
+    assert_adoption_rejected(RemoteEntryMode::ForeignSchema);
+}
+
+#[test]
+fn transparency_adoption_rejects_noncanonical_bytes() {
+    assert_adoption_rejected(RemoteEntryMode::NonCanonical);
+}
+
+#[test]
+fn transparency_adoption_rejects_invalid_timestamp() {
+    assert_adoption_rejected(RemoteEntryMode::InvalidTimestamp);
+}
+
+#[test]
+fn transparency_adopted_pair_persistence_never_leaves_new_body_with_old_signature() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("ledger-entry.json"), b"old body").unwrap();
+    fs::write(
+        temp.path().join("ledger-entry.json.minisig"),
+        b"old signature",
+    )
+    .unwrap();
+    assert!(
+        persist_adopted_entry_with(temp.path(), b"new body", b"new signature", || {
+            Err(Error::new("injected persistence interruption"))
+        })
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(temp.path().join("ledger-entry.json")).unwrap(),
+        b"old body"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("ledger-entry.json.minisig")).unwrap(),
+        b"old signature"
     );
 }
 
@@ -1832,6 +2043,21 @@ fn transparency_ledger_contradicting_locked_entry_fails() {
 }
 
 #[test]
+fn transparency_ledger_contradiction_before_malformed_suffix_fails_closed() {
+    let tip = genesis_entry();
+    let locked = transparency_canonical_json(&serde_json::to_value(&tip).unwrap()).unwrap();
+    let mut contradictory = tip.clone();
+    contradictory.version = "9.9.9".into();
+    let mut fetched =
+        transparency_canonical_json(&serde_json::to_value(contradictory).unwrap()).unwrap();
+    fetched.extend_from_slice(b"{malformed");
+    let error = reject_locked_ledger_contradiction(&fetched, &locked)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("transparency ledger locked entry mismatch"));
+}
+
+#[test]
 fn transparency_missing_ledger_is_rederivable() {
     let tip = genesis_entry();
     let pointer = pointer_for(&tip);
@@ -1980,15 +2206,103 @@ fn transparency_resign_cannot_change_chain_length_or_tip() {
 
 #[test]
 fn transparency_deterministic_entry_and_pointer_bytes_ignore_later_clock() {
-    let entry = genesis_entry();
-    let entry_one = transparency_canonical_json(&serde_json::to_value(&entry).unwrap()).unwrap();
-    let entry_two = transparency_canonical_json(&serde_json::to_value(&entry).unwrap()).unwrap();
-    let pointer = pointer_for(&entry);
-    let pointer_one =
-        transparency_canonical_json(&serde_json::to_value(&pointer).unwrap()).unwrap();
-    let pointer_two =
-        transparency_canonical_json(&serde_json::to_value(&pointer).unwrap()).unwrap();
-    assert_eq!((entry_one, pointer_one), (entry_two, pointer_two));
+    let fixture = crate::proof_tests::retained_fixture();
+    let release = fixture.repo.root.path().join("dist/rust");
+    let chain = VerifiedChain {
+        pointer: None,
+        pointer_bytes: None,
+        pointer_etag: None,
+        tip: None,
+        transparency_ledger: Vec::new(),
+    };
+    let mut verifier = FakeVerifier { reject_tip: false };
+    let mut signer = |_: &Path, _: &Path, signature: &Path, comment: &str| {
+        fs::write(signature, fake_signature(comment)).map_err(display_error)
+    };
+    set_test_now(Some(
+        DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+    ));
+    configure_test_operation_seam(None);
+    let first = prepare_publication(
+        &fixture.repo.root,
+        &release,
+        &chain,
+        Path::new("fixture.pub"),
+        &mut verifier,
+        &mut signer,
+    )
+    .unwrap();
+    let mut transport = DirectoryTransport::new();
+    let mut archive = FakeArchive {
+        log: transport.log.clone(),
+        response: Some(ArchiveResponse {
+            exit_status: 9,
+            stdout: Vec::new(),
+            stderr: b"injected interruption after staging".to_vec(),
+        }),
+        retained: BTreeMap::new(),
+    };
+    assert!(
+        upload_publication(
+            &test_config(),
+            &mut transport,
+            &mut archive,
+            &mut verifier,
+            &first.snapshot.staging,
+            &StagedPublication {
+                staging: &first.snapshot.staging,
+                chain: &chain,
+                entry: &first.entry,
+                entry_bytes: &first.entry_bytes,
+                entry_signature: &first.entry_signature,
+                pointer_bytes: &first.pointer_bytes,
+                pointer_signature: &first.pointer_signature,
+                manifest: &first.snapshot.manifest,
+                proofs: &first.snapshot.proofs,
+            },
+        )
+        .is_err()
+    );
+    set_test_now(Some(
+        DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+    ));
+    let second = prepare_publication(
+        &fixture.repo.root,
+        &release,
+        &chain,
+        Path::new("fixture.pub"),
+        &mut verifier,
+        &mut signer,
+    )
+    .unwrap();
+    assert_eq!(second.entry_bytes, first.entry_bytes);
+    assert_eq!(second.entry_signature, first.entry_signature);
+    assert_eq!(second.pointer_signature, first.pointer_signature);
+    archive.response = None;
+    upload_publication(
+        &test_config(),
+        &mut transport,
+        &mut archive,
+        &mut verifier,
+        &second.snapshot.staging,
+        &StagedPublication {
+            staging: &second.snapshot.staging,
+            chain: &chain,
+            entry: &second.entry,
+            entry_bytes: &second.entry_bytes,
+            entry_signature: &second.entry_signature,
+            pointer_bytes: &second.pointer_bytes,
+            pointer_signature: &second.pointer_signature,
+            manifest: &second.snapshot.manifest,
+            proofs: &second.snapshot.proofs,
+        },
+    )
+    .unwrap();
+    set_test_now(None);
 }
 
 #[test]

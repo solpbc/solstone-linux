@@ -18,6 +18,80 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+#[cfg(test)]
+#[derive(Default)]
+struct TestOperationSeam {
+    count: usize,
+    fail_at: Option<usize>,
+    log: Vec<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_OPERATION_SEAM: std::cell::RefCell<Option<TestOperationSeam>> = const { std::cell::RefCell::new(None) };
+    static TEST_NOW: std::cell::RefCell<Option<DateTime<Utc>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn transparency_now() -> DateTime<Utc> {
+    #[cfg(test)]
+    if let Some(now) = TEST_NOW.with(|state| *state.borrow()) {
+        return now;
+    }
+    Utc::now()
+}
+
+pub(crate) fn operation_seam(label: &str) -> Result<()> {
+    #[cfg(test)]
+    return TEST_OPERATION_SEAM.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(seam) = state.as_mut() else {
+            return Ok(());
+        };
+        let current = seam.count;
+        seam.count += 1;
+        seam.log.push(label.into());
+        if seam.fail_at == Some(current) {
+            return Err(transparency_error(
+                "retryable",
+                "injected publication seam",
+                "success",
+                format!("failure at {label}"),
+                "retry the test publication",
+            ));
+        }
+        Ok(())
+    });
+    #[cfg(not(test))]
+    {
+        let _ = label;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn configure_test_operation_seam(fail_at: Option<usize>) {
+    TEST_OPERATION_SEAM.with(|state| {
+        *state.borrow_mut() = Some(TestOperationSeam {
+            fail_at,
+            ..TestOperationSeam::default()
+        });
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn test_operation_seam_state() -> (usize, Vec<String>) {
+    TEST_OPERATION_SEAM.with(|state| {
+        let state = state.borrow();
+        let seam = state.as_ref().expect("test operation seam configured");
+        (seam.count, seam.log.clone())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_now(now: Option<DateTime<Utc>>) {
+    TEST_NOW.with(|state| *state.borrow_mut() = now);
+}
+
 pub const TRANSPARENCY_ENTRY_SCHEMA: &str =
     "https://solpbc.org/schemas/transparency-ledger-entry/v1.json";
 pub const TRANSPARENCY_LATEST_SCHEMA: &str =
@@ -1140,28 +1214,41 @@ fn parsed_transparency_ledger(bytes: &[u8]) -> Result<Vec<(TransparencyEntry, Ve
     Ok(parsed)
 }
 
-fn reject_locked_ledger_contradiction(fetched: &[u8], locked: &[u8]) -> Result<()> {
-    let fetched = match parsed_transparency_ledger(fetched) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
+pub(crate) fn reject_locked_ledger_contradiction(fetched: &[u8], locked: &[u8]) -> Result<()> {
     let locked = parsed_transparency_ledger(locked)?;
     let locked_by_seq = locked
         .into_iter()
         .map(|(entry, bytes)| (entry.seq, bytes))
         .collect::<BTreeMap<_, _>>();
-    for (entry, bytes) in fetched {
+    let mut previous = None;
+    for line in fetched.split_inclusive(|byte| *byte == b'\n') {
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let entry: TransparencyEntry = match parse_json(line, "transparency ledger entry") {
+            Ok(entry) => entry,
+            Err(_) => break,
+        };
+        let canonical =
+            transparency_canonical_json(&serde_json::to_value(&entry).map_err(display_error)?)?;
+        if canonical != line {
+            break;
+        }
         if let Some(expected) = locked_by_seq.get(&entry.seq)
-            && expected != &bytes
+            && expected.as_slice() != line
         {
             return Err(transparency_error(
                 "terminal",
                 "transparency ledger locked entry",
                 digest(expected),
-                format!("seq {} digest {}", entry.seq, digest(&bytes)),
+                format!("seq {} digest {}", entry.seq, digest(line)),
                 "stop and restore the transparency ledger from the signed locked entries",
             ));
         }
+        if validate_entry(&entry, previous.as_ref()).is_err() {
+            break;
+        }
+        previous = Some(entry);
     }
     Ok(())
 }
@@ -1472,6 +1559,7 @@ fn validate_tools() -> Result<()> {
 }
 
 pub(crate) fn append_head_row(root: &Path, row: &TransparencyHeadRow) -> Result<&'static str> {
+    operation_seam("head-log append")?;
     let path = root.join(TRANSPARENCY_HEAD_LOG);
     let existing = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -1533,6 +1621,7 @@ pub(crate) struct CandidateSnapshot {
 }
 
 pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<CandidateSnapshot> {
+    operation_seam("snapshot candidate")?;
     classify_release_dir(root, release_dir)?;
     let manifest_path = fs::read_dir(release_dir).map_err(display_error)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -1782,7 +1871,7 @@ pub(crate) fn build_entry(
         })
         .collect::<Vec<_>>();
     proof_inventory.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
-    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let now = transparency_now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let entry = TransparencyEntry {
         artifacts,
         manifests: vec![TransparencyNamedDigest {
@@ -2027,15 +2116,21 @@ fn verify_adoptable_remote_entry<V: TransparencySignatureVerifier>(
     config: &TransparencyConfig,
     verifier: &mut V,
     verification_root: &Path,
-    expected: &TransparencyEntry,
-    expected_bytes: &[u8],
+    publication: &StagedPublication<'_>,
     remote_bytes: &[u8],
     remote_signature: &[u8],
 ) -> Result<String> {
+    let expected = publication.entry;
+    let expected_bytes = publication.entry_bytes;
     let recorded: TransparencyEntry =
         parse_json(remote_bytes, "remote recorded transparency entry")?;
     let recorded_identity = digest(remote_bytes);
-    let semantic_match = recorded.product == PRODUCT
+    let canonical =
+        transparency_canonical_json(&serde_json::to_value(&recorded).map_err(display_error)?)?;
+    let entry_valid = canonical == remote_bytes
+        && validate_entry(&recorded, publication.chain.tip.as_ref()).is_ok();
+    let semantic_match = entry_valid
+        && recorded.product == PRODUCT
         && recorded.version == expected.version
         && recorded.seq == expected.seq
         && recorded.prev_sha256 == expected.prev_sha256
@@ -2079,9 +2174,37 @@ fn verify_adoptable_remote_entry<V: TransparencySignatureVerifier>(
     Ok(recorded_identity)
 }
 
-fn persist_adopted_entry(staging: &Path, entry_bytes: &[u8], signature_bytes: &[u8]) -> Result<()> {
-    fs::write(staging.join("ledger-entry.json"), entry_bytes).map_err(display_error)?;
-    fs::write(staging.join("ledger-entry.json.minisig"), signature_bytes).map_err(display_error)?;
+pub(crate) fn persist_adopted_entry(
+    staging: &Path,
+    entry_bytes: &[u8],
+    signature_bytes: &[u8],
+) -> Result<()> {
+    persist_adopted_entry_with(staging, entry_bytes, signature_bytes, || Ok(()))
+}
+
+pub(crate) fn persist_adopted_entry_with<F: FnOnce() -> Result<()>>(
+    staging: &Path,
+    entry_bytes: &[u8],
+    signature_bytes: &[u8],
+    before_commit: F,
+) -> Result<()> {
+    let entry_path = staging.join("ledger-entry.json");
+    let signature_path = staging.join("ledger-entry.json.minisig");
+    let entry_temp = staging.join(".adopted-ledger-entry.json.tmp");
+    let signature_temp = staging.join(".adopted-ledger-entry.json.minisig.tmp");
+    fs::write(&entry_temp, entry_bytes).map_err(display_error)?;
+    if let Err(error) = fs::write(&signature_temp, signature_bytes) {
+        let _ = fs::remove_file(&entry_temp);
+        return Err(display_error(error));
+    }
+    before_commit()?;
+    match fs::remove_file(&signature_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(display_error(error)),
+    }
+    fs::rename(&entry_temp, &entry_path).map_err(display_error)?;
+    fs::rename(&signature_temp, &signature_path).map_err(display_error)?;
     for name in ["latest.json", "latest.json.minisig"] {
         match fs::remove_file(staging.join(name)) {
             Ok(()) => {}
@@ -2090,6 +2213,28 @@ fn persist_adopted_entry(staging: &Path, entry_bytes: &[u8], signature_bytes: &[
         }
     }
     Ok(())
+}
+
+fn verify_remote_entry_signature<V: TransparencySignatureVerifier>(
+    config: &TransparencyConfig,
+    verifier: &mut V,
+    verification_root: &Path,
+    entry: &TransparencyEntry,
+    entry_bytes: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    verifier.verify(
+        verification_root,
+        &config.minisign_pub,
+        entry_bytes,
+        signature,
+        "remote recorded transparency entry signature",
+    )?;
+    verify_trusted_comment(
+        signature,
+        &entry_trusted_comment(entry, &digest(entry_bytes)),
+        "remote recorded transparency entry trusted comment",
+    )
 }
 
 pub(crate) fn upload_publication<
@@ -2125,9 +2270,41 @@ pub(crate) fn upload_publication<
     )?;
     match (remote_entry.http_status, remote_signature.http_status) {
         (404, 404) => {}
+        (200, 404) if remote_entry.body == *entry_bytes => {
+            adopted.insert("ledger-entry.json".into());
+        }
+        (404, 200) => {
+            verify_remote_entry_signature(
+                config,
+                verifier,
+                verification_root,
+                entry,
+                entry_bytes,
+                &remote_signature.body,
+            )?;
+            if remote_signature.body != *entry_signature {
+                persist_adopted_entry(staging, entry_bytes, &remote_signature.body)?;
+                return Err(transparency_error(
+                    "retryable",
+                    "transparency immutable adoption",
+                    "staged entry signature",
+                    "adopted alternate valid remote signature",
+                    "retry make publish-transparency so preflight uses the adopted signature before archive and mutable writes",
+                ));
+            }
+            adopted.insert("ledger-entry.json.minisig".into());
+        }
         (200, 200)
             if remote_entry.body == *entry_bytes && remote_signature.body == *entry_signature =>
         {
+            verify_remote_entry_signature(
+                config,
+                verifier,
+                verification_root,
+                entry,
+                entry_bytes,
+                &remote_signature.body,
+            )?;
             adopted.insert("ledger-entry.json".into());
             adopted.insert("ledger-entry.json.minisig".into());
         }
@@ -2136,8 +2313,7 @@ pub(crate) fn upload_publication<
                 config,
                 verifier,
                 verification_root,
-                entry,
-                entry_bytes,
+                publication,
                 &remote_entry.body,
                 &remote_signature.body,
             )?;
@@ -2150,18 +2326,24 @@ pub(crate) fn upload_publication<
                 "retry make publish-transparency so the pointer pair is signed for the adopted entry before archive and mutable writes",
             ));
         }
-        _ => {
+        (200, 404) => {
             return Err(transparency_error(
                 "terminal",
-                "remote immutable entry pair",
-                "both entry and signature absent or present",
-                format!(
-                    "entry HTTP {} signature HTTP {}",
-                    remote_entry.http_status, remote_signature.http_status
-                ),
-                "cut the next version because the remote version key contains an incomplete entry pair",
+                "remote poisoned version entry",
+                digest(entry_bytes),
+                digest(&remote_entry.body),
+                "cut the next version because the unsigned remote entry conflicts with this candidate",
             ));
         }
+        _ => ensure_http(
+            if remote_entry.http_status != 200 && remote_entry.http_status != 404 {
+                &remote_entry
+            } else {
+                &remote_signature
+            },
+            &[200, 404],
+            "remote immutable entry pair preflight GET",
+        )?,
     }
     for (name, bytes) in &objects {
         if matches!(
@@ -2193,6 +2375,7 @@ pub(crate) fn upload_publication<
     fs::write(staging.join("ledger.jsonl"), transparency_ledger).map_err(display_error)?;
     remove_obsolete_staging_manifest(staging)?;
     let (_, archive_digest) = staging_manifest_v1(staging)?;
+    operation_seam("archive")?;
     archive.archive(staging, &archive_digest)?;
     // Immutable mutation completes before any public-plane verification begins.
     // This phase boundary makes mutable writes unreachable after a verification failure.
@@ -2225,8 +2408,7 @@ pub(crate) fn upload_publication<
                         config,
                         verifier,
                         verification_root,
-                        entry,
-                        entry_bytes,
+                        publication,
                         &remote_entry.body,
                         &remote_signature.body,
                     )?;
@@ -2409,6 +2591,123 @@ pub(crate) fn upload_publication<
     Ok(archive_digest)
 }
 
+pub(crate) struct PreparedPublication {
+    pub(crate) snapshot: CandidateSnapshot,
+    pub(crate) entry: TransparencyEntry,
+    pub(crate) entry_bytes: Vec<u8>,
+    pub(crate) entry_signature: Vec<u8>,
+    pub(crate) pointer: TransparencyPointer,
+    pub(crate) pointer_bytes: Vec<u8>,
+    pub(crate) pointer_signature: Vec<u8>,
+    pub(crate) already_published: bool,
+}
+
+pub(crate) fn prepare_publication<V, S>(
+    root: &RepoRoot,
+    release_dir: &Path,
+    chain: &VerifiedChain,
+    public_key: &Path,
+    verifier: &mut V,
+    signer: &mut S,
+) -> Result<PreparedPublication>
+where
+    V: TransparencySignatureVerifier,
+    S: FnMut(&Path, &Path, &Path, &str) -> Result<()>,
+{
+    let snapshot = snapshot_candidate(root, release_dir)?;
+    let staging = &snapshot.staging;
+    let entry_path = staging.join("ledger-entry.json");
+    let entry_signature_path = staging.join("ledger-entry.json.minisig");
+    let pointer_path = staging.join("latest.json");
+    let pointer_signature_path = staging.join("latest.json.minisig");
+    let entry_complete = entry_path.is_file() && entry_signature_path.is_file();
+    let pointer_complete = pointer_path.is_file() && pointer_signature_path.is_file();
+    let (entry, entry_bytes, already_published, sign_entry) = if entry_complete {
+        let entry_bytes = fs::read(&entry_path).map_err(display_error)?;
+        let entry: TransparencyEntry = parse_json(&entry_bytes, "staged transparency entry")?;
+        let already_published = chain_includes_entry(chain, &entry_bytes)?;
+        if !already_published {
+            validate_entry(&entry, chain.tip.as_ref())?;
+        }
+        validate_staged_entry_candidate(&entry, &snapshot.manifest, staging)?;
+        (entry, entry_bytes, already_published, false)
+    } else {
+        let (entry, entry_bytes) =
+            build_entry(staging, &snapshot.manifest, &snapshot.proofs, chain)?;
+        fs::write(&entry_path, &entry_bytes).map_err(display_error)?;
+        (entry, entry_bytes, false, true)
+    };
+    let (pointer, pointer_bytes, sign_pointer) = if pointer_complete {
+        let pointer_bytes = fs::read(&pointer_path).map_err(display_error)?;
+        let pointer: TransparencyPointer =
+            parse_json(&pointer_bytes, "staged transparency pointer")?;
+        validate_pointer(&pointer, &entry)?;
+        (pointer, pointer_bytes, false)
+    } else {
+        let (pointer, pointer_bytes) = build_pointer(&entry, &entry_bytes)?;
+        fs::write(&pointer_path, &pointer_bytes).map_err(display_error)?;
+        (pointer, pointer_bytes, true)
+    };
+    if sign_entry {
+        operation_seam("sign entry")?;
+        signer(
+            staging,
+            &entry_path,
+            &entry_signature_path,
+            &entry_trusted_comment(&entry, &digest(&entry_bytes)),
+        )?;
+    }
+    if sign_pointer {
+        operation_seam("sign pointer")?;
+        signer(
+            staging,
+            &pointer_path,
+            &pointer_signature_path,
+            &pointer_trusted_comment(&pointer),
+        )?;
+    }
+    let entry_signature = fs::read(&entry_signature_path).map_err(display_error)?;
+    let pointer_signature = fs::read(&pointer_signature_path).map_err(display_error)?;
+    verify_trusted_comment(
+        &entry_signature,
+        &entry_trusted_comment(&entry, &digest(&entry_bytes)),
+        "new transparency entry trusted comment",
+    )?;
+    verify_trusted_comment(
+        &pointer_signature,
+        &pointer_trusted_comment(&pointer),
+        "new transparency pointer trusted comment",
+    )?;
+    operation_seam("verify local entry signature")?;
+    verifier.verify(
+        staging,
+        public_key,
+        &entry_bytes,
+        &entry_signature,
+        "new transparency entry signature",
+    )?;
+    if !already_published {
+        operation_seam("verify local pointer signature")?;
+        verifier.verify(
+            staging,
+            public_key,
+            &pointer_bytes,
+            &pointer_signature,
+            "new transparency pointer signature",
+        )?;
+    }
+    Ok(PreparedPublication {
+        snapshot,
+        entry,
+        entry_bytes,
+        entry_signature,
+        pointer,
+        pointer_bytes,
+        pointer_signature,
+        already_published,
+    })
+}
+
 pub fn publish_transparency(release_dir: &Path) -> Result<()> {
     let started = Instant::now();
     let root = RepoRoot::resolve()?;
@@ -2425,102 +2724,51 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
         &mut MinisignVerifier,
         true,
     )?;
-    let snapshot = snapshot_candidate(&root, release_dir)?;
-    let staging = &snapshot.staging;
-    let manifest = &snapshot.manifest;
-    let proofs = &snapshot.proofs;
-    let entry_path = staging.join("ledger-entry.json");
-    let entry_signature_path = staging.join("ledger-entry.json.minisig");
-    let pointer_path = staging.join("latest.json");
-    let pointer_signature_path = staging.join("latest.json.minisig");
-    let entry_complete = entry_path.is_file() && entry_signature_path.is_file();
-    let pointer_complete = pointer_path.is_file() && pointer_signature_path.is_file();
-    let (entry, entry_bytes, already_published, sign_entry) = if entry_complete {
-        let entry_bytes = fs::read(&entry_path).map_err(display_error)?;
-        let entry: TransparencyEntry = parse_json(&entry_bytes, "staged transparency entry")?;
-        let already_published = chain_includes_entry(&chain, &entry_bytes)?;
-        if !already_published {
-            validate_entry(&entry, chain.tip.as_ref())?;
-        }
-        validate_staged_entry_candidate(&entry, manifest, staging)?;
-        (entry, entry_bytes, already_published, false)
-    } else {
-        let (entry, entry_bytes) = build_entry(staging, manifest, proofs, &chain)?;
-        fs::write(&entry_path, &entry_bytes).map_err(display_error)?;
-        (entry, entry_bytes, false, true)
-    };
-    let (pointer, pointer_bytes, sign_pointer) = if pointer_complete {
-        let pointer_bytes = fs::read(&pointer_path).map_err(display_error)?;
-        let pointer: TransparencyPointer =
-            parse_json(&pointer_bytes, "staged transparency pointer")?;
-        validate_pointer(&pointer, &entry)?;
-        (pointer, pointer_bytes, false)
-    } else {
-        let (pointer, pointer_bytes) = build_pointer(&entry, &entry_bytes)?;
-        fs::write(&pointer_path, &pointer_bytes).map_err(display_error)?;
-        (pointer, pointer_bytes, true)
-    };
-    if sign_entry || sign_pointer {
-        let mut passphrase = read_passphrase_once()?;
-        let signing = (|| {
-            if sign_entry {
-                sign_file(
-                    &config.minisign_key,
-                    &entry_path,
-                    &entry_signature_path,
-                    &entry_trusted_comment(&entry, &digest(&entry_bytes)),
-                    &passphrase,
-                )?;
+    let mut passphrase = None::<Vec<u8>>;
+    let prepared = {
+        let mut signer = |_: &Path, message: &Path, signature: &Path, comment: &str| {
+            if passphrase.is_none() {
+                passphrase = Some(read_passphrase_once()?);
             }
-            if sign_pointer {
-                sign_file(
-                    &config.minisign_key,
-                    &pointer_path,
-                    &pointer_signature_path,
-                    &pointer_trusted_comment(&pointer),
-                    &passphrase,
-                )?;
-            }
-            Ok(())
-        })();
-        passphrase.fill(0);
-        signing?;
+            sign_file(
+                &config.minisign_key,
+                message,
+                signature,
+                comment,
+                passphrase.as_deref().unwrap_or_default(),
+            )
+        };
+        prepare_publication(
+            &root,
+            release_dir,
+            &chain,
+            &config.minisign_pub,
+            &mut MinisignVerifier,
+            &mut signer,
+        )
+    };
+    if let Some(secret) = passphrase.as_mut() {
+        secret.fill(0);
     }
-    let entry_signature = fs::read(&entry_signature_path).map_err(display_error)?;
-    let pointer_signature = fs::read(&pointer_signature_path).map_err(display_error)?;
-    verify_trusted_comment(
-        &entry_signature,
-        &entry_trusted_comment(&entry, &digest(&entry_bytes)),
-        "new transparency entry trusted comment",
-    )?;
-    verify_trusted_comment(
-        &pointer_signature,
-        &pointer_trusted_comment(&pointer),
-        "new transparency pointer trusted comment",
-    )?;
-    verify_minisign_bytes(
-        staging,
-        &config.minisign_pub,
-        &entry_bytes,
-        &entry_signature,
-        "new transparency entry signature",
-    )?;
-    if already_published {
+    let prepared = prepared?;
+    let staging = &prepared.snapshot.staging;
+    let manifest = &prepared.snapshot.manifest;
+    let proofs = &prepared.snapshot.proofs;
+    let entry = &prepared.entry;
+    let entry_bytes = &prepared.entry_bytes;
+    let entry_signature = &prepared.entry_signature;
+    let pointer = &prepared.pointer;
+    let pointer_bytes = &prepared.pointer_bytes;
+    let pointer_signature = &prepared.pointer_signature;
+    if prepared.already_published {
         println!(
             "already published, chain unchanged: product={PRODUCT} version={} seq={} entry_sha256={}",
             entry.version,
             entry.seq,
-            digest(&entry_bytes)
+            digest(entry_bytes)
         );
         return Ok(());
     }
-    verify_minisign_bytes(
-        staging,
-        &config.minisign_pub,
-        &pointer_bytes,
-        &pointer_signature,
-        "new transparency pointer signature",
-    )?;
     let mut archive = CommandArchive {
         command: config.archive_channel.clone().unwrap(),
     };
@@ -2533,11 +2781,11 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
         &StagedPublication {
             staging,
             chain: &chain,
-            entry: &entry,
-            entry_bytes: &entry_bytes,
-            entry_signature: &entry_signature,
-            pointer_bytes: &pointer_bytes,
-            pointer_signature: &pointer_signature,
+            entry,
+            entry_bytes,
+            entry_signature,
+            pointer_bytes,
+            pointer_signature,
             manifest,
             proofs,
         },
@@ -2545,19 +2793,19 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
     let witness = append_head_row(
         root.path(),
         &TransparencyHeadRow {
-            entry_sha256: digest(&entry_bytes),
+            entry_sha256: digest(entry_bytes),
             product: PRODUCT.into(),
             published_utc: entry.published_utc.clone(),
             seq: entry.seq,
             version: entry.version.clone(),
         },
     )?;
-    let stale_pointer = pointer_is_stale(&pointer, Utc::now())?;
+    let stale_pointer = pointer_is_stale(pointer, transparency_now())?;
     println!(
         "product: {PRODUCT}\nversion: {}\nseq: {}\nentry_sha256: {}\npublic_entry: {}/releases/{PRODUCT}/v/{}/ledger-entry.json\npublic_entry_signature: {}/releases/{PRODUCT}/v/{}/ledger-entry.json.minisig\npublic_transparency_ledger: {}/releases/{PRODUCT}/ledger.jsonl\npublic_pointer: {}/releases/{PRODUCT}/latest.json\npublic_pointer_signature: {}/releases/{PRODUCT}/latest.json.minisig\narchive: {}\nwitness: {}\nwall_clock_ms: {}",
         entry.version,
         entry.seq,
-        digest(&entry_bytes),
+        digest(entry_bytes),
         config.base_url,
         entry.version,
         config.base_url,
