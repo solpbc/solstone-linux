@@ -63,13 +63,13 @@ RUN actual="$(cargo deb --version)" \
     && { test "${actual}" = "cargo-deb ${CARGO_DEB_VERSION}" \
         || { echo "error: cargo-deb mismatch: expected 'cargo-deb ${CARGO_DEB_VERSION}', actual '${actual:-unavailable}'" >&2; \
              echo "repair: provision the local Ubuntu tool image with cargo-deb ${CARGO_DEB_VERSION}" >&2; exit 1; }; } \
-    && cargo deb --locked -p solstone-linux \
+    && cargo deb --locked --no-build -p solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && test "$VERSION" = "$RELEASE_VERSION" \
     && DEB="target/debian/solstone-linux_${VERSION}-1_amd64.deb" \
     && { test -f "$DEB" \
         || { echo "error: Debian artifact mismatch: expected ${DEB}, actual missing" >&2; \
-             echo "repair: cargo deb --locked -p solstone-linux" >&2; exit 1; }; } \
+             echo "repair: cargo deb --locked --no-build -p solstone-linux" >&2; exit 1; }; } \
     && DEB_OUT="/release/solstone-linux_${VERSION}-1_amd64.deb" \
     && TAR_OUT="/release/solstone-linux-${VERSION}-linux-x86_64.tar.gz" \
     && cp "$DEB" "$DEB_OUT" \

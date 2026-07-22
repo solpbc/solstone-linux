@@ -1808,6 +1808,7 @@ exit 0
     )
     .unwrap();
     for consumed in [
+        "cargo deb --locked --no-build -p solstone-linux",
         "--invocation-id \"$INVOCATION_ID\"",
         "--source-commit \"$SOURCE_COMMIT\"",
         "--source-archive-sha256 \"$SOURCE_ARCHIVE_SHA256\"",
