@@ -3200,16 +3200,29 @@ fn portable_path_component(part: &str) -> Result<()> {
 }
 
 fn require_regular(path: &Path, label: &str) -> Result<()> {
+    let metadata = require_no_follow_regular(path, label)?;
+    if metadata.mode() & 0o7111 != 0 {
+        return Err(Error::new(format!("{label} mode mismatch")));
+    }
+    Ok(())
+}
+
+fn require_regular_executable(path: &Path, label: &str) -> Result<()> {
+    let metadata = require_no_follow_regular(path, label)?;
+    if metadata.mode() & 0o111 == 0 {
+        return Err(Error::new(format!("{label} mode mismatch")));
+    }
+    Ok(())
+}
+
+fn require_no_follow_regular(path: &Path, label: &str) -> Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path).map_err(display_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(Error::new(format!(
             "{label} mismatch: expected no-follow regular file"
         )));
     }
-    if metadata.mode() & 0o7111 != 0 {
-        return Err(Error::new(format!("{label} mode mismatch")));
-    }
-    Ok(())
+    Ok(metadata)
 }
 
 fn require_directory(path: &Path, label: &str) -> Result<()> {

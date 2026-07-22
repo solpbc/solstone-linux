@@ -1545,3 +1545,18 @@ fn clean_tree_policy_distinguishes_source_from_ignored_outputs() {
     command(repo.path(), &["git", "commit", "-m", "change ignores"]).unwrap();
     assert!(require_clean_tree(repo.path(), &payload).is_err());
 }
+
+#[test]
+fn regular_file_mode_helpers_distinguish_executables() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("file");
+    fs::write(&path, b"contents").unwrap();
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    require_regular_executable(&path, "fixture executable").unwrap();
+    assert!(require_regular(&path, "fixture data").is_err());
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    require_regular(&path, "fixture data").unwrap();
+    assert!(require_regular_executable(&path, "fixture executable").is_err());
+}

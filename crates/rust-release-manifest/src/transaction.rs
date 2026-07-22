@@ -1509,7 +1509,7 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
         }
         _ => return Err(Error::new("proof platform mismatch")),
     };
-    require_regular(&actual_executable, "proof installed executable")?;
+    require_regular_executable(&actual_executable, "proof installed executable")?;
     let metadata = fs::symlink_metadata(&actual_executable).map_err(display_error)?;
     let version_command = vec![executable_path.into(), "--version".into()];
     let output = Command::new(&actual_executable)
