@@ -42,10 +42,12 @@ generation path does not require one. Rebuild the proof images when their stock
 base references, runtime dependency closure, or `packaging/Containerfile.tools`
 changes.
 
-Locally regenerated tool images are not guaranteed to be bit-for-bit reproducible:
-distro repositories, rustup distribution content, and tool build environments can
-change while declared versions remain the same. Prove each freshly regenerated
-image offline before committing its observed ID.
+Every `make release-images` run uses `--no-cache`, produces new local image IDs,
+and requires all four observed IDs to be re-pinned. Locally regenerated images are
+not guaranteed to be bit-for-bit reproducible: distro repositories, rustup
+distribution content, and tool build environments can change while declared
+versions remain the same. Prove each freshly regenerated image offline before
+committing its observed ID.
 
 The `proof_debian`, `proof_rpm`, and `proof_tar` roles use clean OS images carrying
 only the runtime dependency closure, with no compiler, Rust toolchain, Cargo, or
