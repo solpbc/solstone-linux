@@ -948,12 +948,30 @@ fn command_evidence(program: &str, args: &[&str]) -> Result<String> {
     )
 }
 
-fn command_first_line(program: &str, args: &[&str]) -> Result<String> {
-    command_evidence(program, args)?
+pub(crate) fn command_first_line(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(display_error)?;
+    if !output.status.success() {
+        return Err(Error::new(format!(
+            "{program} evidence command mismatch: expected success, actual {}",
+            output.status
+        )));
+    }
+    let first_line = String::from_utf8(output.stdout)
+        .map_err(display_error)?
         .lines()
         .next()
-        .map(str::to_owned)
-        .ok_or_else(|| Error::new(format!("{program} identity mismatch: expected output")))
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| Error::new(format!("{program} identity mismatch: expected output")))?
+        .to_owned();
+    let field = if program == "rustc" && args == ["--version", "--verbose"] {
+        "lane rustc verbose"
+    } else {
+        program
+    };
+    normalize_command_evidence(field, first_line)
 }
 
 fn two_word_identity(value: &str, expected_name: &str) -> Result<String> {

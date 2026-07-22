@@ -616,6 +616,26 @@ fn container_build_failure_reports_sanitized_container_stderr() {
     assert!(error.contains("repair: run make release-tool-images"));
 }
 
+#[test]
+fn command_first_line_validates_only_retained_identity() {
+    let bin = tempfile::tempdir().unwrap();
+    let accepted = bin.path().join("accepted-tool");
+    executable(
+        &accepted,
+        "#!/bin/sh\nprintf '%s\\n' 'gzip 1.10' 'license: https://example.invalid/license'\n",
+    );
+    let value = command_first_line(accepted.to_str().unwrap(), &["--version"]).unwrap();
+    assert_eq!(value, "gzip 1.10");
+    assert!(!value.contains("https://"));
+
+    let rejected = bin.path().join("rejected-tool");
+    executable(
+        &rejected,
+        "#!/bin/sh\nprintf '%s\\n' 'gzip https://example.invalid/license' 'discarded text'\n",
+    );
+    assert!(command_first_line(rejected.to_str().unwrap(), &["--version"]).is_err());
+}
+
 pub(super) fn git_repo() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     for args in [
