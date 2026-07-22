@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -126,7 +126,7 @@ check-rust-release-manifest: rust-preflight
 shellcheck:
 	shellcheck $(SHELLCHECK_SCRIPTS)
 
-ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest
+ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-transparency-minisign
 	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check
@@ -134,6 +134,17 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux
 	$(MAKE) shellcheck
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
+
+check-transparency-minisign: rust-preflight
+	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest transparency_tests::real_minisign_sign_verify_and_reject_tamper -- --exact --ignored
+
+publish-transparency: rust-preflight
+	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
+
+resign-transparency-pointer: rust-preflight
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency resign-pointer
 
 audit: rust-preflight check-cargo-deny
 	@echo "Evidence class: refreshed advisory evidence."

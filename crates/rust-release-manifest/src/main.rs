@@ -5,7 +5,8 @@ use clap::{Args, Parser, Subcommand};
 use rust_release_manifest::{
     Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE, ProcessEnvironment, ProofHandoffInput,
     RELEASE_DIR_OK_MESSAGE, RepoRoot, classify_release_dir, create_candidate, emit_lane_handoff,
-    emit_proof_handoff, prove_candidate, recover_candidate, verify_manifest_mode,
+    emit_proof_handoff, prove_candidate, publish_transparency, recover_candidate,
+    resign_transparency_pointer, verify_manifest_mode,
 };
 use std::path::PathBuf;
 
@@ -31,6 +32,19 @@ enum Command {
         #[command(subcommand)]
         command: CandidateCommand,
     },
+    Transparency {
+        #[command(subcommand)]
+        command: TransparencyCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TransparencyCommand {
+    Publish {
+        #[arg(long)]
+        release_dir: PathBuf,
+    },
+    ResignPointer,
 }
 
 #[derive(Subcommand)]
@@ -199,6 +213,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("{}", serde_json::to_string(&status)?);
         }
+        Command::Transparency { command } => match command {
+            TransparencyCommand::Publish { release_dir } => publish_transparency(&release_dir)?,
+            TransparencyCommand::ResignPointer => resign_transparency_pointer()?,
+        },
     }
     Ok(())
 }

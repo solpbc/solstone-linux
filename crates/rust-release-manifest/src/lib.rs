@@ -25,6 +25,8 @@ mod candidate;
 pub use candidate::*;
 mod transaction;
 pub use transaction::*;
+mod transparency;
+pub use transparency::*;
 
 pub const SCHEMA_VERSION: u64 = 1;
 pub const SCHEMA_SHA256: &str = "d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c";
@@ -3319,3 +3321,5 @@ mod candidate_tests;
 mod proof_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transparency_tests;

@@ -202,3 +202,28 @@ live FLAC checkpoint.
 `make audit` refreshes advisory data for a separate operator audit. Candidate
 creation instead consumes the explicitly acquired descriptor cohort and leaves the
 repository `deny.toml` unchanged.
+
+## Release transparency
+
+After delivery, publish the retained candidate with `make publish-transparency
+RELEASE_DIR=<retained-candidate>`. This env-driven, retryable step never gates
+delivery; see the retained candidate paths above rather than reconstructing its
+inventory. Minisign is a development prerequisite. Version keys are one-shot and
+permanent. The final `latest.json` body PUT is the commit boundary: before it the
+pointer body is old and afterward it is new. The signature-first write can briefly
+produce a pointer/signature mismatch; consumers retry that recognized transient.
+The archive retains the candidate artifact bytes alongside the release evidence;
+the public transparency surface carries evidence only, never artifact bytes.
+If an entry was uploaded before its pointer, retry the same command; if
+the version was permanently recorded against a superseded chain head, cut the next
+version.
+
+`make resign-transparency-pointer` is the freeze defense. It first verifies the
+signed pointer, signed tip, product binding, and rollback protection against the
+[transparency head log](transparency-head-log.jsonl), then renews only the pointer
+signature and validity. It never re-attests a rolled-back or foreign pointer.
+
+The surface attests what was released, that it is immutable, and that history is
+publicly reconstructible — not that binaries provably match source. Publication is
+operator-approved and separate from the retained legacy Python publisher, which is
+not a native release path.
