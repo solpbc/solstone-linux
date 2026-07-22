@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use std::ffi::{OsStr, OsString};
 use std::process::Output;
 
-const ADVISORY_URL: &str = "file://localhost/advisory-db";
+pub(crate) const ADVISORY_URL: &str = "file://localhost.invalid/advisory-db";
 const DAY_SECONDS: i64 = 24 * 60 * 60;
 pub(crate) const LANE_EVIDENCE_NAME: &str = "lane-evidence.json";
 pub const LANE_HANDOFF: &str = ".lane-evidence-handoff.json";
@@ -515,7 +515,7 @@ pub fn recheck_advisory_cohort(
     Ok(())
 }
 
-fn advisory_config(source: &str, db_root: &Path) -> Result<String> {
+pub(crate) fn advisory_config(source: &str, db_root: &Path) -> Result<String> {
     let marker = "[advisories]\n";
     let index = source.find(marker).ok_or_else(|| {
         Error::new("advisory policy mismatch: expected [advisories], actual missing")
@@ -526,9 +526,7 @@ fn advisory_config(source: &str, db_root: &Path) -> Result<String> {
     if root.contains(['"', '\n', '\r']) {
         return Err(Error::new("advisory db-path mismatch: expected safe path"));
     }
-    let additions = format!(
-        "db-path = \"{root}\"\ndb-urls = [\"{ADVISORY_URL}\"]\nmaximum-db-staleness = \"1d\"\n"
-    );
+    let additions = format!("db-path = \"{root}\"\ndb-urls = [\"{ADVISORY_URL}\"]\n");
     Ok(format!(
         "{}{}{}",
         &source[..index],

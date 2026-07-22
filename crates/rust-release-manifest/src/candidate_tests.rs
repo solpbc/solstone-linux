@@ -609,10 +609,25 @@ pub(super) fn git_repo() -> tempfile::TempDir {
                 .success()
         );
     }
-    fs::create_dir_all(temp.path().join("crates/example")).unwrap();
+    fs::create_dir_all(
+        temp.path()
+            .join("crates/definitely-absent-solstone-fixture"),
+    )
+    .unwrap();
     fs::write(
-        temp.path().join("crates/example/RUSTSEC-2026-0001.md"),
-        "fixture\n",
+        temp.path()
+            .join("crates/definitely-absent-solstone-fixture/RUSTSEC-2099-0003.md"),
+        r#"```toml
+[advisory]
+id = "RUSTSEC-2099-0003"
+package = "definitely-absent-solstone-fixture"
+date = "2099-01-03"
+url = "https://example.invalid/RUSTSEC-2099-0003"
+
+[versions]
+patched = []
+```
+"#,
     )
     .unwrap();
     for args in [
@@ -655,14 +670,133 @@ pub(super) fn current_time() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+fn cargo_deny_fixture_prerequisite(cargo: &Path) -> Result<()> {
+    let actual = Command::new(cargo)
+        .args(["deny", "--version"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unavailable".into());
+    let expected = format!("cargo-deny {CARGO_DENY_VERSION}");
+    if actual != expected {
+        return Err(Error::new(format!(
+            "cargo-deny fixture prerequisite mismatch: expected {expected}, actual {actual}\nrepair: install cargo-deny {CARGO_DENY_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_fixture_dependency(root: &Path, cargo: &Path) -> Result<()> {
+    let output = Command::new(cargo)
+        .args(["metadata", "--locked", "--offline", "--format-version", "1"])
+        .current_dir(root)
+        .output()
+        .map_err(display_error)?;
+    let present = output.status.success()
+        && serde_json::from_slice::<Value>(&output.stdout)
+            .ok()
+            .and_then(|value| value["packages"].as_array().cloned())
+            .is_some_and(|packages| {
+                packages
+                    .iter()
+                    .any(|package| package["name"].as_str() == Some("libc"))
+            });
+    if !present {
+        return Err(Error::new(
+            "cargo-deny fixture dependency mismatch: expected in-graph crate 'libc', actual absent\nrepair: repoint the synthetic RUSTSEC-2099 fixture to a stable in-graph crate",
+        ));
+    }
+    Ok(())
+}
+
+fn copy_fixture_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_fixture_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn materialize_cargo_deny_fixture(kind: Option<&str>) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let derived = advisory_db_directory(ADVISORY_URL).unwrap();
+    let database = root.path().join(derived);
+    fs::create_dir_all(&database).unwrap();
+    if let Some(kind) = kind {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/advisory-db")
+            .join(kind);
+        copy_fixture_tree(&fixture, &database);
+    }
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "advisory-fixture@invalid.example"][..],
+        &["config", "user.name", "Advisory Fixture"][..],
+        &["add", "--all"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&database)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    assert!(
+        Command::new("git")
+            .args([
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "synthetic advisories"
+            ])
+            .env("GIT_AUTHOR_DATE", "2020-01-02T03:04:05Z")
+            .env("GIT_COMMITTER_DATE", "2020-01-02T03:04:05Z")
+            .current_dir(&database)
+            .status()
+            .unwrap()
+            .success()
+    );
+    root
+}
+
+fn real_cargo_deny_advisories(root: &Path, cargo: &Path, db_root: &Path) -> Output {
+    let config_path = db_root.join("advisory-deny.toml");
+    let policy = fs::read_to_string(root.join("deny.toml")).unwrap();
+    fs::write(&config_path, advisory_config(&policy, db_root).unwrap()).unwrap();
+    Command::new(cargo)
+        .args([
+            "deny",
+            "--locked",
+            "--offline",
+            "--config",
+            config_path.to_str().unwrap(),
+            "check",
+            "advisories",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap()
+}
+
 pub(super) const CARGO_DENY_ASSERTIONS: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$PWD/cargo-deny-argv"
 case " $* " in
   *" deny --locked --offline --config "*" check licenses bans sources "*) ;;
   *" deny --locked --offline --config "*" check advisories "*)
     config="$5"
-    grep -F 'db-urls = ["file://localhost/advisory-db"]' "$config" >/dev/null || exit 91
-    grep -F 'maximum-db-staleness = "1d"' "$config" >/dev/null || exit 92
+    grep -F 'db-urls = ["file://localhost.invalid/advisory-db"]' "$config" >/dev/null || exit 91
+    grep -F 'maximum-db-staleness' "$config" >/dev/null && exit 92
     grep -F 'github.com/RustSec' "$config" >/dev/null && exit 93
     ;;
   *) exit 94 ;;
@@ -695,13 +829,81 @@ fn advisory_cohort_is_clean_local_ordered_and_offline() {
     assert!(calls[1].ends_with("check advisories"));
     let config = fs::read_to_string(staging.root.join("advisory-deny.toml")).unwrap();
     assert!(config.contains("db-path = \""));
-    assert!(config.contains("db-urls = [\"file://localhost/advisory-db\"]"));
+    assert!(config.contains("db-urls = [\"file://localhost.invalid/advisory-db\"]"));
+    assert!(!config.contains("maximum-db-staleness"));
     assert!(!config.contains("github.com/RustSec"));
+    assert!(
+        staging
+            .advisory_db
+            .join("advisory-db-f8e6125c8c7da402")
+            .is_dir()
+    );
     assert!(
         !serde_json::to_string(&cohort.source_id)
             .unwrap()
             .contains(db.path().to_str().unwrap())
     );
+}
+
+#[test]
+fn advisory_config_is_accepted_and_fixtures_are_checked_by_real_cargo_deny() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let cargo = Path::new("cargo");
+
+    let missing = cargo_deny_fixture_prerequisite(Path::new(
+        "/definitely-absent-solstone-cargo-for-advisory-fixture",
+    ))
+    .unwrap_err();
+    assert_eq!(
+        missing.to_string(),
+        "cargo-deny fixture prerequisite mismatch: expected cargo-deny 0.20.2, actual unavailable\nrepair: install cargo-deny 0.20.2"
+    );
+    let wrong = tempfile::tempdir().unwrap();
+    let wrong_cargo = wrong.path().join("cargo");
+    executable(
+        &wrong_cargo,
+        "#!/bin/sh\nprintf '%s\\n' 'cargo-deny 0.20.1'\n",
+    );
+    let wrong = cargo_deny_fixture_prerequisite(&wrong_cargo).unwrap_err();
+    assert_eq!(
+        wrong.to_string(),
+        "cargo-deny fixture prerequisite mismatch: expected cargo-deny 0.20.2, actual cargo-deny 0.20.1\nrepair: install cargo-deny 0.20.2"
+    );
+
+    cargo_deny_fixture_prerequisite(cargo).unwrap();
+    require_fixture_dependency(&root, cargo).unwrap();
+
+    let present = materialize_cargo_deny_fixture(Some("present"));
+    let output = real_cargo_deny_advisories(&root, cargo, present.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success(),
+        "synthetic vulnerability was not denied"
+    );
+    assert!(!stderr.contains("failed to deserialize config"), "{stderr}");
+    assert!(stderr.contains("error[vulnerability]"), "{stderr}");
+    assert!(stderr.contains("RUSTSEC-2099-0001"), "{stderr}");
+
+    let empty = materialize_cargo_deny_fixture(None);
+    let output = real_cargo_deny_advisories(&root, cargo, empty.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success(),
+        "empty advisory database was accepted"
+    );
+    assert!(
+        stderr.contains("failed to load advisory database"),
+        "{stderr}"
+    );
+
+    let malformed = materialize_cargo_deny_fixture(Some("malformed"));
+    let output = real_cargo_deny_advisories(&root, cargo, malformed.path());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!output.status.success(), "malformed advisory was accepted");
+    assert!(stderr.contains("failed to parse advisory"), "{stderr}");
 }
 
 #[test]
@@ -796,7 +998,7 @@ fn advisory_uses_exported_policy_and_lock_and_rechecks_snapshot() {
     let db = git_repo();
     let path = descriptor(&staging.root, db.path(), None, &current_time());
     let cargo = format!(
-        "#!/bin/sh\n[ \"$(sha256sum Cargo.lock | cut -d' ' -f1)\" = '{expected_lock}' ] || exit 91\ncase \" $* \" in *' check licenses bans sources '*) [ \"$5\" = '{}/deny.toml' ] || exit 92;; *' check advisories '*) grep -F 'file://localhost/advisory-db' \"$5\" >/dev/null || exit 93;; *) exit 94;; esac\n",
+        "#!/bin/sh\n[ \"$(sha256sum Cargo.lock | cut -d' ' -f1)\" = '{expected_lock}' ] || exit 91\ncase \" $* \" in *' check licenses bans sources '*) [ \"$5\" = '{}/deny.toml' ] || exit 92;; *' check advisories '*) grep -F 'file://localhost.invalid/advisory-db' \"$5\" >/dev/null || exit 93;; *) exit 94;; esac\n",
         context.path.display()
     );
     let (_bin, processes) = process_bin(&cargo, None);
@@ -826,7 +1028,7 @@ fn advisory_policy_failures_and_wrong_materialization_fail_closed() {
     fs::create_dir(staging.advisory_db.join("advisory-db-wrong")).unwrap();
     let db = git_repo();
     let path = descriptor(&staging.root, db.path(), None, &current_time());
-    let rejecting = "#!/bin/sh\nconfig=\"$5\"\ngrep -F 'file://localhost/advisory-db' \"$config\" >/dev/null || exit 98\nexit 99\n";
+    let rejecting = "#!/bin/sh\nconfig=\"$5\"\ngrep -F 'file://localhost.invalid/advisory-db' \"$config\" >/dev/null || exit 98\nexit 99\n";
     let (_bin, processes) = process_bin(rejecting, None);
     assert!(run_advisory_cohort(&context, &staging, &path, &processes).is_err());
 
