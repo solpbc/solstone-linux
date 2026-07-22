@@ -47,6 +47,9 @@ RUN cargo build --locked --release -p solstone-linux -p rust-release-manifest \
     && tar -C /release-tree -czf "/release/${ROOT}.tar.gz" "$ROOT" \
     && printf '%s\n' "$VERSION" > /release/VERSION
 
+FROM scratch AS proof-runner-export
+COPY --from=baseline /src/target/release/rust-release-manifest /proof-runner
+
 FROM baseline AS deb-build
 
 ARG CARGO_DEB_VERSION=3.7.0

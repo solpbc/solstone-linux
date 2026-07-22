@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+pub(crate) const PROOF_RUNNER_ENTRY_MARKER: &str = "solstone-proof-runner-entry-v1";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateLedger {
@@ -564,6 +566,31 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
                 ExpectedLeaf::Directory,
             )?
             .identity;
+        let staged_runner = input.staging.proof_runner.join("proof-runner");
+        let runner_metadata = fs::symlink_metadata(&staged_runner).map_err(display_error)?;
+        if runner_metadata.file_type().is_symlink() || !runner_metadata.is_file() {
+            return Err(Error::new(
+                "staged proof runner mismatch: expected no-follow regular file",
+            ));
+        }
+        if runner_metadata.mode() & 0o7000 != 0 || runner_metadata.mode() & 0o111 == 0 {
+            return Err(Error::new(
+                "staged proof runner mode mismatch: expected executable, actual non-executable",
+            ));
+        }
+        let runner_path = boundary
+            .resolve_for_create(
+                ReservedPath::ProofRunner(version.clone()),
+                ExpectedLeaf::Absent,
+            )?
+            .absolute;
+        atomic_write_0644(
+            &runner_path,
+            &fs::read(staged_runner).map_err(display_error)?,
+        )?;
+        fs::set_permissions(&runner_path, fs::Permissions::from_mode(0o755))
+            .map_err(display_error)?;
+        resolve_proof_runner(&boundary, version.clone())?;
         let ledger_path = boundary
             .resolve_for_create(
                 ReservedPath::EvidenceLedger(version.clone()),
@@ -773,6 +800,7 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
     let proof = ProofId::new(request.platform)?;
     let version = VersionComponent::new(&request.ledger.version)?;
     let boundary = ReservedReleaseBoundary::new(request.root);
+    let runner = resolve_proof_runner(&boundary, version.clone())?;
     match boundary.presence(
         ReservedPath::Proofs(version.clone()),
         ExpectedLeaf::Directory,
@@ -812,16 +840,20 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             .absolute;
         let artifact_path = payload.join(&artifact.path);
         require_regular(&artifact_path, "proof artifact")?;
-        let executable = std::env::current_exe().map_err(display_error)?;
-        let output_arg = format!("type=bind,src={},dst=/evidence", attempt.display());
+        let relabel = if request.engine == ContainerEngine::Podman {
+            ",relabel=shared"
+        } else {
+            ""
+        };
+        let output_arg = format!("type=bind,src={},dst=/evidence{relabel}", attempt.display());
         let artifact_arg = format!(
-            "type=bind,src={},dst=/input/{},ro",
+            "type=bind,src={},dst=/input/{},ro{relabel}",
             artifact_path.display(),
             artifact.path
         );
         let runner_arg = format!(
-            "type=bind,src={},dst=/proof-runner,ro",
-            executable.display()
+            "type=bind,src={},dst=/proof-runner,ro{relabel}",
+            runner.display()
         );
         let mut args = vec![
             "run".into(),
@@ -839,7 +871,7 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             args.extend([
                 "--mount".into(),
                 format!(
-                    "type=bind,src={},dst=/input/install.sh,ro",
+                    "type=bind,src={},dst=/input/install.sh,ro{relabel}",
                     request.root.path().join("scripts/install.sh").display()
                 ),
             ]);
@@ -867,7 +899,7 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             "--version".into(),
             request.ledger.version.clone(),
         ]);
-        run_success_owned(
+        run_proof_runner(
             request.processes,
             request.root.path(),
             request.engine.executable(),
@@ -906,6 +938,87 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             published_identity,
         )
     })
+}
+
+fn resolve_proof_runner(
+    boundary: &ReservedReleaseBoundary<'_>,
+    version: VersionComponent,
+) -> Result<PathBuf> {
+    let runner = boundary
+        .resolve_for_read(
+            ReservedPath::ProofRunner(version),
+            ExpectedLeaf::RegularFile,
+        )?
+        .absolute;
+    let mode = fs::symlink_metadata(&runner).map_err(display_error)?.mode();
+    if mode & 0o111 == 0 {
+        return Err(Error::new(
+            "proof runner mode mismatch: expected executable, actual non-executable",
+        ));
+    }
+    Ok(runner)
+}
+
+pub(crate) fn run_proof_runner(
+    processes: &ProcessEnvironment,
+    root: &Path,
+    program: &str,
+    args: &[String],
+) -> Result<()> {
+    let output = processes
+        .command(program)
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(display_error)?;
+    let marker = output.stderr.split(|byte| *byte == b'\n').any(|line| {
+        line.strip_suffix(b"\r").unwrap_or(line) == PROOF_RUNNER_ENTRY_MARKER.as_bytes()
+    });
+    let stderr = sanitize_proof_runner_stderr(&output.stderr);
+    let context = (!stderr.is_empty()).then(|| format!("\nstderr: {stderr}"));
+    match (output.status.success(), marker) {
+        (true, true) => Ok(()),
+        (true, false) => Err(Error::new(
+            "proof runner protocol mismatch: expected entry marker, actual absent",
+        )),
+        (false, false) => Err(Error::new(format!(
+            "proof runner execution mismatch: expected entry marker, actual container command failed with {}{}\nrepair: use the candidate-retained proof runner built by the pinned Ubuntu build image",
+            output.status,
+            context.unwrap_or_default()
+        ))),
+        (false, true) => Err(Error::new(format!(
+            "proof handoff mismatch: expected success after entry, actual {}{}",
+            output.status,
+            context.unwrap_or_default()
+        ))),
+    }
+}
+
+fn sanitize_proof_runner_stderr(bytes: &[u8]) -> String {
+    const LIMIT: usize = 4096;
+    let mut sanitized = String::new();
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line == PROOF_RUNNER_ENTRY_MARKER.as_bytes() {
+            continue;
+        }
+        if index > 0 && !sanitized.is_empty() {
+            sanitized.push('\n');
+        }
+        for byte in line {
+            let value = match byte {
+                b' '..=b'~' => char::from(*byte).to_string(),
+                b'\t' => " ".into(),
+                other => format!("\\x{other:02x}"),
+            };
+            if sanitized.len() + value.len() > LIMIT {
+                sanitized.push_str("...");
+                return sanitized;
+            }
+            sanitized.push_str(&value);
+        }
+    }
+    sanitized.trim().to_owned()
 }
 
 pub(crate) fn finish_proof_attempt_cleanup(
@@ -1125,11 +1238,14 @@ pub fn candidate_status(
         )?
         .absolute;
     let evidence_names = directory_names(&evidence_root, "candidate evidence")?;
-    if evidence_names != BTreeSet::from(["ledger.json".into(), "proofs".into()]) {
+    if evidence_names
+        != BTreeSet::from(["ledger.json".into(), "proof-runner".into(), "proofs".into()])
+    {
         return Err(Error::new(
-            "candidate evidence inventory mismatch: expected ledger and proofs, actual different",
+            "candidate evidence inventory mismatch: expected ledger, proof runner, and proofs, actual different",
         ));
     }
+    resolve_proof_runner(&boundary, version.clone())?;
     let expected_proof_names = PROOF_SPECS
         .iter()
         .map(|spec| format!("{}.json", spec.id))
@@ -1283,6 +1399,7 @@ pub struct ProofHandoffInput<'a> {
 }
 
 pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
+    eprintln!("{PROOF_RUNNER_ENTRY_MARKER}");
     if Command::new("sh")
         .args(["-c", "command -v solstone-linux >/dev/null 2>&1"])
         .status()
@@ -1579,6 +1696,15 @@ fn create_candidate_locked(
         let engine_identity = observe_container_engine(processes, engine)?;
         let images = resolve_release_images(processes, engine, &image_policy)?;
         let cohort = run_advisory_cohort(&context, &staging, descriptor, processes)?;
+        build_proof_runner(&ProofRunnerBuildRequest {
+            repo: root,
+            context: &context,
+            engine,
+            ubuntu: &images.build_ubuntu,
+            fedora: &images.build_fedora,
+            output: &staging.proof_runner,
+            processes,
+        })?;
         let invocation = staging
             .root
             .file_name()
@@ -1946,12 +2072,13 @@ fn validate_retained_status_structure(
         )?
         .absolute;
     if directory_names(&evidence, "candidate evidence")?
-        != BTreeSet::from(["ledger.json".into(), "proofs".into()])
+        != BTreeSet::from(["ledger.json".into(), "proof-runner".into(), "proofs".into()])
     {
         return Err(Error::new(
-            "candidate evidence inventory mismatch: expected ledger and proofs, actual different",
+            "candidate evidence inventory mismatch: expected ledger, proof runner, and proofs, actual different",
         ));
     }
+    resolve_proof_runner(&boundary, version.clone())?;
     let policy = ReleaseImages::from_root(root.path())?;
     let allowed = PROOF_SPECS
         .iter()

@@ -677,6 +677,13 @@ fn retained_fixture_from_products(
     };
     let evidence = repo.root.path().join("dist/rust-evidence/1.0.0");
     fs::create_dir_all(evidence.join("proofs")).unwrap();
+    let runner = evidence.join("proof-runner");
+    fs::write(
+        &runner,
+        format!("#!/bin/sh\nprintf '%s\\n' '{PROOF_RUNNER_ENTRY_MARKER}' >&2\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
     atomic_write_0644(&evidence.join("ledger.json"), &ledger_bytes).unwrap();
     for id in proof_ids() {
         write_valid_proof(&repo.root, &ledger, &ledger_bytes, id);
@@ -1256,18 +1263,28 @@ if [ "$1" = image ] && [ "$2" = inspect ]; then id=${{3##*sha256:}}; printf '[{{
 if [ "$1" = build ] || [ "$1" = buildx ]; then printf called > '{tripwire}'; exit 98; fi
 platform=
 output=
+runner=0
+inputs=0
 previous=
 for argument in "$@"; do
   [ "$previous" = --platform ] && platform=$argument
-  case "$argument" in type=bind,src=*,dst=/evidence) output=${{argument#type=bind,src=}}; output=${{output%,dst=/evidence}};; esac
+  case "$argument" in
+    type=bind,src=*,dst=/evidence,relabel=shared) output=${{argument#type=bind,src=}}; output=${{output%%,dst=/evidence,*}};;
+    type=bind,src=*/dist/rust-evidence/1.0.0/proof-runner,dst=/proof-runner,ro,relabel=shared) runner=1;;
+    type=bind,src=*,dst=/input/*,ro,relabel=shared) inputs=$((inputs + 1));;
+  esac
   previous=$argument
 done
+[ "$runner" = 1 ] && [ "$inputs" -ge 1 ] && [ -n "$output" ] || exit 96
+[ "$platform" != tar-x86_64 ] || [ "$inputs" = 2 ] || exit 95
+printf '%s\n' '{marker}' >&2
 [ "$platform" = '{fail}' ] && exit 97
 cp '{templates}/'$platform.json "$output/proof.json"
 "#,
             tripwire = build_tripwire.display(),
             fail = fail_platform.unwrap_or("never"),
             templates = templates.display(),
+            marker = PROOF_RUNNER_ENTRY_MARKER,
         ),
     )
     .unwrap();
@@ -1293,18 +1310,25 @@ fn proof_output_processes_with_source_mutation(
 if [ "$1" = --version ]; then echo 'podman version 5.8.3'; exit 0; fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then id=${{3##*sha256:}}; printf '[{{"Id":"sha256:%s","Os":"linux","Architecture":"amd64"}}]' "$id"; exit 0; fi
 if [ "$1" = build ] || [ "$1" = buildx ]; then printf called > '{tripwire}'; exit 98; fi
-platform=; output=; previous=
+platform=; output=; runner=0; inputs=0; previous=
 for argument in "$@"; do
   [ "$previous" = --platform ] && platform=$argument
-  case "$argument" in type=bind,src=*,dst=/evidence) output=${{argument#type=bind,src=}}; output=${{output%,dst=/evidence}};; esac
+  case "$argument" in
+    type=bind,src=*,dst=/evidence,relabel=shared) output=${{argument#type=bind,src=}}; output=${{output%%,dst=/evidence,*}};;
+    type=bind,src=*/dist/rust-evidence/1.0.0/proof-runner,dst=/proof-runner,ro,relabel=shared) runner=1;;
+    type=bind,src=*,dst=/input/*,ro,relabel=shared) inputs=$((inputs + 1));;
+  esac
   previous=$argument
 done
+[ "$runner" = 1 ] && [ "$inputs" -ge 1 ] && [ -n "$output" ] || exit 96
+printf '%s\n' '{marker}' >&2
 /bin/cp '{templates}/'$platform.json "$output/proof.json"
 /usr/bin/printf 'mid-proof source change\n' > '{cargo_lock}'
 "#,
             templates = templates.display(),
             cargo_lock = cargo_lock.display(),
             tripwire = tripwire.display(),
+            marker = PROOF_RUNNER_ENTRY_MARKER,
         ),
     )
     .unwrap();
@@ -1315,6 +1339,189 @@ done
         ProcessEnvironment::with_path(OsStr::new(path.as_str())),
     )
 }
+
+#[test]
+fn proof_runner_protocol_distinguishes_entry_and_handoff_failures() {
+    let root = tempfile::tempdir().unwrap();
+    for (name, body, expected) in [
+        (
+            "no-entry-failure",
+            "#!/bin/sh\nprintf '%s\\n' 'loader rejected runner' >&2\nexit 1\n",
+            "proof runner execution mismatch: expected entry marker",
+        ),
+        (
+            "entered-failure",
+            "#!/bin/sh\nprintf '%s\\n' 'solstone-proof-runner-entry-v1' >&2\nprintf '%s\\n' 'package rejected' >&2\nexit 2\n",
+            "proof handoff mismatch: expected success after entry",
+        ),
+        (
+            "no-entry-success",
+            "#!/bin/sh\nexit 0\n",
+            "proof runner protocol mismatch: expected entry marker",
+        ),
+    ] {
+        let program = root.path().join(name);
+        fs::write(&program, body).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = run_proof_runner(
+            &ProcessEnvironment::default(),
+            root.path(),
+            program.to_str().unwrap(),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains(PROOF_RUNNER_ENTRY_MARKER), "{error}");
+    }
+    let success = root.path().join("entered-success");
+    fs::write(
+        &success,
+        "#!/bin/sh\nprintf '%s\\n' 'solstone-proof-runner-entry-v1' >&2\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&success, fs::Permissions::from_mode(0o755)).unwrap();
+    run_proof_runner(
+        &ProcessEnvironment::default(),
+        root.path(),
+        success.to_str().unwrap(),
+        &[],
+    )
+    .unwrap();
+}
+
+#[test]
+fn proof_runner_path_rejects_symlink_directory_and_non_executable_before_podman() {
+    for case in ["symlink", "directory", "non-executable"] {
+        let fixture = retained_fixture();
+        let proof = fixture
+            .repo
+            .root
+            .path()
+            .join("dist/rust-evidence/1.0.0/proofs/debian-amd64.json");
+        fs::remove_file(proof).unwrap();
+        let runner = fixture
+            .repo
+            .root
+            .path()
+            .join("dist/rust-evidence/1.0.0/proof-runner");
+        fs::remove_file(&runner).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("sentinel");
+        fs::write(&sentinel, b"foreign").unwrap();
+        match case {
+            "symlink" => std::os::unix::fs::symlink(&sentinel, &runner).unwrap(),
+            "directory" => fs::create_dir(&runner).unwrap(),
+            "non-executable" => fs::write(&runner, b"runner").unwrap(),
+            _ => unreachable!(),
+        }
+        let tripwire = external.path().join("podman-called");
+        let (_bin, processes) = proof_processes(&tripwire);
+        let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
+        let image = proof_image_identity(&policy.proof_debian);
+        assert!(
+            produce_or_retain_proof(&ProofRequest {
+                root: &fixture.repo.root,
+                ledger: &fixture.ledger,
+                ledger_bytes: &fixture.ledger_bytes,
+                platform: "debian-amd64",
+                image: &image,
+                engine: ContainerEngine::Podman,
+                processes: &processes,
+            })
+            .is_err(),
+            "accepted {case} runner"
+        );
+        assert!(!tripwire.exists(), "podman ran for {case}");
+        assert_eq!(fs::read(&sentinel).unwrap(), b"foreign");
+    }
+}
+
+#[test]
+fn podman_proof_mounts_are_shared_relabelled() {
+    for platform in ["debian-amd64", "tar-x86_64"] {
+        let fixture = retained_fixture();
+        let proof = fixture
+            .repo
+            .root
+            .path()
+            .join(format!("dist/rust-evidence/1.0.0/proofs/{platform}.json"));
+        let template = tempfile::NamedTempFile::new().unwrap();
+        fs::copy(&proof, template.path()).unwrap();
+        fs::remove_file(&proof).unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let record = bin.path().join("argv");
+        let podman = bin.path().join("podman");
+        fs::write(
+            &podman,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" > '{record}'
+output=
+previous=
+for argument in "$@"; do
+  case "$argument" in type=bind,src=*,dst=/evidence,relabel=shared) output=${{argument#type=bind,src=}}; output=${{output%%,dst=/evidence,*}};; esac
+  previous=$argument
+done
+/bin/cp '{template}' "$output/proof.json"
+printf '%s\n' '{marker}' >&2
+"#,
+                record = record.display(),
+                template = template.path().display(),
+                marker = PROOF_RUNNER_ENTRY_MARKER,
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
+        let processes = ProcessEnvironment::with_path(bin.path().as_os_str());
+        let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
+        let image = proof_image_identity(match platform {
+            "debian-amd64" => &policy.proof_debian,
+            "tar-x86_64" => &policy.proof_tar,
+            _ => unreachable!(),
+        });
+        produce_or_retain_proof(&ProofRequest {
+            root: &fixture.repo.root,
+            ledger: &fixture.ledger,
+            ledger_bytes: &fixture.ledger_bytes,
+            platform,
+            image: &image,
+            engine: ContainerEngine::Podman,
+            processes: &processes,
+        })
+        .unwrap();
+        let args = fs::read_to_string(record).unwrap();
+        let runner = fixture
+            .repo
+            .root
+            .path()
+            .join("dist/rust-evidence/1.0.0/proof-runner");
+        assert!(args.contains(&format!(
+            "type=bind,src={},dst=/proof-runner,ro,relabel=shared",
+            runner.display()
+        )));
+        assert!(args.lines().any(|argument| {
+            argument.starts_with("type=bind,src=")
+                && argument.contains(",dst=/evidence,relabel=shared")
+        }));
+        assert!(args.lines().any(|argument| {
+            argument.starts_with("type=bind,src=")
+                && argument.contains(",dst=/input/")
+                && argument.ends_with(",ro,relabel=shared")
+        }));
+        assert_eq!(
+            args.lines()
+                .filter(|argument| argument.contains(",dst=/proof-runner"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.contains("dst=/input/install.sh,ro,relabel=shared"),
+            platform == "tar-x86_64"
+        );
+    }
+}
+
 
 #[test]
 fn prove_candidate_validates_all_existing_proofs_before_any_write() {
@@ -1904,6 +2111,11 @@ if [ "$1" = buildx ] && [ "$2" = build ]; then
     previous=$argument
   done
   [ "$pull" = 1 ] && [ "$network" = 1 ] || exit 91
+  if [ "$target" = proof-runner-export ]; then
+    printf '#!/bin/sh\nprintf %%s\\n {marker} >&2\n' > "$output/proof-runner"
+    /bin/chmod 755 "$output/proof-runner"
+    exit 0
+  fi
   case "$target" in
     deb) native=solstone-linux_1.0.0-1_amd64.deb; template=deb-lane.json; image=$ubuntu;;
     rpm) native=solstone-linux-1.0.0-1.x86_64.rpm; template=rpm-lane.json; image=$fedora;;
@@ -1915,11 +2127,15 @@ if [ "$1" = buildx ] && [ "$2" = build ]; then
   exit 0
 fi
 if [ "$1" = run ]; then
-  network=0; pull=0; output=; platform=; candidate=; ledger=; commit=; lock=; image=; previous=
+  network=0; pull=0; output=; runner=0; inputs=0; platform=; candidate=; ledger=; commit=; lock=; image=; previous=
   for argument in "$@"; do
     [ "$argument" = --network=none ] && network=1
     [ "$argument" = --pull=never ] && pull=1
-    case "$argument" in type=bind,src=*,dst=/evidence) output=${{argument#type=bind,src=}}; output=${{output%,dst=/evidence}};; esac
+    case "$argument" in
+      type=bind,src=*,dst=/evidence) output=${{argument#type=bind,src=}}; output=${{output%,dst=/evidence}};;
+      type=bind,src=*/dist/rust-evidence/1.0.0/proof-runner,dst=/proof-runner,ro) runner=1;;
+      type=bind,src=*,dst=/input/*,ro) inputs=$((inputs + 1));;
+    esac
     [ "$previous" = --platform ] && platform=$argument
     [ "$previous" = --candidate-digest ] && candidate=$argument
     [ "$previous" = --ledger-sha256 ] && ledger=$argument
@@ -1928,7 +2144,8 @@ if [ "$1" = run ]; then
     [ "$previous" = --proof-image-digest ] && image=$argument
     previous=$argument
   done
-  [ "$network" = 1 ] && [ "$pull" = 1 ] || exit 93
+  [ "$network" = 1 ] && [ "$pull" = 1 ] && [ "$runner" = 1 ] && [ "$inputs" -ge 1 ] || exit 93
+  printf '%s\n' '{marker}' >&2
   [ -f '{fail_producer}' ] && [ "$(/bin/cat '{fail_producer}')" = "$platform" ] && exit 97
   proof_time=$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
   /bin/sed -e "s#@CANDIDATE@#$candidate#g" -e "s#@LEDGER@#$ledger#g" -e "s#@SOURCE_COMMIT@#$commit#g" -e "s#@LOCK@#$lock#g" -e "s#@IMAGE@#$image#g" -e "s#@PROOF_TIME@#$proof_time#g" "{templates}/$platform.json" > "$output/proof.json"
@@ -1952,6 +2169,7 @@ exit 94
         mutate_lock_digest = mutate_lock_digest.display(),
         mutate_cohort = mutate_cohort.display(),
         advisory_db = db.path().display(),
+        marker = PROOF_RUNNER_ENTRY_MARKER,
     );
     fs::write(stubs.path().join("docker"), docker).unwrap();
     for name in ["git", "cargo", "docker"] {

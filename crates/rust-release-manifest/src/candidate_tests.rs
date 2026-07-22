@@ -24,6 +24,16 @@ fn staged_baseline(staging: &StagingLayout) -> ExecutableIdentity {
     }
 }
 
+fn stage_proof_runner(staging: &StagingLayout) {
+    let runner = staging.proof_runner.join("proof-runner");
+    fs::write(
+        &runner,
+        b"#!/bin/sh\nprintf '%s\\n' 'solstone-proof-runner-entry-v1' >&2\n",
+    )
+    .unwrap();
+    fs::set_permissions(runner, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 pub(super) struct TestRepo {
     _temp: tempfile::TempDir,
     pub root: RepoRoot,
@@ -1215,6 +1225,7 @@ fn finalize_candidate_rolls_back_post_promotion_image_recheck_failure() {
     let repo = fixture();
     let lock = CandidateLock::acquire(&repo.root).unwrap();
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
+    stage_proof_runner(&staging);
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let policy = ReleaseImages::from_root(&context.path).unwrap();
     let ubuntu = proof_image_identity(&policy.build_ubuntu);
@@ -1276,6 +1287,7 @@ fn finalize_candidate_rolls_back_post_promotion_ledger_write_failure() {
     let repo = fixture();
     let lock = CandidateLock::acquire(&repo.root).unwrap();
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
+    stage_proof_runner(&staging);
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let policy = ReleaseImages::from_context(&context).unwrap();
     let images = ResolvedImages {
@@ -1339,6 +1351,7 @@ fn finalize_candidate_rolls_back_promoted_classification_failure() {
     let repo = fixture();
     let lock = CandidateLock::acquire(&repo.root).unwrap();
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
+    stage_proof_runner(&staging);
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let policy = ReleaseImages::from_context(&context).unwrap();
     let images = ResolvedImages {
@@ -1413,6 +1426,8 @@ fn production_finalizer_is_deterministic_for_fixed_lane_bytes_and_evidence() {
     let second_lock = CandidateLock::acquire(&second.root).unwrap();
     let first_staging = StagingLayout::create(&first.root, &first_lock).unwrap();
     let second_staging = StagingLayout::create(&second.root, &second_lock).unwrap();
+    stage_proof_runner(&first_staging);
+    stage_proof_runner(&second_staging);
     let first_context = export_immutable_context(&first.root, &first_staging.context).unwrap();
     let second_context = export_immutable_context(&second.root, &second_staging.context).unwrap();
     assert_eq!(first_context.commit, second_context.commit);

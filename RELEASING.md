@@ -91,6 +91,7 @@ The promoted payload is exactly:
 Retained evidence is versioned and disjoint from the payload:
 
 - `dist/rust-evidence/<VERSION>/ledger.json`
+- `dist/rust-evidence/<VERSION>/proof-runner`
 - `dist/rust-evidence/<VERSION>/proofs/debian-amd64.json`
 - `dist/rust-evidence/<VERSION>/proofs/rpm-x86_64.json`
 - `dist/rust-evidence/<VERSION>/proofs/tar-x86_64.json`
@@ -104,7 +105,10 @@ live FLAC checkpoint.
 The Debian and RPM proofs install only their bound local package. The tar proof runs
 both installer dry-run and isolated-prefix installation. All three validate the
 installed executable path, mode, hash, and exact version output with networking
-disabled.
+disabled. Candidate creation builds one proof runner in the pinned Ubuntu build
+environment and retains it with the evidence. Initial proof and proof resume both use
+that same retained runner, so resume does not depend on the invoking host binary or a
+toolchain inside a proof image.
 
 ## Validator
 

@@ -338,9 +338,11 @@ pub(crate) enum ReservedPath {
     StagingContext(TransactionComponent),
     StagingDebLane(TransactionComponent),
     StagingRpmLane(TransactionComponent),
+    StagingProofRunner(TransactionComponent),
     StagingAdvisoryDb(TransactionComponent),
     StagingPayload(TransactionComponent),
     Proofs(VersionComponent),
+    ProofRunner(VersionComponent),
     Proof(VersionComponent, ProofId),
     ProofAttempt(VersionComponent, ProofId, TransactionComponent),
     ProofAttemptOutput(VersionComponent, ProofId, TransactionComponent),
@@ -380,6 +382,9 @@ impl ReservedPath {
             Self::StagingRpmLane(transaction) => {
                 child(Self::StagingInvocation(transaction.clone()), "lane-rpm")
             }
+            Self::StagingProofRunner(transaction) => {
+                child(Self::StagingInvocation(transaction.clone()), "proof-runner")
+            }
             Self::StagingAdvisoryDb(transaction) => {
                 child(Self::StagingInvocation(transaction.clone()), "advisory-db")
             }
@@ -387,6 +392,9 @@ impl ReservedPath {
                 child(Self::StagingInvocation(transaction.clone()), "payload")
             }
             Self::Proofs(version) => child(Self::EvidenceVersion(version.clone()), "proofs"),
+            Self::ProofRunner(version) => {
+                child(Self::EvidenceVersion(version.clone()), "proof-runner")
+            }
             Self::Proof(version, proof) => {
                 child(Self::Proofs(version.clone()), &format!("{}.json", proof.0))
             }
@@ -431,9 +439,11 @@ impl ReservedPath {
             Self::StagingContext(transaction.clone()),
             Self::StagingDebLane(transaction.clone()),
             Self::StagingRpmLane(transaction.clone()),
+            Self::StagingProofRunner(transaction.clone()),
             Self::StagingAdvisoryDb(transaction.clone()),
             Self::StagingPayload(transaction.clone()),
             Self::Proofs(version.clone()),
+            Self::ProofRunner(version.clone()),
             Self::Proof(version.clone(), proof.clone()),
             Self::ProofAttempt(version.clone(), proof.clone(), transaction.clone()),
             Self::ProofAttemptOutput(version, proof, transaction.clone()),
@@ -446,6 +456,7 @@ impl ReservedPath {
                     Self::EvidenceLedger(_)
                     | Self::Lock
                     | Self::Proof(_, _)
+                    | Self::ProofRunner(_)
                     | Self::ProofAttemptOutput(_, _, _) => ExpectedLeaf::RegularFile,
                     Self::Dist
                     | Self::Payload
@@ -456,6 +467,7 @@ impl ReservedPath {
                     | Self::StagingContext(_)
                     | Self::StagingDebLane(_)
                     | Self::StagingRpmLane(_)
+                    | Self::StagingProofRunner(_)
                     | Self::StagingAdvisoryDb(_)
                     | Self::StagingPayload(_)
                     | Self::Proofs(_)
@@ -472,8 +484,10 @@ impl ReservedPath {
                     | Self::StagingContext(_)
                     | Self::StagingDebLane(_)
                     | Self::StagingRpmLane(_)
+                    | Self::StagingProofRunner(_)
                     | Self::StagingAdvisoryDb(_)
                     | Self::StagingPayload(_) => ReservedPathAction::Create,
+                    Self::ProofRunner(_) => ReservedPathAction::Create,
                     Self::EvidenceLedger(_) | Self::Proofs(_) | Self::Proof(_, _) => {
                         ReservedPathAction::Status
                     }
@@ -1064,6 +1078,7 @@ pub struct StagingLayout {
     pub context: PathBuf,
     pub deb_lane: PathBuf,
     pub rpm_lane: PathBuf,
+    pub proof_runner: PathBuf,
     pub advisory_db: PathBuf,
     pub payload: PathBuf,
     pub(crate) transaction: Option<TransactionComponent>,
@@ -1134,6 +1149,13 @@ impl StagingLayout {
                 )?
                 .resolved()
                 .absolute,
+            proof_runner: boundary
+                .presence(
+                    ReservedPath::StagingProofRunner(transaction.clone()),
+                    ExpectedLeaf::Any,
+                )?
+                .resolved()
+                .absolute,
             advisory_db: boundary
                 .presence(
                     ReservedPath::StagingAdvisoryDb(transaction.clone()),
@@ -1165,6 +1187,10 @@ impl StagingLayout {
                 (
                     ReservedPath::StagingRpmLane(transaction.clone()),
                     &layout.rpm_lane,
+                ),
+                (
+                    ReservedPath::StagingProofRunner(transaction.clone()),
+                    &layout.proof_runner,
                 ),
                 (
                     ReservedPath::StagingAdvisoryDb(transaction.clone()),

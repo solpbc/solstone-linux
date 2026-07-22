@@ -215,7 +215,7 @@ impl ProcessEnvironment {
         self
     }
 
-    fn command(&self, program: &str) -> Command {
+    pub(crate) fn command(&self, program: &str) -> Command {
         let mut command = Command::new(program);
         if let Some(path) = &self.path {
             command.env("PATH", path);
@@ -737,6 +737,16 @@ pub struct LaneRequest<'a> {
     pub processes: &'a ProcessEnvironment,
 }
 
+pub struct ProofRunnerBuildRequest<'a> {
+    pub repo: &'a RepoRoot,
+    pub context: &'a ImmutableContext,
+    pub engine: ContainerEngine,
+    pub ubuntu: &'a ImageIdentity,
+    pub fedora: &'a ImageIdentity,
+    pub output: &'a Path,
+    pub processes: &'a ProcessEnvironment,
+}
+
 pub struct LaneEmitRequest<'a> {
     pub lane: Lane,
     pub invocation_id: &'a str,
@@ -1100,6 +1110,104 @@ pub fn build_lane(request: &LaneRequest<'_>) -> Result<LaneEvidence> {
     let evidence = consume_lane_handoff(request)?;
     validate_lane_inventory(request, LANE_EVIDENCE_NAME)?;
     Ok(evidence)
+}
+
+pub fn build_proof_runner(request: &ProofRunnerBuildRequest<'_>) -> Result<PathBuf> {
+    require_image_digest(&request.ubuntu.digest)?;
+    require_image_digest(&request.fedora.digest)?;
+    if request.context.path == request.repo.path()
+        || request.context.path.starts_with(request.repo.path())
+            && !request.context.path.starts_with(
+                ReservedReleaseBoundary::new(request.repo)
+                    .resolve_for_read(ReservedPath::StagingParent, ExpectedLeaf::Directory)?
+                    .absolute,
+            )
+    {
+        return Err(Error::new(
+            "container build context mismatch: expected immutable export, actual live repository",
+        ));
+    }
+    require_directory(request.output, "proof runner output")?;
+    let file = request.context.path.join("packaging/Containerfile");
+    require_regular(&file, "immutable Containerfile")?;
+    let file = path_text(&file, "Containerfile")?;
+    let output = path_text(request.output, "proof runner output")?;
+    let context = path_text(&request.context.path, "immutable context")?;
+    let mut args = match request.engine {
+        ContainerEngine::Podman => vec![
+            "build".into(),
+            "--pull=never".into(),
+            "--network=none".into(),
+            "--file".into(),
+            file.into(),
+            "--target".into(),
+            "proof-runner-export".into(),
+            "--output".into(),
+            format!("type=local,dest={output}"),
+        ],
+        ContainerEngine::Docker => {
+            run_success(
+                request.processes,
+                request.repo.path(),
+                "docker",
+                &["buildx", "version"],
+            )?;
+            vec![
+                "buildx".into(),
+                "build".into(),
+                "--pull=false".into(),
+                "--network=none".into(),
+                "--file".into(),
+                file.into(),
+                "--target".into(),
+                "proof-runner-export".into(),
+                "--output".into(),
+                format!("type=local,dest={output}"),
+            ]
+        }
+    };
+    for (key, value) in [
+        ("UBUNTU_TOOL_BASE", request.ubuntu.digest.as_str()),
+        ("FEDORA_TOOL_BASE", request.fedora.digest.as_str()),
+    ] {
+        args.extend(["--build-arg".into(), format!("{key}={value}")]);
+    }
+    args.push(context.into());
+    run_success_owned(
+        request.processes,
+        &request.context.path,
+        request.engine.executable(),
+        &args,
+    )?;
+    let names = fs::read_dir(request.output)
+        .map_err(display_error)?
+        .map(|entry| {
+            entry
+                .map_err(display_error)?
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::new("proof runner output mismatch: expected UTF-8 basename"))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    if names != BTreeSet::from(["proof-runner".into()]) {
+        return Err(Error::new(format!(
+            "proof runner output inventory mismatch: expected {{\"proof-runner\"}}, actual {names:?}"
+        )));
+    }
+    let runner = request.output.join("proof-runner");
+    let metadata = fs::symlink_metadata(&runner).map_err(display_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(Error::new(
+            "proof runner output mismatch: expected no-follow regular file",
+        ));
+    }
+    let mode = metadata.mode();
+    if mode & 0o7000 != 0 || mode & 0o111 == 0 {
+        return Err(Error::new(
+            "proof runner output mode mismatch: expected executable, actual non-executable",
+        ));
+    }
+    Ok(runner)
 }
 
 fn require_image_digest(value: &str) -> Result<()> {

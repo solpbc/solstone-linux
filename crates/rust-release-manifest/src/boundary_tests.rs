@@ -32,7 +32,7 @@ fn reserved_path_catalog_covers_every_variant_and_phase() {
     let version = VersionComponent::new("1.0.0").unwrap();
     let transaction = TransactionComponent::new("0123456789abcdef").unwrap();
     let cases = ReservedPath::test_cases(version, transaction);
-    assert_eq!(cases.len(), 18);
+    assert_eq!(cases.len(), 20);
     let names = cases
         .iter()
         .map(|case| case.path.relative())
@@ -107,6 +107,7 @@ fn reserved_path_catalog_drives_production_command_confinement_matrix() {
                     ReservedPath::StagingContext(_)
                         | ReservedPath::StagingDebLane(_)
                         | ReservedPath::StagingRpmLane(_)
+                        | ReservedPath::StagingProofRunner(_)
                         | ReservedPath::StagingAdvisoryDb(_)
                         | ReservedPath::StagingPayload(_)
                 ) {
