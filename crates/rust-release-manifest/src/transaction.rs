@@ -344,6 +344,20 @@ pub fn atomic_write_0644(path: &Path, bytes: &[u8]) -> Result<FileIdentity> {
     })
 }
 
+pub fn atomic_write_0755(path: &Path, bytes: &[u8]) -> Result<FileIdentity> {
+    atomic_write_with_mode_and_post_rename(
+        path,
+        bytes,
+        0o755,
+        |_, _| Ok(()),
+        |parent| {
+            File::open(parent)
+                .and_then(|file| file.sync_all())
+                .map_err(display_error)
+        },
+    )
+}
+
 pub(crate) fn atomic_write_0644_with_parent_sync(
     path: &Path,
     bytes: &[u8],
@@ -355,6 +369,16 @@ pub(crate) fn atomic_write_0644_with_parent_sync(
 pub(crate) fn atomic_write_0644_with_post_rename(
     path: &Path,
     bytes: &[u8],
+    post_rename: impl FnOnce(&Path, FileIdentity) -> Result<()>,
+    parent_sync: impl FnOnce(&Path) -> Result<()>,
+) -> Result<FileIdentity> {
+    atomic_write_with_mode_and_post_rename(path, bytes, 0o644, post_rename, parent_sync)
+}
+
+fn atomic_write_with_mode_and_post_rename(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
     post_rename: impl FnOnce(&Path, FileIdentity) -> Result<()>,
     parent_sync: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<FileIdentity> {
@@ -375,7 +399,7 @@ pub(crate) fn atomic_write_0644_with_post_rename(
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o644)
+        .mode(mode)
         .open(&temp)
         .map_err(display_error)?;
     // Capture ownership from the open temp handle before publication. After rename,
@@ -394,8 +418,9 @@ pub(crate) fn atomic_write_0644_with_post_rename(
     };
     let publish = (|| {
         file.write_all(bytes).map_err(display_error)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(display_error)?;
         file.sync_all().map_err(display_error)?;
-        fs::set_permissions(&temp, fs::Permissions::from_mode(0o644)).map_err(display_error)?;
         fs::rename(&temp, path).map_err(display_error)
     })();
     drop(file);
@@ -570,7 +595,7 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
         let runner_metadata = fs::symlink_metadata(&staged_runner).map_err(display_error)?;
         if runner_metadata.file_type().is_symlink() || !runner_metadata.is_file() {
             return Err(Error::new(
-                "staged proof runner mismatch: expected no-follow regular file",
+                "staged proof runner mismatch: expected no-follow regular file, actual symlink or non-regular file",
             ));
         }
         if runner_metadata.mode() & 0o7000 != 0 || runner_metadata.mode() & 0o111 == 0 {
@@ -584,12 +609,10 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
                 ExpectedLeaf::Absent,
             )?
             .absolute;
-        atomic_write_0644(
+        atomic_write_0755(
             &runner_path,
             &fs::read(staged_runner).map_err(display_error)?,
         )?;
-        fs::set_permissions(&runner_path, fs::Permissions::from_mode(0o755))
-            .map_err(display_error)?;
         resolve_proof_runner(&boundary, version.clone())?;
         let ledger_path = boundary
             .resolve_for_create(

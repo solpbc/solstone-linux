@@ -799,20 +799,24 @@ fn real_cargo_deny_advisories(root: &Path, cargo: &Path, db_root: &Path) -> Outp
         .unwrap()
 }
 
-pub(super) const CARGO_DENY_ASSERTIONS: &str = r#"#!/bin/sh
+pub(super) fn cargo_deny_assertions() -> String {
+    format!(
+        r#"#!/bin/sh
 printf '%s\n' "$*" >> "$PWD/cargo-deny-argv"
 case " $* " in
   *" deny --locked --offline --config "*" check licenses bans sources "*) ;;
   *" deny --locked --offline --config "*" check advisories "*)
     config="$5"
-    grep -F 'db-urls = ["file://localhost.invalid/advisory-db"]' "$config" >/dev/null || exit 91
+    grep -F 'db-urls = ["{ADVISORY_URL}"]' "$config" >/dev/null || exit 91
     grep -F 'maximum-db-staleness' "$config" >/dev/null && exit 92
     grep -F 'github.com/RustSec' "$config" >/dev/null && exit 93
     ;;
   *) exit 94 ;;
 esac
 exit 0
-"#;
+"#
+    )
+}
 
 #[test]
 fn advisory_cohort_is_clean_local_ordered_and_offline() {
@@ -822,7 +826,7 @@ fn advisory_cohort_is_clean_local_ordered_and_offline() {
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let db = git_repo();
     let descriptor = descriptor(&staging.root, db.path(), None, &current_time());
-    let (_bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, None);
+    let (_bin, processes) = process_bin(&cargo_deny_assertions(), None);
     let before = fs::read(repo.root.path().join("deny.toml")).unwrap();
     let cohort = run_advisory_cohort(&context, &staging, &descriptor, &processes).unwrap();
     assert_eq!(cohort.deterministic_gate, "pass");
@@ -839,7 +843,7 @@ fn advisory_cohort_is_clean_local_ordered_and_offline() {
     assert!(calls[1].ends_with("check advisories"));
     let config = fs::read_to_string(staging.root.join("advisory-deny.toml")).unwrap();
     assert!(config.contains("db-path = \""));
-    assert!(config.contains("db-urls = [\"file://localhost.invalid/advisory-db\"]"));
+    assert!(config.contains(&format!("db-urls = [\"{ADVISORY_URL}\"]")));
     assert!(!config.contains("maximum-db-staleness"));
     assert!(!config.contains("github.com/RustSec"));
     assert!(
@@ -920,7 +924,7 @@ fn advisory_config_is_accepted_and_fixtures_are_checked_by_real_cargo_deny() {
 fn advisory_descriptor_rejects_absent_stale_dirty_and_fabricated_pass() {
     let repo = fixture();
     let lock = CandidateLock::acquire(&repo.root).unwrap();
-    let (_bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, None);
+    let (_bin, processes) = process_bin(&cargo_deny_assertions(), None);
     for case in ["absent", "stale", "dirty", "fabricated"] {
         let staging = StagingLayout::create(&repo.root, &lock).unwrap();
         let context = export_immutable_context(&repo.root, &staging.context).unwrap();
@@ -988,7 +992,7 @@ fn advisory_paths_and_ambient_git_overrides_fail_closed() {
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let db = git_repo();
     let path = descriptor(&staging.root, db.path(), None, &current_time());
-    let (_bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, None);
+    let (_bin, processes) = process_bin(&cargo_deny_assertions(), None);
     let processes = processes.with_git_canaries(
         OsStr::new("/forbidden/git-dir"),
         OsStr::new("/forbidden/git-work-tree"),
@@ -1008,7 +1012,7 @@ fn advisory_uses_exported_policy_and_lock_and_rechecks_snapshot() {
     let db = git_repo();
     let path = descriptor(&staging.root, db.path(), None, &current_time());
     let cargo = format!(
-        "#!/bin/sh\n[ \"$(sha256sum Cargo.lock | cut -d' ' -f1)\" = '{expected_lock}' ] || exit 91\ncase \" $* \" in *' check licenses bans sources '*) [ \"$5\" = '{}/deny.toml' ] || exit 92;; *' check advisories '*) grep -F 'file://localhost.invalid/advisory-db' \"$5\" >/dev/null || exit 93;; *) exit 94;; esac\n",
+        "#!/bin/sh\n[ \"$(sha256sum Cargo.lock | cut -d' ' -f1)\" = '{expected_lock}' ] || exit 91\ncase \" $* \" in *' check licenses bans sources '*) [ \"$5\" = '{}/deny.toml' ] || exit 92;; *' check advisories '*) grep -F '{ADVISORY_URL}' \"$5\" >/dev/null || exit 93;; *) exit 94;; esac\n",
         context.path.display()
     );
     let (_bin, processes) = process_bin(&cargo, None);
@@ -1038,15 +1042,17 @@ fn advisory_policy_failures_and_wrong_materialization_fail_closed() {
     fs::create_dir(staging.advisory_db.join("advisory-db-wrong")).unwrap();
     let db = git_repo();
     let path = descriptor(&staging.root, db.path(), None, &current_time());
-    let rejecting = "#!/bin/sh\nconfig=\"$5\"\ngrep -F 'file://localhost.invalid/advisory-db' \"$config\" >/dev/null || exit 98\nexit 99\n";
-    let (_bin, processes) = process_bin(rejecting, None);
+    let rejecting = format!(
+        "#!/bin/sh\nconfig=\"$5\"\ngrep -F '{ADVISORY_URL}' \"$config\" >/dev/null || exit 98\nexit 99\n"
+    );
+    let (_bin, processes) = process_bin(&rejecting, None);
     assert!(run_advisory_cohort(&context, &staging, &path, &processes).is_err());
 
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     let db = git_repo();
     let path = descriptor(&staging.root, db.path(), None, &current_time());
-    let (bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, None);
+    let (bin, processes) = process_bin(&cargo_deny_assertions(), None);
     executable(
         &bin.path().join("git"),
         "#!/bin/sh\n/usr/bin/git \"$@\" || exit $?\nif [ \"$1\" = clone ]; then dest=; for arg in \"$@\"; do dest=$arg; done; printf swapped > \"$dest/SWAPPED\"; fi\n",
@@ -1248,7 +1254,7 @@ fn finalize_candidate_rolls_back_post_promotion_image_recheck_failure() {
         count.display(),
         "c".repeat(64)
     );
-    let (_bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, Some(&podman));
+    let (_bin, processes) = process_bin(&cargo_deny_assertions(), Some(&podman));
     let cohort = run_advisory_cohort(&context, &staging, &descriptor, &processes).unwrap();
     let sibling = staging.root.parent().unwrap().join("foreign");
     fs::create_dir(&sibling).unwrap();
@@ -1312,7 +1318,7 @@ fn finalize_candidate_rolls_back_post_promotion_ledger_write_failure() {
     let db = git_repo();
     let descriptor = descriptor(&staging.root, db.path(), None, &current_time());
     let image_script = "#!/bin/sh\nid=${3##*sha256:}\nprintf '[{\"Id\":\"sha256:%s\",\"Os\":\"linux\",\"Architecture\":\"amd64\"}]' \"$id\"\n";
-    let (_bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, Some(image_script));
+    let (_bin, processes) = process_bin(&cargo_deny_assertions(), Some(image_script));
     let cohort = run_advisory_cohort(&context, &staging, &descriptor, &processes).unwrap();
     let evidence = repo.root.path().join("dist/rust-evidence/1.0.0");
     fs::create_dir_all(&evidence).unwrap();
@@ -1382,7 +1388,7 @@ fn finalize_candidate_rolls_back_promoted_classification_failure() {
         count = count.display(),
         checksum = staging.payload.join(CHECKSUM_NAME).display(),
     );
-    let (_bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, Some(&podman));
+    let (_bin, processes) = process_bin(&cargo_deny_assertions(), Some(&podman));
     let cohort = run_advisory_cohort(&context, &staging, &descriptor, &processes).unwrap();
     let sibling = staging
         .root
@@ -1511,7 +1517,7 @@ esac
         evidence = LANE_EVIDENCE_NAME,
         handoff = LANE_HANDOFF,
     );
-    let (_bin, processes) = process_bin(CARGO_DENY_ASSERTIONS, Some(&image_script));
+    let (_bin, processes) = process_bin(&cargo_deny_assertions(), Some(&image_script));
     let db = git_repo();
     let descriptor = descriptor(&first_staging.root, db.path(), None, &current_time());
     let cohort =

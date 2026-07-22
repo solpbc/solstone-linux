@@ -319,7 +319,8 @@ fn xxh64_matches_pinned_vectors_and_cargo_deny_layout() {
     assert_eq!(xxh64(0, b"Hello, world!\0"), 0x7b06_c531_ea43_e89f);
     let long = (0_u8..100).collect::<Vec<_>>();
     assert_eq!(xxh64(0, &long), 0x6ac1_e580_3216_6597);
-    // This URL/directory pairing was observed from cargo-deny 0.20.2.
+    // This explicit URL/directory pairing is pinned independently from ADVISORY_URL and
+    // was observed from cargo-deny 0.20.2.
     let derived = advisory_db_directory("file://localhost.invalid/advisory-db").unwrap();
     assert_eq!(xxh64(0xca80_de71, b""), 0xecd8_91c6_6d7e_1845);
     assert_eq!(derived, "advisory-db-f8e6125c8c7da402");
@@ -720,7 +721,7 @@ fn creation_rejects_divergence(index: usize) {
         &crate::candidate_tests::current_time(),
     );
     let (_bin, processes) =
-        crate::candidate_tests::process_bin(crate::candidate_tests::CARGO_DENY_ASSERTIONS, None);
+        crate::candidate_tests::process_bin(&crate::candidate_tests::cargo_deny_assertions(), None);
     let cohort = run_advisory_cohort(&context, &staging, &descriptor, &processes).unwrap();
     let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
     let members = fixture.ledger.package_members.clone();
@@ -1521,7 +1522,6 @@ printf '%s\n' '{marker}' >&2
         );
     }
 }
-
 
 #[test]
 fn prove_candidate_validates_all_existing_proofs_before_any_write() {

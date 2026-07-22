@@ -107,8 +107,10 @@ both installer dry-run and isolated-prefix installation. All three validate the
 installed executable path, mode, hash, and exact version output with networking
 disabled. Candidate creation builds one proof runner in the pinned Ubuntu build
 environment and retains it with the evidence. Initial proof and proof resume both use
-that same retained runner, so resume does not depend on the invoking host binary or a
-toolchain inside a proof image.
+the runner at that reserved path after revalidating it as a no-follow regular
+executable, so resume does not depend on the invoking host binary or a toolchain inside
+a proof image. The runner bytes are not bound into the candidate ledger; treat the
+retained candidate directory as trusted between creation and resume.
 
 ## Validator
 

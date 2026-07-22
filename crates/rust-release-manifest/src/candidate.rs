@@ -1198,7 +1198,7 @@ pub fn build_proof_runner(request: &ProofRunnerBuildRequest<'_>) -> Result<PathB
     let metadata = fs::symlink_metadata(&runner).map_err(display_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(Error::new(
-            "proof runner output mismatch: expected no-follow regular file",
+            "proof runner output mismatch: expected no-follow regular file, actual symlink or non-regular file",
         ));
     }
     let mode = metadata.mode();
