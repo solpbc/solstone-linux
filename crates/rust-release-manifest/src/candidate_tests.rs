@@ -492,6 +492,12 @@ fn release_image_policy_is_digest_only_strict_and_immutable() {
         fs::write(&policy, invalid).unwrap();
         assert!(ReleaseImages::from_context(&context).is_err());
     }
+    let obsolete_root = String::from_utf8(valid.clone()).unwrap().replace(
+        "\"dpkg\", \"--install\"",
+        "\"dpkg\", \"--root=/proof-root\", \"--install\"",
+    );
+    fs::write(&policy, obsolete_root).unwrap();
+    assert!(ReleaseImages::from_context(&context).is_err());
     fs::write(&policy, valid).unwrap();
 }
 
@@ -625,9 +631,14 @@ fn linker_identity_canonicalizes_vendor_parenthetical_and_fails_closed() {
     let error = linker_identity_from_line("GNU ld GNU Binutils for Ubuntu 2.38")
         .unwrap_err()
         .to_string();
-    assert!(
-        error.contains("ld identity mismatch: expected vendor parenthetical and trailing version")
-    );
+    assert!(error.contains("ld identity mismatch: expected nonempty vendor parenthetical"));
+    for malformed in ["GNU ld () 2.38", "GNU ld (GNU (Binutils) Ubuntu) 2.38"] {
+        let error = linker_identity_from_line(malformed)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ld identity mismatch: expected nonempty vendor parenthetical"));
+        assert!(error.contains("repair: provision GNU ld"));
+    }
 }
 
 #[test]

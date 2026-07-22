@@ -48,6 +48,8 @@ not guaranteed to be bit-for-bit reproducible: distro repositories, rustup
 distribution content, and tool build environments can change while declared
 versions remain the same. Prove each freshly regenerated image offline before
 committing its observed ID.
+Re-read and repin IDs only after `make release-images` exits successfully; after a
+partial failure, rerun the complete target before pinning any image.
 
 The `proof_debian`, `proof_rpm`, and `proof_tar` roles use clean OS images carrying
 only the runtime dependency closure, with no compiler, Rust toolchain, Cargo, or

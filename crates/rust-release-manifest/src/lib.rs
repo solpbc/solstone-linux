@@ -3202,7 +3202,9 @@ fn portable_path_component(part: &str) -> Result<()> {
 fn require_regular(path: &Path, label: &str) -> Result<()> {
     let metadata = require_no_follow_regular(path, label)?;
     if metadata.mode() & 0o7111 != 0 {
-        return Err(Error::new(format!("{label} mode mismatch")));
+        return Err(Error::new(format!(
+            "{label} mode mismatch: expected non-executable regular file, actual executable or special mode\nrepair: replace {label} with a non-executable regular file"
+        )));
     }
     Ok(())
 }
@@ -3210,7 +3212,9 @@ fn require_regular(path: &Path, label: &str) -> Result<()> {
 fn require_regular_executable(path: &Path, label: &str) -> Result<()> {
     let metadata = require_no_follow_regular(path, label)?;
     if metadata.mode() & 0o111 == 0 {
-        return Err(Error::new(format!("{label} mode mismatch")));
+        return Err(Error::new(format!(
+            "{label} mode mismatch: expected executable regular file, actual non-executable\nrepair: install {label} with at least one execute bit"
+        )));
     }
     Ok(())
 }
@@ -3219,7 +3223,7 @@ fn require_no_follow_regular(path: &Path, label: &str) -> Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path).map_err(display_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(Error::new(format!(
-            "{label} mismatch: expected no-follow regular file"
+            "{label} mismatch: expected no-follow regular file, actual symlink or non-regular file\nrepair: replace {label} with a no-follow regular file"
         )));
     }
     Ok(metadata)

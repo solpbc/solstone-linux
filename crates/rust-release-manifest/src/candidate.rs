@@ -79,7 +79,6 @@ impl ReleaseImages {
                     if value.chars().any(char::is_control)
                         || !(value.starts_with("/input/")
                             || value.starts_with("/proof-root")
-                            || value.starts_with("--root=/proof-root")
                             || value.starts_with("/usr/bin/")
                             || value.starts_with("/bin/"))
                     {
@@ -927,25 +926,12 @@ pub(crate) fn emit_lane_handoff_in(
 }
 
 fn command_evidence(program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(display_error)?;
-    if !output.status.success() {
-        return Err(Error::new(format!(
-            "{program} evidence command mismatch: expected success, actual {}",
-            output.status
-        )));
-    }
     let field = if program == "rustc" && args == ["--version", "--verbose"] {
         "lane rustc verbose"
     } else {
         program
     };
-    normalize_command_evidence(
-        field,
-        String::from_utf8(output.stdout).map_err(display_error)?,
-    )
+    normalize_command_evidence(field, command_stdout(program, args)?)
 }
 
 pub(crate) fn command_first_line(program: &str, args: &[&str]) -> Result<String> {
@@ -959,45 +945,56 @@ pub(crate) fn command_first_line(program: &str, args: &[&str]) -> Result<String>
 }
 
 fn raw_command_first_line(program: &str, args: &[&str]) -> Result<String> {
+    let stdout = command_stdout(program, args)?;
+    stdout
+        .lines()
+        .next()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::new(format!(
+                "{program} identity mismatch: expected identity on stdout, actual empty\nrepair: provision {program} so its identity command prints a first line"
+            ))
+        })
+}
+
+fn command_stdout(program: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(program)
         .args(args)
         .output()
         .map_err(display_error)?;
     if !output.status.success() {
         return Err(Error::new(format!(
-            "{program} evidence command mismatch: expected success, actual {}",
-            output.status
+            "{program} evidence command mismatch: expected success, actual {}\nrepair: provision {program} so its identity command succeeds",
+            output.status,
         )));
     }
-    let first_line = String::from_utf8(output.stdout)
-        .map_err(display_error)?
-        .lines()
-        .next()
-        .filter(|line| !line.is_empty())
-        .ok_or_else(|| Error::new(format!("{program} identity mismatch: expected output")))?
-        .to_owned();
-    Ok(first_line)
+    String::from_utf8(output.stdout).map_err(display_error)
 }
 
 pub(crate) fn linker_identity_from_line(line: &str) -> Result<String> {
+    let invalid = || {
+        Error::new(format!(
+            "ld identity mismatch: expected nonempty vendor parenthetical and trailing numeric version token, actual {line}\nrepair: provision GNU ld with a canonical vendor-and-version banner"
+        ))
+    };
     let (prefix, remainder) = if let Some(value) = line.strip_prefix("GNU ld (") {
         ("GNU ld ", value)
     } else if let Some(value) = line.strip_prefix("ld (") {
         ("ld ", value)
     } else {
-        return Err(Error::new(format!(
-            "ld identity mismatch: expected vendor parenthetical and trailing version, actual {line}"
-        )));
+        return Err(invalid());
     };
-    let (_, version) = remainder.rsplit_once(") ").ok_or_else(|| {
-        Error::new(format!(
-            "ld identity mismatch: expected vendor parenthetical and trailing version, actual {line}"
-        ))
-    })?;
-    if version.is_empty() || version.chars().any(char::is_whitespace) {
-        return Err(Error::new(format!(
-            "ld identity mismatch: expected vendor parenthetical and trailing version, actual {line}"
-        )));
+    let (vendor, version) = remainder.rsplit_once(") ").ok_or_else(&invalid)?;
+    if vendor.is_empty()
+        || vendor.trim() != vendor
+        || vendor.contains(['(', ')'])
+        || vendor.chars().any(char::is_control)
+        || version.is_empty()
+        || version.chars().any(char::is_whitespace)
+        || !version.chars().any(|character| character.is_ascii_digit())
+    {
+        return Err(invalid());
     }
     normalize_command_evidence("ld", format!("{prefix}{version}"))
 }
