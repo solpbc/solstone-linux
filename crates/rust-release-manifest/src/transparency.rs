@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -96,12 +96,21 @@ pub const TRANSPARENCY_ENTRY_SCHEMA: &str =
     "https://solpbc.org/schemas/transparency-ledger-entry/v1.json";
 pub const TRANSPARENCY_LATEST_SCHEMA: &str =
     "https://solpbc.org/schemas/transparency-latest/v1.json";
+pub const TRANSPARENCY_ENTRY_SCHEMA_SHA256: &str =
+    "b4889cc7195e13a32a76041349103c3829b19a363d49f27e0df62cbf65fb9476";
+pub const TRANSPARENCY_LATEST_SCHEMA_SHA256: &str =
+    "46e655f17170105f73c5f1183e976d2100198bbeb16818d2e666bd6e4630b9a2";
+pub const TRANSPARENCY_ENTRY_SCHEMA_BYTES: &[u8] = include_bytes!(
+    "../../../vendor/transparency-ledger-entry/transparency-ledger-entry.schema.json"
+);
+pub const TRANSPARENCY_LATEST_SCHEMA_BYTES: &[u8] =
+    include_bytes!("../../../vendor/transparency-latest/transparency-latest.schema.json");
 pub const TRANSPARENCY_DEFAULT_BASE_URL: &str = "https://transparency.solstone.app";
 pub const TRANSPARENCY_PUBLIC_KEY_FILENAME: &str = "solpbc-transparency-1.pub";
 pub const TRANSPARENCY_HEAD_LOG: &str = "transparency-head-log.jsonl";
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
-const MUTABLE_CACHE: &str = "no-cache";
+pub(crate) const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
+pub(crate) const MUTABLE_CACHE: &str = "no-cache";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TemporaryDirectory(PathBuf);
@@ -630,6 +639,95 @@ pub struct CurlTransport {
     sequence: u64,
 }
 
+pub(crate) fn curl_args(
+    destination: &Destination,
+    method_args: &[OsString],
+    cache_bypass: bool,
+    body_path: &Path,
+    header_path: &Path,
+) -> Vec<OsString> {
+    let mut args = [
+        "--silent",
+        "--show-error",
+        "--aws-sigv4",
+        "aws:amz:auto:s3",
+        "-K",
+        "-",
+        "--output",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    args.push(body_path.as_os_str().to_owned());
+    args.push("--dump-header".into());
+    args.push(header_path.as_os_str().to_owned());
+    args.push("--write-out".into());
+    args.push("%{http_code}".into());
+    if cache_bypass {
+        args.push("--header".into());
+        args.push("Cache-Control: no-cache".into());
+    }
+    args.extend_from_slice(method_args);
+    args.push(destination.url().into());
+    args
+}
+
+pub(crate) fn curl_create_only_args(upload: &Path, cache_control: &str) -> Vec<OsString> {
+    vec![
+        OsString::from("--upload-file"),
+        upload.as_os_str().to_owned(),
+        OsString::from("--header"),
+        OsString::from("If-None-Match: *"),
+        OsString::from("--header"),
+        OsString::from(format!("Cache-Control: {cache_control}")),
+    ]
+}
+
+pub(crate) fn curl_conditional_args(
+    upload: &Path,
+    etag: &str,
+    cache_control: &str,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("--upload-file"),
+        upload.as_os_str().to_owned(),
+        OsString::from("--header"),
+        OsString::from(format!("If-Match: {etag}")),
+        OsString::from("--header"),
+        OsString::from(format!("Cache-Control: {cache_control}")),
+    ]
+}
+
+pub(crate) fn parse_curl_status(stdout: &[u8]) -> u16 {
+    String::from_utf8_lossy(stdout)
+        .trim()
+        .parse::<u16>()
+        .unwrap_or(0)
+}
+
+pub(crate) fn curl_stdin_config(access_key: &str, secret_key: &str) -> Vec<u8> {
+    fn escape(value: &str) -> String {
+        value
+            .chars()
+            .flat_map(|character| match character {
+                '\\' => "\\\\".chars().collect::<Vec<_>>(),
+                '"' => "\\\"".chars().collect(),
+                '\n' => "\\n".chars().collect(),
+                '\r' => "\\r".chars().collect(),
+                '\t' => "\\t".chars().collect(),
+                character => vec![character],
+            })
+            .collect()
+    }
+    format!("user = \"{}:{}\"\n", escape(access_key), escape(secret_key)).into_bytes()
+}
+
+pub(crate) fn curl_command(args: &[OsString]) -> Command {
+    let mut command = Command::new("curl");
+    command.args(args).stdin(Stdio::piped());
+    command
+}
+
 impl CurlTransport {
     fn new(config: &TransparencyConfig, root: &Path) -> Self {
         Self {
@@ -645,7 +743,7 @@ impl CurlTransport {
     fn execute(
         &mut self,
         destination: &Destination,
-        method_args: &[&OsStr],
+        method_args: &[OsString],
         cache_bypass: bool,
     ) -> Result<TransportResponse> {
         self.sequence += 1;
@@ -655,28 +753,30 @@ impl CurlTransport {
         let header_path = self
             .response_root
             .join(format!(".curl-headers-{}", self.sequence));
-        let mut command = Command::new("curl");
-        command.args([
-            "--silent",
-            "--show-error",
-            "--aws-sigv4",
-            "aws:amz:auto:s3",
-            "--user",
-            &format!("{}:{}", self.access_key, self.secret_key),
-            "--output",
-        ]);
-        command
-            .arg(&body_path)
-            .arg("--dump-header")
-            .arg(&header_path);
-        command.args(["--write-out", "%{http_code}"]);
-        if cache_bypass {
-            command.args(["--header", "Cache-Control: no-cache"]);
-        }
-        command.args(method_args).arg(destination.url());
-        let output = command.output().map_err(display_error)?;
-        let status_text = String::from_utf8_lossy(&output.stdout);
-        let http_status = status_text.trim().parse::<u16>().unwrap_or(0);
+        let args = curl_args(
+            destination,
+            method_args,
+            cache_bypass,
+            &body_path,
+            &header_path,
+        );
+        let mut child = curl_command(&args).spawn().map_err(display_error)?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| {
+                transparency_error(
+                    "retryable",
+                    "curl credential input",
+                    "piped stdin",
+                    "unavailable stdin",
+                    "restore curl process execution and retry the transparency command",
+                )
+            })?
+            .write_all(&curl_stdin_config(&self.access_key, &self.secret_key))
+            .map_err(display_error)?;
+        let output = child.wait_with_output().map_err(display_error)?;
+        let http_status = parse_curl_status(&output.stdout);
         let body = fs::read(&body_path).unwrap_or_default();
         let headers = fs::read_to_string(&header_path).unwrap_or_default();
         let etag = headers.lines().rev().find_map(|line| {
@@ -727,15 +827,7 @@ impl TransparencyTransport for CurlTransport {
             .response_root
             .join(format!(".curl-upload-{}", self.sequence + 1));
         fs::write(&upload, bytes).map_err(display_error)?;
-        let header = format!("Cache-Control: {cache_control}");
-        let args = [
-            OsStr::new("--upload-file"),
-            upload.as_os_str(),
-            OsStr::new("--header"),
-            OsStr::new("If-None-Match: *"),
-            OsStr::new("--header"),
-            OsStr::new(&header),
-        ];
+        let args = curl_create_only_args(&upload, cache_control);
         let response = self.execute(destination, &args, false);
         let _ = fs::remove_file(upload);
         response
@@ -753,16 +845,7 @@ impl TransparencyTransport for CurlTransport {
             .response_root
             .join(format!(".curl-upload-{}", self.sequence + 1));
         fs::write(&upload, bytes).map_err(display_error)?;
-        let cache = format!("Cache-Control: {cache_control}");
-        let condition = format!("If-Match: {etag}");
-        let args = [
-            OsStr::new("--upload-file"),
-            upload.as_os_str(),
-            OsStr::new("--header"),
-            OsStr::new(&condition),
-            OsStr::new("--header"),
-            OsStr::new(&cache),
-        ];
+        let args = curl_conditional_args(&upload, etag, cache_control);
         let response = self.execute(destination, &args, false);
         let _ = fs::remove_file(upload);
         response
@@ -788,11 +871,11 @@ impl TransparencyTransport for CurlTransport {
             )
         })?;
         let cache = format!("Cache-Control: {cache_control}");
-        let args = [
-            OsStr::new("--upload-file"),
-            upload.as_os_str(),
-            OsStr::new("--header"),
-            OsStr::new(&cache),
+        let args = vec![
+            OsString::from("--upload-file"),
+            upload.as_os_str().to_owned(),
+            OsString::from("--header"),
+            OsString::from(cache),
         ];
         let response = self.execute(destination, &args, false);
         let _ = fs::remove_file(upload);
@@ -838,8 +921,15 @@ pub(crate) struct TransparencyConfig {
 
 impl TransparencyConfig {
     fn from_env(require_archive: bool) -> Result<Self> {
-        let required = |name: &str| {
-            env::var(name).map_err(|_| {
+        Self::from_lookup(require_archive, &mut |name| env::var(name).ok())
+    }
+
+    pub(crate) fn from_lookup<F>(require_archive: bool, lookup: &mut F) -> Result<Self>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let required = |lookup: &mut F, name: &str| {
+            lookup(name).ok_or_else(|| {
                 transparency_error(
                     "retryable",
                     "transparency environment",
@@ -849,7 +939,7 @@ impl TransparencyConfig {
                 )
             })
         };
-        let archive_channel = env::var("TRANSPARENCY_ARCHIVE_CHANNEL").ok();
+        let archive_channel = lookup("TRANSPARENCY_ARCHIVE_CHANNEL");
         if require_archive && archive_channel.is_none() {
             return Err(transparency_error(
                 "retryable",
@@ -860,16 +950,16 @@ impl TransparencyConfig {
             ));
         }
         let config = Self {
-            base_url: env::var("TRANSPARENCY_BASE_URL")
-                .unwrap_or_else(|_| TRANSPARENCY_DEFAULT_BASE_URL.into()),
-            s3_endpoint: required("TRANSPARENCY_S3_ENDPOINT")?,
-            bucket: required("TRANSPARENCY_BUCKET")?,
-            access_key: required("TRANSPARENCY_S3_ACCESS_KEY_ID")?,
-            secret_key: required("TRANSPARENCY_S3_SECRET_ACCESS_KEY")?,
-            minisign_key: required("TRANSPARENCY_MINISIGN_KEY")?.into(),
-            minisign_pub: required("TRANSPARENCY_MINISIGN_PUB")?.into(),
+            base_url: lookup("TRANSPARENCY_BASE_URL")
+                .unwrap_or_else(|| TRANSPARENCY_DEFAULT_BASE_URL.into()),
+            s3_endpoint: required(lookup, "TRANSPARENCY_S3_ENDPOINT")?,
+            bucket: required(lookup, "TRANSPARENCY_BUCKET")?,
+            access_key: required(lookup, "TRANSPARENCY_S3_ACCESS_KEY_ID")?,
+            secret_key: required(lookup, "TRANSPARENCY_S3_SECRET_ACCESS_KEY")?,
+            minisign_key: required(lookup, "TRANSPARENCY_MINISIGN_KEY")?.into(),
+            minisign_pub: required(lookup, "TRANSPARENCY_MINISIGN_PUB")?.into(),
             archive_channel,
-            genesis: env::var("TRANSPARENCY_GENESIS").is_ok_and(|value| value == "1"),
+            genesis: lookup("TRANSPARENCY_GENESIS").is_some_and(|value| value == "1"),
         };
         for (label, value) in [
             ("TRANSPARENCY_BASE_URL", config.base_url.as_str()),
@@ -985,7 +1075,11 @@ fn highest_head_seq(root: &Path) -> Result<u64> {
     Ok(highest)
 }
 
-fn ensure_http(response: &TransportResponse, expected: &[u16], label: &str) -> Result<()> {
+pub(crate) fn ensure_http(
+    response: &TransportResponse,
+    expected: &[u16],
+    label: &str,
+) -> Result<()> {
     if !expected.contains(&response.http_status) {
         return Err(transparency_error(
             "retryable",
@@ -1344,6 +1438,16 @@ pub(crate) fn fetch_verified_chain<T: TransparencyTransport, V: TransparencySign
                 "cut a new version after reconciling the existing transparency chain",
             ));
         }
+        let highest = highest_head_seq(root)?;
+        if highest != 0 {
+            return Err(transparency_error(
+                "terminal",
+                "transparency genesis head log",
+                "local highest seq 0",
+                format!("local highest seq {highest}"),
+                "verify TRANSPARENCY_S3_ENDPOINT and TRANSPARENCY_BUCKET; restore a wiped or wrong bucket from the recorded transparency chain before retrying",
+            ));
+        }
         return Ok(VerifiedChain {
             pointer: None,
             pointer_bytes: None,
@@ -1530,6 +1634,12 @@ fn observed_version(program: &str, argument: &str) -> Result<String> {
 
 fn validate_tools() -> Result<()> {
     let minisign = observed_version("minisign", "-v")?;
+    validate_minisign_version(&minisign)?;
+    let curl = observed_version("curl", "--version")?;
+    validate_curl_version(&curl)
+}
+
+pub(crate) fn validate_minisign_version(minisign: &str) -> Result<()> {
     if minisign != "minisign 0.11" && minisign != "minisign 0.12" {
         return Err(transparency_error(
             "terminal",
@@ -1539,7 +1649,10 @@ fn validate_tools() -> Result<()> {
             "install minisign 0.12 and retry",
         ));
     }
-    let curl = observed_version("curl", "--version")?;
+    Ok(())
+}
+
+pub(crate) fn validate_curl_version(curl: &str) -> Result<()> {
     let first = curl.lines().next().unwrap_or_default();
     let version = first.split_whitespace().nth(1).unwrap_or_default();
     let parts = version
@@ -1602,11 +1715,28 @@ pub(crate) fn validate_previous_head_committed(root: &Path) -> Result<()> {
         .output()
         .map_err(display_error)?;
     if committed.status.success() && committed.stdout != worktree {
+        let row = worktree
+            .split(|byte| *byte == b'\n')
+            .rev()
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| {
+                transparency_error(
+                    "terminal",
+                    "previous transparency head row",
+                    "newline-terminated row",
+                    "missing",
+                    "restore transparency-head-log.jsonl from version control",
+                )
+            })?;
+        let row: TransparencyHeadRow = parse_json(row, "previous transparency head row")?;
         return Err(transparency_error(
             "terminal",
-            "previous transparency head row",
-            "committed row",
-            "present but uncommitted",
+            format!(
+                "previous transparency head row product={} seq={} version={}",
+                row.product, row.seq, row.version
+            ),
+            "committed in HEAD:transparency-head-log.jsonl",
+            "present in worktree but uncommitted",
             "git add transparency-head-log.jsonl && git commit",
         ));
     }
@@ -1620,24 +1750,39 @@ pub(crate) struct CandidateSnapshot {
     pub(crate) proofs: BTreeMap<String, Vec<u8>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CandidateTransparencyInventory {
+    pub(crate) artifacts: Vec<TransparencyArtifact>,
+    pub(crate) manifests: Vec<TransparencyNamedDigest>,
+    pub(crate) proofs: Vec<TransparencyNamedDigest>,
+}
+
 pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<CandidateSnapshot> {
     operation_seam("snapshot candidate")?;
-    classify_release_dir(root, release_dir)?;
     let manifest_path = fs::read_dir(release_dir).map_err(display_error)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .find(|path| path.file_name().and_then(OsStr::to_str).is_some_and(|name| name.ends_with(".rust-release-manifest.json")))
         .ok_or_else(|| Error::new("terminal: transparency manifest mismatch: expected one companion manifest, actual missing\nrepair: restore the retained five-file candidate"))?;
-    let manifest =
-        validate_manifest_bytes(root, &fs::read(&manifest_path).map_err(display_error)?)?;
-    if manifest.source_dirty {
+    let manifest_bytes = fs::read(&manifest_path).map_err(display_error)?;
+    let unchecked_manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).map_err(display_error)?;
+    if unchecked_manifest.source_dirty {
         return Err(transparency_error(
             "terminal",
             "transparency candidate source",
-            format!("commit {} with source_dirty=false", manifest.source_commit),
-            format!("commit {} with source_dirty=true", manifest.source_commit),
+            format!(
+                "commit {} with source_dirty=false",
+                unchecked_manifest.source_commit
+            ),
+            format!(
+                "commit {} with source_dirty=true",
+                unchecked_manifest.source_commit
+            ),
             "cut a clean-source candidate before publishing transparency evidence",
         ));
     }
+    classify_release_dir(root, release_dir)?;
+    let manifest = validate_manifest_bytes(root, &manifest_bytes)?;
     let parent = release_dir.parent().ok_or_else(|| Error::new("terminal: transparency release parent mismatch: expected parent, actual missing\nrepair: provide the retained release directory"))?;
     let evidence = parent.join("rust-evidence").join(&manifest.version);
     let rail_ledger_bytes = fs::read(evidence.join("ledger.json")).map_err(|_| {
@@ -1839,12 +1984,11 @@ fn validate_staged_candidate(root: &RepoRoot, staging: &Path, manifest: &Manifes
     Ok(())
 }
 
-pub(crate) fn build_entry(
+pub(crate) fn candidate_transparency_inventory(
     staging: &Path,
     manifest: &Manifest,
     proofs: &BTreeMap<String, Vec<u8>>,
-    chain: &VerifiedChain,
-) -> Result<(TransparencyEntry, Vec<u8>)> {
+) -> Result<CandidateTransparencyInventory> {
     let mut artifacts = manifest
         .artifacts
         .iter()
@@ -1871,25 +2015,58 @@ pub(crate) fn build_entry(
         })
         .collect::<Vec<_>>();
     proof_inventory.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
-    let now = transparency_now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    let entry = TransparencyEntry {
+    Ok(CandidateTransparencyInventory {
         artifacts,
         manifests: vec![TransparencyNamedDigest {
             name: manifest_name(&manifest.version),
             sha256: digest(&manifest_bytes),
         }],
-        prev_sha256: chain.tip.as_ref().map_or_else(
-            || ZERO_SHA256.into(),
-            |tip| {
-                digest(&transparency_canonical_json(&serde_json::to_value(tip).unwrap()).unwrap())
-            },
-        ),
+        proofs: proof_inventory,
+    })
+}
+
+pub(crate) fn build_entry(
+    staging: &Path,
+    manifest: &Manifest,
+    proofs: &BTreeMap<String, Vec<u8>>,
+    chain: &VerifiedChain,
+) -> Result<(TransparencyEntry, Vec<u8>)> {
+    let inventory = candidate_transparency_inventory(staging, manifest, proofs)?;
+    let prev_sha256 = match chain.tip.as_ref() {
+        Some(tip) => {
+            let value = serde_json::to_value(tip).map_err(|_| {
+                transparency_error(
+                    "terminal",
+                    "transparency previous entry canonicalization",
+                    "canonical JSON for the verified chain tip",
+                    "serialization failure",
+                    "restore the verified transparency chain before retrying",
+                )
+            })?;
+            let bytes = transparency_canonical_json(&value).map_err(|_| {
+                transparency_error(
+                    "terminal",
+                    "transparency previous entry canonicalization",
+                    "canonical JSON for the verified chain tip",
+                    "canonicalization failure",
+                    "restore the verified transparency chain before retrying",
+                )
+            })?;
+            digest(&bytes)
+        }
+        None => ZERO_SHA256.into(),
+    };
+    let now = transparency_now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let entry = TransparencyEntry {
+        artifacts: inventory.artifacts,
+        manifests: inventory.manifests,
+        prev_sha256,
         prev_version: chain
             .tip
             .as_ref()
             .map_or_else(String::new, |tip| tip.version.clone()),
         product: PRODUCT.into(),
-        proofs: proof_inventory,
+        proofs: inventory.proofs,
         published_utc: now,
         schema: TRANSPARENCY_ENTRY_SCHEMA.into(),
         seq: chain
@@ -1941,6 +2118,12 @@ pub(crate) fn renew_pointer(
     Ok((pointer, bytes))
 }
 
+pub(crate) fn renew_pointer_now(
+    old: &TransparencyPointer,
+) -> Result<(TransparencyPointer, Vec<u8>)> {
+    renew_pointer(old, transparency_now())
+}
+
 pub(crate) fn pointer_is_stale(pointer: &TransparencyPointer, now: DateTime<Utc>) -> Result<bool> {
     Ok(exact_timestamp(
         "staged transparency pointer valid_until",
@@ -1977,6 +2160,104 @@ pub(crate) fn chain_includes_entry(chain: &VerifiedChain, entry_bytes: &[u8]) ->
             &serde_json::to_value(tip).map_err(display_error)?,
         )? == entry_bytes),
         None => Ok(false),
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteEntryPair {
+    pub(crate) entry_bytes: Vec<u8>,
+    pub(crate) signature_bytes: Vec<u8>,
+}
+
+fn verified_historical_entry(
+    chain: &VerifiedChain,
+    snapshot: &CandidateSnapshot,
+    pair: &RemoteEntryPair,
+) -> Result<TransparencyEntry> {
+    let entry: TransparencyEntry = parse_json(
+        &pair.entry_bytes,
+        "remote recorded transparency historical entry",
+    )?;
+    let canonical =
+        transparency_canonical_json(&serde_json::to_value(&entry).map_err(display_error)?)?;
+    let inventory =
+        candidate_transparency_inventory(&snapshot.staging, &snapshot.manifest, &snapshot.proofs)?;
+    let ledger_match = parsed_transparency_ledger(&chain.transparency_ledger)?
+        .into_iter()
+        .any(|(recorded, bytes)| recorded.version == entry.version && bytes == pair.entry_bytes);
+    let mismatch = if canonical != pair.entry_bytes {
+        Some("noncanonical entry bytes")
+    } else if !ledger_match {
+        Some("entry absent from the verified transparency ledger")
+    } else if entry.schema != TRANSPARENCY_ENTRY_SCHEMA || entry.product != PRODUCT {
+        Some("schema or product")
+    } else if entry.version != snapshot.manifest.version {
+        Some("version")
+    } else if entry.source_commit != snapshot.manifest.source_commit {
+        Some("source commit")
+    } else if entry.artifacts != inventory.artifacts {
+        Some("artifact inventory")
+    } else if entry.manifests != inventory.manifests {
+        Some("manifest inventory")
+    } else if entry.proofs != inventory.proofs {
+        Some("proof inventory")
+    } else {
+        None
+    };
+    if let Some(actual) = mismatch {
+        return Err(transparency_error(
+            "terminal",
+            format!(
+                "remote recorded transparency version {}",
+                snapshot.manifest.version
+            ),
+            format!(
+                "candidate version {} commit {} and exact evidence inventory",
+                snapshot.manifest.version, snapshot.manifest.source_commit
+            ),
+            actual,
+            "cut the next version because this version key is permanently recorded with different evidence",
+        ));
+    }
+    Ok(entry)
+}
+
+fn probe_remote_entry_pair<T: TransparencyTransport>(
+    config: &TransparencyConfig,
+    transport: &mut T,
+    version: &str,
+) -> Result<Option<RemoteEntryPair>> {
+    let key = format!("releases/{PRODUCT}/v/{version}/ledger-entry.json");
+    let entry = transport.get(&s3(config, &key), false)?;
+    let signature = transport.get(&s3(config, &format!("{key}.minisig")), false)?;
+    match (entry.http_status, signature.http_status) {
+        (404, 404) => Ok(None),
+        (200, 200) => Ok(Some(RemoteEntryPair {
+            entry_bytes: entry.body,
+            signature_bytes: signature.body,
+        })),
+        (200, 404) | (404, 200) => Err(transparency_error(
+            "terminal",
+            format!("remote recorded transparency version {version}"),
+            "complete signed entry pair or no entry",
+            format!(
+                "entry HTTP {} and signature HTTP {}",
+                entry.http_status, signature.http_status
+            ),
+            "restore the immutable signed version entry before retrying",
+        )),
+        _ => {
+            ensure_http(
+                if entry.http_status != 200 && entry.http_status != 404 {
+                    &entry
+                } else {
+                    &signature
+                },
+                &[200, 404],
+                "remote recorded transparency version probe",
+            )?;
+            unreachable!()
+        }
     }
 }
 
@@ -2029,6 +2310,18 @@ pub(crate) fn staging_manifest_v1(staging: &Path) -> Result<(Vec<u8>, String)> {
                 ));
             }
             let file_type = entry.file_type().map_err(display_error)?;
+            if matches!(
+                relative,
+                ".adopted-ledger-entry.json.tmp" | ".adopted-ledger-entry.json.minisig.tmp"
+            ) {
+                return Err(transparency_error(
+                    "terminal",
+                    "staging-manifest v1 temporary file",
+                    "no interrupted adopted-entry temporary files",
+                    format!("temporary file at {relative}"),
+                    "discard the staging directory and retry make publish-transparency",
+                ));
+            }
             if file_type.is_symlink() {
                 return Err(transparency_error(
                     "terminal",
@@ -2197,7 +2490,11 @@ pub(crate) fn persist_adopted_entry_with<F: FnOnce() -> Result<()>>(
         let _ = fs::remove_file(&entry_temp);
         return Err(display_error(error));
     }
-    before_commit()?;
+    if let Err(error) = before_commit() {
+        let _ = fs::remove_file(&entry_temp);
+        let _ = fs::remove_file(&signature_temp);
+        return Err(error);
+    }
     match fs::remove_file(&signature_path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2591,6 +2888,7 @@ pub(crate) fn upload_publication<
     Ok(archive_digest)
 }
 
+#[derive(Debug)]
 pub(crate) struct PreparedPublication {
     pub(crate) snapshot: CandidateSnapshot,
     pub(crate) entry: TransparencyEntry,
@@ -2602,17 +2900,19 @@ pub(crate) struct PreparedPublication {
     pub(crate) already_published: bool,
 }
 
-pub(crate) fn prepare_publication<V, S>(
+pub(crate) fn prepare_publication<V, S, P>(
     root: &RepoRoot,
     release_dir: &Path,
     chain: &VerifiedChain,
     public_key: &Path,
     verifier: &mut V,
     signer: &mut S,
+    probe: &mut P,
 ) -> Result<PreparedPublication>
 where
     V: TransparencySignatureVerifier,
     S: FnMut(&Path, &Path, &Path, &str) -> Result<()>,
+    P: FnMut(&str) -> Result<Option<RemoteEntryPair>>,
 {
     let snapshot = snapshot_candidate(root, release_dir)?;
     let staging = &snapshot.staging;
@@ -2620,6 +2920,38 @@ where
     let entry_signature_path = staging.join("ledger-entry.json.minisig");
     let pointer_path = staging.join("latest.json");
     let pointer_signature_path = staging.join("latest.json.minisig");
+    if chain
+        .tip
+        .as_ref()
+        .is_some_and(|tip| tip.version != snapshot.manifest.version)
+        && let Some(pair) = probe(&snapshot.manifest.version)?
+    {
+        let entry = verified_historical_entry(chain, &snapshot, &pair)?;
+        verifier.verify(
+            staging,
+            public_key,
+            &pair.entry_bytes,
+            &pair.signature_bytes,
+            "remote recorded transparency historical entry signature",
+        )?;
+        verify_trusted_comment(
+            &pair.signature_bytes,
+            &entry_trusted_comment(&entry, &digest(&pair.entry_bytes)),
+            "remote recorded transparency historical entry trusted comment",
+        )?;
+        persist_adopted_entry(staging, &pair.entry_bytes, &pair.signature_bytes)?;
+        let (pointer, pointer_bytes) = build_pointer(&entry, &pair.entry_bytes)?;
+        return Ok(PreparedPublication {
+            snapshot,
+            entry,
+            entry_bytes: pair.entry_bytes,
+            entry_signature: pair.signature_bytes,
+            pointer,
+            pointer_bytes,
+            pointer_signature: Vec::new(),
+            already_published: true,
+        });
+    }
     let entry_complete = entry_path.is_file() && entry_signature_path.is_file();
     let pointer_complete = pointer_path.is_file() && pointer_signature_path.is_file();
     let (entry, entry_bytes, already_published, sign_entry) = if entry_complete {
@@ -2708,6 +3040,143 @@ where
     })
 }
 
+pub(crate) fn prepare_publication_with_signing<V, P, R, S>(
+    root: &RepoRoot,
+    release_dir: &Path,
+    chain: &VerifiedChain,
+    public_key: &Path,
+    verifier: &mut V,
+    probe: &mut P,
+    signing: (&mut R, &mut S),
+) -> Result<PreparedPublication>
+where
+    V: TransparencySignatureVerifier,
+    P: FnMut(&str) -> Result<Option<RemoteEntryPair>>,
+    R: FnMut() -> Result<Vec<u8>>,
+    S: FnMut(&Path, &Path, &Path, &str, &[u8]) -> Result<()>,
+{
+    let (read_passphrase, sign) = signing;
+    let mut passphrase = None::<Vec<u8>>;
+    let prepared = {
+        let mut signer = |staging: &Path, message: &Path, signature: &Path, comment: &str| {
+            if passphrase.is_none() {
+                passphrase = Some(read_passphrase()?);
+            }
+            sign(
+                staging,
+                message,
+                signature,
+                comment,
+                passphrase.as_deref().unwrap_or_default(),
+            )
+        };
+        prepare_publication(
+            root,
+            release_dir,
+            chain,
+            public_key,
+            verifier,
+            &mut signer,
+            probe,
+        )
+    };
+    if let Some(secret) = passphrase.as_mut() {
+        secret.fill(0);
+    }
+    prepared
+}
+
+pub(crate) fn complete_publication<T, A, V, W>(
+    root: &Path,
+    config: &TransparencyConfig,
+    transport: &mut T,
+    channels: (&mut A, &mut V),
+    publication: (&VerifiedChain, PreparedPublication),
+    started: Instant,
+    output: &mut W,
+) -> Result<()>
+where
+    T: TransparencyTransport,
+    A: ArchiveChannel,
+    V: TransparencySignatureVerifier,
+    W: Write,
+{
+    let (archive, verifier) = channels;
+    let (chain, prepared) = publication;
+    let staging = &prepared.snapshot.staging;
+    let manifest = &prepared.snapshot.manifest;
+    let proofs = &prepared.snapshot.proofs;
+    let entry = &prepared.entry;
+    let entry_bytes = &prepared.entry_bytes;
+    let entry_signature = &prepared.entry_signature;
+    let pointer = &prepared.pointer;
+    let pointer_bytes = &prepared.pointer_bytes;
+    let pointer_signature = &prepared.pointer_signature;
+    if prepared.already_published {
+        writeln!(
+            output,
+            "already published, chain unchanged: product={PRODUCT} version={} seq={} entry_sha256={}",
+            entry.version,
+            entry.seq,
+            digest(entry_bytes)
+        )
+        .map_err(display_error)?;
+        return Ok(());
+    }
+    let archive_digest = upload_publication(
+        config,
+        transport,
+        archive,
+        verifier,
+        staging,
+        &StagedPublication {
+            staging,
+            chain,
+            entry,
+            entry_bytes,
+            entry_signature,
+            pointer_bytes,
+            pointer_signature,
+            manifest,
+            proofs,
+        },
+    )?;
+    let witness = append_head_row(
+        root,
+        &TransparencyHeadRow {
+            entry_sha256: digest(entry_bytes),
+            product: PRODUCT.into(),
+            published_utc: entry.published_utc.clone(),
+            seq: entry.seq,
+            version: entry.version.clone(),
+        },
+    )?;
+    let stale_pointer = pointer_is_stale(pointer, transparency_now())?;
+    writeln!(
+        output,
+        "product: {PRODUCT}\nversion: {}\nseq: {}\nentry_sha256: {}\npublic_entry: {}/releases/{PRODUCT}/v/{}/ledger-entry.json\npublic_entry_signature: {}/releases/{PRODUCT}/v/{}/ledger-entry.json.minisig\npublic_transparency_ledger: {}/releases/{PRODUCT}/ledger.jsonl\npublic_pointer: {}/releases/{PRODUCT}/latest.json\npublic_pointer_signature: {}/releases/{PRODUCT}/latest.json.minisig\narchive: {}\nwitness: {}\nwall_clock_ms: {}",
+        entry.version,
+        entry.seq,
+        digest(entry_bytes),
+        config.base_url,
+        entry.version,
+        config.base_url,
+        entry.version,
+        config.base_url,
+        config.base_url,
+        config.base_url,
+        archive_digest,
+        witness,
+        started.elapsed().as_millis()
+    )
+    .map_err(display_error)?;
+    if stale_pointer {
+        writeln!(output, "pointer renewal: make resign-transparency-pointer")
+            .map_err(display_error)?;
+    }
+    Ok(())
+}
+
 pub fn publish_transparency(release_dir: &Path) -> Result<()> {
     let started = Instant::now();
     let root = RepoRoot::resolve()?;
@@ -2724,103 +3193,39 @@ pub fn publish_transparency(release_dir: &Path) -> Result<()> {
         &mut MinisignVerifier,
         true,
     )?;
-    let mut passphrase = None::<Vec<u8>>;
-    let prepared = {
-        let mut signer = |_: &Path, message: &Path, signature: &Path, comment: &str| {
-            if passphrase.is_none() {
-                passphrase = Some(read_passphrase_once()?);
-            }
+    let mut probe = |version: &str| probe_remote_entry_pair(&config, &mut transport, version);
+    let mut read_passphrase = read_passphrase_once;
+    let mut signer =
+        |_: &Path, message: &Path, signature: &Path, comment: &str, passphrase: &[u8]| {
             sign_file(
                 &config.minisign_key,
                 message,
                 signature,
                 comment,
-                passphrase.as_deref().unwrap_or_default(),
+                passphrase,
             )
         };
-        prepare_publication(
-            &root,
-            release_dir,
-            &chain,
-            &config.minisign_pub,
-            &mut MinisignVerifier,
-            &mut signer,
-        )
-    };
-    if let Some(secret) = passphrase.as_mut() {
-        secret.fill(0);
-    }
-    let prepared = prepared?;
-    let staging = &prepared.snapshot.staging;
-    let manifest = &prepared.snapshot.manifest;
-    let proofs = &prepared.snapshot.proofs;
-    let entry = &prepared.entry;
-    let entry_bytes = &prepared.entry_bytes;
-    let entry_signature = &prepared.entry_signature;
-    let pointer = &prepared.pointer;
-    let pointer_bytes = &prepared.pointer_bytes;
-    let pointer_signature = &prepared.pointer_signature;
-    if prepared.already_published {
-        println!(
-            "already published, chain unchanged: product={PRODUCT} version={} seq={} entry_sha256={}",
-            entry.version,
-            entry.seq,
-            digest(entry_bytes)
-        );
-        return Ok(());
-    }
+    let prepared = prepare_publication_with_signing(
+        &root,
+        release_dir,
+        &chain,
+        &config.minisign_pub,
+        &mut MinisignVerifier,
+        &mut probe,
+        (&mut read_passphrase, &mut signer),
+    )?;
     let mut archive = CommandArchive {
         command: config.archive_channel.clone().unwrap(),
     };
-    let archive_digest = upload_publication(
+    complete_publication(
+        root.path(),
         &config,
         &mut transport,
-        &mut archive,
-        &mut MinisignVerifier,
-        staging,
-        &StagedPublication {
-            staging,
-            chain: &chain,
-            entry,
-            entry_bytes,
-            entry_signature,
-            pointer_bytes,
-            pointer_signature,
-            manifest,
-            proofs,
-        },
-    )?;
-    let witness = append_head_row(
-        root.path(),
-        &TransparencyHeadRow {
-            entry_sha256: digest(entry_bytes),
-            product: PRODUCT.into(),
-            published_utc: entry.published_utc.clone(),
-            seq: entry.seq,
-            version: entry.version.clone(),
-        },
-    )?;
-    let stale_pointer = pointer_is_stale(pointer, transparency_now())?;
-    println!(
-        "product: {PRODUCT}\nversion: {}\nseq: {}\nentry_sha256: {}\npublic_entry: {}/releases/{PRODUCT}/v/{}/ledger-entry.json\npublic_entry_signature: {}/releases/{PRODUCT}/v/{}/ledger-entry.json.minisig\npublic_transparency_ledger: {}/releases/{PRODUCT}/ledger.jsonl\npublic_pointer: {}/releases/{PRODUCT}/latest.json\npublic_pointer_signature: {}/releases/{PRODUCT}/latest.json.minisig\narchive: {}\nwitness: {}\nwall_clock_ms: {}",
-        entry.version,
-        entry.seq,
-        digest(entry_bytes),
-        config.base_url,
-        entry.version,
-        config.base_url,
-        entry.version,
-        config.base_url,
-        config.base_url,
-        config.base_url,
-        archive_digest,
-        witness,
-        started.elapsed().as_millis()
-    );
-    if stale_pointer {
-        println!("pointer renewal: make resign-transparency-pointer");
-    }
-    Ok(())
+        (&mut archive, &mut MinisignVerifier),
+        (&chain, prepared),
+        started,
+        &mut std::io::stdout(),
+    )
 }
 
 pub fn resign_transparency_pointer() -> Result<()> {
@@ -2847,7 +3252,7 @@ pub fn resign_transparency_pointer() -> Result<()> {
             "publish genesis before resigning its pointer",
         )
     })?;
-    let (pointer, bytes) = renew_pointer(&old, Utc::now())?;
+    let (pointer, bytes) = renew_pointer_now(&old)?;
     let message = temporary.join("latest.json");
     let signature = temporary.join("latest.json.minisig");
     fs::write(&message, &bytes).map_err(display_error)?;

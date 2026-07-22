@@ -218,6 +218,44 @@ If an entry was uploaded before its pointer, retry the same command; if
 the version was permanently recorded against a superseded chain head, cut the next
 version.
 
+`publish-transparency` reads exactly these operator settings:
+
+- `TRANSPARENCY_BASE_URL` — public HTTPS base URL; defaults to
+  `https://transparency.solstone.app`.
+- `TRANSPARENCY_S3_ENDPOINT` — HTTPS endpoint for the S3-compatible transparency
+  store.
+- `TRANSPARENCY_BUCKET` — bucket containing the transparency objects.
+- `TRANSPARENCY_S3_ACCESS_KEY_ID` — access-key identifier used for S3 SigV4
+  authentication.
+- `TRANSPARENCY_S3_SECRET_ACCESS_KEY` — secret access key supplied to curl over
+  stdin, never in its argument vector.
+- `TRANSPARENCY_MINISIGN_KEY` — local path to the encrypted transparency signing
+  key.
+- `TRANSPARENCY_MINISIGN_PUB` — local path to the corresponding public trust
+  anchor.
+- `TRANSPARENCY_ARCHIVE_CHANNEL` — archive command invoked with the staging
+  directory and its SHA-256 receipt; required for publication.
+- `TRANSPARENCY_GENESIS` — first-publication approval; only the literal value `1`
+  enables genesis.
+
+The retained evidence directory is derived from the validated release manifest,
+not supplied separately. For release directory `<release_dir>` and manifest
+version `<version>`, publication reads
+`<release_dir>/../rust-evidence/<version>/ledger.json` and
+`<release_dir>/../rust-evidence/<version>/proofs/{debian-amd64,rpm-x86_64,tar-x86_64}.json`.
+It rejects evidence whose version or source commit does not bind to the release
+manifest.
+
+For the first publication into a confirmed empty transparency bucket, verify that
+`transparency-head-log.jsonl` has no recorded sequence, set
+`TRANSPARENCY_GENESIS=1`, and run
+`make publish-transparency RELEASE_DIR=<retained-candidate>`. Genesis additionally
+rejects any existing object under the product's version prefix. After genesis
+succeeds, unset `TRANSPARENCY_GENESIS`; later publications derive their predecessor
+exclusively from the verified signed chain. If the bucket appears empty while the
+local head log records a sequence, stop and restore or select the correct bucket
+rather than starting a new genesis.
+
 Verifiers fetch the public trust anchor at
 `releases/keys/solpbc-transparency-1.pub`; key rotation increments the numeric suffix
 and publishes cross-signed successor files. `TRANSPARENCY_MINISIGN_PUB` remains the
