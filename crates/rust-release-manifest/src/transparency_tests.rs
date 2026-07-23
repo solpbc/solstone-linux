@@ -980,16 +980,11 @@ fn transparency_directory_fake_mutable_put_overwrites_existing_object() {
 
 #[test]
 fn transparency_second_publication_and_resign_replace_mutable_objects_end_to_end() {
-    let mut first_transport = FaultTransport::new();
-    run_fixture_publication_with_remote_and_chain(&mut first_transport, None, None)
-        .0
-        .unwrap();
-
-    let mut second_transport = FaultTransport::new();
-    let (chain, old_pointer, old_signature) = seed_old_chain(&mut second_transport);
+    let mut transport = FaultTransport::new();
+    let (chain, old_pointer, old_signature) = seed_old_chain(&mut transport);
     let old_ledger = chain.transparency_ledger.clone();
     let (result, new_pointer, objects) =
-        run_fixture_publication_with_remote_and_chain(&mut second_transport, None, Some(chain));
+        run_fixture_publication_with_remote_and_chain(&mut transport, None, Some(chain));
     result.unwrap();
     let prefix = objects.join("releases/solstone-linux");
     let ledger_path = prefix.join("ledger.jsonl");
@@ -1011,16 +1006,16 @@ fn transparency_second_publication_and_resign_replace_mutable_objects_end_to_end
     let renewed_signature = fake_signature(&pointer_trusted_comment(&renewed));
     let signature_destination = s3_destination("releases/solstone-linux/latest.json.minisig");
     let pointer_destination = s3_destination("releases/solstone-linux/latest.json");
-    second_transport
+    transport
         .put_mutable(&signature_destination, &renewed_signature, MUTABLE_CACHE)
         .unwrap();
-    let etag = second_transport
+    let etag = transport
         .get(&pointer_destination, true)
         .unwrap()
         .etag
         .unwrap();
     assert_eq!(
-        second_transport
+        transport
             .put_conditional(&pointer_destination, &renewed_bytes, &etag, MUTABLE_CACHE,)
             .unwrap()
             .http_status,

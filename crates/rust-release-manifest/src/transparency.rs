@@ -1764,6 +1764,9 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
         .find(|path| path.file_name().and_then(OsStr::to_str).is_some_and(|name| name.ends_with(".rust-release-manifest.json")))
         .ok_or_else(|| Error::new("terminal: transparency manifest mismatch: expected one companion manifest, actual missing\nrepair: restore the retained five-file candidate"))?;
     let manifest_bytes = fs::read(&manifest_path).map_err(display_error)?;
+    // The schema pins source_dirty to const:false, so full validation would only
+    // report a generic schema mismatch. This diagnostic-only deserialize gives a
+    // source-specific error; every non-dirty path still runs authoritative validation.
     let unchecked_manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).map_err(display_error)?;
     if unchecked_manifest.source_dirty {

@@ -234,7 +234,9 @@ version.
 - `TRANSPARENCY_MINISIGN_PUB` — local path to the corresponding public trust
   anchor.
 - `TRANSPARENCY_ARCHIVE_CHANNEL` — archive command invoked with the staging
-  directory and its SHA-256 receipt; required for publication.
+  directory as its sole argument; required for publication. The command must
+  emit an `ARCHIVED <sha256>` receipt as the last line of stdout, which the
+  publisher verifies against the manifest SHA-256.
 - `TRANSPARENCY_GENESIS` — first-publication approval; only the literal value `1`
   enables genesis.
 
