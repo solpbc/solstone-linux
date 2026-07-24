@@ -295,7 +295,7 @@ pub(crate) fn parse_receipt(
 pub(crate) fn validate_locator(locator: &str, sensitive: &SensitiveValues) -> Result<()> {
     let invalid_shape = locator.is_empty()
         || locator.chars().any(|character| {
-            character.is_whitespace() || character.is_control() || character == '\\'
+            character.is_whitespace() || character.is_control() || matches!(character, '\\' | '"')
         })
         || locator.ends_with('/')
         || locator.contains(['?', '#'])
@@ -541,15 +541,10 @@ fn run_materialized_audit(
         sensitive,
     )?
     .stdout;
-    let archive_sha256 = digest(&archive);
-    if archive_sha256.len() != 64 {
-        return Err(sensitive.error(
-            "audit archive gate",
-            "bound archive digest",
-            "invalid digest",
-            "obtain an immutable clean advisory bundle",
-        ));
-    }
+    // Re-verify HEAD's tree fully materializes at the signed commit. The archive
+    // digest is an internal integrity value, intentionally not surfaced: the
+    // authenticated synced_commit is the public database identity.
+    let _archive_sha256 = digest(&archive);
 
     let config_path = staging.root.join("audit-deny.toml");
     sensitive.add_path(&config_path);
@@ -595,7 +590,6 @@ fn run_materialized_audit(
         "audit cargo-deny gate",
         sensitive,
     )?;
-    let _bound_archive_sha256 = archive_sha256;
     Ok(AuditStatus {
         product: PRODUCT.into(),
         source_cohort: SOURCE_COHORT.into(),
@@ -702,24 +696,74 @@ pub(crate) fn run_audit_mode(
         let root = if let Some(root) = root_override {
             root
         } else {
-            resolved_root = RepoRoot::resolve()?;
+            resolved_root = RepoRoot::resolve().map_err(|_| {
+                sensitive.error(
+                    "audit isolation gate",
+                    "solstone-linux repository root",
+                    "unavailable",
+                    "run from a clean local solstone-linux checkout",
+                )
+            })?;
             &resolved_root
         };
-        let lock = CandidateLock::acquire(root)?;
-        let staging = StagingLayout::create(root, &lock)?;
+        sensitive.add_path(root.path());
+        let lock = CandidateLock::acquire(root).map_err(|_| {
+            sensitive.error(
+                "audit isolation gate",
+                "exclusive audit lock",
+                "held or unavailable",
+                "retry after the concurrent release transaction completes",
+            )
+        })?;
+        let staging = StagingLayout::create(root, &lock).map_err(|_| {
+            sensitive.error(
+                "audit isolation gate",
+                "isolated audit staging",
+                "unavailable",
+                "inspect only reserved release staging and retry",
+            )
+        })?;
         sensitive.add_path(&staging.root);
-        let context = export_immutable_context(root, &staging.context)?;
-        let audit = run_materialized_audit(
-            request,
-            &receipt,
-            &staging,
-            &context,
-            processes,
-            &cargo_deny_version,
-            &mut sensitive,
-        );
-        let audit = finish_candidate_staging_owned(root, &staging, audit)?;
-        lock.release()?;
+        let outcome = (|| {
+            let context = export_immutable_context(root, &staging.context).map_err(|_| {
+                sensitive.error(
+                    "audit isolation gate",
+                    "immutable release context",
+                    "unavailable",
+                    "retry from a clean local release workspace",
+                )
+            })?;
+            run_materialized_audit(
+                request,
+                &receipt,
+                &staging,
+                &context,
+                processes,
+                &cargo_deny_version,
+                &mut sensitive,
+            )
+        })();
+        let audit = finish_candidate_staging_owned(root, &staging, outcome).map_err(|error| {
+            let message = error.to_string();
+            if message.starts_with("audit ") && message.lines().count() == 2 {
+                error
+            } else {
+                sensitive.error(
+                    "audit isolation gate",
+                    "staging cleanup before witness",
+                    "cleanup failure",
+                    "inspect only reserved audit staging and retry",
+                )
+            }
+        })?;
+        lock.release().map_err(|_| {
+            sensitive.error(
+                "audit isolation gate",
+                "audit lock release",
+                "cleanup failure",
+                "inspect only the reserved audit lock and retry",
+            )
+        })?;
         Ok(audit)
     })();
     result.map_err(|error| Error::new(sensitive.redact(&error.to_string())))

@@ -101,6 +101,7 @@ fn audit_locator_accepts_only_private_terminal_names_and_rejects_github_spelling
         "file://mirror.invalid/advisory-db?ref=main",
         "file://mirror.invalid/advisory-db#main",
         "file://mirror.invalid/advisory db",
+        "file://mir\"ror/advisory-db",
         "file://mirror.invalid/other",
     ] {
         let (_temp, sensitive) = sensitive(rejected);

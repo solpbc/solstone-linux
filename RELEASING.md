@@ -220,12 +220,14 @@ identity only and is never contacted.
 Success is one JSON object naming product `solstone-linux`, source cohort
 `sol-controlled-rustsec-mirror-v1`, the signed commit and receipt time,
 Cargo.lock digest, cargo-deny version, and `pass` verdict. Audit staging is
-removed before that witness is printed. Packet inputs, the source tree, ambient
-Cargo home, candidates, proofs, signatures, tags, uploads, and runtime state are
-not modified. A failed named gate prints one safe repair; replace the local
-packet component identified by that gate and retry. Candidate creation remains
-separate: it consumes its explicitly acquired descriptor cohort and leaves the
-repository `deny.toml` unchanged.
+removed before that witness is printed. The advisory database is materialized
+and scanned only within isolated staging; no advisory data is fetched into or
+written to the ambient Cargo home. Packet inputs, tracked source, candidates,
+proofs, signatures, tags, uploads, and runtime state are not modified. A failed
+named gate prints one safe repair; replace the local packet component identified
+by that gate and retry. Candidate creation remains separate: it consumes its
+explicitly acquired descriptor cohort and leaves the repository `deny.toml`
+unchanged.
 
 ## Release transparency
 
