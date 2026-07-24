@@ -1137,7 +1137,7 @@ fn s3_list_is_empty(bytes: &[u8]) -> Result<bool> {
     Ok(count == 0 && !text.contains("<Contents>"))
 }
 
-fn verify_minisign_bytes(
+pub(crate) fn verify_minisign_bytes(
     root: &Path,
     public_key: &Path,
     message: &[u8],
@@ -1157,6 +1157,8 @@ fn verify_minisign_bytes(
         .arg(&message_path)
         .arg("-x")
         .arg(&signature_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(display_error)?;
     if !status.success() {
@@ -1610,7 +1612,7 @@ fn read_passphrase_once() -> Result<Vec<u8>> {
     Ok(value.into_bytes())
 }
 
-fn observed_version(program: &str, argument: &str) -> Result<String> {
+pub(crate) fn observed_version(program: &str, argument: &str) -> Result<String> {
     let output = Command::new(program).arg(argument).output().map_err(|_| {
         transparency_error(
             "retryable",

@@ -2317,6 +2317,7 @@ name = "rust-release-manifest"
 version = "1.0.0"
 dependencies = [
  "ar",
+ "base64",
  "chrono",
  "clap",
  "flate2",

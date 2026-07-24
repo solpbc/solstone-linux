@@ -199,8 +199,32 @@ proofs, bundle digest, or candidate status.
 offline licenses/bans/sources policy. It does not run target package proofs or the
 live FLAC checkpoint.
 
-`make audit` refreshes advisory data for a separate operator audit. Candidate
-creation instead consumes the explicitly acquired descriptor cohort and leaves the
+`make audit` verifies a signed, local advisory packet and never refreshes or
+contacts an advisory database. Supply exactly four operator inputs:
+
+```bash
+make audit \
+  BUNDLE=<local-git-bundle> \
+  RECEIPT=<local-freshness.json> \
+  PUBKEY=<approved-minisign-public-key> \
+  LOCATOR=<approved-mirror-identity-ending-in-advisory-db>
+```
+
+The detached signature must be adjacent to the receipt as
+`<receipt>.minisig`; it is derived, not supplied separately. The command pins
+the approved public-key digest and key ID, authenticates the receipt and its
+24-hour freshness window, verifies and materializes only the local Git bundle,
+and runs cargo-deny 0.20.2 locked and offline. The locator is cargo-deny database
+identity only and is never contacted.
+
+Success is one JSON object naming product `solstone-linux`, source cohort
+`sol-controlled-rustsec-mirror-v1`, the signed commit and receipt time,
+Cargo.lock digest, cargo-deny version, and `pass` verdict. Audit staging is
+removed before that witness is printed. Packet inputs, the source tree, ambient
+Cargo home, candidates, proofs, signatures, tags, uploads, and runtime state are
+not modified. A failed named gate prints one safe repair; replace the local
+packet component identified by that gate and retry. Candidate creation remains
+separate: it consumes its explicitly acquired descriptor cohort and leaves the
 repository `deny.toml` unchanged.
 
 ## Release transparency

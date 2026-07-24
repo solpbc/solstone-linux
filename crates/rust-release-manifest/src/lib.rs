@@ -23,6 +23,8 @@ use xz2::read::XzDecoder;
 
 mod candidate;
 pub use candidate::*;
+mod audit;
+pub use audit::*;
 mod transaction;
 pub use transaction::*;
 mod transparency;
@@ -3313,6 +3315,8 @@ fn display_error(error: impl std::fmt::Display) -> Error {
     Error::new(error.to_string())
 }
 
+#[cfg(test)]
+mod audit_tests;
 #[cfg(test)]
 mod boundary_tests;
 #[cfg(test)]

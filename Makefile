@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -126,7 +126,7 @@ check-rust-release-manifest: rust-preflight
 shellcheck:
 	shellcheck $(SHELLCHECK_SCRIPTS)
 
-ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-transparency-minisign
+ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet
 	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check
@@ -139,6 +139,10 @@ check-transparency-minisign: rust-preflight
 	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest transparency_tests::real_minisign_sign_verify_and_reject_tamper -- --exact --ignored
 
+check-audit-signed-packet: rust-preflight check-cargo-deny
+	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest audit_tests::real_signed_packet_local_audit -- --exact --ignored
+
 publish-transparency: rust-preflight
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
@@ -147,9 +151,11 @@ resign-transparency-pointer: rust-preflight
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency resign-pointer
 
 audit: rust-preflight check-cargo-deny
-	@echo "Evidence class: refreshed advisory evidence."
-	cargo deny fetch db
-	cargo deny $(CARGO_LOCKED) check advisories
+	@test -n "$(strip $(BUNDLE))" || { echo "error: audit bundle mismatch: expected BUNDLE, actual missing" >&2; echo "repair: make audit BUNDLE=<bundle> RECEIPT=<receipt> PUBKEY=<pubkey> LOCATOR=<locator>" >&2; exit 1; }
+	@test -n "$(strip $(RECEIPT))" || { echo "error: audit receipt mismatch: expected RECEIPT, actual missing" >&2; echo "repair: make audit BUNDLE=<bundle> RECEIPT=<receipt> PUBKEY=<pubkey> LOCATOR=<locator>" >&2; exit 1; }
+	@test -n "$(strip $(PUBKEY))" || { echo "error: audit public key mismatch: expected PUBKEY, actual missing" >&2; echo "repair: make audit BUNDLE=<bundle> RECEIPT=<receipt> PUBKEY=<pubkey> LOCATOR=<locator>" >&2; exit 1; }
+	@test -n "$(strip $(LOCATOR))" || { echo "error: audit locator mismatch: expected LOCATOR, actual missing" >&2; echo "repair: make audit BUNDLE=<bundle> RECEIPT=<receipt> PUBKEY=<pubkey> LOCATOR=<locator>" >&2; exit 1; }
+	@CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- audit --bundle "$(BUNDLE)" --receipt "$(RECEIPT)" --pubkey "$(PUBKEY)" --locator "$(LOCATOR)"
 
 update-deps: rust-preflight
 	$(CARGO) update

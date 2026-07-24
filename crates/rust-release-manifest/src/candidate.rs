@@ -443,7 +443,7 @@ fn run_advisory_cohort_mode(
 
     let config_path = staging.root.join("advisory-deny.toml");
     let deny = fs::read_to_string(context.path.join("deny.toml")).map_err(display_error)?;
-    let config = advisory_config(&deny, db_root)?;
+    let config = advisory_config(&deny, db_root, ADVISORY_URL)?;
     fs::write(&config_path, config).map_err(display_error)?;
 
     run_cargo_deny(
@@ -514,7 +514,7 @@ pub fn recheck_advisory_cohort(
     Ok(())
 }
 
-pub(crate) fn advisory_config(source: &str, db_root: &Path) -> Result<String> {
+pub(crate) fn advisory_config(source: &str, db_root: &Path, locator: &str) -> Result<String> {
     let marker = "[advisories]\n";
     let index = source.find(marker).ok_or_else(|| {
         Error::new("advisory policy mismatch: expected [advisories], actual missing")
@@ -522,10 +522,10 @@ pub(crate) fn advisory_config(source: &str, db_root: &Path) -> Result<String> {
     let root = db_root
         .to_str()
         .ok_or_else(|| Error::new("advisory db-path mismatch: expected UTF-8"))?;
-    if root.contains(['"', '\n', '\r']) {
+    if root.contains(['"', '\n', '\r']) || locator.contains(['"', '\n', '\r']) {
         return Err(Error::new("advisory db-path mismatch: expected safe path"));
     }
-    let additions = format!("db-path = \"{root}\"\ndb-urls = [\"{ADVISORY_URL}\"]\n");
+    let additions = format!("db-path = \"{root}\"\ndb-urls = [\"{locator}\"]\n");
     Ok(format!(
         "{}{}{}",
         &source[..index],

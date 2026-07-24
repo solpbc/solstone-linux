@@ -3,10 +3,10 @@
 
 use clap::{Args, Parser, Subcommand};
 use rust_release_manifest::{
-    Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE, ProcessEnvironment, ProofHandoffInput,
-    RELEASE_DIR_OK_MESSAGE, RepoRoot, classify_release_dir, create_candidate, emit_lane_handoff,
-    emit_proof_handoff, prove_candidate, publish_transparency, recover_candidate,
-    resign_transparency_pointer, verify_manifest_mode,
+    AuditRequest, Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE, ProcessEnvironment,
+    ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, RepoRoot, classify_release_dir, create_candidate,
+    emit_lane_handoff, emit_proof_handoff, prove_candidate, publish_transparency,
+    recover_candidate, resign_transparency_pointer, run_audit, verify_manifest_mode,
 };
 use std::path::PathBuf;
 
@@ -18,6 +18,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Audit {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        receipt: PathBuf,
+        #[arg(long)]
+        pubkey: PathBuf,
+        #[arg(long)]
+        locator: String,
+    },
     Validate {
         #[arg(long, conflicts_with = "release_dir")]
         manifest: Option<PathBuf>,
@@ -122,6 +132,20 @@ struct ProofHandoffArgs {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let command = Cli::parse().command;
     match command {
+        Command::Audit {
+            bundle,
+            receipt,
+            pubkey,
+            locator,
+        } => {
+            let status = run_audit(&AuditRequest {
+                bundle: &bundle,
+                receipt: &receipt,
+                public_key: &pubkey,
+                locator: &locator,
+            })?;
+            println!("{}", serde_json::to_string(&status)?);
+        }
         Command::Validate {
             manifest: Some(path),
             release_dir: None,

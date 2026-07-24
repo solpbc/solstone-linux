@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 ar = "0.9.0"
+base64 = "0.22"
 chrono = "0.4"
 clap = { workspace = true, features = ["derive"] }
 flate2 = "1"

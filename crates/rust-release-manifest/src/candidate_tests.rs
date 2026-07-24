@@ -841,7 +841,11 @@ fn materialize_cargo_deny_fixture(kind: Option<&str>) -> tempfile::TempDir {
 fn real_cargo_deny_advisories(root: &Path, cargo: &Path, db_root: &Path) -> Output {
     let config_path = db_root.join("advisory-deny.toml");
     let policy = fs::read_to_string(root.join("deny.toml")).unwrap();
-    fs::write(&config_path, advisory_config(&policy, db_root).unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        advisory_config(&policy, db_root, ADVISORY_URL).unwrap(),
+    )
+    .unwrap();
     Command::new(cargo)
         .args([
             "deny",
