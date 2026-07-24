@@ -770,11 +770,11 @@ fn require_fixture_dependency(root: &Path, cargo: &Path) -> Result<()> {
             .is_some_and(|packages| {
                 packages
                     .iter()
-                    .any(|package| package["name"].as_str() == Some("libc"))
+                    .any(|package| package["name"].as_str() == Some("serde_json"))
             });
     if !present {
         return Err(Error::new(
-            "cargo-deny fixture dependency mismatch: expected in-graph crate 'libc', actual absent\nrepair: repoint the synthetic RUSTSEC-2099 fixture to a stable in-graph crate",
+            "cargo-deny fixture dependency mismatch: expected in-graph crate 'serde_json', actual absent\nrepair: repoint the synthetic RUSTSEC-2099 fixture to a stable in-graph crate",
         ));
     }
     Ok(())
