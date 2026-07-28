@@ -190,7 +190,6 @@ pub fn uninstall(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use std::{cell::RefCell, os::unix::fs::PermissionsExt};
 
     struct FakeRunner {
@@ -381,17 +380,5 @@ mod tests {
         assert_eq!(&calls[0][1..], &["stop", "solstone-linux.service"]);
         assert_eq!(&calls[1][1..], &["disable", "solstone-linux.service"]);
         assert_eq!(&calls[2][1..], &["daemon-reload"]);
-    }
-    // AC: this freezes the Python template and deliberately does not compare it to the native template.
-    #[test]
-    fn python_template_is_frozen() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/solstone_linux/solstone-linux.service.in");
-        let bytes = fs::read(path).unwrap();
-        assert_eq!(bytes.len(), 417);
-        assert_eq!(
-            format!("{:x}", Sha256::digest(bytes)),
-            "5bd74d6c852a3851e48a798147c913c2d5c6f875fb5c8cca2f4762fca1890dad"
-        );
     }
 }

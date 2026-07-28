@@ -57,10 +57,6 @@ make install-service
 solstone-linux setup
 ```
 
-The former Python rail remains functional behind `legacy-python-*` targets,
-including its publishing targets, but it is not part of the shipping product
-rail.
-
 ## Setup
 
 ```bash

@@ -1,12 +1,4 @@
-__pycache__/
-*.pyc
-*.egg-info/
 dist/
 build/
-.pytest_cache/
-.mypy_cache/
-.venv/
-.installed
-uv.lock
 /target/
 /.transparency-staging/

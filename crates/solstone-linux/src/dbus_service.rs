@@ -349,9 +349,7 @@ mod tests {
         service.introspect_to_writer(&mut xml, 0);
         assert_eq!(
             normalized(&xml),
-            normalized(include_str!(
-                "../../../tests/fixtures/introspection/observer1.xml"
-            ))
+            normalized(include_str!("../testdata/introspection/observer1.xml"))
         );
     }
     #[test]

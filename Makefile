@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -22,13 +22,6 @@ CARGO_GENERATE_RPM_VERSION := 0.21.0
 UBUNTU_STOCK_BASE := sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890
 FEDORA_STOCK_BASE := sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56
 SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/install.sh
-
-VENV := .venv
-VENV_BIN := $(VENV)/bin
-PYTEST := $(VENV_BIN)/pytest
-RUFF := $(VENV_BIN)/ruff
-UV := $(shell command -v uv 2>/dev/null)
-VENV_FLAGS := --system-site-packages
 
 all: install
 
@@ -212,41 +205,7 @@ release-candidate-recover: rust-preflight
 
 clean:
 	@echo "Cleaning build artifacts and cache files..."
-	rm -rf build/ dist/ *.egg-info/
+	rm -rf build/ dist/
 	rm -rf target/
-	rm -rf .pytest_cache/ .mypy_cache/
-	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.pyc" -delete
-	find . -type f -name "*.pyo" -delete
-	rm -f .legacy-python-installed
-	rm -rf $(VENV)
 
 clean-install: clean install
-
-.legacy-python-installed: pyproject.toml
-	@command -v uv >/dev/null 2>&1 || { echo "error: uv is required for legacy Python targets" >&2; exit 1; }
-	@[ -f $(VENV)/pyvenv.cfg ] || $(UV) venv $(VENV_FLAGS) --python /usr/bin/python3 $(VENV)
-	$(UV) sync --group dev --no-install-package pygobject --no-install-package pycairo
-	@touch .legacy-python-installed
-
-legacy-python-install: .legacy-python-installed
-
-legacy-python-format: .legacy-python-installed
-	$(RUFF) format .
-	$(RUFF) check --fix .
-
-legacy-python-test: .legacy-python-installed
-	$(PYTEST) tests/ -q
-
-legacy-python-test-only: .legacy-python-installed
-	@test -n "$(TEST)" || { echo "Usage: make legacy-python-test-only TEST=<test_file_or_pattern>" >&2; exit 1; }
-	$(PYTEST) $(TEST)
-
-legacy-python-ci: .legacy-python-installed
-	$(RUFF) format --check .
-	$(RUFF) check .
-	$(PYTEST) tests/ -q
-
-legacy-python-bootstrap:
-	@if command -v uv >/dev/null 2>&1; then echo "uv already installed"; else curl -LsSf https://astral.sh/uv/install.sh | sh; fi
-	@$(MAKE) legacy-python-install

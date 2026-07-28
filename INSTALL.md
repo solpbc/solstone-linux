@@ -84,23 +84,9 @@ Activity detection uses screen-lock and power-save signals to notice when you st
 
 The tray uses the StatusNotifierItem D-Bus protocol. KDE supports it directly. GNOME requires an AppIndicator extension; without an SNI host, the observer continues normally without a tray icon.
 
-## retained Python implementation
+## PyPI history
 
-**The PyPI channel is retired.** `solstone-linux` is no longer developed or
-published on PyPI, and the publish path has been removed from this repository —
-`scripts/release.sh`, `make legacy-python-release`, and `make
-legacy-python-release-test` are gone.
-
-The previously published versions remain available on PyPI for legacy purposes,
-and they are not the product. They stop at `0.4.5`, which predates the native
-rewrite; installing one gets you the retired Python implementation, not
-`solstone-linux` as it ships today. Install the `.deb`, `.rpm`, or portable
-archive from the release instead; see the Install section above.
-
-The Python source and tests remain for maintenance and historical parity, but
-they cannot publish and are not part of the shipping product rail. Their
-commands are `make legacy-python-bootstrap`, `legacy-python-install`,
-`legacy-python-format`, `legacy-python-test`, `legacy-python-test-only
-TEST=<selector>`, and `legacy-python-ci`. They require uv and the former
-system PyGObject environment. Canonical install, test, CI, service, and
-release commands are Rust-native.
+Previously published PyPI versions remain available at version 0.4.5 for legacy
+availability. They contain the retired pre-native Python implementation;
+current releases are the native Debian, RPM, and portable packages described
+above.

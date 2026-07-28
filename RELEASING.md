@@ -296,5 +296,4 @@ signature and validity. It never re-attests a rolled-back or foreign pointer.
 
 The surface attests what was released, that it is immutable, and that history is
 publicly reconstructible — not that binaries provably match source. Publication is
-operator-approved and separate from the retained legacy Python publisher, which is
-not a native release path.
+operator-approved.
