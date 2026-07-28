@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci legacy-python-release legacy-python-release-test check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer legacy-python-bootstrap legacy-python-install legacy-python-format legacy-python-test legacy-python-test-only legacy-python-ci check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -250,9 +250,3 @@ legacy-python-ci: .legacy-python-installed
 legacy-python-bootstrap:
 	@if command -v uv >/dev/null 2>&1; then echo "uv already installed"; else curl -LsSf https://astral.sh/uv/install.sh | sh; fi
 	@$(MAKE) legacy-python-install
-
-legacy-python-release:
-	@bash scripts/release.sh
-
-legacy-python-release-test:
-	@bash scripts/release.sh --test

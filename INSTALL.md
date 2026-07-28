@@ -86,12 +86,18 @@ The tray uses the StatusNotifierItem D-Bus protocol. KDE supports it directly. G
 
 ## retained Python implementation
 
-The Python source, tests, PyPI metadata, and `scripts/release.sh` remain for
-maintenance and historical parity. This former rail remains functional and
-can publish when credentials are present, but it is not part of the shipping
-product rail. Its commands are `make legacy-python-bootstrap`,
-`legacy-python-install`, `legacy-python-format`, `legacy-python-test`,
-`legacy-python-test-only TEST=<selector>`, `legacy-python-ci`,
-`legacy-python-release`, and `legacy-python-release-test`. They require uv and
-the former system PyGObject environment. Canonical install, test, CI, service,
-and release commands are Rust-native.
+**The PyPI channel is retired.** `solstone-linux` is no longer distributed on
+PyPI, every published version there has been yanked, and the publish path has
+been removed from this repository — `scripts/release.sh`, `make
+legacy-python-release`, and `make legacy-python-release-test` are gone. There
+is no pip or pipx install path, and no shim forwarding one. Install the
+`.deb`, `.rpm`, or portable archive from the release instead; see the Install
+section above.
+
+The Python source and tests remain for maintenance and historical parity, but
+they cannot publish and are not part of the shipping product rail. Their
+commands are `make legacy-python-bootstrap`, `legacy-python-install`,
+`legacy-python-format`, `legacy-python-test`, `legacy-python-test-only
+TEST=<selector>`, and `legacy-python-ci`. They require uv and the former
+system PyGObject environment. Canonical install, test, CI, service, and
+release commands are Rust-native.
