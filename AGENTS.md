@@ -107,8 +107,6 @@ make legacy-python-format        # Format and lint retained Python code
 make legacy-python-test          # Run all retained Python tests
 make legacy-python-test-only TEST=<selector>  # Run selected retained Python tests
 make legacy-python-ci            # Run the retained Python gate
-make legacy-python-release       # Run the functional former PyPI/GitHub release script
-make legacy-python-release-test  # Run that script against its test publishing path
 ```
 
 ## Rust rebuild

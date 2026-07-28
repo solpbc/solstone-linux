@@ -86,13 +86,16 @@ The tray uses the StatusNotifierItem D-Bus protocol. KDE supports it directly. G
 
 ## retained Python implementation
 
-**The PyPI channel is retired.** `solstone-linux` is no longer distributed on
-PyPI, every published version there has been yanked, and the publish path has
-been removed from this repository — `scripts/release.sh`, `make
-legacy-python-release`, and `make legacy-python-release-test` are gone. There
-is no pip or pipx install path, and no shim forwarding one. Install the
-`.deb`, `.rpm`, or portable archive from the release instead; see the Install
-section above.
+**The PyPI channel is retired.** `solstone-linux` is no longer developed or
+published on PyPI, and the publish path has been removed from this repository —
+`scripts/release.sh`, `make legacy-python-release`, and `make
+legacy-python-release-test` are gone.
+
+The previously published versions remain available on PyPI for legacy purposes,
+and they are not the product. They stop at `0.4.5`, which predates the native
+rewrite; installing one gets you the retired Python implementation, not
+`solstone-linux` as it ships today. Install the `.deb`, `.rpm`, or portable
+archive from the release instead; see the Install section above.
 
 The Python source and tests remain for maintenance and historical parity, but
 they cannot publish and are not part of the shipping product rail. Their
