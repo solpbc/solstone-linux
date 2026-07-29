@@ -116,9 +116,22 @@ Shipping system packages:
 Run `make test` for the locked Rust suite or `make ci` for host evidence across
 Rust formatting, lint, tests, shell scripts, and offline dependency policy.
 
+On a fresh checkout, run `make install` (or `cargo fetch --locked`) before
+`make ci`. Parts of the gate resolve the dependency graph offline, and that
+resolve covers the whole lockfile, including crates that never build on this
+platform, so a cache populated only by building here is not sufficient.
+
+Repository configuration is test-pinned. `Makefile`, `Cargo.toml`,
+`.containerignore`, `packaging/`, and `contrib/icons/` all have tests asserting
+their contents, and the toolchain policy fails closed on any Cargo invocation it
+does not recognise. Run `make ci` after editing any of them: an edit that looks
+like housekeeping can break the gate, and removing an entry can violate a policy
+the tests hold.
+
 ## Brand canon
 
-- **solstone-linux is an observer.** Owner-facing canon describes solstone as observers + journal; sol is the keeper who lives in and tends your journal. In engineering architecture, `observers + sol agent + journal` is the running software this repo's code talks to. This repo implements one of those observers.
+- **solstone-linux is an observer, but "observer" is an engineering word.** Owner-facing: solstone is the platform, **sol** is the app that lives on your devices, and **the journal** is the memory it keeps. "Observer" and "keeper" are engineering-internal only — never use them in owner-facing prose, and never give sol a role-noun title. Say what sol does with verbs: *sol keeps your journal*. In engineering architecture, `observers + sol agent + journal` is the running software this repo's code talks to, and this repo implements one of those observers.
+- **The journal is "the journal" or "your journal."** Never "journal host," "journal service," or "a server" in owner-facing prose. Those are backstage words; the package name is not the owner-facing name.
 - **Use co-experience language in branded prose.** In README, INSTALL, onboarding text, settings copy, and error messages, describe solstone-linux as something that experiences screen and audio along with the owner. Never describe it as watching, recording, monitoring, or tracking the owner.
 - **Keep code language in code-only contexts.** Internal architecture terms such as `Capture loop`, the capture pipeline, module names, and data-path names are canon-permitted here and must not be renamed just to match branded prose.
 - **Edit with the surface in mind.** If the owner sees the string, follow the canon. If the text is naming code, pipelines, modules, or storage artifacts for engineers, the existing internal vocabulary stays.

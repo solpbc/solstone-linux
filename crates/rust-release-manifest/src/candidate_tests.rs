@@ -763,16 +763,33 @@ fn require_fixture_dependency(root: &Path, cargo: &Path) -> Result<()> {
         .current_dir(root)
         .output()
         .map_err(display_error)?;
-    let present = output.status.success()
-        && serde_json::from_slice::<Value>(&output.stdout)
-            .ok()
-            .and_then(|value| value["packages"].as_array().cloned())
-            .is_some_and(|packages| {
-                packages
-                    .iter()
-                    .any(|package| package["name"].as_str() == Some("serde_json"))
-            });
-    if !present {
+    // The offline resolve covers the whole lockfile, including dependencies that
+    // never build on this platform, so an unpopulated registry cache fails here
+    // rather than at build time. Report that separately from a genuinely absent
+    // crate: the two have opposite repairs, and conflating them sends a reader
+    // to edit the fixture when the checkout simply was not fetched.
+    if !output.status.success() {
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+        return Err(Error::new(format!(
+            "cargo metadata mismatch: expected an offline resolve of the locked graph, actual exit {status}\ncargo: {}\nrepair: run 'cargo fetch --locked' once in this checkout; the offline resolve needs every crate in the lockfile cached, including ones that never build on this platform",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let packages = serde_json::from_slice::<Value>(&output.stdout)
+        .ok()
+        .and_then(|value| value["packages"].as_array().cloned());
+    let Some(packages) = packages else {
+        return Err(Error::new(
+            "cargo metadata mismatch: expected a JSON document carrying a 'packages' array, actual unparseable\nrepair: run 'cargo metadata --locked --offline --format-version 1' in this checkout and inspect its output",
+        ));
+    };
+    if !packages
+        .iter()
+        .any(|package| package["name"].as_str() == Some("serde_json"))
+    {
         return Err(Error::new(
             "cargo-deny fixture dependency mismatch: expected in-graph crate 'serde_json', actual absent\nrepair: repoint the synthetic RUSTSEC-2099 fixture to a stable in-graph crate",
         ));
