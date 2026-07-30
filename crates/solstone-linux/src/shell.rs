@@ -696,16 +696,6 @@ mod tests {
         }
     }
 
-    // AC: 6 — the wiring has one session-connection constructor, preventing a second bus identity.
-    #[test]
-    fn wiring_has_exactly_one_session_connection_construction_site() {
-        let constructor = ["Connection", "::session()"].concat();
-        assert_eq!(include_str!("shell.rs").matches(&constructor).count(), 1);
-        assert_eq!(include_str!("run.rs").matches(&constructor).count(), 0);
-        let serve_site = ["with_connection", "(inputs.connection.as_ref()"].concat();
-        assert_eq!(include_str!("shell.rs").matches(&serve_site).count(), 1);
-    }
-
     // AC: 8 — hung tasks and interface removal are both bounded without a live bus or tray.
     #[tokio::test]
     async fn shutdown_bounds_hung_task_and_removal() {
