@@ -705,6 +705,50 @@ fn dependency_policy_denies_wildcards_and_unknown_sources() {
 }
 
 #[test]
+fn dependency_policy_pins_the_single_spl_git_source() {
+    let root = workspace_root();
+    let deny = read_toml(&root.join("deny.toml"));
+    let strings = |value: &toml::Value| {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        strings(&deny["sources"]["allow-registry"]),
+        ["https://github.com/rust-lang/crates.io-index"]
+    );
+    assert_eq!(
+        strings(&deny["sources"]["allow-git"]),
+        ["https://github.com/solpbc/spl-rust"]
+    );
+    assert_eq!(deny["sources"]["unknown-registry"].as_str(), Some("deny"));
+    assert_eq!(deny["sources"]["unknown-git"].as_str(), Some("deny"));
+    assert_eq!(deny["bans"]["wildcards"].as_str(), Some("deny"));
+
+    let manifest = read_toml(&root.join("crates/solstone-linux/Cargo.toml"));
+    for name in ["spl-core", "spl-transport"] {
+        let dependency = &manifest["dependencies"][name];
+        assert_eq!(dependency["version"].as_str(), Some("0.1.0"));
+        assert_eq!(
+            dependency["git"].as_str(),
+            Some("https://github.com/solpbc/spl-rust")
+        );
+        assert_eq!(
+            dependency["rev"].as_str(),
+            Some("742bc9dc789c5a75658844849a04d75033aeb6e3")
+        );
+    }
+    for (name, dependency) in manifest["dependencies"].as_table().unwrap() {
+        if dependency.get("git").is_some() {
+            assert!(matches!(name.as_str(), "spl-core" | "spl-transport"));
+        }
+    }
+}
+
+#[test]
 fn observer_contract_gate_is_locked_offline_and_named() {
     let makefile = fs::read_to_string(workspace_root().join("Makefile")).unwrap();
     let target = makefile

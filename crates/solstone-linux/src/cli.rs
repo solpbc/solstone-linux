@@ -629,8 +629,11 @@ fn cmd_run(interval: Option<i64>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::save_identity;
+    use crate::{
+        config::save_identity, private_link_test_peer::PrivateLinkPeer, test_support::MockServer,
+    };
     use clap::CommandFactory;
+    use serde_json::json;
     use std::{cell::Cell, path::Path};
 
     struct FakeRunner {
@@ -1106,6 +1109,54 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("registration failed"));
         assert!(!out.contains("Config saved"));
+    }
+
+    #[test]
+    fn setup_registration_remains_on_production_http_not_private_link() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = runtime.block_on(MockServer::new(vec![(
+            200,
+            json!({"key":"K123456789", "name":"host-a"}),
+        )]));
+        let peer = runtime.block_on(PrivateLinkPeer::start());
+        let temp = tempfile::tempdir().unwrap();
+        let options = SetupOptions {
+            server_url: Some(server.url.clone()),
+            token: None,
+            stream_name: Some("host-a".into()),
+            non_interactive: true,
+        };
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        assert_eq!(
+            cmd_setup(
+                options,
+                paths(&temp),
+                None,
+                &mut RealRegistrar,
+                &mut output,
+                &mut errors,
+            ),
+            0
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].uri, "/app/observer/register");
+        assert!(requests[0].headers.get("authorization").is_none());
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body["hostname"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert_eq!(body["label"], "host-a");
+        assert_eq!(body["stream_type"], "desktop");
+        assert!(peer.requests().is_empty());
+        runtime.block_on(peer.shutdown());
     }
 
     struct ScriptedPrompt {

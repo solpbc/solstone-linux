@@ -762,6 +762,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{ConfigPaths, load_config},
+        private_link_test_peer::PrivateLinkPeer,
         test_support::{Action, MockServer, MutableClock, wait_for_requests},
     };
     use tempfile::TempDir;
@@ -834,6 +835,86 @@ mod tests {
         });
         assert_eq!(loaded.config.key, "K123456789");
         assert_eq!(loaded.config.stream, "fedora");
+    }
+
+    #[tokio::test]
+    async fn daemon_requests_remain_on_production_http_not_private_link() {
+        let server = MockServer::new(vec![
+            (200, json!({"key":"K123456789", "name":"host-a"})),
+            (200, json!({"status":"ok", "key":"stored"})),
+            (200, json!({"segments":[]})),
+        ])
+        .await;
+        let peer = PrivateLinkPeer::start().await;
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&server, &temp);
+        config.key.clear();
+        config.stream = "host-a".into();
+        let client = client(&config);
+        assert!(client.ensure_registered(&mut config).await);
+        let capture = write_file(&temp, "capture.jsonl", b"{\"event\":1}\n");
+        assert!(
+            client
+                .upload_segment("20260101", "120000", &[capture])
+                .await
+                .success
+        );
+        assert!(
+            client
+                .get_server_segments("20260101")
+                .await
+                .segments
+                .is_some()
+        );
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            (requests[0].method.as_str(), requests[0].uri.as_str()),
+            ("POST", "/app/observer/register")
+        );
+        assert_eq!(
+            (requests[1].method.as_str(), requests[1].uri.as_str()),
+            ("POST", "/app/observer/ingest")
+        );
+        assert!(
+            requests[1]
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("Bearer K123456789")
+        );
+        let upload = String::from_utf8_lossy(&requests[1].body);
+        assert!(upload.contains("name=\"day\""));
+        assert!(upload.contains("20260101"));
+        assert!(upload.contains("name=\"segment\""));
+        assert!(upload.contains("120000"));
+        assert!(upload.contains("name=\"files\""));
+        assert!(upload.contains("{\"event\":1}"));
+        assert_eq!(
+            (requests[2].method.as_str(), requests[2].uri.as_str()),
+            ("GET", "/app/observer/ingest/segments/20260101")
+        );
+        assert_eq!(
+            requests[2]
+                .headers
+                .get(OBSERVER_PROTOCOL_VERSION_HEADER)
+                .unwrap(),
+            "2"
+        );
+        assert_eq!(
+            requests[2]
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer K123456789"
+        );
+        assert!(peer.requests().is_empty());
+        peer.shutdown().await;
     }
 
     // tests/test_upload.py::test_ensure_registered_skips_when_key_present
