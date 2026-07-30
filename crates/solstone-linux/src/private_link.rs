@@ -8,11 +8,16 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
-use reqwest::{Method, RequestBuilder, StatusCode, Url};
+#[cfg(test)]
+use reqwest::Method;
+use reqwest::{RequestBuilder, StatusCode, Url, multipart};
 use serde::{Deserialize, Serialize};
 use spl_core::bridge::{BridgeNames, RequestHeaderPolicy};
 use spl_transport::credential::Credential;
@@ -24,6 +29,9 @@ use spl_transport::{
     },
 };
 
+use crate::config::{
+    ConfigPaths, sanitize_link_authority, save_linked_stream, save_linked_stream_with_fault,
+};
 use crate::private_file::{
     DurableWriteFault, NoWriteFault, PrivateFileError, atomic_write_bytes,
     atomic_write_bytes_with_fault, ensure_private_directory, open_regular_readonly,
@@ -33,11 +41,18 @@ pub(crate) const CREDENTIALS_FILENAME: &str = "credentials.json";
 pub(crate) const OBSERVER_FILENAME: &str = "observer.json";
 const PRIVATE_STATE_LOCK_FILENAME: &str = ".solstone-linux.private-state.lock";
 const MAX_PAIR_LINK_BYTES: u64 = 4096;
-const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const LOOPBACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
+const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
+const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
+const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
+const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const OBSERVER_HEADER_NAME: &str = "x-solstone-observer";
 pub(crate) const PROTOCOL_VERSION_HEADER_NAME: &str = "x-solstone-protocol-version";
+const REGISTRATION_MARKER_HEADER_NAME: &str = "x-solstone-linux-registration-route";
+const REGISTRATION_MARKER_HEADER_VALUE: &str = "1";
+const EVENT_PATH: &str = "/app/observer/ingest/event";
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -336,7 +351,10 @@ pub(crate) fn read_pair_link<R: Read>(input: R) -> Result<String, PrivateStateEr
         return Err(PrivateStateError::PairInputInvalid);
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| PrivateStateError::PairInputInvalid)?;
-    let link = text.trim_end_matches(char::is_whitespace);
+    let link = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
     if link.is_empty() || link.chars().any(char::is_whitespace) {
         return Err(PrivateStateError::PairInputInvalid);
     }
@@ -376,21 +394,61 @@ pub(crate) async fn setup<R: Read>(
     device_label: &str,
     input: R,
 ) -> Result<(), PrivateStateError> {
-    setup_with_pairer(&SplPairer, config_root, device_label, input).await
+    setup_with_stream(config_root, device_label, None, input).await
 }
 
+pub(crate) async fn setup_with_stream<R: Read>(
+    config_root: &Path,
+    device_label: &str,
+    stream: Option<&str>,
+    input: R,
+) -> Result<(), PrivateStateError> {
+    setup_with_pairer_and_stream(&SplPairer, config_root, device_label, stream, input).await
+}
+
+#[cfg(test)]
 async fn setup_with_pairer<R: Read>(
     pairer: &dyn Pairer,
     config_root: &Path,
     device_label: &str,
     input: R,
 ) -> Result<(), PrivateStateError> {
+    setup_with_pairer_and_stream(pairer, config_root, device_label, None, input).await
+}
+
+async fn setup_with_pairer_and_stream<R: Read>(
+    pairer: &dyn Pairer,
+    config_root: &Path,
+    device_label: &str,
+    stream: Option<&str>,
+    input: R,
+) -> Result<(), PrivateStateError> {
     let state_lock = PrivateStateLock::acquire(config_root)?;
+    sanitize_link_authority(&private_config_paths(state_lock.root()))
+        .map_err(config_persist_error)?;
+    if let Some(stream) = stream {
+        save_linked_stream(&private_config_paths(state_lock.root()), stream)
+            .map_err(config_persist_error)?;
+    }
     let link = read_pair_link(input)?;
     let credential = pairer
         .pair(&link, device_label, &serde_json::Map::new())
         .await?;
     persist_credential(state_lock.root(), &credential)
+}
+
+fn private_config_paths(config_root: &Path) -> ConfigPaths {
+    ConfigPaths {
+        base_dir: None,
+        config_dir: Some(config_root.to_path_buf()),
+    }
+}
+
+fn config_persist_error(source: io::Error) -> PrivateStateError {
+    PrivateStateError::Io {
+        operation: PrivateIoOperation::Persist,
+        source,
+    }
 }
 
 fn read_private_file(
@@ -513,6 +571,65 @@ fn contains_invalid_header_value(value: &str) -> bool {
     reqwest::header::HeaderValue::from_bytes(value.as_bytes()).is_err()
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinkFact {
+    PairingRequired,
+    PrivateStateInvalid,
+    ConfigSanitationFailed,
+    ListenerReady,
+    CarrierProven,
+    ObserverRegistered,
+    TransportUnavailable,
+    TerminalRevocation,
+    TokenPersistenceFailure,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LinkFacts {
+    inner: Arc<Mutex<LinkFactState>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LinkFactState {
+    pub(crate) pairing_required: bool,
+    pub(crate) private_state_invalid: bool,
+    pub(crate) config_sanitation_failed: bool,
+    pub(crate) listener_ready: bool,
+    pub(crate) carrier_proven: bool,
+    pub(crate) observer_registered: bool,
+    pub(crate) transport_unavailable: bool,
+    pub(crate) terminal_revocation: bool,
+    pub(crate) token_persistence_failure: bool,
+}
+
+impl LinkFacts {
+    pub(crate) fn publish(&self, fact: LinkFact) {
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match fact {
+            LinkFact::PairingRequired => state.pairing_required = true,
+            LinkFact::PrivateStateInvalid => state.private_state_invalid = true,
+            LinkFact::ConfigSanitationFailed => state.config_sanitation_failed = true,
+            LinkFact::ListenerReady => state.listener_ready = true,
+            LinkFact::CarrierProven => state.carrier_proven = true,
+            LinkFact::ObserverRegistered => state.observer_registered = true,
+            LinkFact::TransportUnavailable => state.transport_unavailable = true,
+            LinkFact::TerminalRevocation => state.terminal_revocation = true,
+            LinkFact::TokenPersistenceFailure => state.token_persistence_failure = true,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn snapshot(&self) -> LinkFactState {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+}
+
+struct RegistrationCommitFaults<'a> {
+    observer: &'a dyn DurableWriteFault,
+    config: &'a dyn DurableWriteFault,
+}
+
 fn persist_and_publish_observer(
     config_root: &Path,
     credential_instance_id: &str,
@@ -520,12 +637,18 @@ fn persist_and_publish_observer(
     origin: &Url,
     observer: &ObserverState,
     opener: &PrivateLinkOpener,
-    fault: &dyn DurableWriteFault,
-) -> Result<(), PrivateStateError> {
+    faults: RegistrationCommitFaults<'_>,
+) -> Result<u64, PrivateStateError> {
     if !observer_is_valid(observer, credential_instance_id, expected_name, origin) {
         return Err(PrivateStateError::RegistrationInvalid);
     }
-    write_observer_durably(config_root, observer, fault)?;
+    write_observer_durably(config_root, observer, faults.observer)?;
+    save_linked_stream_with_fault(
+        &private_config_paths(config_root),
+        &observer.name,
+        faults.config,
+    )
+    .map_err(config_persist_error)?;
     opener.set_registered(observer)
 }
 
@@ -535,22 +658,41 @@ enum OpenerAuth {
     Registered { key: String },
 }
 
+struct AuthEpoch {
+    generation: u64,
+    state: OpenerAuth,
+}
+
 struct PrivateLinkOpener {
     transport: Arc<TransportClient>,
-    auth: RwLock<OpenerAuth>,
+    auth: RwLock<Arc<AuthEpoch>>,
     expected_name: String,
+    admission: tokio::sync::Mutex<()>,
+    transport_unavailable: Arc<AtomicBool>,
+    facts: LinkFacts,
 }
 
 impl PrivateLinkOpener {
-    fn new(transport: TransportClient, expected_name: String) -> Self {
+    fn new(
+        transport: TransportClient,
+        expected_name: String,
+        transport_unavailable: Arc<AtomicBool>,
+        facts: LinkFacts,
+    ) -> Self {
         Self {
             transport: Arc::new(transport),
-            auth: RwLock::new(OpenerAuth::Unregistered),
+            auth: RwLock::new(Arc::new(AuthEpoch {
+                generation: 0,
+                state: OpenerAuth::Unregistered,
+            })),
             expected_name,
+            admission: tokio::sync::Mutex::new(()),
+            transport_unavailable,
+            facts,
         }
     }
 
-    fn set_registered(&self, observer: &ObserverState) -> Result<(), PrivateStateError> {
+    fn set_registered(&self, observer: &ObserverState) -> Result<u64, PrivateStateError> {
         if observer.key.is_empty()
             || contains_invalid_header_value(&observer.key)
             || observer.protocol_version != 2
@@ -562,10 +704,50 @@ impl PrivateLinkOpener {
             .auth
             .write()
             .map_err(|_| PrivateStateError::RegistrationInvalid)?;
-        *auth = OpenerAuth::Registered {
-            key: observer.key.clone(),
-        };
-        Ok(())
+        let generation = auth.generation.saturating_add(1);
+        *auth = Arc::new(AuthEpoch {
+            generation,
+            state: OpenerAuth::Registered {
+                key: observer.key.clone(),
+            },
+        });
+        self.facts.publish(LinkFact::ObserverRegistered);
+        Ok(generation)
+    }
+
+    fn generation(&self) -> u64 {
+        self.auth
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .generation
+    }
+
+    async fn admit_dial<T>(
+        &self,
+        dial: impl Future<Output = Result<T, TransportError>>,
+    ) -> Result<T, TransportError> {
+        if self.transport_unavailable.load(Ordering::Acquire) {
+            return Err(TransportError::Pairing(
+                "linked transport unavailable".into(),
+            ));
+        }
+        // Pinned client.rs:265 and :296 are the only refresh callers, both
+        // inside dial_carrier_over_relay reached by TransportClient::dial_carrier.
+        // There is no timer, background, or live-stream refresh path.
+        let _admission = self.admission.lock().await;
+        if self.transport_unavailable.load(Ordering::Acquire) {
+            return Err(TransportError::Pairing(
+                "linked transport unavailable".into(),
+            ));
+        }
+        let dialed = dial.await?;
+        if self.transport_unavailable.load(Ordering::Acquire) {
+            drop(dialed);
+            return Err(TransportError::Pairing(
+                "linked transport unavailable".into(),
+            ));
+        }
+        Ok(dialed)
     }
 }
 
@@ -574,39 +756,65 @@ impl CarrierOpener for PrivateLinkOpener {
         &self,
         upstream_headers: &[(String, String)],
     ) -> Result<Vec<(String, String)>, TransportError> {
-        let auth = self
+        let epoch = self
             .auth
             .read()
             .map_err(|_| TransportError::Pairing("opener state unavailable".into()))?;
-        Ok(proxy_headers_for_auth(upstream_headers, &auth))
+        proxy_headers_for_epoch(upstream_headers, &epoch)
     }
 
     fn dial_carrier(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<DialedCarrier, TransportError>> + Send + '_>> {
-        Box::pin(self.transport.dial_carrier())
+        Box::pin(async move {
+            let carrier = self.admit_dial(self.transport.dial_carrier()).await?;
+            self.facts.publish(LinkFact::CarrierProven);
+            Ok(carrier)
+        })
     }
 }
 
-fn proxy_headers_for_auth(
+fn proxy_headers_for_epoch(
     upstream_headers: &[(String, String)],
-    auth: &OpenerAuth,
-) -> Vec<(String, String)> {
-    let mut headers = upstream_headers.to_vec();
-    match auth {
-        OpenerAuth::Unregistered => {
-            headers.push((PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned()));
+    epoch: &AuthEpoch,
+) -> Result<Vec<(String, String)>, TransportError> {
+    let markers = upstream_headers
+        .iter()
+        .filter(|(name, _)| name == REGISTRATION_MARKER_HEADER_NAME)
+        .collect::<Vec<_>>();
+    let registration = match markers.as_slice() {
+        [] => false,
+        [(_, value)] if value == REGISTRATION_MARKER_HEADER_VALUE => true,
+        _ => {
+            return Err(TransportError::Pairing(
+                "invalid registration route marker".into(),
+            ));
         }
+    };
+    let mut headers = upstream_headers
+        .iter()
+        .filter(|(name, _)| name != REGISTRATION_MARKER_HEADER_NAME)
+        .cloned()
+        .collect::<Vec<_>>();
+    if registration {
+        headers.push((PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned()));
+        return Ok(headers);
+    }
+    match &epoch.state {
+        OpenerAuth::Unregistered => Err(TransportError::Pairing(
+            "observer registration unavailable".into(),
+        )),
         OpenerAuth::Registered { key } => {
             headers.push((OBSERVER_HEADER_NAME.to_owned(), key.clone()));
             headers.push(("authorization".to_owned(), format!("Bearer {key}")));
             headers.push((PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned()));
+            Ok(headers)
         }
     }
-    headers
 }
 
 pub(crate) struct PrivateLinkSession {
+    #[allow(dead_code)]
     client: reqwest::Client,
     origin: Url,
     opener: Arc<PrivateLinkOpener>,
@@ -615,10 +823,266 @@ pub(crate) struct PrivateLinkSession {
     state_lock: PrivateStateLock,
     credential_instance_id: String,
     expected_name: String,
+    #[allow(dead_code)]
+    facts: LinkFacts,
+}
+
+#[allow(dead_code)]
+pub(crate) enum LinkOutcome {
+    Success { status: StatusCode, body: Vec<u8> },
+    Unauthorized { generation: u64 },
+    Forbidden,
+    TransportUnavailable,
+    LocalRejected { status: StatusCode },
+}
+
+#[allow(dead_code)]
+pub(crate) enum RepairOutcome {
+    Repaired { generation: u64, name: String },
+    AlreadySuperseded { generation: u64 },
+    GuardRefused { reason_code: Option<String> },
+    TransportUnavailable,
+    PersistenceFailed,
+    InvalidRegistration,
+}
+
+#[allow(dead_code)]
+pub(crate) struct EventBody {
+    pub(crate) tract: String,
+    pub(crate) event: String,
+    pub(crate) fields: serde_json::Map<String, serde_json::Value>,
+}
+
+struct PrivateLinkCapabilityInner {
+    client: reqwest::Client,
+    origin: Url,
+    ingest_path: String,
+    opener: Arc<PrivateLinkOpener>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PrivateLinkCapability {
+    inner: Arc<PrivateLinkCapabilityInner>,
+}
+
+impl PrivateLinkCapability {
+    async fn send(&self, builder: RequestBuilder, timeout: Duration) -> LinkOutcome {
+        let generation = self.inner.opener.generation();
+        match builder.timeout(timeout).send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status == StatusCode::UNAUTHORIZED {
+                    return LinkOutcome::Unauthorized { generation };
+                }
+                if status == StatusCode::FORBIDDEN {
+                    return LinkOutcome::Forbidden;
+                }
+                if status.is_client_error() {
+                    return LinkOutcome::LocalRejected { status };
+                }
+                match response.bytes().await {
+                    Ok(body) => LinkOutcome::Success {
+                        status,
+                        body: body.to_vec(),
+                    },
+                    Err(_) => LinkOutcome::TransportUnavailable,
+                }
+            }
+            Err(_) => LinkOutcome::TransportUnavailable,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn ingest(&self, form: multipart::Form) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.inner.origin, &self.inner.ingest_path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(self.inner.client.post(url).multipart(form), INGEST_TIMEOUT)
+            .await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn list_day(&self, day: &str) -> LinkOutcome {
+        if day.len() != 8 || !day.bytes().all(|byte| byte.is_ascii_digit()) {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        }
+        let path = format!(
+            "{}/segments/{day}",
+            self.inner.ingest_path.trim_end_matches('/')
+        );
+        let Ok(url) = confine_path(&self.inner.origin, &path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(self.inner.client.get(url), LISTING_TIMEOUT).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn send_event(&self, body: EventBody) -> LinkOutcome {
+        let mut fields = body.fields;
+        fields.insert("tract".into(), serde_json::Value::String(body.tract));
+        fields.insert("event".into(), serde_json::Value::String(body.event));
+        let Ok(url) = confine_path(&self.inner.origin, EVENT_PATH) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(self.inner.client.post(url).json(&fields), EVENT_TIMEOUT)
+            .await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn report_unauthorized(&self, generation: u64) -> RepairOutcome {
+        let current = self.inner.opener.generation();
+        if current != generation {
+            RepairOutcome::AlreadySuperseded {
+                generation: current,
+            }
+        } else {
+            RepairOutcome::TransportUnavailable
+        }
+    }
+}
+
+pub(crate) struct PrivateLinkOwner {
+    capability: PrivateLinkCapability,
+    session: PrivateLinkSession,
+}
+
+impl PrivateLinkOwner {
+    #[allow(dead_code)]
+    pub(crate) fn capability(&self) -> PrivateLinkCapability {
+        self.capability.clone()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn shutdown(self) -> Result<(), PrivateStateError> {
+        self.session.shutdown().await
+    }
+
+    #[allow(dead_code)]
+    async fn register(&self, body: &serde_json::Value) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.capability.inner.origin, "/app/observer/register") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.capability
+            .send(
+                self.capability
+                    .inner
+                    .client
+                    .post(url)
+                    .header(
+                        REGISTRATION_MARKER_HEADER_NAME,
+                        REGISTRATION_MARKER_HEADER_VALUE,
+                    )
+                    .json(body),
+                REGISTRATION_TIMEOUT,
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn register_for_test(&self, body: &serde_json::Value) -> LinkOutcome {
+        self.register(body).await
+    }
+}
+
+pub(crate) async fn start_private_link_owner(
+    config_root: &Path,
+    credential: Credential,
+    expected_name: &str,
+) -> Result<PrivateLinkOwner, PrivateStateError> {
+    let session = start_private_link_session(config_root, credential, expected_name).await?;
+    let capability = session.capability("/app/observer/ingest".to_owned());
+    Ok(PrivateLinkOwner {
+        capability,
+        session,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn start_registered_private_link_for_test(
+    credential: Credential,
+    expected_name: &str,
+    key: &str,
+    ingest_path: &str,
+) -> (tempfile::TempDir, PrivateLinkOwner) {
+    let temp = tempfile::tempdir().unwrap();
+    let session = start_private_link_session(temp.path(), credential.clone(), expected_name)
+        .await
+        .unwrap();
+    publish_observer_registration(
+        &session,
+        &ObserverState {
+            credential_instance_id: credential.instance_id,
+            key: key.to_owned(),
+            prefix: "contract".to_owned(),
+            name: expected_name.to_owned(),
+            ingest_url: ingest_path.to_owned(),
+            protocol_version: 2,
+        },
+    )
+    .unwrap();
+    let capability = session.capability(ingest_path.to_owned());
+    (
+        temp,
+        PrivateLinkOwner {
+            capability,
+            session,
+        },
+    )
 }
 
 impl PrivateLinkSession {
+    #[allow(dead_code)]
+    pub(crate) fn capability(&self, ingest_path: String) -> PrivateLinkCapability {
+        PrivateLinkCapability {
+            inner: Arc::new(PrivateLinkCapabilityInner {
+                client: self.client.clone(),
+                origin: self.origin.clone(),
+                ingest_path,
+                opener: self.opener.clone(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn register_for_test(&self, body: &serde_json::Value) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.origin, "/app/observer/register") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        PrivateLinkCapability {
+            inner: Arc::new(PrivateLinkCapabilityInner {
+                client: self.client.clone(),
+                origin: self.origin.clone(),
+                ingest_path: String::new(),
+                opener: self.opener.clone(),
+            }),
+        }
+        .send(
+            self.client
+                .post(url)
+                .header(
+                    REGISTRATION_MARKER_HEADER_NAME,
+                    REGISTRATION_MARKER_HEADER_VALUE,
+                )
+                .json(body),
+            REGISTRATION_TIMEOUT,
+        )
+        .await
+    }
+
     // The cutover lode will issue confined requests through this root.
+    #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn request(
         &self,
@@ -626,26 +1090,23 @@ impl PrivateLinkSession {
         relative_path: &str,
     ) -> Result<RequestBuilder, PrivateStateError> {
         let url = confine_path(&self.origin, relative_path)?;
-        Ok(self
-            .client
-            .request(method, url)
-            .timeout(LOOPBACK_REQUEST_TIMEOUT))
+        Ok(self.client.request(method, url).timeout(EVENT_TIMEOUT))
     }
 
     // The cutover lode will explicitly quiesce sessions through this root.
     #[allow(dead_code)]
     pub(crate) async fn shutdown(self) -> Result<(), PrivateStateError> {
         let status = self.handle.shutdown_and_wait().await;
-        if self.token_persistence.failed() {
-            return Err(PrivateStateError::TokenPersistenceFailed);
-        }
         if status.listener_active || status.active_requests != 0 {
             return Err(PrivateStateError::ShutdownFailed);
+        }
+        if self.token_persistence.failed() {
+            return Err(PrivateStateError::TokenPersistenceFailed);
         }
         Ok(())
     }
 
-    fn publish_observer(&self, observer: &ObserverState) -> Result<(), PrivateStateError> {
+    fn publish_observer(&self, observer: &ObserverState) -> Result<u64, PrivateStateError> {
         persist_and_publish_observer(
             self.state_lock.root(),
             &self.credential_instance_id,
@@ -653,7 +1114,10 @@ impl PrivateLinkSession {
             &self.origin,
             observer,
             &self.opener,
-            &NoWriteFault,
+            RegistrationCommitFaults {
+                observer: &NoWriteFault,
+                config: &NoWriteFault,
+            },
         )
     }
 
@@ -662,7 +1126,7 @@ impl PrivateLinkSession {
         &self,
         observer: &ObserverState,
         fault: &dyn DurableWriteFault,
-    ) -> Result<(), PrivateStateError> {
+    ) -> Result<u64, PrivateStateError> {
         persist_and_publish_observer(
             self.state_lock.root(),
             &self.credential_instance_id,
@@ -670,7 +1134,31 @@ impl PrivateLinkSession {
             &self.origin,
             observer,
             &self.opener,
-            fault,
+            RegistrationCommitFaults {
+                observer: fault,
+                config: &NoWriteFault,
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn publish_observer_with_faults(
+        &self,
+        observer: &ObserverState,
+        observer_fault: &dyn DurableWriteFault,
+        config_fault: &dyn DurableWriteFault,
+    ) -> Result<u64, PrivateStateError> {
+        persist_and_publish_observer(
+            self.state_lock.root(),
+            &self.credential_instance_id,
+            &self.expected_name,
+            &self.origin,
+            observer,
+            &self.opener,
+            RegistrationCommitFaults {
+                observer: observer_fault,
+                config: config_fault,
+            },
         )
     }
 }
@@ -680,7 +1168,7 @@ impl PrivateLinkSession {
 pub(crate) fn publish_observer_registration(
     session: &PrivateLinkSession,
     observer: &ObserverState,
-) -> Result<(), PrivateStateError> {
+) -> Result<u64, PrivateStateError> {
     session.publish_observer(observer)
 }
 
@@ -689,6 +1177,8 @@ struct TokenPersistence {
     credential: Mutex<Credential>,
     failed: Mutex<bool>,
     fault: Arc<dyn DurableWriteFault>,
+    transport_unavailable: Arc<AtomicBool>,
+    facts: LinkFacts,
 }
 
 impl TokenPersistence {
@@ -696,12 +1186,16 @@ impl TokenPersistence {
         config_root: PathBuf,
         credential: Credential,
         fault: Arc<dyn DurableWriteFault>,
+        transport_unavailable: Arc<AtomicBool>,
+        facts: LinkFacts,
     ) -> (Arc<Self>, TokenPersistHook) {
         let state = Arc::new(Self {
             config_root,
             credential: Mutex::new(credential),
             failed: Mutex::new(false),
             fault,
+            transport_unavailable,
+            facts,
         });
         let hook_state = state.clone();
         let hook: TokenPersistHook = Arc::new(move |token, expires_at| {
@@ -729,6 +1223,9 @@ impl TokenPersistence {
             *current = updated;
         } else {
             *self.failed.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            self.transport_unavailable.store(true, Ordering::Release);
+            self.facts.publish(LinkFact::TokenPersistenceFailure);
+            self.facts.publish(LinkFact::TransportUnavailable);
         }
     }
 
@@ -769,17 +1266,45 @@ async fn start_private_link_session_inner(
 ) -> Result<PrivateLinkSession, PrivateStateError> {
     let state_lock = PrivateStateLock::acquire(config_root)?;
     let config_root = state_lock.root().to_path_buf();
+    let facts = LinkFacts::default();
+    let paths = private_config_paths(&config_root);
+    let sanitized = match sanitize_link_authority(&paths) {
+        Ok(config) => config,
+        Err(error) => {
+            facts.publish(LinkFact::ConfigSanitationFailed);
+            facts.publish(LinkFact::TransportUnavailable);
+            return Err(config_persist_error(error));
+        }
+    };
+    let expected_name = if sanitized.stream.is_empty() {
+        save_linked_stream(&paths, expected_name)
+            .map_err(config_persist_error)?
+            .stream
+    } else {
+        sanitized.stream
+    };
     let credential_instance_id = credential.instance_id.clone();
+    let transport_unavailable = Arc::new(AtomicBool::new(false));
     let endpoint_hosts = credential
         .endpoints
         .iter()
         .map(|endpoint| endpoint.host.clone())
         .collect();
-    let (token_persistence, hook) =
-        TokenPersistence::new(config_root.clone(), credential.clone(), persistence_fault);
+    let (token_persistence, hook) = TokenPersistence::new(
+        config_root.clone(),
+        credential.clone(),
+        persistence_fault,
+        transport_unavailable.clone(),
+        facts.clone(),
+    );
     let transport = TransportClient::new(credential, Some(hook))
         .map_err(|_| PrivateStateError::BridgeUnavailable)?;
-    let opener = Arc::new(PrivateLinkOpener::new(transport, expected_name.to_owned()));
+    let opener = Arc::new(PrivateLinkOpener::new(
+        transport,
+        expected_name.clone(),
+        transport_unavailable,
+        facts.clone(),
+    ));
     let bridge_names = BridgeNames {
         capability_cookie_name: "solstone_linux_cap".to_owned(),
         upstream_cookie_prefix: "solstone_linux_".to_owned(),
@@ -802,6 +1327,7 @@ async fn start_private_link_session_inner(
                 "if-modified-since",
                 "range",
                 "user-agent",
+                REGISTRATION_MARKER_HEADER_NAME,
             ]
             .into_iter()
             .map(str::to_owned)
@@ -843,7 +1369,7 @@ async fn start_private_link_session_inner(
         .map_err(|_| PrivateStateError::BridgeUnavailable)?;
     let response = client
         .get(bootstrap_url)
-        .timeout(LOOPBACK_REQUEST_TIMEOUT)
+        .timeout(BOOTSTRAP_TIMEOUT)
         .send()
         .await
         .map_err(|_| PrivateStateError::BootstrapFailed)?;
@@ -851,10 +1377,11 @@ async fn start_private_link_session_inner(
         handle.begin_shutdown();
         return Err(PrivateStateError::BootstrapFailed);
     }
+    facts.publish(LinkFact::ListenerReady);
     if let Some(observer) = load_observer(
         &config_root,
         &credential_instance_id,
-        expected_name,
+        &expected_name,
         &origin,
     )? {
         opener.set_registered(&observer)?;
@@ -867,7 +1394,8 @@ async fn start_private_link_session_inner(
         token_persistence,
         state_lock,
         credential_instance_id,
-        expected_name: expected_name.to_owned(),
+        expected_name,
+        facts,
     })
 }
 
@@ -887,6 +1415,19 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
+
+    async fn raw_local_request(port: u16, request: String) -> Vec<u8> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        response
+    }
 
     fn credential() -> Credential {
         Credential {
@@ -937,9 +1478,15 @@ mod tests {
 
     async fn start_peer_session(peer: &PrivateLinkPeer) -> (tempfile::TempDir, PrivateLinkSession) {
         let temp = tempfile::tempdir().unwrap();
-        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+        let credential = peer.credential();
+        let state = ObserverState {
+            credential_instance_id: credential.instance_id.clone(),
+            ..observer("/ingest")
+        };
+        let session = start_private_link_session(temp.path(), credential, "stream")
             .await
             .unwrap();
+        publish_observer_registration(&session, &state).unwrap();
         (temp, session)
     }
 
@@ -950,6 +1497,8 @@ mod tests {
         let opener = PrivateLinkOpener::new(
             TransportClient::new(peer.credential(), None).unwrap(),
             "stream".to_owned(),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
         );
         let loaded = load_observer(
             temp.path(),
@@ -961,11 +1510,7 @@ mod tests {
         if let Some(observer) = loaded {
             opener.set_registered(&observer).unwrap();
         }
-        let headers = opener.proxy_headers(&[]).unwrap();
-        assert_eq!(
-            headers,
-            vec![(PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned())]
-        );
+        assert!(opener.proxy_headers(&[]).is_err());
         peer.shutdown().await;
     }
 
@@ -1060,27 +1605,17 @@ mod tests {
             Err(PrivateStateError::RegistrationInvalid)
         ));
         assert!(!temp.path().join(OBSERVER_FILENAME).exists());
-        session
-            .request(Method::GET, "/still-unregistered")
-            .unwrap()
-            .send()
-            .await
-            .unwrap();
-        let requests = peer.requests();
-        assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0]
-                .headers
-                .iter()
-                .filter(|(name, _)| {
-                    name.eq_ignore_ascii_case(PROTOCOL_VERSION_HEADER_NAME)
-                        || name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
-                        || name.eq_ignore_ascii_case("authorization")
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec![(PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned())],
+            session
+                .request(Method::GET, "/still-unregistered")
+                .unwrap()
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_GATEWAY
         );
+        assert!(peer.requests().is_empty());
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -1176,8 +1711,11 @@ mod tests {
         assert_redacted_setup_rejection(b" pair").await;
     }
     #[test]
-    fn pair_input_trailing_spaces_and_tabs_are_accepted_after_trim() {
-        assert_eq!(read_pair_link(Cursor::new(b"pair \t")).unwrap(), "pair");
+    fn pair_input_trailing_spaces_and_tabs_are_rejected() {
+        assert!(matches!(
+            read_pair_link(Cursor::new(b"pair \t")),
+            Err(PrivateStateError::PairInputInvalid)
+        ));
     }
     #[tokio::test]
     async fn pair_input_multiple_line_endings_are_rejected() {
@@ -1196,11 +1734,41 @@ mod tests {
         assert_eq!(read_pair_link(Cursor::new(b"pair\r\n")).unwrap(), "pair");
     }
     #[test]
-    fn pair_input_exactly_4096_bytes_is_accepted() {
+    fn pair_input_exactly_4096_unterminated_bytes_is_accepted() {
         assert_eq!(
             read_pair_link(Cursor::new(vec![b'a'; 4096])).unwrap().len(),
             4096
         );
+    }
+    #[test]
+    fn pair_input_4095_bytes_plus_lf_is_accepted() {
+        let mut input = vec![b'a'; 4095];
+        input.push(b'\n');
+        assert_eq!(read_pair_link(Cursor::new(input)).unwrap().len(), 4095);
+    }
+    #[test]
+    fn pair_input_4094_bytes_plus_crlf_is_accepted() {
+        let mut input = vec![b'a'; 4094];
+        input.extend_from_slice(b"\r\n");
+        assert_eq!(read_pair_link(Cursor::new(input)).unwrap().len(), 4094);
+    }
+    #[test]
+    fn pair_input_4096_bytes_plus_lf_is_rejected() {
+        let mut input = vec![b'a'; 4096];
+        input.push(b'\n');
+        assert!(matches!(
+            read_pair_link(Cursor::new(input)),
+            Err(PrivateStateError::PairInputInvalid)
+        ));
+    }
+    #[test]
+    fn pair_input_4095_bytes_plus_crlf_is_rejected() {
+        let mut input = vec![b'a'; 4095];
+        input.extend_from_slice(b"\r\n");
+        assert!(matches!(
+            read_pair_link(Cursor::new(input)),
+            Err(PrivateStateError::PairInputInvalid)
+        ));
     }
     #[tokio::test]
     async fn pair_input_4097_bytes_is_rejected() {
@@ -1210,6 +1778,31 @@ mod tests {
     struct FakePairer {
         calls: Arc<AtomicUsize>,
         result: Option<Credential>,
+    }
+
+    struct SanitizedConfigPairer {
+        config_path: PathBuf,
+        calls: Arc<AtomicUsize>,
+        result: Credential,
+    }
+
+    impl Pairer for SanitizedConfigPairer {
+        fn pair<'a>(
+            &'a self,
+            _link: &'a str,
+            _device_label: &'a str,
+            _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+        ) -> Pin<Box<dyn Future<Output = Result<Credential, PrivateStateError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&self.config_path).unwrap()).unwrap();
+                assert!(value.get("server_url").is_none());
+                assert!(value.get("key").is_none());
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.result.clone())
+            })
+        }
     }
 
     struct FailStage(DurableWriteStage);
@@ -1237,6 +1830,97 @@ mod tests {
             }
         }
     }
+
+    struct BlockingDirSyncFault {
+        stages: Arc<Mutex<Vec<DurableWriteStage>>>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl DurableWriteFault for BlockingDirSyncFault {
+        fn before(&self, stage: DurableWriteStage) -> io::Result<()> {
+            self.stages.lock().unwrap().push(stage);
+            if stage == DurableWriteStage::DirSync {
+                self.entered
+                    .send(())
+                    .map_err(|_| io::Error::other("test observer dropped"))?;
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .map_err(|_| io::Error::other("test release dropped"))?;
+            }
+            Ok(())
+        }
+    }
+
+    async fn blocking_admission_observation() -> (Vec<DurableWriteStage>, Vec<&'static str>) {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let transport_unavailable = Arc::new(AtomicBool::new(false));
+        let facts = LinkFacts::default();
+        let opener = Arc::new(PrivateLinkOpener::new(
+            TransportClient::new(peer.credential(), None).unwrap(),
+            "stream".to_owned(),
+            transport_unavailable.clone(),
+            facts.clone(),
+        ));
+        let stages = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (_persistence, hook) = TokenPersistence::new(
+            temp.path().to_path_buf(),
+            peer.credential(),
+            Arc::new(BlockingDirSyncFault {
+                stages: stages.clone(),
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }),
+            transport_unavailable,
+            facts,
+        );
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+
+        let relay_opener = opener.clone();
+        let relay_completed = completed_tx.clone();
+        let relay = tokio::spawn(async move {
+            let result = relay_opener
+                .admit_dial(async move {
+                    hook("refreshed-token", 456);
+                    Ok("relay")
+                })
+                .await;
+            relay_completed.send(result.unwrap()).unwrap();
+        });
+        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            .await
+            .unwrap();
+
+        let direct_opener = opener.clone();
+        let direct_completed = completed_tx.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let direct = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            let result = direct_opener.admit_dial(async { Ok("direct") }).await;
+            direct_completed.send(result.unwrap()).unwrap();
+        });
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            completed_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        release_tx.send(()).unwrap();
+        relay.await.unwrap();
+        direct.await.unwrap();
+        let completion_order = vec![completed_rx.recv().unwrap(), completed_rx.recv().unwrap()];
+        peer.shutdown().await;
+        let recorded = stages.lock().unwrap().clone();
+        (recorded, completion_order)
+    }
+
     impl Pairer for FakePairer {
         fn pair<'a>(
             &'a self,
@@ -1564,18 +2248,25 @@ mod tests {
         let credential_instance_id = peer.credential().instance_id;
         peer.enqueue_response(200, b"{}".to_vec());
         peer.enqueue_response(200, b"{}".to_vec());
-        let (_temp, session) = start_peer_session(&peer).await;
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
         assert_eq!(
             session
-                .request(Method::GET, "/unregistered")
+                .request(Method::POST, "/app/observer/register")
                 .unwrap()
+                .header(
+                    REGISTRATION_MARKER_HEADER_NAME,
+                    REGISTRATION_MARKER_HEADER_VALUE,
+                )
                 .send()
                 .await
                 .unwrap()
                 .status(),
             StatusCode::OK
         );
-        publish_observer_registration(
+        let first_generation = publish_observer_registration(
             &session,
             &ObserverState {
                 credential_instance_id,
@@ -1583,6 +2274,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(first_generation, 1);
         assert_eq!(
             session
                 .request(Method::GET, "/registered")
@@ -1595,8 +2287,8 @@ mod tests {
         );
         let requests = peer.requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].method, "GET");
-        assert_eq!(requests[0].path, "/unregistered");
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/app/observer/register");
         assert!(requests[0].body.is_empty());
         assert_eq!(
             requests[0]
@@ -1606,17 +2298,31 @@ mod tests {
                 .map(|(_, value)| value.as_str()),
             Some("2")
         );
-        assert!(
-            !requests[0]
-                .headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
-                    || name.eq_ignore_ascii_case("authorization"))
-        );
+        assert!(!requests[0].headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case(REGISTRATION_MARKER_HEADER_NAME)
+                || name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
+                || name.eq_ignore_ascii_case("authorization")
+        }));
         assert_eq!(requests[1].method, "GET");
         assert_eq!(requests[1].path, "/registered");
         assert!(requests[1].body.is_empty());
         assert_registered_auth(&requests[1], "observer-key");
+        assert_eq!(peer.accepted_carriers(), 1);
+        let capability = session.capability("/app/observer/ingest".to_owned());
+        let second_generation = publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: session.credential_instance_id.clone(),
+                key: "replacement-key".into(),
+                ..observer("/app/observer/ingest")
+            },
+        )
+        .unwrap();
+        assert_eq!(second_generation, 2);
+        assert!(matches!(
+            capability.report_unauthorized(first_generation).await,
+            RepairOutcome::AlreadySuperseded { generation: 2 }
+        ));
         assert_eq!(peer.accepted_carriers(), 1);
         session.shutdown().await.unwrap();
         peer.shutdown().await;
@@ -1644,8 +2350,108 @@ mod tests {
         }
     }
 
+    #[test]
+    fn registration_marker_malformed_and_duplicate_forms_are_rejected_locally() {
+        let epoch = AuthEpoch {
+            generation: 0,
+            state: OpenerAuth::Unregistered,
+        };
+        for headers in [
+            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), String::new())],
+            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), " 1".to_owned())],
+            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), "1 ".to_owned())],
+            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), "2".to_owned())],
+            vec![
+                (
+                    REGISTRATION_MARKER_HEADER_NAME.to_owned(),
+                    REGISTRATION_MARKER_HEADER_VALUE.to_owned(),
+                ),
+                (
+                    REGISTRATION_MARKER_HEADER_NAME.to_owned(),
+                    REGISTRATION_MARKER_HEADER_VALUE.to_owned(),
+                ),
+            ],
+        ] {
+            assert!(proxy_headers_for_epoch(&headers, &epoch).is_err());
+        }
+    }
+
+    #[test]
+    fn registration_marker_is_stripped_before_forwarding() {
+        let epoch = AuthEpoch {
+            generation: 0,
+            state: OpenerAuth::Unregistered,
+        };
+        let headers = proxy_headers_for_epoch(
+            &[(
+                REGISTRATION_MARKER_HEADER_NAME.to_owned(),
+                REGISTRATION_MARKER_HEADER_VALUE.to_owned(),
+            )],
+            &epoch,
+        )
+        .unwrap();
+        assert_eq!(
+            headers,
+            vec![(PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned())]
+        );
+    }
+
     #[tokio::test]
-    async fn bridge_rejects_untrusted_local_authority_and_auth_without_upstream() {
+    async fn unregistered_data_routes_never_dial() {
+        let peer = PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let response = session
+            .request(Method::GET, "/data")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(peer.accepted_carriers(), 0);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn capability_rejects_admin_path_query_and_route_substitution() {
+        let peer = PrivateLinkPeer::start().await;
+        let (_temp, session) = start_peer_session(&peer).await;
+        let capability = session.capability("/app/observer/ingest".to_owned());
+        for day in ["", "2026010", "202601011", "202601?1", "../20260101"] {
+            assert!(matches!(
+                capability.list_day(day).await,
+                LinkOutcome::LocalRejected {
+                    status: StatusCode::BAD_REQUEST
+                }
+            ));
+        }
+        assert!(peer.requests().is_empty());
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn typed_unauthorized_report_is_only_recovery_surface() {
+        let peer = PrivateLinkPeer::start().await;
+        let (_temp, session) = start_peer_session(&peer).await;
+        let capability = session.capability("/ingest".to_owned());
+        assert!(matches!(
+            capability.report_unauthorized(0).await,
+            RepairOutcome::AlreadySuperseded { generation: 1 }
+        ));
+        assert!(matches!(
+            capability.report_unauthorized(1).await,
+            RepairOutcome::TransportUnavailable
+        ));
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn caller_reserved_auth_headers_are_rejected_before_dial() {
         let peer = PrivateLinkPeer::start().await;
         let (_temp, session) = start_peer_session(&peer).await;
         for (name, value) in [
@@ -1680,6 +2486,150 @@ mod tests {
             );
         }
         assert!(peer.requests().is_empty());
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    async fn session_with_capability(
+        peer: &PrivateLinkPeer,
+    ) -> (tempfile::TempDir, PrivateLinkSession, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let session = start_private_link_session_inner(
+            temp.path(),
+            peer.credential(),
+            "stream",
+            Arc::new(NoWriteFault),
+            SessionTestCapture {
+                capability: Some(captured.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let capability = captured.lock().unwrap().clone().unwrap();
+        (temp, session, capability)
+    }
+
+    #[tokio::test]
+    async fn chunked_unknown_length_is_local_400_before_carrier() {
+        let peer = PrivateLinkPeer::start().await;
+        let (_temp, session, capability) = session_with_capability(&peer).await;
+        let port = session.handle.port();
+        let response = raw_local_request(
+            port,
+            format!(
+                "POST /ingest HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: solstone_linux_cap={capability}\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n0\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(response.starts_with(b"HTTP/1.1 400"));
+        assert_eq!(peer.accepted_carriers(), 0);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[test]
+    fn ingest_uses_300_second_policy() {
+        assert_eq!(INGEST_TIMEOUT, Duration::from_secs(300));
+        assert_eq!(MAX_REQUEST_BODY_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn large_upload_staging_is_credit_bounded() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, b"{}".to_vec());
+        let (_temp, session) = start_peer_session(&peer).await;
+        let body = vec![b'x'; spl_core::mux::INITIAL_WINDOW * 2 + 1];
+        let form = reqwest::multipart::Form::new()
+            .part("files", reqwest::multipart::Part::bytes(body.clone()));
+        assert!(matches!(
+            session.capability("/ingest".to_owned()).ingest(form).await,
+            LinkOutcome::Success { .. }
+        ));
+        peer.wait_for_requests(1).await;
+        let request = &peer.requests()[0];
+        assert!(
+            request
+                .body
+                .windows(body.len())
+                .any(|window| window == body)
+        );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn chunked_rejection_releases_staging_and_allows_small_request() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, br#"{"items":[],"total":0}"#.to_vec());
+        let (_temp, session, capability_cookie) = session_with_capability(&peer).await;
+        let state = ObserverState {
+            credential_instance_id: peer.credential().instance_id,
+            ..observer("/ingest")
+        };
+        publish_observer_registration(&session, &state).unwrap();
+        let port = session.handle.port();
+        let response = raw_local_request(
+            port,
+            format!(
+                "POST /ingest HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: solstone_linux_cap={capability_cookie}\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n0\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(response.starts_with(b"HTTP/1.1 400"));
+        assert!(matches!(
+            session
+                .capability("/ingest".to_owned())
+                .list_day("20260101")
+                .await,
+            LinkOutcome::Success { .. }
+        ));
+        assert_eq!(peer.requests().len(), 1);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn declared_over_limit_is_local_413_before_carrier() {
+        let peer = PrivateLinkPeer::start().await;
+        let (_temp, session, capability) = session_with_capability(&peer).await;
+        let port = session.handle.port();
+        let response = raw_local_request(
+            port,
+            format!(
+                "POST /ingest HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: solstone_linux_cap={capability}\r\nContent-Length: {}\r\n\r\n",
+                MAX_REQUEST_BODY_BYTES + 1
+            ),
+        )
+        .await;
+        assert!(response.starts_with(b"HTTP/1.1 413"));
+        assert_eq!(peer.accepted_carriers(), 0);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn absent_content_length_with_trailing_bytes_dials_but_forwards_empty_body() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, b"{}".to_vec());
+        let (_temp, session, capability) = session_with_capability(&peer).await;
+        let state = ObserverState {
+            credential_instance_id: peer.credential().instance_id,
+            ..observer("/ingest")
+        };
+        publish_observer_registration(&session, &state).unwrap();
+        let port = session.handle.port();
+        let response = raw_local_request(
+            port,
+            format!(
+                "POST /ingest HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: solstone_linux_cap={capability}\r\n\r\ntrailing"
+            ),
+        )
+        .await;
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        let requests = peer.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].body.is_empty());
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -1773,11 +2723,14 @@ mod tests {
     #[tokio::test]
     async fn observer_publication_is_durable_before_registered_auth() {
         let temp = tempfile::tempdir().unwrap();
-        let prior = observer("/prior");
-        persist_observer(temp.path(), &prior).unwrap();
-        let prior_bytes = fs::read(temp.path().join(OBSERVER_FILENAME)).unwrap();
         let peer = PrivateLinkPeer::start().await;
         let credential_instance_id = peer.credential().instance_id;
+        let prior = ObserverState {
+            credential_instance_id: credential_instance_id.clone(),
+            ..observer("/prior")
+        };
+        persist_observer(temp.path(), &prior).unwrap();
+        let prior_bytes = fs::read(temp.path().join(OBSERVER_FILENAME)).unwrap();
         for _ in 0..6 {
             peer.enqueue_response(200, b"{}".to_vec());
         }
@@ -1834,15 +2787,303 @@ mod tests {
         let requests = peer.requests();
         assert_eq!(requests.len(), 6);
         for request in &requests[..5] {
-            assert!(request.headers.iter().any(|(name, value)| {
-                name.eq_ignore_ascii_case(PROTOCOL_VERSION_HEADER_NAME) && value == "2"
-            }));
-            assert!(!request.headers.iter().any(|(name, _)| {
-                name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
-                    || name.eq_ignore_ascii_case("authorization")
-            }));
+            assert_registered_auth(request, "observer-key");
         }
         assert_registered_auth(&requests[5], "new-observer-key");
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sanitation_precedes_pairer_bridge_carrier_and_peer() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("config.json"),
+            r#"{"server_url":"http://127.0.0.1:9","key":"secret","stream":"stream"}"#,
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let pairer = SanitizedConfigPairer {
+            config_path: temp.path().join("config.json"),
+            calls: calls.clone(),
+            result: credential(),
+        };
+        setup_with_pairer(&pairer, temp.path(), "device", Cursor::new(b"pair"))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct LegacyNetworkTraps {
+        configured: TcpListener,
+        default: Option<TcpListener>,
+    }
+
+    impl LegacyNetworkTraps {
+        fn bind() -> Self {
+            let configured = TcpListener::bind("127.0.0.1:0").unwrap();
+            configured.set_nonblocking(true).unwrap();
+            let default = TcpListener::bind("127.0.0.1:5015").ok();
+            if let Some(default) = &default {
+                default.set_nonblocking(true).unwrap();
+            } else {
+                eprintln!(
+                    "criterion 12 note: localhost:5015 opportunistic zero-connection clause did not execute because the port is already in use"
+                );
+            }
+            Self {
+                configured,
+                default,
+            }
+        }
+
+        fn configured_origin(&self) -> String {
+            format!("http://{}", self.configured.local_addr().unwrap())
+        }
+
+        fn assert_zero_connections(&self) {
+            let listeners = std::iter::once(&self.configured).chain(self.default.iter());
+            for listener in listeners {
+                assert!(matches!(
+                    listener.accept(),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_never_contacts_legacy_origin_or_default_listener() {
+        let traps = LegacyNetworkTraps::bind();
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("config.json"),
+            format!(
+                r#"{{"server_url":"{}","key":"secret","stream":"stream"}}"#,
+                traps.configured_origin()
+            ),
+        )
+        .unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let session = start_private_link_session(temp.path(), peer.credential(), "ignored")
+            .await
+            .unwrap();
+        traps.assert_zero_connections();
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn already_sanitized_and_reacquired_authority_are_sanitized_before_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let first = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        first.shutdown().await.unwrap();
+        let path = temp.path().join("config.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["server_url"] = serde_json::json!("http://127.0.0.1:9");
+        value["key"] = serde_json::json!("reintroduced");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let second = start_private_link_session(temp.path(), peer.credential(), "ignored")
+            .await
+            .unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(rewritten.get("server_url").is_none());
+        assert!(rewritten.get("key").is_none());
+        assert_eq!(rewritten["stream"], "stream");
+        second.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn observer_then_config_commit_restart_matrix() {
+        for config_file in [false, true] {
+            for stage in [
+                DurableWriteStage::Create,
+                DurableWriteStage::Write,
+                DurableWriteStage::Fsync,
+                DurableWriteStage::Rename,
+                DurableWriteStage::DirSync,
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let peer = PrivateLinkPeer::start().await;
+                let credential = peer.credential();
+                let state = ObserverState {
+                    credential_instance_id: credential.instance_id.clone(),
+                    ..observer("/ingest")
+                };
+                let session = start_private_link_session(temp.path(), credential.clone(), "stream")
+                    .await
+                    .unwrap();
+                let result = if config_file {
+                    session.publish_observer_with_faults(&state, &NoWriteFault, &FailStage(stage))
+                } else {
+                    session.publish_observer_with_faults(&state, &FailStage(stage), &NoWriteFault)
+                };
+                assert!(result.is_err(), "{config_file} {stage:?}");
+                assert_eq!(session.opener.generation(), 0);
+                session.shutdown().await.unwrap();
+
+                let restarted = start_private_link_session(temp.path(), credential, "stream")
+                    .await
+                    .unwrap();
+                let persisted = load_observer(
+                    temp.path(),
+                    &restarted.credential_instance_id,
+                    "stream",
+                    &restarted.origin,
+                )
+                .unwrap();
+                assert_eq!(
+                    restarted.opener.generation(),
+                    u64::from(persisted.is_some())
+                );
+                restarted.shutdown().await.unwrap();
+                peer.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_mismatch_retries_without_manual_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let credential = peer.credential();
+        persist_observer(
+            temp.path(),
+            &ObserverState {
+                credential_instance_id: credential.instance_id.clone(),
+                ..observer("/ingest")
+            },
+        )
+        .unwrap();
+        fs::write(temp.path().join("config.json"), r#"{"stream":"other"}"#).unwrap();
+        let session = start_private_link_session(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+        assert_eq!(session.opener.generation(), 0);
+        assert!(temp.path().join(OBSERVER_FILENAME).exists());
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn registration_commit_never_overwrites_external_referent() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let credential = peer.credential();
+        let state = ObserverState {
+            credential_instance_id: credential.instance_id.clone(),
+            ..observer("/ingest")
+        };
+        let session = start_private_link_session(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+        let referent = temp.path().join("external.json");
+        fs::write(&referent, "external").unwrap();
+        symlink(&referent, temp.path().join(OBSERVER_FILENAME)).unwrap();
+        assert!(matches!(
+            publish_observer_registration(&session, &state),
+            Err(PrivateStateError::InvalidTarget {
+                kind: PrivateTargetKind::Observer
+            })
+        ));
+        assert_eq!(fs::read_to_string(referent).unwrap(), "external");
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restart_never_mixes_old_and_new_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let credential = peer.credential();
+        let mut state = observer("/ingest");
+        state.credential_instance_id = credential.instance_id.clone();
+        state.name = "old".into();
+        persist_observer(temp.path(), &state).unwrap();
+        fs::write(temp.path().join("config.json"), r#"{"stream":"new"}"#).unwrap();
+        let session = start_private_link_session(temp.path(), credential, "ignored")
+            .await
+            .unwrap();
+        assert_eq!(session.expected_name, "new");
+        assert_eq!(session.opener.generation(), 0);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_repair_preserves_usable_prior_credential() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, b"{}".to_vec());
+        let (_temp, session) = start_peer_session(&peer).await;
+        let prior_generation = session.opener.generation();
+        let next = ObserverState {
+            credential_instance_id: session.credential_instance_id.clone(),
+            key: "next-key".into(),
+            ..observer("/next")
+        };
+        assert!(
+            session
+                .publish_observer_with_faults(
+                    &next,
+                    &NoWriteFault,
+                    &FailStage(DurableWriteStage::Write),
+                )
+                .is_err()
+        );
+        assert_eq!(session.opener.generation(), prior_generation);
+        session
+            .request(Method::GET, "/uses-prior")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_registered_auth(&peer.requests()[0], "observer-key");
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn successful_repair_invalidates_prior_instance_observer() {
+        let temp = tempfile::tempdir().unwrap();
+        persist_observer(temp.path(), &observer("/ingest")).unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let mut credential = peer.credential();
+        credential.instance_id = "replacement-instance".into();
+        let session = start_private_link_session(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+        assert_eq!(session.opener.generation(), 0);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn repaired_instance_registers_before_first_data_request() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, b"{}".to_vec());
+        let temp = tempfile::tempdir().unwrap();
+        let credential = peer.credential();
+        let state = ObserverState {
+            credential_instance_id: credential.instance_id.clone(),
+            ..observer("/ingest")
+        };
+        let session = start_private_link_session(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+        publish_observer_registration(&session, &state).unwrap();
+        session
+            .request(Method::GET, "/first-data")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_registered_auth(&peer.requests()[0], "observer-key");
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -1859,6 +3100,8 @@ mod tests {
                 stages: stages.clone(),
                 fail: None,
             }),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
         );
         hook("refreshed-token", 456);
         assert_eq!(
@@ -1874,6 +3117,28 @@ mod tests {
         let loaded = load_credential(temp.path()).unwrap().unwrap();
         assert_eq!(loaded.device_token.as_deref(), Some("refreshed-token"));
         assert_eq!(loaded.device_token_expires_at, Some(456));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_direct_and_relay_dials_wait_for_blocking_token_hook() {
+        let (_stages, completion_order) = blocking_admission_observation().await;
+        assert_eq!(completion_order, ["relay", "direct"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_carrier_escapes_before_token_directory_sync() {
+        let (stages, completion_order) = blocking_admission_observation().await;
+        assert_eq!(
+            stages,
+            [
+                DurableWriteStage::Create,
+                DurableWriteStage::Write,
+                DurableWriteStage::Fsync,
+                DurableWriteStage::Rename,
+                DurableWriteStage::DirSync,
+            ]
+        );
+        assert_eq!(completion_order, ["relay", "direct"]);
     }
 
     async fn assert_token_failure(stage: DurableWriteStage) {
@@ -1895,6 +3160,11 @@ mod tests {
         .await
         .unwrap();
         session.token_persistence.persist("failed-refresh", 999);
+        let facts = session.facts.snapshot();
+        assert!(facts.token_persistence_failure);
+        assert!(facts.transport_unavailable);
+        assert!(session.opener.dial_carrier().await.is_err());
+        assert_eq!(peer.accepted_carriers(), 0);
         assert_eq!(
             fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
             prior_bytes
@@ -1907,12 +3177,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_write_failure_is_latched_and_preserves_prior_credential() {
+    async fn token_write_failure_drops_carrier_and_latches() {
         assert_token_failure(DurableWriteStage::Write).await;
     }
 
     #[tokio::test]
-    async fn token_fsync_failure_is_latched_and_preserves_prior_credential() {
+    async fn token_fsync_failure_drops_carrier_and_latches() {
         assert_token_failure(DurableWriteStage::Fsync).await;
     }
 
@@ -1979,7 +3249,7 @@ mod tests {
     }
 
     #[test]
-    fn session_implements_no_debug_clone_or_serialize_traits() {
+    fn private_link_types_enforce_authority_and_ownership_boundaries() {
         use core::marker::PhantomData;
 
         struct DebugProbe<T>(PhantomData<T>);
@@ -2027,5 +3297,11 @@ mod tests {
         assert!(!DebugProbe::<PrivateLinkSession>(PhantomData).probe());
         assert!(!CloneProbe::<PrivateLinkSession>(PhantomData).probe());
         assert!(!SerializeProbe::<PrivateLinkSession>(PhantomData).probe());
+        assert!(!DebugProbe::<PrivateLinkCapability>(PhantomData).probe());
+        assert!(CloneProbe::<PrivateLinkCapability>(PhantomData).probe());
+        assert!(!SerializeProbe::<PrivateLinkCapability>(PhantomData).probe());
+        assert!(!DebugProbe::<PrivateLinkOwner>(PhantomData).probe());
+        assert!(!CloneProbe::<PrivateLinkOwner>(PhantomData).probe());
+        assert!(!SerializeProbe::<PrivateLinkOwner>(PhantomData).probe());
     }
 }

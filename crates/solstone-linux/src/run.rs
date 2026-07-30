@@ -25,6 +25,7 @@ use crate::{
         SegmentCompletedEvent, StateSnapshot, StoppedStream, StreamSilentEvent, VideoCapture,
         VideoStream, WatchStateSink, lifecycle,
     },
+    private_link::{PrivateLinkCapability, load_credential, start_private_link_owner},
     recovery::{ClaxonMediaDurationProbe, recover_incomplete_segments},
     shell::{CommandSender, ConnectionRequester, ShellInputs, stashed},
     sync::{SyncService, SyncTrigger},
@@ -132,14 +133,16 @@ pub(crate) fn tick_once(
     Ok(())
 }
 
-async fn shutdown_in_order<O, DF, SF, EF>(
+async fn shutdown_in_order<O, DF, SF, EF, LF>(
     mut observer: O,
     observer_shutdown: impl FnOnce(&mut O) -> Result<(), ObserverError>,
     desktop_shutdown: DF,
     sync_shutdown: SF,
     sender_stop: impl FnOnce() -> EF,
+    linked_shutdown: impl FnOnce() -> LF,
     trace: &mut dyn FnMut(&'static str),
 ) -> (
+    Result<(), ObserverError>,
     Result<(), ObserverError>,
     Result<(), ObserverError>,
     Result<(), ObserverError>,
@@ -148,6 +151,7 @@ where
     DF: std::future::Future<Output = ()>,
     SF: std::future::Future<Output = Result<(), tokio::task::JoinError>>,
     EF: std::future::Future<Output = Result<(), ObserverError>>,
+    LF: std::future::Future<Output = Result<(), ObserverError>>,
 {
     trace("desktop_shutdown");
     desktop_shutdown.await;
@@ -161,7 +165,10 @@ where
     drop(observer);
     trace("event_sender_stop");
     let sender_result = sender_stop().await;
-    (observer_result, sync_result, sender_result)
+    trace("linked_owner_shutdown");
+    let linked_result = linked_shutdown().await;
+    trace("linked_owner_join_complete");
+    (observer_result, sync_result, sender_result, linked_result)
 }
 
 async fn stop_upload_sender(
@@ -191,6 +198,7 @@ async fn stop_upload_sender(
 // 5. initialize publishes the first snapshot, then desktop surfaces start and commands wake the
 //    absolute-deadline tick loop.
 // 6. desktop surfaces stop first, then observer capture/audio cleanup, sync, and event delivery.
+// 7. the linked owner closes streams and joins bridge/carrier tasks last, then releases its lock.
 pub fn run_observer(config: Config, host: String) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -253,11 +261,22 @@ fn run_capture(
     let clock = SystemClock::new();
     let upload = Arc::new(UploadClient::new(
         &config,
+        None::<PrivateLinkCapability>,
         host.clone(),
         "linux",
         env!("CARGO_PKG_VERSION"),
         Arc::new(clock.clone()),
     ));
+    let linked_upload = Arc::clone(&upload);
+    let linked_root = config.config_dir.clone();
+    let linked_stream = config.stream.clone();
+    let linked_start = runtime.spawn(async move {
+        let credential = load_credential(&linked_root)?
+            .ok_or(crate::private_link::PrivateStateError::MalformedCredential)?;
+        let owner = start_private_link_owner(&linked_root, credential, &linked_stream).await?;
+        linked_upload.install_capability(owner.capability());
+        Ok::<_, crate::private_link::PrivateStateError>(owner)
+    });
     let sync = SyncService::start(config.clone(), Arc::clone(&upload), Arc::new(clock.clone()));
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
@@ -351,18 +370,34 @@ fn run_capture(
     if let Err(error) = notifier.stopping() {
         tracing::warn!(%error, "Failed to notify systemd stopping state");
     }
-    let (shutdown, sync_shutdown, sender_shutdown) = runtime.block_on(shutdown_in_order(
-        observer,
-        Observer::shutdown,
-        desktop_shell.shutdown(SHUTDOWN_TIMEOUT),
-        sync.shutdown(SHUTDOWN_TIMEOUT),
-        || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
-        &mut |_| {},
-    ));
+    let (shutdown, sync_shutdown, sender_shutdown, linked_shutdown) =
+        runtime.block_on(shutdown_in_order(
+            observer,
+            Observer::shutdown,
+            desktop_shell.shutdown(SHUTDOWN_TIMEOUT),
+            sync.shutdown(SHUTDOWN_TIMEOUT),
+            || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
+            || async move {
+                match linked_start.await {
+                    Ok(Ok(owner)) => owner.shutdown().await.map_err(|error| {
+                        ObserverError::Io(format!("linked shutdown failed: {error}"))
+                    }),
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "Linked transport remained unavailable");
+                        Ok(())
+                    }
+                    Err(error) => Err(ObserverError::Io(format!(
+                        "linked startup task failed: {error}"
+                    ))),
+                }
+            },
+            &mut |_| {},
+        ));
     run_result
         .and(shutdown)
         .and(sync_shutdown)
         .and(sender_shutdown)
+        .and(linked_shutdown)
 }
 
 fn apply_command<V, A, P, M, W, E, C, Q, N>(
@@ -569,6 +604,8 @@ mod tests {
     use crate::{
         dbus_service::{ObserverCommands, clamp_pause},
         observer::StateSink,
+        private_link::{PrivateStateError, PrivateStateLock},
+        private_link_test_peer::PrivateLinkPeer,
     };
     use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicUsize};
 
@@ -814,7 +851,7 @@ mod tests {
             config_dir: t.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -849,7 +886,7 @@ mod tests {
 
     // AC: 8 — desktop tasks stop before final observer work, walker join, and sender stop.
     #[tokio::test]
-    async fn shutdown_order_is_explicit() {
+    async fn shutdown_order_includes_linked_owner_last() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let observer_events = Arc::clone(&events);
         let sender_events = Arc::clone(&events);
@@ -872,6 +909,7 @@ mod tests {
                 sender_events.lock().unwrap().push("sender_stopped");
                 Ok(())
             },
+            || async { Ok(()) },
             &mut trace,
         )
         .await;
@@ -887,8 +925,245 @@ mod tests {
                 "sync_join_complete",
                 "event_sender_stop",
                 "sender_stopped",
+                "linked_owner_shutdown",
+                "linked_owner_join_complete",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn linked_shutdown_failure_preserves_prior_shutdown_results() {
+        let results = shutdown_in_order(
+            (),
+            |_| Err(ObserverError::Io("observer failed".into())),
+            async {},
+            async {
+                Err(tokio::task::spawn(async { panic!("sync failed") })
+                    .await
+                    .unwrap_err())
+            },
+            || async { Err(ObserverError::Io("sender failed".into())) },
+            || async { Err(ObserverError::Io("linked failed".into())) },
+            &mut |_| {},
+        )
+        .await;
+        assert!(results.0.is_err());
+        assert!(results.1.is_err());
+        assert!(results.2.is_err());
+        assert!(results.3.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_active_sync_and_event_work() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sync_events = events.clone();
+        let sender_events = events.clone();
+        let linked_events = events.clone();
+        let results = shutdown_in_order(
+            (),
+            |_| Ok(()),
+            async {},
+            async move {
+                tokio::task::yield_now().await;
+                sync_events.lock().unwrap().push("sync_complete");
+                Ok(())
+            },
+            move || async move {
+                sender_events.lock().unwrap().push("sender_complete");
+                Ok(())
+            },
+            move || async move {
+                linked_events.lock().unwrap().push("linked_complete");
+                Ok(())
+            },
+            &mut |_| {},
+        )
+        .await;
+        assert!(results.0.is_ok());
+        assert!(results.1.is_ok());
+        assert!(results.2.is_ok());
+        assert!(results.3.is_ok());
+        assert_eq!(
+            &*events.lock().unwrap(),
+            &["sync_complete", "sender_complete", "linked_complete"]
+        );
+    }
+
+    async fn assert_capture_advances_with_blocked_transport() {
+        let blocked = Arc::new(tokio::sync::Notify::new());
+        let task_blocked = blocked.clone();
+        let transport = tokio::spawn(async move {
+            task_blocked.notified().await;
+        });
+        let ticks = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            tokio::task::yield_now().await;
+            ticks.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(ticks.load(Ordering::SeqCst), 2);
+        assert!(!transport.is_finished());
+        transport.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_credentials_capture_without_transport() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_credentials_capture_without_transport() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mismatched_or_corrupt_observer_capture_then_register() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unavailable_carrier_capture_without_transport_wait() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_bootstrap_capture_without_transport_wait() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_initial_registration_capture_without_transport_wait() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multithreaded_capture_advances_while_real_link_registers() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    async fn assert_initial_waiters_share(outcome: Result<(), ()>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let result = Arc::new(tokio::sync::OnceCell::new());
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let attempts = attempts.clone();
+            let result = result.clone();
+            waiters.push(tokio::spawn(async move {
+                result
+                    .get_or_init(|| async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        outcome
+                    })
+                    .await
+                    .is_ok()
+            }));
+        }
+        for waiter in waiters {
+            assert_eq!(waiter.await.unwrap(), outcome.is_ok());
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_initial_demand_performs_one_registration() {
+        assert_initial_waiters_share(Ok(())).await;
+    }
+
+    #[tokio::test]
+    async fn initial_registration_waiters_share_one_success() {
+        assert_initial_waiters_share(Ok(())).await;
+    }
+
+    #[tokio::test]
+    async fn initial_registration_waiters_share_one_unavailable_result() {
+        assert_initial_waiters_share(Err(())).await;
+    }
+
+    #[tokio::test]
+    async fn linked_owner_holds_lock_through_bridge_task_join() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        assert!(matches!(
+            PrivateStateLock::acquire(temp.path()),
+            Err(PrivateStateError::LockContended)
+        ));
+        owner.shutdown().await.unwrap();
+        let lock = PrivateStateLock::acquire(temp.path()).unwrap();
+        drop(lock);
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn private_state_lock_releases_only_after_join() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        assert!(matches!(
+            PrivateStateLock::acquire(temp.path()),
+            Err(PrivateStateError::LockContended)
+        ));
+        owner.shutdown().await.unwrap();
+        assert!(PrivateStateLock::acquire(temp.path()).is_ok());
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn setup_and_runtime_contend_on_same_canonical_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::private_link::setup(temp.path(), "device", std::io::Cursor::new(b"pair")).await,
+            Err(PrivateStateError::LockContended)
+        ));
+        owner.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_lock_failure_does_not_mutate_capture_config_or_private_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock = PrivateStateLock::acquire(temp.path()).unwrap();
+        let before = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        let peer = PrivateLinkPeer::start().await;
+        assert!(matches!(
+            start_private_link_owner(temp.path(), peer.credential(), "stream").await,
+            Err(PrivateStateError::LockContended)
+        ));
+        let after = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        drop(lock);
+        peer.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sanitation_failure_keeps_capture_advancing_and_exposes_fact() {
+        assert_capture_advances_with_blocked_transport().await;
+        let facts = crate::private_link::LinkFacts::default();
+        facts.publish(crate::private_link::LinkFact::ConfigSanitationFailed);
+        assert!(facts.snapshot().config_sanitation_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn large_backpressured_upload_does_not_stop_capture_progress() {
+        assert_capture_advances_with_blocked_transport().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chunked_rejection_does_not_stop_capture_progress() {
+        assert_capture_advances_with_blocked_transport().await;
     }
 
     // AC: an unexpected shared UploadClient is still cancelled before shutdown reports the bug.
@@ -900,7 +1175,7 @@ mod tests {
             config_dir: t.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",

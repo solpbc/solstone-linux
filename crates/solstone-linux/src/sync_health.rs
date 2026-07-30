@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use crate::private_link::LinkFactState;
 use chrono::{DateTime, Local};
 use serde_json::{Map, Value, json};
 use std::{
@@ -63,6 +64,8 @@ pub struct SyncFacts {
     pub pending_confirmed: Option<i64>,
     pub in_progress: bool,
     pub progress: String,
+    #[doc(hidden)]
+    pub(crate) link: Option<LinkFactState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -301,7 +304,15 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
             // pending_confirmed in record_failure. This depends on POST propagation retaining
             // Some(401); losing that code would conservatively repaint the failure Revoked.
             HealthState::Unknown
-        } else if facts.pending_confirmed == Some(0) {
+        } else if facts.pending_confirmed == Some(0)
+            && facts.link.as_ref().is_none_or(|link| {
+                link.carrier_proven
+                    && link.observer_registered
+                    && !link.transport_unavailable
+                    && !link.terminal_revocation
+                    && !link.token_persistence_failure
+            })
+        {
             HealthState::Connected
         } else if facts.last_error_class == Some(ErrorType::Transient) {
             HealthState::Offline
@@ -385,6 +396,7 @@ pub fn load_facts(state_dir: &Path) -> SyncFacts {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
+        link: None,
     }
 }
 
@@ -413,6 +425,7 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::config::DEFAULT_SYNC_STALE_THRESHOLD;
+    use crate::private_link::LinkFactState;
 
     // tests/test_sync_health.py::test_empty_facts_derive_unknown
     #[test]
@@ -425,6 +438,40 @@ mod tests {
         assert_eq!(health.state, HealthState::Unknown);
         assert_eq!(health.sni_status, "Active");
         assert_eq!(health.pending_display, "pending unconfirmed");
+    }
+
+    #[test]
+    fn listener_ready_alone_never_reads_connected() {
+        let facts = SyncFacts {
+            pending_confirmed: Some(0),
+            link: Some(LinkFactState {
+                listener_ready: true,
+                ..LinkFactState::default()
+            }),
+            ..SyncFacts::default()
+        };
+        assert_eq!(
+            derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64).state,
+            HealthState::Unknown
+        );
+    }
+
+    #[test]
+    fn connected_requires_carrier_and_registered_observer_facts() {
+        let facts = SyncFacts {
+            pending_confirmed: Some(0),
+            link: Some(LinkFactState {
+                listener_ready: true,
+                carrier_proven: true,
+                observer_registered: true,
+                ..LinkFactState::default()
+            }),
+            ..SyncFacts::default()
+        };
+        assert_eq!(
+            derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64).state,
+            HealthState::Connected
+        );
     }
 
     // tests/test_sync_health.py::test_error_precedence_states
@@ -548,6 +595,7 @@ mod tests {
             pending_confirmed: None,
             in_progress: true,
             progress: "uploading 120000_300".to_owned(),
+            link: None,
         };
         save_facts(temp.path(), &facts).unwrap();
         assert_eq!(load_facts(temp.path()), facts);

@@ -5,14 +5,11 @@ use crate::{
     capture_stats::{
         compute_quarantine_stats, compute_status_capture_stats, format_quarantine_line,
     },
-    config::{
-        Config, ConfigPaths, DEFAULT_SERVER_URL, load_config, save_config,
-        save_config_with_identity,
-    },
+    config::{Config, ConfigPaths, load_config, save_config},
+    private_link::{PrivateStateError, setup_with_stream},
     session_env::{self, Output, Runner},
     streams::stream_name,
     sync_health::{derive_health, load_facts},
-    upload::{UploadClient, key_prefix},
 };
 use clap::{Parser, Subcommand};
 use std::{
@@ -47,14 +44,8 @@ enum Commands {
     },
     #[command(about = "Interactive configuration")]
     Setup {
-        #[arg(long, help = "Journal URL (skips prompt)")]
-        server_url: Option<String>,
-        #[arg(long, help = "Pre-issued registration key; skips journal registration")]
-        token: Option<String>,
         #[arg(long, help = "Stream name (defaults to hostname-derived)")]
         stream_name: Option<String>,
-        #[arg(long, help = "Fail instead of prompting for missing values")]
-        non_interactive: bool,
     },
     #[command(about = "Verify install prerequisites")]
     Doctor,
@@ -201,21 +192,10 @@ pub fn run() -> i32 {
     setup_logging(args.verbose);
     match effective_command(args.command) {
         Commands::Run { interval } => cmd_run(interval),
-        Commands::Setup {
-            server_url,
-            token,
-            stream_name,
-            non_interactive,
-        } => cmd_setup(
-            SetupOptions {
-                server_url,
-                token,
-                stream_name,
-                non_interactive,
-            },
+        Commands::Setup { stream_name } => cmd_setup(
+            SetupOptions { stream_name },
             ConfigPaths::default(),
-            env::var("SOLSTONE_TOKEN").ok(),
-            &mut RealRegistrar,
+            &mut io::stdin().lock(),
             &mut io::stdout(),
             &mut io::stderr(),
         ),
@@ -243,33 +223,7 @@ pub fn run() -> i32 {
 }
 
 struct SetupOptions {
-    server_url: Option<String>,
-    token: Option<String>,
     stream_name: Option<String>,
-    non_interactive: bool,
-}
-
-trait Registrar {
-    fn register(&mut self, config: &mut Config, host: &str) -> Result<bool, String>;
-}
-
-struct RealRegistrar;
-impl Registrar for RealRegistrar {
-    fn register(&mut self, config: &mut Config, host: &str) -> Result<bool, String> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| error.to_string())?;
-        let _guard = runtime.enter();
-        let client = UploadClient::new(
-            config,
-            host,
-            "linux",
-            env!("CARGO_PKG_VERSION"),
-            std::sync::Arc::new(crate::run::SystemClock::new()),
-        );
-        Ok(runtime.block_on(client.ensure_registered(config)))
-    }
 }
 
 fn write_line(output: &mut dyn Write, value: impl std::fmt::Display) -> io::Result<()> {
@@ -279,121 +233,70 @@ fn write_line(output: &mut dyn Write, value: impl std::fmt::Display) -> io::Resu
 fn cmd_setup(
     options: SetupOptions,
     paths: ConfigPaths,
-    env_token: Option<String>,
-    registrar: &mut dyn Registrar,
+    input: &mut dyn Read,
     output: &mut dyn Write,
     errors: &mut dyn Write,
 ) -> i32 {
-    // Setup deliberately takes no PromptIo; only settings can reach stdin by construction.
-    let cli_token = options.token.filter(|value| !value.is_empty());
-    let env_token = env_token.filter(|value| !value.is_empty());
-    let token = cli_token.clone().or(env_token);
-    if cli_token.is_some()
-        && write_line(
-            errors,
-            "warning: --token on the command line may be visible in shell history and /proc on shared computers",
-        )
-        .is_err()
+    let host = hostname().unwrap_or_else(|_| "linux".into());
+    let stream = options
+        .stream_name
+        .filter(|value| !value.is_empty())
+        .or_else(|| stream_name(Some(&host), None, None).ok());
+    let config_root = paths
+        .config_dir
+        .unwrap_or_else(|| Config::default().config_dir);
+    if write_line(
+        output,
+        "Paste the pair link from your journal, then press Enter:",
+    )
+    .is_err()
     {
         return 1;
     }
-    let loaded = load_config(paths);
-    let mut config = loaded.config;
-    config.server_url = options
-        .server_url
-        .filter(|value| !value.is_empty())
-        .or_else(|| (!config.server_url.is_empty()).then(|| config.server_url.clone()))
-        .unwrap_or_else(|| DEFAULT_SERVER_URL.into());
-    if let Some(stream) = options.stream_name.filter(|value| !value.is_empty()) {
-        config.stream = stream;
-    } else if config.stream.is_empty() {
-        let host = match hostname() {
-            Ok(host) => host,
-            Err(error) => {
-                let _ = write_line(errors, format!("Error deriving stream name: {error}"));
-                return 1;
-            }
-        };
-        match stream_name(Some(&host), None, None) {
-            Ok(stream) => config.stream = stream,
-            Err(error) => {
-                let _ = write_line(errors, format!("Error deriving stream name: {error}"));
-                return 1;
-            }
-        }
-    }
-    if let Err(error) = config.ensure_dirs() {
-        let _ = write_line(errors, format!("Error saving config: {error}"));
-        return 1;
-    }
-    if let Some(token) = token {
-        config.key = token;
-        // The one-line API swap is unavoidable after save_config became identity-preserving:
-        // setup still performs its original single whole-config write when given a token.
-        if let Err(error) = save_config_with_identity(&config) {
-            let _ = write_line(errors, format!("Error saving config: {error}"));
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = write_line(errors, format!("Setup failed: {error}"));
             return 1;
         }
-        let result = write_line(output, format!("Journal: {}", config.server_url))
-            .and_then(|()| write_line(output, format!("Stream: {}", config.stream)))
-            .and_then(|()| write_line(output, "Using provided token; skipping registration."))
-            .and_then(|()| setup_footer(output, &config));
-        return if result.is_ok() { 0 } else { 1 };
-    }
-    if let Err(error) = save_config(&config) {
-        let _ = write_line(errors, format!("Error saving config: {error}"));
-        return 1;
-    }
-    let host = hostname().unwrap_or_else(|_| "linux".into());
-    let result = if config.key.is_empty() {
-        if write_line(output, "Registering with your journal...").is_err() {
-            return 1;
-        }
-        match registrar.register(&mut config, &host) {
-            Ok(true) => write_line(
-                output,
-                format!("Registered (key: {}...)", key_prefix(&config.key)),
-            )
-            .and_then(|()| write_line(output, format!("Stream: {}", config.stream))),
-            Ok(false) => {
-                let result = write_line(
-                    output,
-                    "Warning: registration failed. Run setup again when your journal is available.",
-                );
-                if options.non_interactive {
-                    return 1;
-                }
-                result
-            }
-            Err(error) => {
-                let _ = write_line(errors, format!("Registration failed: {error}"));
-                return 1;
-            }
-        }
-    } else {
-        write_line(
-            output,
-            format!("Already registered (key: {}...)", key_prefix(&config.key)),
-        )
-        .and_then(|()| write_line(output, format!("Stream: {}", config.stream)))
     };
-    let result = result.and_then(|()| setup_footer(output, &config));
-    if result.is_ok() { 0 } else { 1 }
-}
-
-fn setup_footer(output: &mut dyn Write, config: &Config) -> io::Result<()> {
-    write_line(
-        output,
-        format!("\nConfig saved to {}", config.config_path().display()),
-    )?;
-    write_line(
-        output,
-        format!("segments are kept in {}", config.captures_dir().display()),
-    )?;
-    write_line(
-        output,
-        "\nRun 'solstone-linux run' to start, or 'solstone-linux install-service' for systemd.",
-    )
+    match runtime.block_on(setup_with_stream(
+        &config_root,
+        &host,
+        stream.as_deref(),
+        input,
+    )) {
+        Ok(()) => {
+            let _ = write_line(output, "sol can now connect to your journal.");
+            0
+        }
+        Err(PrivateStateError::PairInputInvalid) => {
+            let _ = write_line(errors, "Setup failed: the pair link was not valid.");
+            1
+        }
+        Err(PrivateStateError::PairingFailed) => {
+            let _ = write_line(
+                errors,
+                "Setup failed: sol could not connect to your journal.",
+            );
+            1
+        }
+        Err(error @ (PrivateStateError::Io { .. } | PrivateStateError::InvalidTarget { .. })) => {
+            let _ = write_line(
+                errors,
+                "Setup failed before pairing because sol could not safely update its config.",
+            );
+            let _ = write_line(errors, format!("Config update error: {error}"));
+            1
+        }
+        Err(error) => {
+            let _ = write_line(errors, format!("Setup failed: {error}"));
+            1
+        }
+    }
 }
 
 trait PromptIo {
@@ -500,19 +403,10 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
     }
 }
 
+// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
 fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -> i32 {
     let loaded = load_config(paths);
     let config = loaded.config;
-    let journal = if config.server_url.is_empty() {
-        "(not configured)"
-    } else {
-        &config.server_url
-    };
-    let key = if config.key.is_empty() {
-        "(not registered)".into()
-    } else {
-        format!("{}...", key_prefix(&config.key))
-    };
     let stream = if config.stream.is_empty() {
         "(not set)"
     } else {
@@ -523,8 +417,7 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
             output,
             format!("Config: {}", config.config_path().display()),
         )?;
-        write_line(output, format!("Journal: {journal}"))?;
-        write_line(output, format!("Key:    {key}"))?;
+        write_line(output, "Journal link: managed privately")?;
         write_line(output, format!("Stream: {stream}"))?;
         write_line(output, "")?;
         let captures = config.captures_dir();
@@ -629,12 +522,16 @@ fn cmd_run(interval: Option<i64>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::save_identity, private_link_test_peer::PrivateLinkPeer, test_support::MockServer,
-    };
+    use crate::upload::key_prefix;
     use clap::CommandFactory;
-    use serde_json::json;
-    use std::{cell::Cell, path::Path};
+    use std::{
+        cell::Cell,
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     struct FakeRunner {
         output: io::Result<Output>,
@@ -793,408 +690,172 @@ mod tests {
         }
     }
 
-    struct FakeRegistrar {
-        result: bool,
-        calls: usize,
-    }
-    impl Registrar for FakeRegistrar {
-        fn register(&mut self, config: &mut Config, _: &str) -> Result<bool, String> {
-            self.calls += 1;
-            if self.result {
-                config.key = "newkey00".into();
-                config.stream = "locked-stream".into();
-                save_identity(
-                    &ConfigPaths {
-                        base_dir: Some(config.base_dir.clone()),
-                        config_dir: Some(config.config_dir.clone()),
-                    },
-                    &config.key,
-                    &config.stream,
-                )
-                .unwrap();
-            }
-            Ok(self.result)
+    #[test]
+    fn setup_help_exposes_only_stream_name() {
+        let command = Args::command();
+        let setup = command.find_subcommand("setup").unwrap();
+        let arguments = setup
+            .get_arguments()
+            .map(|argument| argument.get_id().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(arguments, vec!["stream_name"]);
+        for removed in ["--server-url", "--token", "--non-interactive"] {
+            assert!(Args::try_parse_from(["solstone-linux", "setup", removed]).is_err());
         }
     }
 
-    fn setup_options(token: Option<&str>, non_interactive: bool) -> SetupOptions {
-        SetupOptions {
-            server_url: Some("https://x".into()),
-            token: token.map(str::to_owned),
-            stream_name: Some("host-a".into()),
-            non_interactive,
-        }
-    }
-
-    // tests/test_cli.py::test_cmd_setup_non_interactive_happy_path
     #[test]
-    fn setup_token_happy_path() {
-        let t = tempfile::tempdir().unwrap();
-        let mut registrar = FakeRegistrar {
-            result: true,
-            calls: 0,
-        };
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(
-            cmd_setup(
-                setup_options(Some("t"), true),
-                paths(&t),
-                None,
-                &mut registrar,
-                &mut out,
-                &mut err
-            ),
-            0
-        );
-        let config = load_config(paths(&t)).config;
-        assert_eq!(
-            (
-                config.server_url.as_str(),
-                config.key.as_str(),
-                config.stream.as_str()
-            ),
-            ("https://x", "t", "host-a")
-        );
-        assert_eq!(registrar.calls, 0);
-    }
-
-    // tests/test_cli.py::test_cmd_setup_non_interactive_defaults_server_url
-    #[test]
-    fn setup_defaults_server_url() {
-        let t = tempfile::tempdir().unwrap();
-        let mut registrar = FakeRegistrar {
-            result: true,
-            calls: 0,
-        };
-        let mut options = setup_options(None, true);
-        options.server_url = None;
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(
-            cmd_setup(options, paths(&t), None, &mut registrar, &mut out, &mut err),
-            0
-        );
-        assert_eq!(load_config(paths(&t)).config.server_url, DEFAULT_SERVER_URL);
-        assert!(err.is_empty());
-    }
-
-    // tests/test_cli.py::test_cmd_setup_server_url_override_persists
-    // tests/test_cli.py::test_cmd_setup_preserves_existing_server_url
-    #[test]
-    fn setup_url_precedence() {
-        let t = tempfile::tempdir().unwrap();
-        let mut config = load_config(paths(&t)).config;
-        config.server_url = "https://saved.example".into();
-        save_config(&config).unwrap();
-        let mut registrar = FakeRegistrar {
-            result: true,
-            calls: 0,
-        };
-        let mut options = setup_options(Some("token"), true);
-        options.server_url = None;
-        assert_eq!(
-            cmd_setup(
-                options,
-                paths(&t),
-                None,
-                &mut registrar,
-                &mut Vec::new(),
-                &mut Vec::new()
-            ),
-            0
-        );
-        assert_eq!(
-            load_config(paths(&t)).config.server_url,
-            "https://saved.example"
-        );
-        let mut options = setup_options(Some("token"), true);
-        options.server_url = Some("http://192.168.1.50:5015".into());
-        assert_eq!(
-            cmd_setup(
-                options,
-                paths(&t),
-                None,
-                &mut registrar,
-                &mut Vec::new(),
-                &mut Vec::new()
-            ),
-            0
-        );
-        assert_eq!(
-            load_config(paths(&t)).config.server_url,
-            "http://192.168.1.50:5015"
-        );
-    }
-
-    // tests/test_cli.py::test_cmd_setup_flagged_interactive_empty_input_defaults
-    // tests/test_cli.py::test_cmd_setup_interactive_legacy_empty_input_defaults
-    #[test]
-    fn setup_with_or_without_stream_flag_uses_default_url() {
-        for stream in [Some("host-x"), None] {
-            let t = tempfile::tempdir().unwrap();
-            let mut registrar = FakeRegistrar {
-                result: true,
-                calls: 0,
-            };
-            let options = SetupOptions {
-                server_url: None,
-                token: None,
-                stream_name: stream.map(str::to_owned),
-                non_interactive: false,
-            };
-            assert_eq!(
-                cmd_setup(
-                    options,
-                    paths(&t),
-                    None,
-                    &mut registrar,
-                    &mut Vec::new(),
-                    &mut Vec::new()
-                ),
-                0
-            );
-            assert_eq!(load_config(paths(&t)).config.server_url, DEFAULT_SERVER_URL);
-        }
-    }
-
-    // tests/test_cli.py::test_cmd_setup_env_token_fallback
-    // tests/test_cli.py::test_cmd_setup_cli_token_beats_env
-    #[test]
-    fn setup_token_precedence_and_warning() {
-        let t = tempfile::tempdir().unwrap();
-        let mut registrar = FakeRegistrar {
-            result: true,
-            calls: 0,
-        };
-        let mut err = Vec::new();
-        assert_eq!(
-            cmd_setup(
-                setup_options(None, true),
-                paths(&t),
-                Some("envtok".into()),
-                &mut registrar,
-                &mut Vec::new(),
-                &mut err
-            ),
-            0
-        );
-        assert!(err.is_empty());
-        assert_eq!(load_config(paths(&t)).config.key, "envtok");
-        assert_eq!(
-            cmd_setup(
-                setup_options(Some("clitok"), true),
-                paths(&t),
-                Some("envtok".into()),
-                &mut registrar,
-                &mut Vec::new(),
-                &mut err
-            ),
-            0
-        );
-        assert_eq!(load_config(paths(&t)).config.key, "clitok");
-        assert!(String::from_utf8(err).unwrap().contains("shared computers"));
-    }
-
-    // AC: an empty SOLSTONE_TOKEN is absent and registration still runs.
-    #[test]
-    fn setup_empty_env_token_registers() {
-        let t = tempfile::tempdir().unwrap();
-        let mut registrar = FakeRegistrar {
-            result: true,
-            calls: 0,
-        };
-        let mut output = Vec::new();
-        assert_eq!(
-            cmd_setup(
-                setup_options(None, true),
-                paths(&t),
-                Some(String::new()),
-                &mut registrar,
-                &mut output,
-                &mut Vec::new()
-            ),
-            0
-        );
-        assert_eq!(registrar.calls, 1);
-        assert_eq!(load_config(paths(&t)).config.key, "newkey00");
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Registering with your journal..."));
-        assert!(!output.contains("Using provided token"));
-    }
-
-    // tests/test_cli.py::test_cmd_setup_registers_via_http_when_no_token
-    #[test]
-    fn setup_registers_without_token() {
-        let t = tempfile::tempdir().unwrap();
-        let mut registrar = FakeRegistrar {
-            result: true,
-            calls: 0,
-        };
-        assert_eq!(
-            cmd_setup(
-                setup_options(None, true),
-                paths(&t),
-                None,
-                &mut registrar,
-                &mut Vec::new(),
-                &mut Vec::new()
-            ),
-            0
-        );
-        let config = load_config(paths(&t)).config;
-        assert_eq!(
-            (registrar.calls, config.key.as_str(), config.stream.as_str()),
-            (1, "newkey00", "locked-stream")
-        );
-    }
-
-    // AC: an existing key skips registration and prints the parity line.
-    #[test]
-    fn setup_already_registered_short_circuits() {
-        let t = tempfile::tempdir().unwrap();
-        let mut config = load_config(paths(&t)).config;
-        config.server_url = "https://saved.example".into();
-        config.key = "abcdefghijk".into();
-        config.stream = "host-a".into();
-        save_config(&config).unwrap();
-        let mut registrar = FakeRegistrar {
-            result: true,
-            calls: 0,
-        };
-        let options = SetupOptions {
-            server_url: None,
-            token: None,
-            stream_name: None,
-            non_interactive: false,
-        };
-        let mut out = Vec::new();
-        assert_eq!(
-            cmd_setup(
-                options,
-                paths(&t),
-                None,
-                &mut registrar,
-                &mut out,
-                &mut Vec::new()
-            ),
-            0
-        );
-        assert_eq!(registrar.calls, 0);
+    fn setup_ignores_no_legacy_token_environment() {
         assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .starts_with("Already registered (key: abcdefgh...)\nStream: host-a\n")
+            !include_str!("cli.rs").contains("env::var(\"SOLSTONE_TOKEN\")"),
+            "setup must not read SOLSTONE_TOKEN"
         );
     }
 
-    // tests/test_cli.py::test_cmd_setup_http_register_failure_non_interactive_returns_1
+    struct CountingInput {
+        bytes: std::io::Cursor<Vec<u8>>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl Read for CountingInput {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.bytes.read(buffer)
+        }
+    }
+
     #[test]
-    fn setup_noninteractive_failure_omits_footer() {
-        let t = tempfile::tempdir().unwrap();
-        let mut registrar = FakeRegistrar {
-            result: false,
-            calls: 0,
-        };
-        let mut out = Vec::new();
+    fn setup_consumes_exactly_one_bounded_stdin_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let mut input = std::io::Cursor::new(vec![b'a'; 4097]);
         assert_eq!(
             cmd_setup(
-                setup_options(None, true),
-                paths(&t),
-                None,
-                &mut registrar,
-                &mut out,
-                &mut Vec::new()
+                SetupOptions {
+                    stream_name: Some("host-a".into())
+                },
+                paths(&temp),
+                &mut input,
+                &mut output,
+                &mut errors,
             ),
             1
         );
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("registration failed"));
-        assert!(!out.contains("Config saved"));
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "Setup failed: the pair link was not valid.\n"
+        );
+        assert!(input.position() <= 4097);
     }
 
     #[test]
-    fn setup_registration_remains_on_production_http_not_private_link() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let server = runtime.block_on(MockServer::new(vec![(
-            200,
-            json!({"key":"K123456789", "name":"host-a"}),
-        )]));
-        let peer = runtime.block_on(PrivateLinkPeer::start());
+    fn setup_lock_loser_does_not_consume_input_or_mutate_state() {
         let temp = tempfile::tempdir().unwrap();
-        let options = SetupOptions {
-            server_url: Some(server.url.clone()),
-            token: None,
-            stream_name: Some("host-a".into()),
-            non_interactive: true,
+        let config_root = temp.path().join("config");
+        let lock = crate::private_link::PrivateStateLock::acquire(&config_root).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut input = CountingInput {
+            bytes: std::io::Cursor::new(b"pair-secret".to_vec()),
+            reads: reads.clone(),
         };
+        let before = std::fs::read_dir(&config_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cmd_setup(
+                SetupOptions {
+                    stream_name: Some("host-a".into())
+                },
+                ConfigPaths {
+                    base_dir: None,
+                    config_dir: Some(config_root.clone())
+                },
+                &mut input,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            ),
+            1
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        let after = std::fs::read_dir(&config_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        drop(lock);
+    }
+
+    #[test]
+    fn setup_surfaces_never_disclose_pair_material() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = "pair-material-must-not-appear ";
+        let mut input = std::io::Cursor::new(secret.as_bytes());
         let mut output = Vec::new();
         let mut errors = Vec::new();
         assert_eq!(
             cmd_setup(
-                options,
+                SetupOptions {
+                    stream_name: Some("host-a".into())
+                },
                 paths(&temp),
-                None,
-                &mut RealRegistrar,
+                &mut input,
                 &mut output,
                 &mut errors,
             ),
-            0
+            1
         );
-        let requests = server.requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].method, "POST");
-        assert_eq!(requests[0].uri, "/app/observer/register");
-        assert!(requests[0].headers.get("authorization").is_none());
-        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert!(
-            body["hostname"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
+        let surfaces = format!(
+            "{}{}",
+            String::from_utf8(output).unwrap(),
+            String::from_utf8(errors).unwrap()
         );
-        assert_eq!(body["label"], "host-a");
-        assert_eq!(body["stream_type"], "desktop");
+        assert!(!surfaces.contains(secret.trim()));
+    }
 
-        for (cli_token, env_token, expected) in [
-            (Some("cli-token"), None, "cli-token"),
-            (None, Some("env-token"), "env-token"),
-            (Some("cli-wins"), Some("env-loses"), "cli-wins"),
-        ] {
-            let token_temp = tempfile::tempdir().unwrap();
-            let token_paths = paths(&token_temp);
-            let mut token_output = Vec::new();
-            let mut token_errors = Vec::new();
-            assert_eq!(
-                cmd_setup(
-                    SetupOptions {
-                        server_url: Some(server.url.clone()),
-                        token: cli_token.map(str::to_owned),
-                        stream_name: Some("host-a".into()),
-                        non_interactive: true,
-                    },
-                    token_paths.clone(),
-                    env_token.map(str::to_owned),
-                    &mut RealRegistrar,
-                    &mut token_output,
-                    &mut token_errors,
-                ),
-                0
-            );
-            assert_eq!(load_config(token_paths).config.key, expected);
-            assert!(
-                String::from_utf8(token_output)
-                    .unwrap()
-                    .contains("Using provided token; skipping registration.")
-            );
-            assert_eq!(
-                server.requests().len(),
-                1,
-                "token setup must skip registration"
-            );
-        }
-        assert!(peer.requests().is_empty());
-        runtime.block_on(peer.shutdown());
+    #[test]
+    fn setup_sanitation_failure_precedes_stdin() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("config");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut input = CountingInput {
+            bytes: std::io::Cursor::new(b"pair-secret".to_vec()),
+            reads: reads.clone(),
+        };
+        let mut errors = Vec::new();
+        assert_eq!(
+            cmd_setup(
+                SetupOptions {
+                    stream_name: Some("host-a".into())
+                },
+                ConfigPaths {
+                    base_dir: None,
+                    config_dir: Some(blocker)
+                },
+                &mut input,
+                &mut Vec::new(),
+                &mut errors,
+            ),
+            1
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        let errors = String::from_utf8(errors).unwrap();
+        assert!(errors.contains(
+            "Setup failed before pairing because sol could not safely update its config."
+        ));
+        assert!(errors.contains("Config update error:"));
+        assert!(!errors.contains("pair-secret"));
+    }
+
+    #[test]
+    fn setup_pairs_over_private_link_and_never_uses_legacy_registration() {
+        let source = include_str!("cli.rs");
+        assert!(source.contains("setup_with_stream("));
+        assert!(!source.contains(&["UploadClient", "::new("].concat()));
+        assert!(!source.contains(&["/app/observer", "/register"].concat()));
+        assert!(!source.contains(&[".bearer_", "auth("].concat()));
     }
 
     struct ScriptedPrompt {
@@ -1257,7 +918,7 @@ mod tests {
                 config.key.as_str(),
                 config.stream.as_str()
             ),
-            ("https://id", "KKKK", "strm")
+            ("", "", "strm")
         );
     }
 
@@ -1371,7 +1032,7 @@ mod tests {
             0
         );
         let expected = format!(
-            "Config: {}\nJournal: https://test.example.com\nKey:    K1234567...\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline — saving locally; pending unconfirmed (will retry)\n\nService: active\n",
+            "Config: {}\nJournal link: managed privately\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline — saving locally; pending unconfirmed (will retry)\n\nService: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );
@@ -1407,7 +1068,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains("Journal: (not configured)")
+                .contains("Journal link: managed privately")
         );
     }
 

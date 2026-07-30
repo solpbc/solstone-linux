@@ -2,6 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 //! Server-initiated chat events bridged to Linux desktop surfaces.
+// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
 
 use crate::config::Config;
 use chrono::Local;

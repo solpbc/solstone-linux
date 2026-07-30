@@ -39,6 +39,8 @@ pub mod upload;
 pub mod video;
 
 #[cfg(test)]
+mod linked_authority_policy_tests;
+#[cfg(test)]
 mod observer_contract_tests;
 #[cfg(test)]
 mod private_link_test_peer;

@@ -1002,6 +1002,8 @@ fn remove_if_empty(path: &Path) {
 mod tests {
     use super::*;
     use crate::{
+        private_link::{ObserverState, publish_observer_registration, start_private_link_session},
+        private_link_test_peer::PrivateLinkPeer,
         test_support::{MockServer, MutableClock, wait_for_requests},
         upload::ListingFile,
     };
@@ -1111,7 +1113,7 @@ mod tests {
             wall: 1_800_000_000.0,
             mono: 100.0,
         });
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -1765,7 +1767,7 @@ mod tests {
             ..Config::default()
         };
         let server = MockServer::new(vec![]).await;
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -1842,7 +1844,7 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -2124,7 +2126,7 @@ mod tests {
             wall: 1_800_000_000.0,
             mono: 100.0,
         });
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -2570,7 +2572,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -2610,7 +2612,7 @@ mod tests {
             },
         )
         .unwrap();
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -2745,6 +2747,152 @@ mod tests {
             cleanup_worker_with_segment(&temp, "120000_300", vec![(500, json!({}))], 7, true).await;
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
+    }
+
+    #[tokio::test]
+    async fn linked_disconnect_never_deletes_unproven_segment() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        let legacy = MockServer::new(vec![]).await;
+        let peer = PrivateLinkPeer::start().await;
+        let config = Config {
+            server_url: legacy.url.clone(),
+            key: "K".into(),
+            stream: "host".into(),
+            cache_retention_days: 7,
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "host")
+            .await
+            .unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "K".into(),
+                prefix: "prefix".into(),
+                name: "host".into(),
+                ingest_url: "/app/observer/ingest".into(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        let clock = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".into()),
+            "host",
+            "linux",
+            "test",
+            clock.clone(),
+        ));
+        let mut worker = SyncWorker::new(
+            config,
+            client,
+            clock,
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+        );
+        worker.synced_days.insert("20260101".into());
+        peer.shutdown().await;
+        worker.cleanup_synced_segments().await;
+        assert!(segment.exists());
+        assert!(legacy.requests().is_empty());
+        drop(worker);
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn slow_linked_response_does_not_block_capture_or_delete_unproven_segment() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        let legacy = MockServer::new(vec![]).await;
+        let peer = PrivateLinkPeer::start().await;
+        let gate = Arc::new(Notify::new());
+        peer.enqueue_gated_response(
+            200,
+            serde_json::to_vec(&json!({"items":[],"total":0})).unwrap(),
+            gate.clone(),
+        );
+        let config = Config {
+            server_url: legacy.url.clone(),
+            key: "K".into(),
+            stream: "host".into(),
+            cache_retention_days: 7,
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "host")
+            .await
+            .unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "K".into(),
+                prefix: "prefix".into(),
+                name: "host".into(),
+                ingest_url: "/app/observer/ingest".into(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        let clock = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".into()),
+            "host",
+            "linux",
+            "test",
+            clock.clone(),
+        ));
+        let mut worker = SyncWorker::new(
+            config,
+            client,
+            clock,
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+        );
+        worker.synced_days.insert("20260101".into());
+        let mut cleanup = Box::pin(worker.cleanup_synced_segments());
+        tokio::select! {
+            () = &mut cleanup => panic!("slow linked response completed before release"),
+            () = async {
+                while peer.requests().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        let capture_ticks = AtomicUsize::new(0);
+        capture_ticks.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(capture_ticks.load(Ordering::SeqCst), 1);
+        assert!(segment.exists());
+        gate.notify_one();
+        cleanup.await;
+        assert!(segment.exists());
+        assert!(legacy.requests().is_empty());
+        drop(worker);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // tests/test_sync.py::test_never_touches_incomplete
@@ -3068,7 +3216,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3127,7 +3275,7 @@ mod tests {
         };
         save_facts(&config.state_dir(), &facts).unwrap();
         assert_eq!(load_facts(&config.state_dir()).pending_confirmed, Some(-5));
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3161,7 +3309,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3197,7 +3345,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3243,7 +3391,7 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3303,7 +3451,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3351,7 +3499,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3446,7 +3594,7 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3490,7 +3638,7 @@ mod tests {
         let (server, mut worker) = test_worker(&temp, vec![], -1).await;
         worker.config.key.clear();
         let config = worker.config.clone();
-        worker.client = Arc::new(UploadClient::new(
+        worker.client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",
@@ -3555,7 +3703,7 @@ mod tests {
             },
         )
         .unwrap();
-        let client = Arc::new(UploadClient::new(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
             "host",
             "linux",

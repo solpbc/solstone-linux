@@ -130,11 +130,8 @@ impl DesktopComponent {
         }
     }
     pub fn journal_url(&self) -> &str {
-        if self.config.server_url.is_empty() {
-            "https://solstone.app"
-        } else {
-            &self.config.server_url
-        }
+        // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
+        "https://solstone.app"
     }
     pub fn command_url<'a>(&'a self, command: &'a crate::tray::TrayCommand) -> Option<&'a str> {
         match command {

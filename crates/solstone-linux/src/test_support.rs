@@ -14,6 +14,8 @@ use serde_json::Value;
 use std::{
     collections::VecDeque,
     convert::Infallible,
+    io,
+    net::TcpListener as StdTcpListener,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -28,6 +30,34 @@ use tokio::{
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+pub(crate) struct OpportunisticDefaultListenerTrap(Option<StdTcpListener>);
+
+impl OpportunisticDefaultListenerTrap {
+    pub(crate) fn bind() -> Self {
+        match StdTcpListener::bind("127.0.0.1:5015") {
+            Ok(listener) => {
+                listener.set_nonblocking(true).unwrap();
+                Self(Some(listener))
+            }
+            Err(error) => {
+                eprintln!(
+                    "criterion 12 note: localhost:5015 opportunistic zero-connection clause did not execute: {error}"
+                );
+                Self(None)
+            }
+        }
+    }
+
+    pub(crate) fn assert_zero_connections(&self) {
+        if let Some(listener) = &self.0 {
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock
+            ));
+        }
+    }
+}
 
 pub(crate) struct MutableClock {
     wall: AtomicU64,

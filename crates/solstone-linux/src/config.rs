@@ -15,6 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::private_file::{
+    DurableWriteFault, NoWriteFault, atomic_write_bytes_with_fault, ensure_private_directory,
+};
+
+// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
 pub const DEFAULT_SERVER_URL: &str = "http://localhost:5015";
 pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
@@ -25,7 +30,11 @@ static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
+    #[serde(default, skip_serializing)]
     pub server_url: String,
+    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
+    #[serde(default, skip_serializing)]
     pub key: String,
     pub stream: String,
     pub segment_interval: i64,
@@ -314,6 +323,49 @@ fn write_config(config: &Config) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
+fn write_link_config(
+    paths: &ConfigPaths,
+    stream: Option<&str>,
+    fault: &dyn DurableWriteFault,
+) -> io::Result<Config> {
+    let _guard = acquire_config_write_lock()?;
+    let mut config = load_config(paths.clone()).config;
+    config.server_url.clear();
+    config.key.clear();
+    if let Some(stream) = stream {
+        config.stream = stream.to_owned();
+    }
+    ensure_private_directory(&config.config_dir).map_err(io::Error::other)?;
+    let mut bytes = serde_json::to_vec_pretty(&config).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    atomic_write_bytes_with_fault(&config.config_path(), &bytes, fault)
+        .map_err(io::Error::other)?;
+    Ok(config)
+}
+
+pub(crate) fn sanitize_link_authority(paths: &ConfigPaths) -> io::Result<Config> {
+    sanitize_link_authority_with_fault(paths, &NoWriteFault)
+}
+
+pub(crate) fn sanitize_link_authority_with_fault(
+    paths: &ConfigPaths,
+    fault: &dyn DurableWriteFault,
+) -> io::Result<Config> {
+    write_link_config(paths, None, fault)
+}
+
+pub(crate) fn save_linked_stream(paths: &ConfigPaths, stream: &str) -> io::Result<Config> {
+    save_linked_stream_with_fault(paths, stream, &NoWriteFault)
+}
+
+pub(crate) fn save_linked_stream_with_fault(
+    paths: &ConfigPaths,
+    stream: &str,
+    fault: &dyn DurableWriteFault,
+) -> io::Result<Config> {
+    write_link_config(paths, Some(stream), fault)
+}
+
 enum IdentityWrite<'a> {
     PreserveDisk,
     Provided { key: &'a str, stream: &'a str },
@@ -356,6 +408,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
     )
 }
 
+// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
 pub fn save_config_with_identity(config: &Config) -> io::Result<()> {
     save_config_inner(
         &ConfigPaths {
@@ -370,6 +423,7 @@ pub fn save_config_with_identity(config: &Config) -> io::Result<()> {
     )
 }
 
+// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
 pub fn save_identity(paths: &ConfigPaths, key: &str, stream: &str) -> io::Result<()> {
     save_config_inner(paths, None, IdentityWrite::Provided { key, stream })
 }
@@ -400,8 +454,21 @@ fn migrate(config: &Config) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::private_file::DurableWriteStage;
     use serde_json::json;
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, os::unix::fs::symlink};
+
+    struct FailStage(DurableWriteStage);
+
+    impl DurableWriteFault for FailStage {
+        fn before(&self, stage: DurableWriteStage) -> io::Result<()> {
+            if stage == self.0 {
+                Err(io::Error::other("injected durable write failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn paths(root: &std::path::Path) -> ConfigPaths {
         ConfigPaths {
@@ -495,12 +562,7 @@ mod tests {
         });
         assert_eq!(
             (c.server_url, c.key, c.stream, c.segment_interval),
-            (
-                "https://example.com".into(),
-                "key".into(),
-                "archon".into(),
-                600
-            )
+            ("".into(), "".into(), "archon".into(), 600)
         );
     }
     // tests/test_config.py::test_load_missing
@@ -708,7 +770,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(
             serde_json::to_value(c).unwrap(),
-            json!({"server_url":"","key":"","stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"cache_retention_days":7,"chat_bridge_enabled":true,"capture_framerate":1,"draw_cursor":true,"start_paused":false})
+            json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"cache_retention_days":7,"chat_bridge_enabled":true,"capture_framerate":1,"draw_cursor":true,"start_paused":false})
         );
     }
     // AC: numeric coercion rejects bool and truncates floats, including list elements.
@@ -775,8 +837,6 @@ mod tests {
         assert_eq!(
             keys,
             BTreeSet::from([
-                "server_url",
-                "key",
                 "stream",
                 "segment_interval",
                 "sync_retry_delays",
@@ -824,14 +884,14 @@ mod tests {
         save_config(&stale_settings).unwrap();
 
         let saved = load_config(config_paths).config;
-        assert_eq!(saved.key, "NEW-KEY");
+        assert_eq!(saved.key, "");
         assert_eq!(saved.stream, "desktop-new");
         assert_eq!(saved.cache_retention_days, 30);
     }
 
     // AC 12: recovery writes identity only and cannot revert newer non-identity disk state.
     #[test]
-    fn save_identity_preserves_newer_server_url() {
+    fn save_identity_preserves_stream_but_not_legacy_authority() {
         let t = tempfile::tempdir().unwrap();
         let config_paths = paths(t.path());
         let mut config = Config {
@@ -848,9 +908,138 @@ mod tests {
 
         save_identity(&config_paths, "NEW-KEY", "desktop-new").unwrap();
         let saved = load_config(config_paths).config;
-        assert_eq!(saved.server_url, "https://new");
-        assert_eq!(saved.key, "NEW-KEY");
+        assert_eq!(saved.server_url, "");
+        assert_eq!(saved.key, "");
         assert_eq!(saved.stream, "desktop-new");
+    }
+
+    #[test]
+    fn representative_legacy_configs_preserve_settings_and_stream_while_stripping_authority() {
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            json!({
+                "server_url": "https://legacy.invalid",
+                "key": "legacy-secret",
+                "stream": "desktop",
+                "segment_interval": 17,
+                "sync_retry_delays": [2, 4],
+                "sync_max_retries": 3,
+                "sync_stale_threshold": 91,
+                "cache_retention_days": 12,
+                "chat_bridge_enabled": false,
+                "capture_framerate": 4,
+                "draw_cursor": false,
+                "start_paused": true
+            }),
+        );
+
+        let sanitized = sanitize_link_authority(&paths(t.path())).unwrap();
+        assert_eq!(sanitized.server_url, "");
+        assert_eq!(sanitized.key, "");
+        assert_eq!(sanitized.stream, "desktop");
+        assert_eq!(sanitized.segment_interval, 17);
+        assert_eq!(sanitized.sync_retry_delays, vec![2, 4]);
+        assert_eq!(sanitized.sync_max_retries, 3);
+        assert_eq!(sanitized.sync_stale_threshold, 91);
+        assert_eq!(sanitized.cache_retention_days, 12);
+        assert!(!sanitized.chat_bridge_enabled);
+        assert_eq!(sanitized.capture_framerate, 4);
+        assert!(!sanitized.draw_cursor);
+        assert!(sanitized.start_paused);
+        let value: Value =
+            serde_json::from_slice(&fs::read(t.path().join("cfg/config.json")).unwrap()).unwrap();
+        assert!(value.get("server_url").is_none());
+        assert!(value.get("key").is_none());
+    }
+
+    #[test]
+    fn fresh_config_serializes_authority_free_schema() {
+        let t = tempfile::tempdir().unwrap();
+        let saved = sanitize_link_authority(&paths(t.path())).unwrap();
+        let text = fs::read_to_string(saved.config_path()).unwrap();
+        assert!(text.ends_with('\n'));
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert!(value.get("server_url").is_none());
+        assert!(value.get("key").is_none());
+        assert_eq!(value["stream"], "");
+    }
+
+    #[test]
+    fn sanitation_rejects_symlinked_or_wrong_kind_root_without_touching_referent() {
+        let t = tempfile::tempdir().unwrap();
+        let referent = t.path().join("referent");
+        fs::create_dir(&referent).unwrap();
+        fs::write(referent.join("sentinel"), "unchanged").unwrap();
+        let linked = t.path().join("linked");
+        symlink(&referent, &linked).unwrap();
+        let linked_paths = ConfigPaths {
+            base_dir: None,
+            config_dir: Some(linked),
+        };
+        assert!(sanitize_link_authority(&linked_paths).is_err());
+        assert_eq!(
+            fs::read_to_string(referent.join("sentinel")).unwrap(),
+            "unchanged"
+        );
+
+        let wrong = t.path().join("wrong");
+        fs::write(&wrong, "unchanged").unwrap();
+        let wrong_paths = ConfigPaths {
+            base_dir: None,
+            config_dir: Some(wrong.clone()),
+        };
+        assert!(sanitize_link_authority(&wrong_paths).is_err());
+        assert_eq!(fs::read_to_string(wrong).unwrap(), "unchanged");
+    }
+
+    #[test]
+    fn sanitation_rejects_symlinked_or_wrong_kind_config_file_without_touching_referent() {
+        let t = tempfile::tempdir().unwrap();
+        let config_dir = t.path().join("cfg");
+        fs::create_dir(&config_dir).unwrap();
+        let referent = t.path().join("referent.json");
+        fs::write(&referent, r#"{"stream":"external"}"#).unwrap();
+        symlink(&referent, config_dir.join("config.json")).unwrap();
+        assert!(sanitize_link_authority(&paths(t.path())).is_err());
+        assert_eq!(
+            fs::read_to_string(&referent).unwrap(),
+            r#"{"stream":"external"}"#
+        );
+
+        fs::remove_file(config_dir.join("config.json")).unwrap();
+        fs::create_dir(config_dir.join("config.json")).unwrap();
+        assert!(sanitize_link_authority(&paths(t.path())).is_err());
+        assert!(config_dir.join("config.json").is_dir());
+    }
+
+    #[test]
+    fn sanitation_fault_preserves_last_complete_config() {
+        for stage in [
+            DurableWriteStage::Create,
+            DurableWriteStage::Write,
+            DurableWriteStage::Fsync,
+            DurableWriteStage::Rename,
+            DurableWriteStage::DirSync,
+        ] {
+            let t = tempfile::tempdir().unwrap();
+            write(
+                t.path(),
+                json!({"server_url":"https://legacy.invalid","key":"secret","stream":"old"}),
+            );
+            let path = t.path().join("cfg/config.json");
+            let before = fs::read(&path).unwrap();
+            let result = sanitize_link_authority_with_fault(&paths(t.path()), &FailStage(stage));
+            assert!(result.is_err(), "{stage:?}");
+            if stage == DurableWriteStage::DirSync {
+                let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                assert_eq!(value["stream"], "old");
+                assert!(value.get("server_url").is_none());
+                assert!(value.get("key").is_none());
+            } else {
+                assert_eq!(fs::read(path).unwrap(), before, "{stage:?}");
+            }
+        }
     }
 
     // AC: migration failure is returned as one warning and leaves legacy data intact.

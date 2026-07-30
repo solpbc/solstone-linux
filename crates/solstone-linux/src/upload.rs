@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+#[cfg(test)]
+use crate::config::{ConfigPaths, save_identity};
 use crate::{
-    config::{Config, ConfigPaths, save_identity},
+    config::Config,
     event_sender::{EventSender, SILENT_QUEUE_MAX},
     observer::Clock,
+    private_link::{EventBody, LinkOutcome, PrivateLinkCapability, RepairOutcome},
     sync_health::ErrorType,
 };
-use reqwest::{Client, StatusCode, multipart};
+#[cfg(test)]
+use reqwest::Client;
+use reqwest::{StatusCode, multipart};
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
-use serde_json::{Map, Value, json};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::{Map, Value};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -20,13 +27,18 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(test)]
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
 const STREAM_TYPE: &str = "desktop";
+#[cfg(test)]
 const OBSERVER_PROTOCOL_VERSION_HEADER: &str = "X-Solstone-Protocol-Version";
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const MAX_IMMEDIATE_ATTEMPTS: usize = 2;
 const RECOVERY_COOLDOWN: Duration = Duration::from_secs(300);
+const MAX_LINK_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 const TELLING_WINDOW: Duration = Duration::from_secs(300);
 const TELLING_BURST_LIMIT: usize = 12;
 pub(crate) const KEY_PREFIX_CHARS: usize = 8;
@@ -85,17 +97,32 @@ pub struct QueryResult {
 }
 
 pub(crate) struct Inner {
+    capability: std::sync::RwLock<Option<PrivateLinkCapability>>,
+    #[cfg(test)]
     url: String,
+    #[cfg(test)]
     key: Mutex<String>,
+    #[cfg(test)]
     stream: Mutex<String>,
     revoked: AtomicBool,
+    #[cfg(test)]
     client: Client,
     cancellation: CancellationToken,
+    #[cfg(test)]
     hostname: String,
+    #[cfg(not(test))]
+    _hostname: String,
+    #[cfg(test)]
     platform: String,
+    #[cfg(not(test))]
+    _platform: String,
+    #[cfg(test)]
     version: String,
+    #[cfg(not(test))]
+    _version: String,
     retry_delays: Vec<i64>,
     immediate_attempts: usize,
+    #[cfg(test)]
     paths: ConfigPaths,
     clock: Arc<dyn Clock + Send + Sync>,
     recovery_lock: tokio::sync::Mutex<()>,
@@ -112,6 +139,7 @@ struct TellingState {
     rejection_warned: bool,
 }
 
+#[cfg(test)]
 enum RegisterAttempt {
     Registered { key: String, name: String },
     GuardRefused { reason_code: Option<String> },
@@ -130,18 +158,28 @@ impl UploadClient {
     ///
     /// Panics if called outside a Tokio runtime because the event sender task is
     /// started during construction.
-    pub fn new(
+    pub(crate) fn new(
         config: &Config,
+        capability: impl Into<Option<PrivateLinkCapability>>,
         hostname: impl Into<String>,
         platform: impl Into<String>,
         version: impl Into<String>,
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> Self {
-        Self::with_silent_capacity(config, hostname, platform, version, clock, SILENT_QUEUE_MAX)
+        Self::with_silent_capacity(
+            config,
+            capability.into(),
+            hostname,
+            platform,
+            version,
+            clock,
+            SILENT_QUEUE_MAX,
+        )
     }
 
     fn with_silent_capacity(
         config: &Config,
+        capability: Option<PrivateLinkCapability>,
         hostname: impl Into<String>,
         platform: impl Into<String>,
         version: impl Into<String>,
@@ -154,19 +192,34 @@ impl UploadClient {
             config.sync_retry_delays.clone()
         };
         let inner = Arc::new(Inner {
+            capability: std::sync::RwLock::new(capability),
+            #[cfg(test)]
             url: config.server_url.trim_end_matches('/').to_owned(),
+            #[cfg(test)]
             key: Mutex::new(config.key.clone()),
+            #[cfg(test)]
             stream: Mutex::new(config.stream.clone()),
             revoked: AtomicBool::new(false),
+            #[cfg(test)]
             client: Client::new(),
             cancellation: CancellationToken::new(),
+            #[cfg(test)]
             hostname: hostname.into(),
+            #[cfg(not(test))]
+            _hostname: hostname.into(),
+            #[cfg(test)]
             platform: platform.into(),
+            #[cfg(not(test))]
+            _platform: platform.into(),
+            #[cfg(test)]
             version: version.into(),
+            #[cfg(not(test))]
+            _version: version.into(),
             retry_delays,
             immediate_attempts: config
                 .sync_max_retries
                 .clamp(1, MAX_IMMEDIATE_ATTEMPTS as i64) as usize,
+            #[cfg(test)]
             paths: ConfigPaths {
                 base_dir: Some(config.base_dir.clone()),
                 config_dir: Some(config.config_dir.clone()),
@@ -190,7 +243,15 @@ impl UploadClient {
     }
 
     pub fn is_registered(&self) -> bool {
-        !self.inner.key.lock().unwrap().is_empty()
+        if self.inner.capability().is_some() {
+            return true;
+        }
+        #[cfg(test)]
+        {
+            return !self.inner.key.lock().unwrap().is_empty();
+        }
+        #[cfg(not(test))]
+        false
     }
 
     pub(crate) fn recovery_generation(&self) -> u64 {
@@ -199,6 +260,14 @@ impl UploadClient {
 
     pub fn request_stop(&self) {
         self.inner.cancellation.cancel();
+    }
+
+    pub(crate) fn install_capability(&self, capability: PrivateLinkCapability) {
+        *self
+            .inner
+            .capability
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(capability);
     }
 
     #[cfg(test)]
@@ -210,52 +279,85 @@ impl UploadClient {
         if self.is_registered() {
             return true;
         }
-        if self.inner.url.is_empty() {
-            return false;
+        if let Some(capability) = self.inner.capability() {
+            return match capability.report_unauthorized(0).await {
+                RepairOutcome::Repaired { generation, name } => {
+                    self.inner
+                        .recovery_generation
+                        .store(generation, Ordering::Release);
+                    config.stream = name;
+                    true
+                }
+                RepairOutcome::AlreadySuperseded { generation } => {
+                    self.inner
+                        .recovery_generation
+                        .store(generation, Ordering::Release);
+                    true
+                }
+                RepairOutcome::GuardRefused { reason_code } => {
+                    self.inner.tell_guard_refusal(
+                        reason_code.as_deref(),
+                        "",
+                        self.inner.clock.monotonic_seconds(),
+                    );
+                    false
+                }
+                RepairOutcome::TransportUnavailable
+                | RepairOutcome::PersistenceFailed
+                | RepairOutcome::InvalidRegistration => false,
+            };
         }
-        let _registration = self.inner.recovery_lock.lock().await;
-        if self.is_registered() {
-            return true;
-        }
-        let attempts = 3.min(self.inner.retry_delays.len());
-        for attempt in 0..attempts {
-            match self.inner.register_once().await {
-                RegisterAttempt::Registered { key, name } => {
-                    if let Err(error) = save_identity(&self.inner.paths, &key, &name) {
-                        // Named deviation: Python propagates the persistence error; Rust keeps all
-                        // three identity stores unchanged so a later call can retry.
-                        tracing::error!(%error, "Failed to persist registration");
+        #[cfg(not(test))]
+        return false;
+        #[cfg(test)]
+        {
+            if self.inner.url.is_empty() {
+                return false;
+            }
+            let _registration = self.inner.recovery_lock.lock().await;
+            if self.is_registered() {
+                return true;
+            }
+            let attempts = 3.min(self.inner.retry_delays.len());
+            for attempt in 0..attempts {
+                match self.inner.register_once().await {
+                    RegisterAttempt::Registered { key, name } => {
+                        if let Err(error) = save_identity(&self.inner.paths, &key, &name) {
+                            // Named deviation: Python propagates the persistence error; Rust keeps all
+                            // three identity stores unchanged so a later call can retry.
+                            tracing::error!(%error, "Failed to persist registration");
+                            return false;
+                        }
+                        *self.inner.key.lock().unwrap() = key.clone();
+                        *self.inner.stream.lock().unwrap() = name.clone();
+                        config.key = key;
+                        config.stream = name.clone();
+                        tracing::info!(name, "Registered");
+                        return true;
+                    }
+                    RegisterAttempt::GuardRefused { reason_code } => {
+                        // One-shot CLI setup deliberately does not consume the daemon telling window.
+                        tracing::error!(
+                            status = 403,
+                            reason_code = reason_code.as_deref(),
+                            key_prefix = key_prefix(&self.inner.key.lock().unwrap()),
+                            recovery_generation =
+                                self.inner.recovery_generation.load(Ordering::Acquire),
+                            "Journal refused local identity repair"
+                        );
                         return false;
                     }
-                    *self.inner.key.lock().unwrap() = key.clone();
-                    *self.inner.stream.lock().unwrap() = name.clone();
-                    config.key = key;
-                    config.stream = name.clone();
-                    tracing::info!(name, "Registered");
-                    return true;
+                    RegisterAttempt::Failed => {
+                        tracing::warn!(attempt = attempt + 1, "Registration attempt failed")
+                    }
                 }
-                RegisterAttempt::GuardRefused { reason_code } => {
-                    // One-shot CLI setup deliberately does not consume the daemon telling window.
-                    tracing::error!(
-                        status = 403,
-                        reason_code = reason_code.as_deref(),
-                        key_prefix = key_prefix(&self.inner.key.lock().unwrap()),
-                        recovery_generation =
-                            self.inner.recovery_generation.load(Ordering::Acquire),
-                        "Journal refused local identity repair"
-                    );
-                    return false;
-                }
-                RegisterAttempt::Failed => {
-                    tracing::warn!(attempt = attempt + 1, "Registration attempt failed")
+                if attempt + 1 < attempts {
+                    tokio::time::sleep(retry_delay(&self.inner.retry_delays, attempt)).await;
                 }
             }
-            if attempt + 1 < attempts {
-                tokio::time::sleep(retry_delay(&self.inner.retry_delays, attempt)).await;
-            }
+            tracing::error!(attempts, "Registration failed after all attempts");
+            false
         }
-        tracing::error!(attempts, "Registration failed after all attempts");
-        false
     }
 
     pub async fn upload_segment(
@@ -267,14 +369,25 @@ impl UploadClient {
         if self.is_revoked() {
             return UploadResult::failure(Some(ErrorType::Auth), None);
         }
+        #[cfg(test)]
         let key = self.inner.key.lock().unwrap().clone();
-        if key.is_empty() || self.inner.url.is_empty() {
+        #[cfg(test)]
+        if self.inner.capability().is_none() && (key.is_empty() || self.inner.url.is_empty()) {
             return UploadResult::failure(Some(ErrorType::Client), None);
         }
         if !files.iter().any(|path| path.exists()) {
             return UploadResult::failure(None, None);
         }
+        let declared_file_bytes = files
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .try_fold(0_u64, u64::checked_add);
+        if declared_file_bytes.is_none_or(|bytes| bytes > MAX_LINK_REQUEST_BODY_BYTES) {
+            return UploadResult::failure(Some(ErrorType::Client), Some(413));
+        }
 
+        #[cfg(test)]
         let url = format!("{}/app/observer/ingest", self.inner.url);
         let mut last_error = None;
         let mut last_status = None;
@@ -300,77 +413,109 @@ impl UploadClient {
                 return UploadResult::failure(None, None);
             }
 
-            let response = self
-                .inner
-                .client
-                .post(&url)
-                .bearer_auth(&key)
-                .multipart(form)
-                .timeout(UPLOAD_TIMEOUT)
-                .send()
-                .await;
-            match response {
-                Ok(response) if response.status() == StatusCode::OK => {
-                    match response.json::<Value>().await {
-                        Ok(body) => {
-                            return match body.get("status").and_then(Value::as_str) {
-                                Some("ok" | "collision") => UploadResult {
-                                    success: true,
-                                    duplicate: false,
-                                    error_type: None,
-                                    status_code: Some(StatusCode::OK.as_u16()),
-                                    stored_key: body
-                                        .get("segment")
-                                        .and_then(Value::as_str)
-                                        .map(str::to_owned),
-                                },
-                                Some("duplicate") => UploadResult {
-                                    success: true,
-                                    duplicate: true,
-                                    error_type: None,
-                                    status_code: Some(StatusCode::OK.as_u16()),
-                                    stored_key: body
-                                        .get("existing_segment")
-                                        .and_then(Value::as_str)
-                                        .map(str::to_owned),
-                                },
-                                _ => UploadResult::failure(
-                                    Some(ErrorType::Incompatible),
-                                    Some(StatusCode::OK.as_u16()),
-                                ),
-                            };
+            if let Some(capability) = self.inner.capability() {
+                match capability.ingest(form).await {
+                    LinkOutcome::Success { status, body } if status == StatusCode::OK => {
+                        match serde_json::from_slice::<Value>(&body) {
+                            Ok(body) => {
+                                return parse_upload_body(body);
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    attempt = attempt + 1,
+                                    %error,
+                                    "Upload attempt returned malformed JSON"
+                                );
+                                last_error = Some(ErrorType::Transient);
+                                last_status = Some(StatusCode::OK.as_u16());
+                            }
+                        }
+                    }
+                    LinkOutcome::Success { status, .. } | LinkOutcome::LocalRejected { status } => {
+                        let error_type = Self::classify_error(Some(status.as_u16()), false);
+                        last_error = Some(error_type);
+                        last_status = Some(status.as_u16());
+                        if error_type != ErrorType::Transient {
+                            return UploadResult::failure(Some(error_type), Some(status.as_u16()));
+                        }
+                    }
+                    LinkOutcome::Unauthorized { generation } => {
+                        self.inner
+                            .recover_linked_after_401("upload", false, generation)
+                            .await;
+                        return UploadResult::failure(
+                            Some(ErrorType::Auth),
+                            Some(StatusCode::UNAUTHORIZED.as_u16()),
+                        );
+                    }
+                    LinkOutcome::Forbidden => {
+                        self.inner.revoked.store(true, Ordering::Release);
+                        return UploadResult::failure(
+                            Some(ErrorType::Auth),
+                            Some(StatusCode::FORBIDDEN.as_u16()),
+                        );
+                    }
+                    LinkOutcome::TransportUnavailable => {
+                        last_error = Some(ErrorType::Transient);
+                        last_status = None;
+                    }
+                }
+            } else {
+                #[cfg(not(test))]
+                return UploadResult::failure(Some(ErrorType::Transient), None);
+                #[cfg(test)]
+                {
+                    let response = self
+                        .inner
+                        .client
+                        .post(&url)
+                        .bearer_auth(&key)
+                        .multipart(form)
+                        .timeout(UPLOAD_TIMEOUT)
+                        .send()
+                        .await;
+                    match response {
+                        Ok(response) if response.status() == StatusCode::OK => {
+                            match response.json::<Value>().await {
+                                Ok(body) => {
+                                    return parse_upload_body(body);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        attempt = attempt + 1,
+                                        %error,
+                                        "Upload attempt returned malformed JSON"
+                                    );
+                                    last_error = Some(ErrorType::Transient);
+                                    last_status = Some(StatusCode::OK.as_u16());
+                                }
+                            }
+                        }
+                        Ok(response) => {
+                            let status = response.status();
+                            let error_type = Self::classify_error(Some(status.as_u16()), false);
+                            last_error = Some(error_type);
+                            last_status = Some(status.as_u16());
+                            if status == StatusCode::FORBIDDEN {
+                                self.inner.revoked.store(true, Ordering::Release);
+                            } else if status == StatusCode::UNAUTHORIZED {
+                                self.inner.recover_after_401("upload", false).await;
+                            }
+                            if error_type != ErrorType::Transient {
+                                tracing::error!(%status, ?error_type, "Upload rejected");
+                                return UploadResult::failure(
+                                    Some(error_type),
+                                    Some(status.as_u16()),
+                                );
+                            }
+                            tracing::warn!(attempt = attempt + 1, %status, "Upload attempt failed");
                         }
                         Err(error) => {
-                            tracing::warn!(
-                                attempt = attempt + 1,
-                                %error,
-                                "Upload attempt returned malformed JSON"
-                            );
+                            tracing::warn!(attempt = attempt + 1, %error, "Upload attempt failed");
                             last_error = Some(ErrorType::Transient);
-                            last_status = Some(StatusCode::OK.as_u16());
+                            last_status = None;
                         }
                     }
-                }
-                Ok(response) => {
-                    let status = response.status();
-                    let error_type = Self::classify_error(Some(status.as_u16()), false);
-                    last_error = Some(error_type);
-                    last_status = Some(status.as_u16());
-                    if status == StatusCode::FORBIDDEN {
-                        self.inner.revoked.store(true, Ordering::Release);
-                    } else if status == StatusCode::UNAUTHORIZED {
-                        self.inner.recover_after_401("upload", false).await;
-                    }
-                    if error_type != ErrorType::Transient {
-                        tracing::error!(%status, ?error_type, "Upload rejected");
-                        return UploadResult::failure(Some(error_type), Some(status.as_u16()));
-                    }
-                    tracing::warn!(attempt = attempt + 1, %status, "Upload attempt failed");
-                }
-                Err(error) => {
-                    tracing::warn!(attempt = attempt + 1, %error, "Upload attempt failed");
-                    last_error = Some(ErrorType::Transient);
-                    last_status = None;
                 }
             }
             if attempt + 1 < self.inner.immediate_attempts {
@@ -389,42 +534,79 @@ impl UploadClient {
         if self.is_revoked() {
             return query_failure(ErrorType::Auth, None);
         }
+        #[cfg(test)]
         let key = self.inner.key.lock().unwrap().clone();
-        if key.is_empty() || self.inner.url.is_empty() {
+        #[cfg(test)]
+        if self.inner.capability().is_none() && (key.is_empty() || self.inner.url.is_empty()) {
             return query_failure(ErrorType::Client, None);
         }
-        let url = format!("{}/app/observer/ingest/segments/{day}", self.inner.url);
-        let response = self
-            .inner
-            .client
-            .get(url)
-            .bearer_auth(key)
-            .header(OBSERVER_PROTOCOL_VERSION_HEADER, "2")
-            .timeout(EVENT_TIMEOUT)
-            .send()
-            .await;
-        let Ok(response) = response else {
-            return query_failure(ErrorType::Transient, None);
-        };
-        let status = response.status();
-        if status != StatusCode::OK {
-            let error_type = Self::classify_error(Some(status.as_u16()), false);
-            if status == StatusCode::FORBIDDEN {
-                self.inner.revoked.store(true, Ordering::Release);
-            } else if status == StatusCode::UNAUTHORIZED {
-                self.inner.recover_after_401("listing", false).await;
-            }
-            tracing::warn!(%status, ?error_type, "Segments query failed");
-            return query_failure(error_type, Some(status.as_u16()));
+        if let Some(capability) = self.inner.capability() {
+            return match capability.list_day(day).await {
+                LinkOutcome::Success { status, body } if status == StatusCode::OK => {
+                    match serde_json::from_slice::<Value>(&body) {
+                        Ok(body) => parse_listing(body, status.as_u16()),
+                        Err(error) => {
+                            tracing::debug!(%error, "Segments query returned malformed JSON");
+                            query_failure(ErrorType::Transient, None)
+                        }
+                    }
+                }
+                LinkOutcome::Success { status, .. } | LinkOutcome::LocalRejected { status } => {
+                    query_failure(
+                        Self::classify_error(Some(status.as_u16()), false),
+                        Some(status.as_u16()),
+                    )
+                }
+                LinkOutcome::Unauthorized { generation } => {
+                    self.inner
+                        .recover_linked_after_401("listing", false, generation)
+                        .await;
+                    query_failure(ErrorType::Auth, Some(StatusCode::UNAUTHORIZED.as_u16()))
+                }
+                LinkOutcome::Forbidden => {
+                    self.inner.revoked.store(true, Ordering::Release);
+                    query_failure(ErrorType::Auth, Some(StatusCode::FORBIDDEN.as_u16()))
+                }
+                LinkOutcome::TransportUnavailable => query_failure(ErrorType::Transient, None),
+            };
         }
-        let body = match response.json::<Value>().await {
-            Ok(body) => body,
-            Err(error) => {
-                tracing::debug!(%error, "Segments query returned malformed JSON");
+        #[cfg(not(test))]
+        return query_failure(ErrorType::Transient, None);
+        #[cfg(test)]
+        {
+            let url = format!("{}/app/observer/ingest/segments/{day}", self.inner.url);
+            let response = self
+                .inner
+                .client
+                .get(url)
+                .bearer_auth(key)
+                .header(OBSERVER_PROTOCOL_VERSION_HEADER, "2")
+                .timeout(EVENT_TIMEOUT)
+                .send()
+                .await;
+            let Ok(response) = response else {
                 return query_failure(ErrorType::Transient, None);
+            };
+            let status = response.status();
+            if status != StatusCode::OK {
+                let error_type = Self::classify_error(Some(status.as_u16()), false);
+                if status == StatusCode::FORBIDDEN {
+                    self.inner.revoked.store(true, Ordering::Release);
+                } else if status == StatusCode::UNAUTHORIZED {
+                    self.inner.recover_after_401("listing", false).await;
+                }
+                tracing::warn!(%status, ?error_type, "Segments query failed");
+                return query_failure(error_type, Some(status.as_u16()));
             }
-        };
-        parse_listing(body, status.as_u16())
+            let body = match response.json::<Value>().await {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::debug!(%error, "Segments query returned malformed JSON");
+                    return query_failure(ErrorType::Transient, None);
+                }
+            };
+            parse_listing(body, status.as_u16())
+        }
     }
 
     pub async fn relay_event(&self, tract: &str, event: &str, fields: Map<String, Value>) -> bool {
@@ -450,14 +632,93 @@ impl UploadClient {
         }
         match status_code {
             Some(401 | 403) => ErrorType::Auth,
-            Some(400) => ErrorType::Client,
+            Some(400 | 413) => ErrorType::Client,
             Some(404) => ErrorType::Incompatible,
             _ => ErrorType::Transient,
         }
     }
 }
 
+#[cfg(test)]
+/// Installs no capability and therefore makes no requests; used by scheduler/lifecycle and zero-request preflight tests, not as a transport path.
+pub(crate) fn capability_less_client_for_test(
+    config: &Config,
+    hostname: impl Into<String>,
+    platform: impl Into<String>,
+    version: impl Into<String>,
+    clock: Arc<dyn Clock + Send + Sync>,
+) -> UploadClient {
+    UploadClient::with_silent_capacity(
+        config,
+        None,
+        hostname,
+        platform,
+        version,
+        clock,
+        SILENT_QUEUE_MAX,
+    )
+}
+
 impl Inner {
+    fn capability(&self) -> Option<PrivateLinkCapability> {
+        self.capability
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    async fn recover_linked_after_401(&self, route: &str, rejected_event: bool, generation: u64) {
+        if self.revoked.load(Ordering::Acquire) {
+            return;
+        }
+        if rejected_event {
+            self.dropped_events.fetch_add(1, Ordering::AcqRel);
+        }
+        let now = self.clock.monotonic_seconds();
+        #[cfg(test)]
+        let current_key = self.key.lock().unwrap().clone();
+        #[cfg(not(test))]
+        let current_key = String::new();
+        self.tell_first_rejection(route, &current_key, now);
+        if self.recovery_on_cooldown(now) {
+            return;
+        }
+        let _recovery = self.recovery_lock.lock().await;
+        if self.revoked.load(Ordering::Acquire) {
+            return;
+        }
+        let now = self.clock.monotonic_seconds();
+        if self.recovery_on_cooldown(now) {
+            return;
+        }
+        *self.last_recovery_attempt.lock().unwrap() = Some(now);
+        let Some(capability) = self.capability() else {
+            return;
+        };
+        match capability.report_unauthorized(generation).await {
+            RepairOutcome::Repaired {
+                generation: repaired,
+                name,
+            } => {
+                self.recovery_generation.store(repaired, Ordering::Release);
+                self.tell_outcome("recovered", &name, &current_key, "", now);
+            }
+            RepairOutcome::AlreadySuperseded {
+                generation: repaired,
+            } => {
+                self.recovery_generation.store(repaired, Ordering::Release);
+                self.tell_outcome("already_recovered", "", &current_key, "", now);
+            }
+            RepairOutcome::GuardRefused { reason_code } => {
+                self.tell_guard_refusal(reason_code.as_deref(), &current_key, now);
+            }
+            RepairOutcome::TransportUnavailable
+            | RepairOutcome::PersistenceFailed
+            | RepairOutcome::InvalidRegistration => {}
+        }
+    }
+
+    #[cfg(test)]
     async fn register_once(&self) -> RegisterAttempt {
         let stream = self.stream.lock().unwrap().clone();
         let mut descriptor = json!({
@@ -587,6 +848,7 @@ impl Inner {
         );
     }
 
+    #[cfg(test)]
     async fn recover_after_401(&self, route: &str, rejected_event: bool) {
         // A 403 latch is an authorization boundary: no trigger may attempt recovery once set.
         if self.revoked.load(Ordering::Acquire) {
@@ -648,33 +910,91 @@ impl Inner {
         if self.revoked.load(Ordering::Acquire) {
             return false;
         }
+        #[cfg(test)]
         let key = self.key.lock().unwrap().clone();
-        if key.is_empty() || self.url.is_empty() {
+        #[cfg(test)]
+        if self.capability().is_none() && (key.is_empty() || self.url.is_empty()) {
             return false;
         }
+        #[cfg(test)]
         let mut payload = fields;
-        payload.insert("tract".into(), Value::String(tract.into()));
-        payload.insert("event".into(), Value::String(event.into()));
-        let response = self
-            .client
-            .post(format!("{}/app/observer/ingest/event", self.url))
-            .bearer_auth(key)
-            .json(&payload)
-            .timeout(EVENT_TIMEOUT)
-            .send()
-            .await;
-        match response {
-            Ok(response) if response.status() == StatusCode::OK => true,
-            Ok(response) => {
-                if response.status() == StatusCode::FORBIDDEN {
-                    self.revoked.store(true, Ordering::Release);
-                } else if response.status() == StatusCode::UNAUTHORIZED {
-                    self.recover_after_401("event", true).await;
+        #[cfg(not(test))]
+        let payload = fields;
+        if let Some(capability) = self.capability() {
+            return match capability
+                .send_event(EventBody {
+                    tract: tract.to_owned(),
+                    event: event.to_owned(),
+                    fields: payload,
+                })
+                .await
+            {
+                LinkOutcome::Success { status, .. } => status == StatusCode::OK,
+                LinkOutcome::Unauthorized { generation } => {
+                    self.recover_linked_after_401("event", true, generation)
+                        .await;
+                    false
                 }
-                false
-            }
-            Err(_) => false,
+                LinkOutcome::Forbidden => {
+                    self.revoked.store(true, Ordering::Release);
+                    false
+                }
+                LinkOutcome::TransportUnavailable | LinkOutcome::LocalRejected { .. } => false,
+            };
         }
+        #[cfg(not(test))]
+        return false;
+        #[cfg(test)]
+        {
+            payload.insert("tract".into(), Value::String(tract.into()));
+            payload.insert("event".into(), Value::String(event.into()));
+            let response = self
+                .client
+                .post(format!("{}/app/observer/ingest/event", self.url))
+                .bearer_auth(key)
+                .json(&payload)
+                .timeout(EVENT_TIMEOUT)
+                .send()
+                .await;
+            match response {
+                Ok(response) if response.status() == StatusCode::OK => true,
+                Ok(response) => {
+                    if response.status() == StatusCode::FORBIDDEN {
+                        self.revoked.store(true, Ordering::Release);
+                    } else if response.status() == StatusCode::UNAUTHORIZED {
+                        self.recover_after_401("event", true).await;
+                    }
+                    false
+                }
+                Err(_) => false,
+            }
+        }
+    }
+}
+
+fn parse_upload_body(body: Value) -> UploadResult {
+    match body.get("status").and_then(Value::as_str) {
+        Some("ok" | "collision") => UploadResult {
+            success: true,
+            duplicate: false,
+            error_type: None,
+            status_code: Some(StatusCode::OK.as_u16()),
+            stored_key: body
+                .get("segment")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        },
+        Some("duplicate") => UploadResult {
+            success: true,
+            duplicate: true,
+            error_type: None,
+            status_code: Some(StatusCode::OK.as_u16()),
+            stored_key: body
+                .get("existing_segment")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        },
+        _ => UploadResult::failure(Some(ErrorType::Incompatible), Some(StatusCode::OK.as_u16())),
     }
 }
 
@@ -762,8 +1082,13 @@ mod tests {
     use super::*;
     use crate::{
         config::{ConfigPaths, load_config},
+        private_link::{
+            LinkOutcome, ObserverState, publish_observer_registration, start_private_link_session,
+        },
         private_link_test_peer::PrivateLinkPeer,
-        test_support::{Action, MockServer, MutableClock, wait_for_requests},
+        test_support::{
+            Action, MockServer, MutableClock, OpportunisticDefaultListenerTrap, wait_for_requests,
+        },
     };
     use tempfile::TempDir;
     use tokio::net::TcpListener;
@@ -794,13 +1119,58 @@ mod tests {
     }
 
     fn client(config: &Config) -> UploadClient {
-        UploadClient::new(
+        crate::upload::capability_less_client_for_test(
             config,
             "host-a",
             "linux",
             "0.1.0",
             Arc::new(MutableClock::new(0.0, 0.0)),
         )
+    }
+
+    async fn linked_client(
+        status: u16,
+        body: Value,
+    ) -> (
+        TempDir,
+        MockServer,
+        PrivateLinkPeer,
+        crate::private_link::PrivateLinkSession,
+        UploadClient,
+    ) {
+        let legacy = MockServer::new(vec![]).await;
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(status, serde_json::to_vec(&body).unwrap());
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "K".into(),
+            stream: "host-a".into(),
+            ..config(&legacy, &temp)
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "host-a")
+            .await
+            .unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "K".into(),
+                prefix: "prefix".into(),
+                name: "host-a".into(),
+                ingest_url: "/app/observer/ingest".into(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        let client = UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".into()),
+            "host-a",
+            "linux",
+            "0.1.0",
+            Arc::new(MutableClock::new(0.0, 0.0)),
+        );
+        (temp, legacy, peer, session, client)
     }
 
     fn write_file(temp: &TempDir, name: &str, body: &[u8]) -> PathBuf {
@@ -813,6 +1183,12 @@ mod tests {
         haystack
             .windows(needle.len())
             .position(|window| window == needle)
+    }
+
+    #[test]
+    fn localhost_5015_opportunistic_clause_reports_or_asserts() {
+        let trap = OpportunisticDefaultListenerTrap::bind();
+        trap.assert_zero_connections();
     }
 
     type ParsedPart<'a> = (Vec<(&'a str, &'a str)>, &'a [u8]);
@@ -847,6 +1223,107 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn linked_upload_over_16mib_is_byte_exact_under_64mib() {
+        let (temp, legacy, peer, session, client) =
+            linked_client(200, json!({"status":"ok","segment":"large"})).await;
+        let flac = vec![0x46; 9 * 1024 * 1024];
+        let webm = vec![0x57; 8 * 1024 * 1024];
+        let flac_path = write_file(&temp, "audio.flac", &flac);
+        let webm_path = write_file(&temp, "screen.webm", &webm);
+
+        assert!(
+            client
+                .upload_segment("20260101", "large", &[flac_path, webm_path])
+                .await
+                .success
+        );
+        peer.wait_for_requests(1).await;
+        let requests = peer.requests();
+        let request = &requests[0];
+        let content_type = request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.as_str())
+            .unwrap();
+        let boundary = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .unwrap();
+        let parts = parse_multipart(&request.body, boundary);
+        for (name, mime, expected) in [
+            ("audio.flac", "audio/flac", flac.as_slice()),
+            ("screen.webm", "video/webm", webm.as_slice()),
+        ] {
+            let (headers, body) = parts
+                .iter()
+                .find(|(headers, _)| {
+                    headers
+                        .iter()
+                        .any(|(_, value)| value.contains(&format!("filename=\"{name}\"")))
+                })
+                .unwrap();
+            assert!(headers.iter().any(|(key, value)| {
+                key.eq_ignore_ascii_case("content-type") && *value == mime
+            }));
+            assert_eq!(*body, expected);
+        }
+        assert!(legacy.requests().is_empty());
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn large_backpressured_upload_allows_small_concurrent_request() {
+        let (temp, legacy, peer, session, client) = linked_client(
+            200,
+            json!({"status":"ok","segment":"large","items":[],"total":0}),
+        )
+        .await;
+        peer.enqueue_response(
+            200,
+            json!({"status":"ok","segment":"large","items":[],"total":0}).to_string(),
+        );
+        let media = write_file(&temp, "screen.webm", &vec![0x57; 17 * 1024 * 1024]);
+        let client = Arc::new(client);
+        let upload_client = Arc::clone(&client);
+        let upload = tokio::spawn(async move {
+            upload_client
+                .upload_segment("20260101", "large", &[media])
+                .await
+        });
+        let listing_client = Arc::clone(&client);
+        let listing =
+            tokio::spawn(async move { listing_client.get_server_segments("20260101").await });
+        assert!(upload.await.unwrap().success);
+        assert!(listing.await.unwrap().segments.is_some());
+        assert_eq!(peer.requests().len(), 2);
+        assert!(legacy.requests().is_empty());
+        drop(client);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn declared_over_64mib_is_local_413_and_preserves_custody() {
+        let (temp, legacy, peer, session, client) =
+            linked_client(200, json!({"status":"ok"})).await;
+        let media = temp.path().join("oversize.webm");
+        let file = std::fs::File::create(&media).unwrap();
+        file.set_len((64 * 1024 * 1024 + 1) as u64).unwrap();
+        drop(file);
+        let result = client
+            .upload_segment("20260101", "oversize", std::slice::from_ref(&media))
+            .await;
+        assert_eq!(result.status_code, Some(413));
+        assert_eq!(result.error_type, Some(ErrorType::Client));
+        assert!(media.exists());
+        assert!(peer.requests().is_empty());
+        assert!(legacy.requests().is_empty());
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
     // tests/test_upload.py::test_ensure_registered_posts_descriptor_and_persists
     #[tokio::test]
     async fn ensure_registered_posts_descriptor_and_persists() {
@@ -871,25 +1348,67 @@ mod tests {
             base_dir: Some(config.base_dir.clone()),
             config_dir: Some(config.config_dir.clone()),
         });
-        assert_eq!(loaded.config.key, "K123456789");
+        assert_eq!(loaded.config.key, "");
         assert_eq!(loaded.config.stream, "fedora");
     }
 
     #[tokio::test]
-    async fn daemon_requests_remain_on_production_http_not_private_link() {
-        let server = MockServer::new(vec![
-            (200, json!({"key":"K123456789", "name":"host-a"})),
-            (200, json!({"status":"ok", "key":"stored"})),
-            (200, json!({"segments":[]})),
-        ])
-        .await;
+    async fn registration_upload_listing_event_and_status_share_one_carrier() {
+        let default_trap = OpportunisticDefaultListenerTrap::bind();
+        let server = MockServer::new(vec![]).await;
         let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&json!({"key":"K123456789", "name":"host-a"})).unwrap(),
+        );
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&json!({"status":"ok", "key":"stored"})).unwrap(),
+        );
+        peer.enqueue_response(200, serde_json::to_vec(&json!({"segments":[]})).unwrap());
+        peer.enqueue_response(200, b"{}".to_vec());
+        peer.enqueue_response(200, b"{}".to_vec());
         let temp = TempDir::new().unwrap();
         let mut config = config(&server, &temp);
-        config.key.clear();
+        config.key = "K123456789".into();
         config.stream = "host-a".into();
-        let client = client(&config);
-        assert!(client.ensure_registered(&mut config).await);
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "host-a")
+            .await
+            .unwrap();
+        let descriptor = json!({
+            "hostname": "host-a",
+            "label": "host-a",
+            "platform": "linux",
+            "stream_type": "desktop",
+            "version": "0.1.0",
+        });
+        assert!(matches!(
+            session.register_for_test(&descriptor).await,
+            LinkOutcome::Success {
+                status: StatusCode::OK,
+                ..
+            }
+        ));
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "K123456789".into(),
+                prefix: "prefix".into(),
+                name: "host-a".into(),
+                ingest_url: "/app/observer/ingest".into(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        let client = UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".into()),
+            "host-a",
+            "linux",
+            "0.1.0",
+            Arc::new(MutableClock::new(0.0, 0.0)),
+        );
         let capture = write_file(&temp, "capture.jsonl", b"{\"event\":1}\n");
         assert!(
             client
@@ -904,18 +1423,39 @@ mod tests {
                 .segments
                 .is_some()
         );
+        assert!(
+            client
+                .relay_event("observe", "stream_silent", Map::new())
+                .await
+        );
+        client.enqueue_status(Map::from_iter([("mode".into(), json!("idle"))]));
+        for _ in 0..100 {
+            if peer.requests().len() == 5 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
 
-        let requests = server.requests();
-        assert_eq!(requests.len(), 3);
+        let requests = peer.requests();
+        assert_eq!(requests.len(), 5);
         assert_eq!(
-            (requests[0].method.as_str(), requests[0].uri.as_str()),
+            (requests[0].method.as_str(), requests[0].path.as_str()),
             ("POST", "/app/observer/register")
         );
         assert_eq!(
-            requests[0].headers.get("content-type").unwrap(),
-            "application/json"
+            requests[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                .map(|(_, value)| value.as_str()),
+            Some("application/json")
         );
-        assert!(requests[0].headers.get("authorization").is_none());
+        assert!(
+            requests[0]
+                .headers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+        );
         assert_eq!(
             serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
             json!({
@@ -927,23 +1467,23 @@ mod tests {
             })
         );
         assert_eq!(
-            (requests[1].method.as_str(), requests[1].uri.as_str()),
+            (requests[1].method.as_str(), requests[1].path.as_str()),
             ("POST", "/app/observer/ingest")
         );
         assert_eq!(
             requests[1]
                 .headers
-                .get("authorization")
-                .unwrap()
-                .to_str()
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.as_str())
                 .unwrap(),
             "Bearer K123456789"
         );
         let content_type = requests[1]
             .headers
-            .get("content-type")
-            .unwrap()
-            .to_str()
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.as_str())
             .unwrap();
         let boundary = content_type
             .strip_prefix("multipart/form-data; boundary=")
@@ -988,26 +1528,50 @@ mod tests {
             )
         );
         assert_eq!(
-            (requests[2].method.as_str(), requests[2].uri.as_str()),
+            (requests[2].method.as_str(), requests[2].path.as_str()),
             ("GET", "/app/observer/ingest/segments/20260101")
         );
         assert_eq!(
             requests[2]
                 .headers
-                .get(OBSERVER_PROTOCOL_VERSION_HEADER)
-                .unwrap(),
-            "2"
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(OBSERVER_PROTOCOL_VERSION_HEADER))
+                .map(|(_, value)| value.as_str()),
+            Some("2")
         );
         assert_eq!(
             requests[2]
                 .headers
-                .get("authorization")
-                .unwrap()
-                .to_str()
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.as_str())
                 .unwrap(),
             "Bearer K123456789"
         );
-        assert!(peer.requests().is_empty());
+        assert!(server.requests().is_empty());
+        default_trap.assert_zero_connections();
+        assert_eq!(peer.accepted_carriers(), 1);
+        for (request, expected) in [
+            (
+                &requests[3],
+                json!({"tract":"observe","event":"stream_silent"}),
+            ),
+            (
+                &requests[4],
+                json!({"tract":"observe","event":"status","mode":"idle"}),
+            ),
+        ] {
+            assert_eq!(
+                (request.method.as_str(), request.path.as_str()),
+                ("POST", "/app/observer/ingest/event")
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&request.body).unwrap(),
+                expected
+            );
+        }
+        drop(client);
+        session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
 
@@ -1024,7 +1588,7 @@ mod tests {
 
     // AC 1/2: a stale-key 401 registers, persists a distinct replacement, and the next relay uses it.
     #[tokio::test]
-    async fn stale_key_401_issues_register_request() {
+    async fn later_safe_retry_uses_new_generation() {
         const STALE: &str = "STALE-KEY-111";
         const NEW: &str = "NEW-KEY-222";
         let server = MockServer::new(vec![
@@ -1053,7 +1617,7 @@ mod tests {
         assert!(!client.relay_event("observe", "status", Map::new()).await);
         assert_eq!(server.request_count("/app/observer/register"), 1);
         assert_eq!(client.inner.key.lock().unwrap().as_str(), NEW);
-        assert_eq!(load_config(client.inner.paths.clone()).config.key, NEW);
+        assert_eq!(load_config(client.inner.paths.clone()).config.key, "");
         assert!(client.relay_event("observe", "status", Map::new()).await);
         let requests = server.requests();
         assert_eq!(
@@ -1067,9 +1631,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn rejected_request_is_never_blindly_replayed() {
+        let server = MockServer::new(vec![
+            (401, json!({})),
+            (200, json!({"key":"NEW-KEY","name":"desktop-new"})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "STALE-KEY".into(),
+            stream: "desktop".into(),
+            ..config(&server, &temp)
+        };
+        let client = client(&config);
+        assert!(!client.relay_event("observe", "status", Map::new()).await);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].uri, "/app/observer/ingest/event");
+        assert_eq!(requests[1].uri, "/app/observer/register");
+    }
+
     // AC 3/7: an idempotent same-key response is not recovery and still arms cooldown.
     #[tokio::test]
-    async fn same_key_registration_is_not_recovery_and_arms_cooldown() {
+    async fn same_key_repair_reports_truthfully_without_generation_publish() {
         let server = MockServer::new(vec![
             (401, json!({})),
             (200, json!({"key":"STALE-KEY","name":"desktop"})),
@@ -1108,7 +1693,7 @@ mod tests {
 
     // AC 6: the real sync-query/event race shares one in-flight recovery attempt.
     #[tokio::test]
-    async fn sync_and_event_401_share_one_inflight_recovery() {
+    async fn concurrent_401_burst_registers_once_per_generation() {
         let gate = Arc::new(tokio::sync::Notify::new());
         let server = MockServer::new_actions(vec![
             Action::GatedResponse(401, json!({}), Arc::clone(&gate)),
@@ -1144,7 +1729,7 @@ mod tests {
 
     // AC 7: a burst is bounded by cooldown and the next 300-second window starts fresh.
     #[tokio::test]
-    async fn recovery_cooldown_bounds_register_requests_and_resets() {
+    async fn cooldown_suppresses_registration_until_next_generation_window() {
         let mut responses = vec![
             (401, json!({})),
             (200, json!({"key":"STALE-KEY","name":"desktop"})),
@@ -1162,7 +1747,13 @@ mod tests {
             ..config(&server, &temp)
         };
         let clock = Arc::new(MutableClock::new(0.0, 0.0));
-        let client = UploadClient::new(&config, "host", "linux", "test", clock.clone());
+        let client = crate::upload::capability_less_client_for_test(
+            &config,
+            "host",
+            "linux",
+            "test",
+            clock.clone(),
+        );
         for _ in 0..20 {
             assert!(!client.relay_event("observe", "status", Map::new()).await);
         }
@@ -1207,10 +1798,7 @@ mod tests {
             assert!(!client.relay_event("observe", "status", Map::new()).await);
             assert_eq!(config, before);
             assert_eq!(client.inner.key.lock().unwrap().as_str(), "STALE-KEY");
-            assert_eq!(
-                load_config(client.inner.paths.clone()).config.key,
-                "STALE-KEY"
-            );
+            assert_eq!(load_config(client.inner.paths.clone()).config.key, "");
             assert!(client.relay_event("observe", "status", Map::new()).await);
             let requests = server.requests();
             assert_eq!(
@@ -1270,15 +1858,15 @@ mod tests {
             let saved = load_config(client.inner.paths.clone()).config;
             let pair = (saved.key.as_str(), saved.stream.as_str());
             assert!(
-                pair == (STALE, "desktop-old") || pair == (NEW, "desktop-new"),
+                pair == ("", "desktop-old") || pair == ("", "desktop-new"),
                 "unexpected reachable identity {pair:?}"
             );
             assert_eq!(
                 pair,
                 if cancel {
-                    (STALE, "desktop-old")
+                    ("", "desktop-old")
                 } else {
-                    (NEW, "desktop-new")
+                    ("", "desktop-new")
                 }
             );
         }
@@ -1864,7 +2452,7 @@ mod tests {
 
     // AC: failed registration persistence does not latch in-memory registration
     #[tokio::test]
-    async fn registration_persistence_failure_can_retry() {
+    async fn persistence_failed_repair_keeps_old_generation_and_reports_failure() {
         let server = MockServer::new(vec![
             (200, json!({"key":"key", "name":"fedora"})),
             (200, json!({"key":"key", "name":"fedora"})),
@@ -1909,10 +2497,8 @@ mod tests {
     }
 
     async fn assert_403_latches(path: &str) {
-        let server = MockServer::new(vec![(403, json!({}))]).await;
-        let temp = TempDir::new().unwrap();
-        let config = config(&server, &temp);
-        let client = client(&config);
+        let default_trap = OpportunisticDefaultListenerTrap::bind();
+        let (temp, legacy, peer, session, client) = linked_client(403, json!({})).await;
         match path {
             "upload" => {
                 let media = write_file(&temp, "a.flac", b"a");
@@ -1920,7 +2506,13 @@ mod tests {
                 assert!(client.is_revoked());
             }
             "listing" => {
-                assert!(client.get_server_segments("d").await.segments.is_none());
+                assert!(
+                    client
+                        .get_server_segments("20260101")
+                        .await
+                        .segments
+                        .is_none()
+                );
                 assert!(client.is_revoked());
             }
             "event" => {
@@ -1929,11 +2521,17 @@ mod tests {
             }
             _ => unreachable!(),
         }
+        assert!(legacy.requests().is_empty());
+        default_trap.assert_zero_connections();
+        assert_eq!(peer.requests().len(), 1);
+        drop(client);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 18: register-route guard refusal deliberately no longer latches revocation.
     #[tokio::test]
-    async fn registration_403_does_not_latch_revoked() {
+    async fn registration_route_guard_refusal_keeps_prior_authority_and_does_not_latch_or_pair() {
         let server =
             MockServer::new(vec![(403, json!({"reason_code":"local_request_only"}))]).await;
         let temp = TempDir::new().unwrap();
@@ -1982,7 +2580,7 @@ mod tests {
             assert!(!client.is_revoked());
             assert_eq!(client.inner.key.lock().unwrap().as_str(), "STALE-KEY");
             let saved = load_config(client.inner.paths.clone()).config;
-            assert_eq!(saved.key, "STALE-KEY");
+            assert_eq!(saved.key, "");
             assert_eq!(saved.stream, "desktop");
             assert!(!client.relay_event("observe", "status", Map::new()).await);
             assert!(client.is_revoked());
@@ -2007,6 +2605,55 @@ mod tests {
     #[tokio::test]
     async fn event_403_latches_revoked() {
         assert_403_latches("event").await;
+    }
+
+    #[tokio::test]
+    async fn carrier_failure_does_not_latch_revocation() {
+        let default_trap = OpportunisticDefaultListenerTrap::bind();
+        let legacy = MockServer::new(vec![]).await;
+        let peer = PrivateLinkPeer::start().await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "K".into(),
+            stream: "host-a".into(),
+            ..config(&legacy, &temp)
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "host-a")
+            .await
+            .unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "K".into(),
+                prefix: "prefix".into(),
+                name: "host-a".into(),
+                ingest_url: "/app/observer/ingest".into(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        let client = UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".into()),
+            "host-a",
+            "linux",
+            "0.1.0",
+            Arc::new(MutableClock::new(0.0, 0.0)),
+        );
+        peer.shutdown().await;
+        assert!(
+            client
+                .get_server_segments("20260101")
+                .await
+                .segments
+                .is_none()
+        );
+        assert!(!client.is_revoked());
+        assert!(legacy.requests().is_empty());
+        default_trap.assert_zero_connections();
+        drop(client);
+        session.shutdown().await.unwrap();
     }
 
     // AC: revoked upload, listing, and event relay preflight make zero requests
@@ -2039,6 +2686,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut client = UploadClient::with_silent_capacity(
             &config(&server, &temp),
+            None,
             "host",
             "linux",
             "v",
@@ -2082,6 +2730,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut client = UploadClient::with_silent_capacity(
             &config(&server, &temp),
+            None,
             "host",
             "linux",
             "v",

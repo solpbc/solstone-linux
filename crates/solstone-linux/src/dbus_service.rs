@@ -82,8 +82,9 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
         String::new()
     }
     #[zbus(property)]
+    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
     fn server_url(&self) -> String {
-        self.config.server_url.clone()
+        String::new()
     }
     #[zbus(property)]
     fn stream(&self) -> String {
@@ -641,7 +642,7 @@ mod tests {
             0,
         );
         assert_eq!(s.capture_dir(), "/tmp/observer1/captures");
-        assert_eq!(s.server_url(), "https://test.example.com");
+        assert_eq!(s.server_url(), "");
         assert_eq!(s.stream(), "test-stream");
         assert_eq!(s.segment_interval(), 300);
     }

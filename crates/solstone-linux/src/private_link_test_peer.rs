@@ -30,6 +30,7 @@ use spl_transport::credential::{Credential, EndpointAddr};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Notify,
     task::JoinHandle,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -45,7 +46,9 @@ pub(crate) struct PeerRequest {
 #[derive(Clone)]
 struct PeerResponse {
     status: u16,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
+    gate: Option<Arc<Notify>>,
 }
 
 struct OutboundResponse {
@@ -58,6 +61,7 @@ struct OutboundResponse {
 struct PeerState {
     responses: Arc<Mutex<VecDeque<PeerResponse>>>,
     requests: Arc<Mutex<Vec<PeerRequest>>>,
+    request_arrived: Arc<Notify>,
     accepted: Arc<AtomicUsize>,
 }
 
@@ -74,6 +78,7 @@ impl PrivateLinkPeer {
         let state = PeerState {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
+            request_arrived: Arc::new(Notify::new()),
             accepted: Arc::new(AtomicUsize::new(0)),
         };
         let task_state = state.clone();
@@ -103,7 +108,43 @@ impl PrivateLinkPeer {
             .unwrap()
             .push_back(PeerResponse {
                 status,
+                headers: Vec::new(),
                 body: body.into(),
+                gate: None,
+            });
+    }
+    pub(crate) fn enqueue_response_with_headers(
+        &self,
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: impl Into<Vec<u8>>,
+    ) {
+        self.state
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(PeerResponse {
+                status,
+                headers,
+                body: body.into(),
+                gate: None,
+            });
+    }
+    pub(crate) fn enqueue_gated_response(
+        &self,
+        status: u16,
+        body: impl Into<Vec<u8>>,
+        gate: Arc<Notify>,
+    ) {
+        self.state
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(PeerResponse {
+                status,
+                headers: Vec::new(),
+                body: body.into(),
+                gate: Some(gate),
             });
     }
     pub(crate) fn requests(&self) -> Vec<PeerRequest> {
@@ -111,6 +152,19 @@ impl PrivateLinkPeer {
     }
     pub(crate) fn accepted_carriers(&self) -> usize {
         self.state.accepted.load(Ordering::SeqCst)
+    }
+    pub(crate) async fn wait_for_requests(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notified = self.state.request_arrived.notified();
+                if self.requests().len() >= count {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap();
     }
     pub(crate) async fn shutdown(self) {
         self.task.abort();
@@ -214,6 +268,7 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                 let raw = requests.remove(&frame.stream_id).unwrap_or_default();
                 if let Some(request) = parse_request(&raw) {
                     state.requests.lock().unwrap().push(request);
+                    state.request_arrived.notify_waiters();
                 }
                 let response =
                     state
@@ -223,8 +278,13 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                         .pop_front()
                         .unwrap_or(PeerResponse {
                             status: 500,
+                            headers: Vec::new(),
                             body: Vec::new(),
+                            gate: None,
                         });
+                if let Some(gate) = &response.gate {
+                    gate.notified().await;
+                }
                 let mut response = encode_response(response);
                 flush_response(&mut tls, frame.stream_id, &mut response).await?;
                 if response.offset != response.bytes.len() {
@@ -258,12 +318,15 @@ async fn write_frame(tls: &mut TlsStream<TcpStream>, frame: Frame) -> io::Result
 }
 
 fn encode_response(response: PeerResponse) -> OutboundResponse {
-    let mut bytes = format!(
-        "HTTP/1.1 {} OK\r\ncontent-length: {}\r\n\r\n",
-        response.status,
-        response.body.len()
-    )
-    .into_bytes();
+    let mut head = format!("HTTP/1.1 {} OK\r\n", response.status);
+    for (name, value) in response.headers {
+        head.push_str(&name);
+        head.push_str(": ");
+        head.push_str(&value);
+        head.push_str("\r\n");
+    }
+    head.push_str(&format!("content-length: {}\r\n\r\n", response.body.len()));
+    let mut bytes = head.into_bytes();
     bytes.extend(response.body);
     OutboundResponse {
         bytes,

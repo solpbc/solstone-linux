@@ -7,6 +7,8 @@ use crate::{
         dispatch_contract_payload, parse_contract_sse,
     },
     config::Config,
+    private_link::{PrivateLinkOwner, start_registered_private_link_for_test},
+    private_link_test_peer::{PeerRequest, PrivateLinkPeer},
     sync::{contract_segment_proven_held, contract_sha256_file},
     sync_health::ErrorType,
     test_support::{Action, MockServer, wait_for_requests},
@@ -414,10 +416,8 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn config(server: &MockServer, temp: &TempDir) -> Config {
+fn config(temp: &TempDir) -> Config {
     Config {
-        server_url: server.url.clone(),
-        key: "K".into(),
         stream: "desktop".into(),
         sync_retry_delays: vec![0],
         sync_max_retries: 1,
@@ -427,14 +427,53 @@ fn config(server: &MockServer, temp: &TempDir) -> Config {
     }
 }
 
-fn client(config: &Config) -> UploadClient {
+fn client(config: &Config, capability: crate::private_link::PrivateLinkCapability) -> UploadClient {
     UploadClient::new(
         config,
+        capability,
         "archon",
         "linux",
         "1.4.0",
         std::sync::Arc::new(crate::test_support::MutableClock::new(0.0, 0.0)),
     )
+}
+
+struct LinkedHarness {
+    peer: PrivateLinkPeer,
+    owner: PrivateLinkOwner,
+    client: UploadClient,
+}
+
+impl LinkedHarness {
+    async fn start(temp: &TempDir) -> Self {
+        let peer = PrivateLinkPeer::start().await;
+        let (_state, owner) = start_registered_private_link_for_test(
+            peer.credential(),
+            "desktop",
+            "K",
+            "/app/observer/ingest",
+        )
+        .await;
+        let client = client(&config(temp), owner.capability());
+        Self {
+            peer,
+            owner,
+            client,
+        }
+    }
+
+    async fn finish(self) {
+        self.owner.shutdown().await.unwrap();
+        self.peer.shutdown().await;
+    }
+}
+
+fn header<'a>(request: &'a PeerRequest, name: &str) -> Option<&'a str> {
+    request
+        .headers
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }
 
 async fn assert_upload_contract(
@@ -480,8 +519,12 @@ async fn assert_upload_contract(
         let temp = tempfile::tempdir().unwrap();
         let media = temp.path().join("audio.flac");
         fs::write(&media, b"audio").unwrap();
-        let server = MockServer::new(vec![(status, fixture["payload"].clone())]).await;
-        let result = client(&config(&server, &temp))
+        let harness = LinkedHarness::start(&temp).await;
+        harness
+            .peer
+            .enqueue_response(status, fixture["payload"].to_string());
+        let result = harness
+            .client
             .upload_segment("20260618", "143022_300", &[media])
             .await;
         let accepted = vector["decision"]["accepted"].as_bool().unwrap_or_else(|| {
@@ -499,12 +542,13 @@ async fn assert_upload_contract(
             );
         } else if status == 200 {
             assert_eq!(result.error_type, Some(ErrorType::Incompatible));
-            assert_eq!(server.requests().len(), 1);
+            assert_eq!(harness.peer.requests().len(), 1);
         } else {
             assert!(!result.success && result.stored_key.is_none());
         }
         record(executed_fixtures, fixture_id, true);
         record(executed_vectors, vector_id, true);
+        harness.finish().await;
     }
     for fixture_id in [
         "example.observer.ingestUpload.response.200.application-json.normal",
@@ -513,14 +557,19 @@ async fn assert_upload_contract(
         let temp = tempfile::tempdir().unwrap();
         let media = temp.path().join("audio.flac");
         fs::write(&media, b"audio").unwrap();
-        let server = MockServer::new(vec![(200, fixtures[fixture_id]["payload"].clone())]).await;
+        let harness = LinkedHarness::start(&temp).await;
+        harness
+            .peer
+            .enqueue_response(200, fixtures[fixture_id]["payload"].to_string());
         assert!(
-            client(&config(&server, &temp))
+            harness
+                .client
                 .upload_segment("20260618", "143022_300", &[media])
                 .await
                 .success
         );
         record(executed_fixtures, fixture_id, true);
+        harness.finish().await;
     }
     let fixture_id = "example.observer.ingestUpload.request.body.multipart-form-data.default";
     let temp = tempfile::tempdir().unwrap();
@@ -535,24 +584,25 @@ async fn assert_upload_contract(
             path
         })
         .collect();
-    let server = MockServer::new(vec![(200, json!({"status":"ok","segment":"143022_300"}))]).await;
-    client(&config(&server, &temp))
+    let harness = LinkedHarness::start(&temp).await;
+    harness.peer.enqueue_response(
+        200,
+        json!({"status":"ok","segment":"143022_300"}).to_string(),
+    );
+    harness
+        .client
         .upload_segment(
             fixtures[fixture_id]["payload"]["day"].as_str().unwrap(),
             fixtures[fixture_id]["payload"]["segment"].as_str().unwrap(),
             &media,
         )
         .await;
-    let request = &server.requests()[0];
+    let requests = harness.peer.requests();
+    let request = &requests[0];
     let body = String::from_utf8_lossy(&request.body);
     assert_eq!(request.method, "POST");
-    assert_eq!(request.uri, "/app/observer/ingest");
-    assert!(
-        request.headers["authorization"]
-            .to_str()
-            .unwrap()
-            .starts_with("Bearer ")
-    );
+    assert_eq!(request.path, "/app/observer/ingest");
+    assert!(header(request, "authorization").is_some_and(|value| value.starts_with("Bearer ")));
     assert_eq!(body.matches("name=\"day\"").count(), 1);
     assert_eq!(body.matches("name=\"segment\"").count(), 1);
     assert_eq!(body.matches("name=\"files\"").count(), fixture_files.len());
@@ -574,6 +624,7 @@ async fn assert_upload_contract(
         assert!(!body.contains(forbidden));
     }
     record(executed_fixtures, fixture_id, true);
+    harness.finish().await;
 }
 
 async fn assert_listing_contract(
@@ -643,19 +694,20 @@ async fn assert_listing_contract(
             )
         };
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, payload.clone())]).await;
-        let result = client(&config(&server, &temp))
-            .get_server_segments("20260618")
-            .await;
+        let harness = LinkedHarness::start(&temp).await;
+        harness.peer.enqueue_response_with_headers(
+            200,
+            vec![("x-solstone-protocol-version".to_owned(), "2".to_owned())],
+            payload.to_string(),
+        );
+        let result = harness.client.get_server_segments("20260618").await;
         assert_eq!((result.legacy, result.truncated), (legacy, truncated));
-        let request = &server.requests()[0];
+        let requests = harness.peer.requests();
+        let request = &requests[0];
         assert_eq!(request.method, "GET");
-        assert_eq!(request.uri, "/app/observer/ingest/segments/20260618");
-        assert_eq!(request.headers["x-solstone-protocol-version"], "2");
-        let authorization = request
-            .headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok());
+        assert_eq!(request.path, "/app/observer/ingest/segments/20260618");
+        assert_eq!(header(request, "x-solstone-protocol-version"), Some("2"));
+        let authorization = header(request, "authorization");
         assert!(authorization.is_some_and(|value| value.starts_with("Bearer ")));
         record(executed_fixtures, fixture_id, true);
         if let Some(vector_id) = vector_id {
@@ -683,6 +735,7 @@ async fn assert_listing_contract(
             }
             record(executed_vectors, vector_id, true);
         }
+        harness.finish().await;
     }
 
     let custody_cases = [
@@ -771,24 +824,26 @@ async fn assert_event_and_register(
 ) {
     let temp = tempfile::tempdir().unwrap();
     let event_id = "example.observer.ingestEvent.request.body.application-json.default";
-    let server = MockServer::new(vec![(
+    let harness = LinkedHarness::start(&temp).await;
+    harness.peer.enqueue_response(
         200,
         fixtures["example.observer.ingestEvent.response.200.application-json.default"]["payload"]
-            .clone(),
-    )])
-    .await;
+            .to_string(),
+    );
     let payload = fixtures[event_id]["payload"].as_object().unwrap();
     let mut fields = payload.clone();
     let tract = fields.remove("tract").unwrap();
     let event = fields.remove("event").unwrap();
     assert!(
-        client(&config(&server, &temp))
+        harness
+            .client
             .relay_event(tract.as_str().unwrap(), event.as_str().unwrap(), fields)
             .await
     );
-    let request = &server.requests()[0];
+    let requests = harness.peer.requests();
+    let request = &requests[0];
     assert_eq!(
-        (request.method.as_str(), request.uri.as_str()),
+        (request.method.as_str(), request.path.as_str()),
         ("POST", "/app/observer/ingest/event")
     );
     assert_eq!(
@@ -801,27 +856,40 @@ async fn assert_event_and_register(
         "example.observer.ingestEvent.response.200.application-json.default",
         true,
     );
+    harness.finish().await;
     let register_request = "example.observer.register.request.body.application-json.default";
     let register_response = "example.observer.register.response.200.application-json.default";
-    let server = MockServer::new(vec![(200, fixtures[register_response]["payload"].clone())]).await;
-    let mut cfg = config(&server, &temp);
-    cfg.key.clear();
-    cfg.stream = fixtures[register_request]["payload"]["label"]
+    let peer = PrivateLinkPeer::start().await;
+    peer.enqueue_response(200, fixtures[register_response]["payload"].to_string());
+    let label = fixtures[register_request]["payload"]["label"]
         .as_str()
-        .unwrap()
-        .to_owned();
-    fs::create_dir_all(&cfg.config_dir).unwrap();
-    assert!(client(&cfg).ensure_registered(&mut cfg).await);
-    let request = &server.requests()[0];
+        .unwrap();
+    let (_state, owner) = start_registered_private_link_for_test(
+        peer.credential(),
+        label,
+        "K",
+        "/app/observer/ingest",
+    )
+    .await;
+    assert!(matches!(
+        owner
+            .register_for_test(&fixtures[register_request]["payload"])
+            .await,
+        crate::private_link::LinkOutcome::Success { .. }
+    ));
+    let requests = peer.requests();
+    let request = &requests[0];
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(
-        (request.method.as_str(), request.uri.as_str()),
+        (request.method.as_str(), request.path.as_str()),
         ("POST", "/app/observer/register")
     );
     assert_eq!(body, fixtures[register_request]["payload"]);
-    assert!(!request.headers.contains_key("authorization"));
+    assert!(header(request, "authorization").is_none());
     record(executed, register_request, true);
     record(executed, register_response, true);
+    owner.shutdown().await.unwrap();
+    peer.shutdown().await;
 }
 
 async fn assert_chat_contract(
@@ -1177,8 +1245,10 @@ async fn assert_production_contradiction_mutation(
     let temp = tempfile::tempdir().unwrap();
     let media = temp.path().join("audio.flac");
     fs::write(&media, b"audio").unwrap();
-    let server = MockServer::new(vec![(status, payload)]).await;
-    let result = client(&config(&server, &temp))
+    let harness = LinkedHarness::start(&temp).await;
+    harness.peer.enqueue_response(status, payload.to_string());
+    let result = harness
+        .client
         .upload_segment("20260618", "143022_300", &[media])
         .await;
     let decision = &vectors[vector_id]["decision"];
@@ -1188,6 +1258,7 @@ async fn assert_production_contradiction_mutation(
         .expect("stored key source")]
     .as_str();
     assert!(result.duplicate != expected_duplicate || result.stored_key.as_deref() != expected_key);
+    harness.finish().await;
 }
 
 #[tokio::test]
