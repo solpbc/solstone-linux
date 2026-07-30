@@ -240,6 +240,7 @@ struct SyncWorker {
     last_contact_flush: f64,
     registration_refused: bool,
     draining_shutdown: bool,
+    last_recovery_generation: u64,
     #[cfg(test)]
     fail_next_pass: bool,
 }
@@ -254,6 +255,7 @@ impl SyncWorker {
         recent_error_count: Arc<AtomicU8>,
     ) -> Self {
         let synced_days = load_synced_days(&config.state_dir());
+        let last_recovery_generation = client.recovery_generation();
         Self {
             config,
             client,
@@ -275,6 +277,7 @@ impl SyncWorker {
             last_contact_flush: 0.0,
             registration_refused: false,
             draining_shutdown: false,
+            last_recovery_generation,
             #[cfg(test)]
             fail_next_pass: false,
         }
@@ -340,8 +343,13 @@ impl SyncWorker {
             self.clear_progress();
             return false;
         }
+        let generation = self.client.recovery_generation();
+        let skip_cooldown = generation != self.last_recovery_generation;
+        if skip_cooldown {
+            self.last_recovery_generation = generation;
+        }
         let elapsed = self.clock.monotonic_seconds() - self.circuit_open_since;
-        if elapsed < self.circuit_cooldown {
+        if !skip_cooldown && elapsed < self.circuit_cooldown {
             self.set_progress(
                 format!("{:.0}s until probe", self.circuit_cooldown - elapsed),
                 false,
@@ -352,6 +360,8 @@ impl SyncWorker {
         // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
         let today = timestamp_parts(self.clock.wall_seconds()).0;
         let result = self.client.get_server_segments(&today).await;
+        // Consume a recovery that completed inside this probe so it cannot skip a future breaker.
+        self.last_recovery_generation = self.client.recovery_generation();
         if result.error_type.is_none() {
             self.record_contact(true);
             self.circuit_open = false;
@@ -992,7 +1002,7 @@ fn remove_if_empty(path: &Path) {
 mod tests {
     use super::*;
     use crate::{
-        test_support::{MockServer, wait_for_requests},
+        test_support::{MockServer, MutableClock, wait_for_requests},
         upload::ListingFile,
     };
     use serde_json::{Value, json};
@@ -1009,35 +1019,6 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
-        }
-    }
-
-    struct MutableClock {
-        wall: std::sync::atomic::AtomicU64,
-        mono: std::sync::atomic::AtomicU64,
-    }
-
-    impl MutableClock {
-        fn new(wall: f64, mono: f64) -> Self {
-            Self {
-                wall: std::sync::atomic::AtomicU64::new(wall.to_bits()),
-                mono: std::sync::atomic::AtomicU64::new(mono.to_bits()),
-            }
-        }
-        fn set_wall(&self, value: f64) {
-            self.wall.store(value.to_bits(), Ordering::Release);
-        }
-        fn set_mono(&self, value: f64) {
-            self.mono.store(value.to_bits(), Ordering::Release);
-        }
-    }
-
-    impl Clock for MutableClock {
-        fn wall_seconds(&self) -> f64 {
-            f64::from_bits(self.wall.load(Ordering::Acquire))
-        }
-        fn monotonic_seconds(&self) -> f64 {
-            f64::from_bits(self.mono.load(Ordering::Acquire))
         }
     }
 
@@ -1126,14 +1107,21 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let clock = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            clock.clone(),
+        ));
         let worker = SyncWorker::new(
             config,
             client,
-            Arc::new(FixedClock {
-                wall: 1_800_000_000.0,
-                mono: 100.0,
-            }),
+            clock,
             SyncControl {
                 notify: Arc::new(Notify::new()),
                 pending_trigger: Arc::new(AtomicBool::new(false)),
@@ -1777,7 +1765,16 @@ mod tests {
             ..Config::default()
         };
         let server = MockServer::new(vec![]).await;
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
             wall: 1_800_000_000.0,
             mono: 0.0,
@@ -1845,7 +1842,16 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             client,
@@ -2061,6 +2067,137 @@ mod tests {
         assert!(worker.try_probe().await);
         worker.sync_pass(true).await;
         assert!(upload_hits(&server) >= 1);
+    }
+
+    // AC 4/16: listing alone repairs a distinct key and skips the still-active breaker wait once.
+    #[tokio::test]
+    async fn recovery_generation_skips_breaker_wait_once_with_empty_event_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![
+                (401, json!({})),
+                (200, json!({"key":"NEW-KEY","name":"desktop-new"})),
+                (200, json!({"items":[],"total":0})),
+            ],
+            -1,
+        )
+        .await;
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
+        worker.clock = clock.clone();
+
+        worker.sync_pass(true).await;
+        assert!(worker.circuit_open);
+        assert_eq!(worker.client.recovery_generation(), 1);
+        assert!(clock.monotonic_seconds() < worker.circuit_open_since + worker.circuit_cooldown);
+        let before = server.request_count("/app/observer/ingest/segments/");
+        assert!(worker.try_probe().await);
+        assert_eq!(
+            server.request_count("/app/observer/ingest/segments/"),
+            before + 1
+        );
+        assert_eq!(clock.monotonic_seconds(), 100.0);
+    }
+
+    // AC 14: positive-control the sync-path record, then prove it contains prefixes but no full key.
+    #[tokio::test]
+    async fn sync_recovery_log_has_name_and_prefixes_without_full_keys() {
+        const STALE: &str = "STALE-KEY-FULL";
+        const NEW: &str = "NEW-KEY-FULL";
+        let temp = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![
+            (401, json!({})),
+            (200, json!({"key":NEW,"name":"desktop-new"})),
+        ])
+        .await;
+        let config = Config {
+            server_url: server.url.clone(),
+            key: STALE.into(),
+            stream: "desktop".into(),
+            sync_retry_delays: vec![0],
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let clock = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            clock.clone(),
+        ));
+        let mut worker = SyncWorker::new(
+            config,
+            client,
+            clock,
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tokio::spawn(async move { worker.sync_pass(true).await }.with_subscriber(subscriber))
+            .await
+            .unwrap();
+        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("Journal identity repair completed"),
+            "{captured}"
+        );
+        assert!(captured.contains("desktop-new"), "{captured}");
+        assert!(captured.contains("STALE-KE"), "{captured}");
+        assert!(captured.contains("NEW-KEY-"), "{captured}");
+        assert!(!captured.contains(STALE), "{captured}");
+        assert!(!captured.contains(NEW), "{captured}");
+    }
+
+    // AC 15: one or twenty sync-path rejections emit exactly one first-rejection warning.
+    #[tokio::test]
+    async fn first_rejection_warning_is_once_per_window() {
+        let mut responses = vec![(401, json!({})), (200, json!({"key":"K","name":"desktop"}))];
+        responses.extend((0..19).map(|_| (401, json!({}))));
+        let temp = tempfile::tempdir().unwrap();
+        let (server, worker) = test_worker(&temp, responses, -1).await;
+        let client = Arc::clone(&worker.client);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tokio::spawn(
+            async move {
+                for _ in 0..20 {
+                    let _ = client.get_server_segments("20260101").await;
+                }
+            }
+            .with_subscriber(subscriber),
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.request_count("/app/observer/register"), 1);
+        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            captured
+                .matches("Journal rejected the current key; attempting identity repair")
+                .count(),
+            1,
+            "{captured}"
+        );
     }
 
     // Named deviation: AC 2+5 intentionally break
@@ -2394,7 +2531,16 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             Arc::clone(&client),
@@ -2425,7 +2571,16 @@ mod tests {
             },
         )
         .unwrap();
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config.clone(),
             client,
@@ -2874,7 +3029,16 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             client,
@@ -2924,7 +3088,16 @@ mod tests {
         };
         save_facts(&config.state_dir(), &facts).unwrap();
         assert_eq!(load_facts(&config.state_dir()).pending_confirmed, Some(-5));
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             client,
@@ -2949,7 +3122,16 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             client,
@@ -2976,7 +3158,16 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             client,
@@ -3013,7 +3204,16 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
         let service = SyncService::start(config, client, clock.clone());
         service.trigger();
@@ -3064,7 +3264,16 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             client,
@@ -3103,7 +3312,16 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config.clone(),
             client,
@@ -3189,7 +3407,16 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config,
             client,
@@ -3224,7 +3451,16 @@ mod tests {
         let (server, mut worker) = test_worker(&temp, vec![], -1).await;
         worker.config.key.clear();
         let config = worker.config.clone();
-        worker.client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        worker.client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let notify = Arc::clone(&worker.notify);
         let running = Arc::clone(&worker.running);
         let facts = worker.facts.lock().unwrap().clone();
@@ -3280,7 +3516,16 @@ mod tests {
             },
         )
         .unwrap();
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
         let service = SyncService::start(
             config.clone(),
             client,

@@ -3,11 +3,25 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{env, fs, io, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{
+    env, fs, io,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{
+        Mutex, MutexGuard, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 pub const DEFAULT_SERVER_URL: &str = "http://localhost:5015";
 pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
+const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
+const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_millis(1);
+static CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -98,7 +112,7 @@ pub struct LoadedConfig {
     pub warnings: Vec<ConfigWarning>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ConfigPaths {
     pub base_dir: Option<PathBuf>,
     pub config_dir: Option<PathBuf>,
@@ -263,15 +277,65 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
     LoadedConfig { config, warnings }
 }
 
-pub fn save_config(config: &Config) -> io::Result<()> {
+fn acquire_config_write_lock() -> io::Result<MutexGuard<'static, ()>> {
+    let lock = CONFIG_WRITE_LOCK.get_or_init(|| Mutex::new(()));
+    let deadline = Instant::now() + CONFIG_WRITE_LOCK_TIMEOUT;
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(CONFIG_WRITE_LOCK_POLL);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting to write config",
+                ));
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(io::Error::other("config write lock is poisoned"));
+            }
+        }
+    }
+}
+
+fn write_config(config: &Config) -> io::Result<()> {
     config.ensure_dirs()?;
     let path = config.config_path();
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), sequence));
     let mut text = serde_json::to_string_pretty(config).map_err(io::Error::other)?;
     text.push('\n');
     fs::write(&temporary, text)?;
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
     fs::rename(temporary, path)
+}
+
+pub fn save_config(config: &Config) -> io::Result<()> {
+    // This bounded critical section contains filesystem syscalls only. It never spans a prompt,
+    // an await, or any caller-visible guard, so an abandoned interactive settings session cannot
+    // prevent the running app from repairing its identity.
+    let _guard = acquire_config_write_lock()?;
+    let mut merged = config.clone();
+    if config.config_path().exists() {
+        let disk = load_config(ConfigPaths {
+            base_dir: Some(config.base_dir.clone()),
+            config_dir: Some(config.config_dir.clone()),
+        })
+        .config;
+        merged.key = disk.key;
+        merged.stream = disk.stream;
+    }
+    write_config(&merged)
+}
+
+pub fn save_identity(paths: &ConfigPaths, key: &str, stream: &str) -> io::Result<()> {
+    // See save_config: lock acquisition is bounded and the guard covers filesystem work only.
+    let _guard = acquire_config_write_lock()?;
+    let mut config = load_config(paths.clone()).config;
+    config.key = key.to_owned();
+    config.stream = stream.to_owned();
+    write_config(&config)
 }
 
 fn migrate(config: &Config) -> io::Result<()> {
@@ -702,6 +766,57 @@ mod tests {
                 .exists()
         );
     }
+
+    // AC 11/17: identity-only recovery and a stale whole-config writer preserve both change sets.
+    #[test]
+    fn stale_settings_snapshot_preserves_recovered_identity() {
+        let t = tempfile::tempdir().unwrap();
+        let initial = Config {
+            base_dir: t.path().into(),
+            config_dir: t.path().join("cfg"),
+            server_url: "https://journal".into(),
+            cache_retention_days: 7,
+            ..Config::default()
+        };
+        save_config(&initial).unwrap();
+        let config_paths = paths(t.path());
+        save_identity(&config_paths, "STALE-KEY", "desktop-old").unwrap();
+        let mut stale_settings = load_config(config_paths.clone()).config;
+
+        save_identity(&config_paths, "NEW-KEY", "desktop-new").unwrap();
+        stale_settings.cache_retention_days = 30;
+        save_config(&stale_settings).unwrap();
+
+        let saved = load_config(config_paths).config;
+        assert_eq!(saved.key, "NEW-KEY");
+        assert_eq!(saved.stream, "desktop-new");
+        assert_eq!(saved.cache_retention_days, 30);
+    }
+
+    // AC 12: recovery writes identity only and cannot revert newer non-identity disk state.
+    #[test]
+    fn save_identity_preserves_newer_server_url() {
+        let t = tempfile::tempdir().unwrap();
+        let config_paths = paths(t.path());
+        let mut config = Config {
+            base_dir: t.path().into(),
+            config_dir: t.path().join("cfg"),
+            server_url: "https://old".into(),
+            ..Config::default()
+        };
+        save_config(&config).unwrap();
+        save_identity(&config_paths, "STALE-KEY", "desktop").unwrap();
+        config = load_config(config_paths.clone()).config;
+        config.server_url = "https://new".into();
+        save_config(&config).unwrap();
+
+        save_identity(&config_paths, "NEW-KEY", "desktop-new").unwrap();
+        let saved = load_config(config_paths).config;
+        assert_eq!(saved.server_url, "https://new");
+        assert_eq!(saved.key, "NEW-KEY");
+        assert_eq!(saved.stream, "desktop-new");
+    }
+
     // AC: migration failure is returned as one warning and leaves legacy data intact.
     #[test]
     fn migration_warning() {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use crate::observer::Clock;
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response,
@@ -14,7 +15,10 @@ use std::{
     collections::VecDeque,
     convert::Infallible,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
 };
 use tokio::{
@@ -24,6 +28,38 @@ use tokio::{
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+pub(crate) struct MutableClock {
+    wall: AtomicU64,
+    mono: AtomicU64,
+}
+
+impl MutableClock {
+    pub(crate) fn new(wall: f64, mono: f64) -> Self {
+        Self {
+            wall: AtomicU64::new(wall.to_bits()),
+            mono: AtomicU64::new(mono.to_bits()),
+        }
+    }
+
+    pub(crate) fn set_wall(&self, value: f64) {
+        self.wall.store(value.to_bits(), Ordering::Release);
+    }
+
+    pub(crate) fn set_mono(&self, value: f64) {
+        self.mono.store(value.to_bits(), Ordering::Release);
+    }
+}
+
+impl Clock for MutableClock {
+    fn wall_seconds(&self) -> f64 {
+        f64::from_bits(self.wall.load(Ordering::Acquire))
+    }
+
+    fn monotonic_seconds(&self) -> f64 {
+        f64::from_bits(self.mono.load(Ordering::Acquire))
+    }
+}
 
 struct ReceiverBody(mpsc::Receiver<Result<Bytes, std::io::Error>>);
 
@@ -64,6 +100,7 @@ pub(crate) enum Action {
     OwnedRaw(u16, String),
     Disconnect,
     Stream(u16, mpsc::Receiver<Result<Bytes, std::io::Error>>),
+    GatedResponse(u16, Value, Arc<Notify>),
 }
 
 impl MockServer {
@@ -145,6 +182,15 @@ impl MockServer {
                                 }
                                 Action::Stream(status, receiver) => {
                                     (status, ReceiverBody(receiver).boxed())
+                                }
+                                Action::GatedResponse(status, value, gate) => {
+                                    gate.notified().await;
+                                    (
+                                        status,
+                                        Full::new(Bytes::from(value.to_string()))
+                                            .map_err(|never| match never {})
+                                            .boxed(),
+                                    )
                                 }
                             };
                             Ok::<_, std::io::Error>(

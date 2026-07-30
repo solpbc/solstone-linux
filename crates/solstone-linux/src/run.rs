@@ -250,13 +250,14 @@ fn run_capture(
     let video = construct_video(Arc::clone(&notifier), || VideoBackend::new(&config))
         .map_err(ObserverError::VideoStart)?;
     let (audio, mute) = PulseAudioCapture::spawn().map_err(ObserverError::Io)?;
+    let clock = SystemClock::new();
     let upload = Arc::new(UploadClient::new(
         &config,
         host.clone(),
         "linux",
         env!("CARGO_PKG_VERSION"),
+        Arc::new(clock.clone()),
     ));
-    let clock = SystemClock::new();
     let sync = SyncService::start(config.clone(), Arc::clone(&upload), Arc::new(clock.clone()));
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
@@ -543,7 +544,7 @@ pub(crate) struct SystemClock {
     started: Instant,
 }
 impl SystemClock {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             wall: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -813,7 +814,13 @@ mod tests {
             config_dir: t.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(SystemClock::new()),
+        ));
         let count = Arc::new(AtomicUsize::new(0));
         let mut sink = UploadEventSink {
             client: Arc::clone(&client),
@@ -893,7 +900,13 @@ mod tests {
             config_dir: t.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(UploadClient::new(&config, "host", "linux", "test"));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(SystemClock::new()),
+        ));
         let extra_owner = Arc::clone(&client);
         let result = stop_upload_sender(client, Duration::from_millis(1)).await;
         assert!(result.is_err());

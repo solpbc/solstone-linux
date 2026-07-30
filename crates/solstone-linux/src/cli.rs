@@ -5,11 +5,11 @@ use crate::{
     capture_stats::{
         compute_quarantine_stats, compute_status_capture_stats, format_quarantine_line,
     },
-    config::{Config, ConfigPaths, DEFAULT_SERVER_URL, load_config, save_config},
+    config::{Config, ConfigPaths, DEFAULT_SERVER_URL, load_config, save_config, save_identity},
     session_env::{self, Output, Runner},
     streams::stream_name,
     sync_health::{derive_health, load_facts},
-    upload::UploadClient,
+    upload::{UploadClient, key_prefix},
 };
 use clap::{Parser, Subcommand};
 use std::{
@@ -258,7 +258,13 @@ impl Registrar for RealRegistrar {
             .build()
             .map_err(|error| error.to_string())?;
         let _guard = runtime.enter();
-        let client = UploadClient::new(config, host, "linux", env!("CARGO_PKG_VERSION"));
+        let client = UploadClient::new(
+            config,
+            host,
+            "linux",
+            env!("CARGO_PKG_VERSION"),
+            std::sync::Arc::new(crate::run::SystemClock::new()),
+        );
         Ok(runtime.block_on(client.ensure_registered(config)))
     }
 }
@@ -319,7 +325,13 @@ fn cmd_setup(
     }
     if let Some(token) = token {
         config.key = token;
-        if let Err(error) = save_config(&config) {
+        let identity_paths = ConfigPaths {
+            base_dir: Some(config.base_dir.clone()),
+            config_dir: Some(config.config_dir.clone()),
+        };
+        if let Err(error) = save_config(&config)
+            .and_then(|()| save_identity(&identity_paths, &config.key, &config.stream))
+        {
             let _ = write_line(errors, format!("Error saving config: {error}"));
             return 1;
         }
@@ -383,10 +395,6 @@ fn setup_footer(output: &mut dyn Write, config: &Config) -> io::Result<()> {
         output,
         "\nRun 'solstone-linux run' to start, or 'solstone-linux install-service' for systemd.",
     )
-}
-
-fn key_prefix(key: &str) -> String {
-    key.chars().take(8).collect()
 }
 
 trait PromptIo {
@@ -792,7 +800,15 @@ mod tests {
             if self.result {
                 config.key = "newkey00".into();
                 config.stream = "locked-stream".into();
-                save_config(config).unwrap();
+                save_identity(
+                    &ConfigPaths {
+                        base_dir: Some(config.base_dir.clone()),
+                        config_dir: Some(config.config_dir.clone()),
+                    },
+                    &config.key,
+                    &config.stream,
+                )
+                .unwrap();
             }
             Ok(self.result)
         }

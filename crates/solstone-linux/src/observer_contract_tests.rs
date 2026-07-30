@@ -428,7 +428,13 @@ fn config(server: &MockServer, temp: &TempDir) -> Config {
 }
 
 fn client(config: &Config) -> UploadClient {
-    UploadClient::new(config, "archon", "linux", "1.4.0")
+    UploadClient::new(
+        config,
+        "archon",
+        "linux",
+        "1.4.0",
+        std::sync::Arc::new(crate::test_support::MutableClock::new(0.0, 0.0)),
+    )
 }
 
 async fn assert_upload_contract(

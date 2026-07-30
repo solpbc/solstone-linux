@@ -2,8 +2,9 @@
 // Copyright (c) 2026 sol pbc
 
 use crate::{
-    config::{Config, save_config},
+    config::{Config, ConfigPaths, save_identity},
     event_sender::{EventSender, SILENT_QUEUE_MAX},
+    observer::Clock,
     sync_health::ErrorType,
 };
 use reqwest::{Client, StatusCode, multipart};
@@ -13,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -25,6 +26,10 @@ const STREAM_TYPE: &str = "desktop";
 const OBSERVER_PROTOCOL_VERSION_HEADER: &str = "X-Solstone-Protocol-Version";
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const MAX_IMMEDIATE_ATTEMPTS: usize = 2;
+const RECOVERY_COOLDOWN: Duration = Duration::from_secs(300);
+const TELLING_WINDOW: Duration = Duration::from_secs(300);
+const TELLING_BURST_LIMIT: usize = 12;
+pub(crate) const KEY_PREFIX_CHARS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadResult {
@@ -91,6 +96,27 @@ pub(crate) struct Inner {
     version: String,
     retry_delays: Vec<i64>,
     immediate_attempts: usize,
+    paths: ConfigPaths,
+    clock: Arc<dyn Clock + Send + Sync>,
+    recovery_lock: tokio::sync::Mutex<()>,
+    last_recovery_attempt: Mutex<Option<f64>>,
+    recovery_generation: AtomicU64,
+    telling: Mutex<TellingState>,
+    dropped_events: AtomicU64,
+}
+
+#[derive(Default)]
+struct TellingState {
+    window_start: Option<f64>,
+    records: usize,
+    rejection_warned: bool,
+    suppressed_records: usize,
+}
+
+enum RegisterAttempt {
+    Registered { key: String, name: String },
+    GuardRefused { reason_code: Option<String> },
+    Failed,
 }
 
 pub struct UploadClient {
@@ -110,8 +136,9 @@ impl UploadClient {
         hostname: impl Into<String>,
         platform: impl Into<String>,
         version: impl Into<String>,
+        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Self {
-        Self::with_silent_capacity(config, hostname, platform, version, SILENT_QUEUE_MAX)
+        Self::with_silent_capacity(config, hostname, platform, version, clock, SILENT_QUEUE_MAX)
     }
 
     fn with_silent_capacity(
@@ -119,6 +146,7 @@ impl UploadClient {
         hostname: impl Into<String>,
         platform: impl Into<String>,
         version: impl Into<String>,
+        clock: Arc<dyn Clock + Send + Sync>,
         silent_capacity: usize,
     ) -> Self {
         let retry_delays = if config.sync_retry_delays.is_empty() {
@@ -140,6 +168,16 @@ impl UploadClient {
             immediate_attempts: config
                 .sync_max_retries
                 .clamp(1, MAX_IMMEDIATE_ATTEMPTS as i64) as usize,
+            paths: ConfigPaths {
+                base_dir: Some(config.base_dir.clone()),
+                config_dir: Some(config.config_dir.clone()),
+            },
+            clock,
+            recovery_lock: tokio::sync::Mutex::new(()),
+            last_recovery_attempt: Mutex::new(None),
+            recovery_generation: AtomicU64::new(0),
+            telling: Mutex::new(TellingState::default()),
+            dropped_events: AtomicU64::new(0),
         });
         let event_sender = EventSender::with_capacity(Arc::clone(&inner), silent_capacity);
         Self {
@@ -154,6 +192,10 @@ impl UploadClient {
 
     pub fn is_registered(&self) -> bool {
         !self.inner.key.lock().unwrap().is_empty()
+    }
+
+    pub(crate) fn recovery_generation(&self) -> u64 {
+        self.inner.recovery_generation.load(Ordering::Acquire)
     }
 
     pub fn request_stop(&self) {
@@ -172,77 +214,37 @@ impl UploadClient {
         if self.inner.url.is_empty() {
             return false;
         }
-        let stream = self.inner.stream.lock().unwrap().clone();
-        let mut descriptor = json!({
-            "platform": self.inner.platform,
-            "hostname": self.inner.hostname,
-            "stream_type": STREAM_TYPE,
-            "version": self.inner.version,
-        });
-        if !stream.is_empty() {
-            descriptor["label"] = Value::String(stream);
+        let _registration = self.inner.recovery_lock.lock().await;
+        if self.is_registered() {
+            return true;
         }
         let attempts = 3.min(self.inner.retry_delays.len());
-        let url = format!("{}/app/observer/register", self.inner.url);
         for attempt in 0..attempts {
-            let response = self
-                .inner
-                .client
-                .post(&url)
-                .json(&descriptor)
-                .timeout(EVENT_TIMEOUT)
-                .send()
-                .await;
-            match response {
-                Ok(response) if response.status() == StatusCode::OK => {
-                    let body = match response.json::<Value>().await {
-                        Ok(body) => body,
-                        Err(error) => {
-                            tracing::warn!(
-                                attempt = attempt + 1,
-                                %error,
-                                "Registration attempt returned malformed JSON"
-                            );
-                            if attempt + 1 < attempts {
-                                tokio::time::sleep(retry_delay(&self.inner.retry_delays, attempt))
-                                    .await;
-                            }
-                            continue;
-                        }
-                    };
-                    let (Some(key), Some(name)) = (
-                        body.get("key").and_then(Value::as_str),
-                        body.get("name").and_then(Value::as_str),
-                    ) else {
-                        // Named deviation: Python raises KeyError for a malformed
-                        // success body; Rust reports registration failure without panicking.
-                        return false;
-                    };
-                    config.key = key.to_owned();
-                    config.stream = name.to_owned();
-                    if let Err(error) = save_config(config) {
-                        // Named deviation: Python propagates the persistence error;
-                        // Rust leaves the client unregistered so a later call can retry.
-                        tracing::error!(%error, "Failed to persist observer registration");
+            match self.inner.register_once().await {
+                RegisterAttempt::Registered { key, name } => {
+                    if let Err(error) = save_identity(&self.inner.paths, &key, &name) {
+                        // Named deviation: Python propagates the persistence error; Rust keeps all
+                        // three identity stores unchanged so a later call can retry.
+                        tracing::error!(%error, "Failed to persist registration");
                         return false;
                     }
-                    *self.inner.key.lock().unwrap() = key.to_owned();
-                    *self.inner.stream.lock().unwrap() = name.to_owned();
-                    tracing::info!(name, "Registered observer");
+                    *self.inner.key.lock().unwrap() = key.clone();
+                    *self.inner.stream.lock().unwrap() = name.clone();
+                    config.key = key;
+                    config.stream = name.clone();
+                    tracing::info!(name, "Registered");
                     return true;
                 }
-                Ok(response) if response.status() == StatusCode::FORBIDDEN => {
-                    self.inner.revoked.store(true, Ordering::Release);
-                    tracing::error!("Registration rejected (403)");
+                RegisterAttempt::GuardRefused { reason_code } => {
+                    tracing::error!(
+                        status = 403,
+                        reason_code = reason_code.as_deref(),
+                        "Journal refused local registration"
+                    );
                     return false;
                 }
-                Ok(response) => tracing::warn!(
-                    attempt = attempt + 1,
-                    status = %response.status(),
-                    "Registration attempt failed"
-                ),
-                Err(error) => {
-                    tracing::warn!(attempt = attempt + 1, %error, "Registration attempt failed")
+                RegisterAttempt::Failed => {
+                    tracing::warn!(attempt = attempt + 1, "Registration attempt failed")
                 }
             }
             if attempt + 1 < attempts {
@@ -353,6 +355,8 @@ impl UploadClient {
                     last_status = Some(status.as_u16());
                     if status == StatusCode::FORBIDDEN {
                         self.inner.revoked.store(true, Ordering::Release);
+                    } else if status == StatusCode::UNAUTHORIZED {
+                        self.inner.recover_after_401("upload", false).await;
                     }
                     if error_type != ErrorType::Transient {
                         tracing::error!(%status, ?error_type, "Upload rejected");
@@ -404,6 +408,8 @@ impl UploadClient {
             let error_type = Self::classify_error(Some(status.as_u16()), false);
             if status == StatusCode::FORBIDDEN {
                 self.inner.revoked.store(true, Ordering::Release);
+            } else if status == StatusCode::UNAUTHORIZED {
+                self.inner.recover_after_401("listing", false).await;
             }
             tracing::warn!(%status, ?error_type, "Segments query failed");
             return query_failure(error_type, Some(status.as_u16()));
@@ -449,6 +455,190 @@ impl UploadClient {
 }
 
 impl Inner {
+    async fn register_once(&self) -> RegisterAttempt {
+        let stream = self.stream.lock().unwrap().clone();
+        let mut descriptor = json!({
+            "platform": self.platform,
+            "hostname": self.hostname,
+            "stream_type": STREAM_TYPE,
+            "version": self.version,
+        });
+        if !stream.is_empty() {
+            descriptor["label"] = Value::String(stream);
+        }
+        let request = self
+            .client
+            .post(format!("{}/app/observer/register", self.url))
+            .json(&descriptor)
+            .timeout(EVENT_TIMEOUT)
+            .send();
+        let response = tokio::select! {
+            response = request => response,
+            () = self.cancellation.cancelled() => return RegisterAttempt::Failed,
+        };
+        let Ok(response) = response else {
+            return RegisterAttempt::Failed;
+        };
+        if response.status() == StatusCode::FORBIDDEN {
+            let reason_code = response.json::<Value>().await.ok().and_then(|body| {
+                body.get("reason_code")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+            return RegisterAttempt::GuardRefused { reason_code };
+        }
+        if response.status() != StatusCode::OK {
+            return RegisterAttempt::Failed;
+        }
+        let Ok(body) = response.json::<Value>().await else {
+            return RegisterAttempt::Failed;
+        };
+        let (Some(key), Some(name)) = (
+            body.get("key").and_then(Value::as_str),
+            body.get("name").and_then(Value::as_str),
+        ) else {
+            return RegisterAttempt::Failed;
+        };
+        RegisterAttempt::Registered {
+            key: key.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    fn recovery_on_cooldown(&self, now: f64) -> bool {
+        self.last_recovery_attempt
+            .lock()
+            .unwrap()
+            .is_some_and(|last| now - last < RECOVERY_COOLDOWN.as_secs_f64())
+    }
+
+    fn prepare_telling(&self, now: f64) -> std::sync::MutexGuard<'_, TellingState> {
+        let mut telling = self.telling.lock().unwrap();
+        if telling
+            .window_start
+            .is_none_or(|start| now - start >= TELLING_WINDOW.as_secs_f64())
+        {
+            *telling = TellingState {
+                window_start: Some(now),
+                ..TellingState::default()
+            };
+        }
+        telling
+    }
+
+    fn tell_first_rejection(&self, route: &str, key: &str, now: f64) {
+        let mut telling = self.prepare_telling(now);
+        if telling.rejection_warned {
+            return;
+        }
+        telling.rejection_warned = true;
+        if telling.records >= TELLING_BURST_LIMIT {
+            telling.suppressed_records += 1;
+            return;
+        }
+        telling.records += 1;
+        drop(telling);
+        tracing::warn!(
+            reason = "unauthorized",
+            route,
+            status = 401,
+            key_prefix = key_prefix(key),
+            recovery_generation = self.recovery_generation.load(Ordering::Acquire),
+            "Journal rejected the current key; attempting identity repair"
+        );
+    }
+
+    fn tell_outcome(&self, outcome: &str, name: &str, old_key: &str, new_key: &str, now: f64) {
+        let mut telling = self.prepare_telling(now);
+        if telling.records >= TELLING_BURST_LIMIT {
+            telling.suppressed_records += 1;
+            return;
+        }
+        telling.records += 1;
+        drop(telling);
+        let dropped_events_lower_bound = self.dropped_events.swap(0, Ordering::AcqRel);
+        tracing::warn!(
+            outcome,
+            name,
+            old_key_prefix = key_prefix(old_key),
+            new_key_prefix = key_prefix(new_key),
+            recovery_generation = self.recovery_generation.load(Ordering::Acquire),
+            dropped_events_lower_bound,
+            dropped_events_note =
+                "lower bound; queued, superseded, or otherwise rejected events are not included",
+            "Journal identity repair completed"
+        );
+    }
+
+    fn tell_guard_refusal(&self, reason_code: Option<&str>, key: &str, now: f64) {
+        let mut telling = self.prepare_telling(now);
+        if telling.records >= TELLING_BURST_LIMIT {
+            telling.suppressed_records += 1;
+            return;
+        }
+        telling.records += 1;
+        drop(telling);
+        tracing::error!(
+            status = 403,
+            reason_code,
+            key_prefix = key_prefix(key),
+            recovery_generation = self.recovery_generation.load(Ordering::Acquire),
+            "Journal refused local identity repair"
+        );
+    }
+
+    async fn recover_after_401(&self, route: &str, rejected_event: bool) {
+        // A 403 latch is an authorization boundary: no trigger may attempt recovery once set.
+        if self.revoked.load(Ordering::Acquire) {
+            return;
+        }
+        if rejected_event {
+            self.dropped_events.fetch_add(1, Ordering::AcqRel);
+        }
+        let now = self.clock.monotonic_seconds();
+        let current_key = self.key.lock().unwrap().clone();
+        self.tell_first_rejection(route, &current_key, now);
+        if self.recovery_on_cooldown(now) {
+            return;
+        }
+
+        let _recovery = self.recovery_lock.lock().await;
+        // Recheck both authorization and cooldown after waiting for a concurrent trigger.
+        if self.revoked.load(Ordering::Acquire) {
+            return;
+        }
+        let now = self.clock.monotonic_seconds();
+        if self.recovery_on_cooldown(now) {
+            return;
+        }
+        *self.last_recovery_attempt.lock().unwrap() = Some(now);
+        // Mitigation 1 compares against the key rejected by this attempt, never a prior response.
+        let rejected_key = self.key.lock().unwrap().clone();
+        let attempt = self.register_once().await;
+        if self.revoked.load(Ordering::Acquire) {
+            return;
+        }
+        match attempt {
+            RegisterAttempt::Registered { key, name } if key == rejected_key => {
+                self.tell_outcome("same_key_returned", &name, &rejected_key, &key, now);
+            }
+            RegisterAttempt::Registered { key, name } => {
+                if let Err(error) = save_identity(&self.paths, &key, &name) {
+                    tracing::error!(%error, "Failed to persist repaired journal identity");
+                    return;
+                }
+                *self.key.lock().unwrap() = key.clone();
+                *self.stream.lock().unwrap() = name.clone();
+                self.recovery_generation.fetch_add(1, Ordering::AcqRel);
+                self.tell_outcome("recovered", &name, &rejected_key, &key, now);
+            }
+            RegisterAttempt::GuardRefused { reason_code } => {
+                self.tell_guard_refusal(reason_code.as_deref(), &rejected_key, now);
+            }
+            RegisterAttempt::Failed => {}
+        }
+    }
+
     pub(crate) async fn relay_event(
         &self,
         tract: &str,
@@ -478,12 +668,18 @@ impl Inner {
             Ok(response) => {
                 if response.status() == StatusCode::FORBIDDEN {
                     self.revoked.store(true, Ordering::Release);
+                } else if response.status() == StatusCode::UNAUTHORIZED {
+                    self.recover_after_401("event", true).await;
                 }
                 false
             }
             Err(_) => false,
         }
     }
+}
+
+pub(crate) fn key_prefix(key: &str) -> String {
+    key.chars().take(KEY_PREFIX_CHARS).collect()
 }
 
 fn retry_delay(delays: &[i64], attempt: usize) -> Duration {
@@ -566,10 +762,25 @@ mod tests {
     use super::*;
     use crate::{
         config::{ConfigPaths, load_config},
-        test_support::{Action, MockServer, wait_for_requests},
+        test_support::{Action, MockServer, MutableClock, wait_for_requests},
     };
     use tempfile::TempDir;
     use tokio::net::TcpListener;
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn config(server: &MockServer, temp: &TempDir) -> Config {
         Config {
@@ -582,7 +793,13 @@ mod tests {
     }
 
     fn client(config: &Config) -> UploadClient {
-        UploadClient::new(config, "host-a", "linux", "0.1.0")
+        UploadClient::new(
+            config,
+            "host-a",
+            "linux",
+            "0.1.0",
+            Arc::new(MutableClock::new(0.0, 0.0)),
+        )
     }
 
     fn write_file(temp: &TempDir, name: &str, body: &[u8]) -> PathBuf {
@@ -620,6 +837,7 @@ mod tests {
     }
 
     // tests/test_upload.py::test_ensure_registered_skips_when_key_present
+    // AC 18: constructor clock plumbing deliberately preserves the existing-key short circuit.
     #[tokio::test]
     async fn ensure_registered_skips_when_key_present() {
         let server = MockServer::new(vec![]).await;
@@ -627,6 +845,309 @@ mod tests {
         let mut config = config(&server, &temp);
         assert!(client(&config).ensure_registered(&mut config).await);
         assert!(server.requests().is_empty());
+    }
+
+    // AC 1/2: a stale-key 401 registers, persists a distinct replacement, and the next relay uses it.
+    #[tokio::test]
+    async fn stale_key_401_issues_register_request() {
+        const STALE: &str = "STALE-KEY-111";
+        const NEW: &str = "NEW-KEY-222";
+        let server = MockServer::new(vec![
+            (401, json!({})),
+            (200, json!({"key":NEW,"name":"desktop-new"})),
+            (200, json!({})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: STALE.into(),
+            stream: "desktop".into(),
+            ..config(&server, &temp)
+        };
+        save_identity(
+            &ConfigPaths {
+                base_dir: Some(config.base_dir.clone()),
+                config_dir: Some(config.config_dir.clone()),
+            },
+            STALE,
+            "desktop",
+        )
+        .unwrap();
+        let client = client(&config);
+
+        assert!(!client.relay_event("observe", "status", Map::new()).await);
+        assert_eq!(server.request_count("/app/observer/register"), 1);
+        assert_eq!(client.inner.key.lock().unwrap().as_str(), NEW);
+        assert_eq!(load_config(client.inner.paths.clone()).config.key, NEW);
+        assert!(client.relay_event("observe", "status", Map::new()).await);
+        let requests = server.requests();
+        assert_eq!(
+            requests[2]
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            format!("Bearer {NEW}")
+        );
+    }
+
+    // AC 3/7: an idempotent same-key response is not recovery and still arms cooldown.
+    #[tokio::test]
+    async fn same_key_registration_is_not_recovery_and_arms_cooldown() {
+        let server = MockServer::new(vec![
+            (401, json!({})),
+            (200, json!({"key":"STALE-KEY","name":"desktop"})),
+            (401, json!({})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "STALE-KEY".into(),
+            stream: "desktop".into(),
+            ..config(&server, &temp)
+        };
+        let client = client(&config);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        async {
+            assert!(!client.relay_event("observe", "status", Map::new()).await);
+            assert_eq!(client.recovery_generation(), 0);
+            assert!(!client.relay_event("observe", "status", Map::new()).await);
+        }
+        .with_subscriber(subscriber)
+        .await;
+        assert_eq!(server.request_count("/app/observer/register"), 1);
+        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("outcome=\"same_key_returned\""),
+            "{captured}"
+        );
+        assert!(!captured.contains("outcome=\"recovered\""), "{captured}");
+    }
+
+    // AC 6: the real sync-query/event race shares one in-flight recovery attempt.
+    #[tokio::test]
+    async fn sync_and_event_401_share_one_inflight_recovery() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let server = MockServer::new_actions(vec![
+            Action::GatedResponse(401, json!({}), Arc::clone(&gate)),
+            Action::GatedResponse(401, json!({}), Arc::clone(&gate)),
+            Action::Response(200, json!({"key":"NEW-KEY","name":"desktop-new"})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "STALE-KEY".into(),
+            stream: "desktop".into(),
+            ..config(&server, &temp)
+        };
+        let client = Arc::new(client(&config));
+        let listing = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.get_server_segments("20260101").await })
+        };
+        let event = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.relay_event("observe", "status", Map::new()).await })
+        };
+        wait_for_requests(&server, 2).await;
+        tokio::task::yield_now().await;
+        gate.notify_waiters();
+        let (listing, event) = tokio::join!(listing, event);
+        let listing = listing.unwrap();
+        let event = event.unwrap();
+        assert!(listing.segments.is_none());
+        assert!(!event);
+        assert_eq!(server.request_count("/app/observer/register"), 1);
+    }
+
+    // AC 7: a burst is bounded by cooldown and the next 300-second window starts fresh.
+    #[tokio::test]
+    async fn recovery_cooldown_bounds_register_requests_and_resets() {
+        let mut responses = vec![
+            (401, json!({})),
+            (200, json!({"key":"STALE-KEY","name":"desktop"})),
+        ];
+        responses.extend((0..19).map(|_| (401, json!({}))));
+        responses.extend([
+            (401, json!({})),
+            (200, json!({"key":"STALE-KEY","name":"desktop"})),
+        ]);
+        let server = MockServer::new(responses).await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "STALE-KEY".into(),
+            stream: "desktop".into(),
+            ..config(&server, &temp)
+        };
+        let clock = Arc::new(MutableClock::new(0.0, 0.0));
+        let client = UploadClient::new(&config, "host", "linux", "test", clock.clone());
+        for _ in 0..20 {
+            assert!(!client.relay_event("observe", "status", Map::new()).await);
+        }
+        assert_eq!(server.request_count("/app/observer/register"), 1);
+        clock.set_mono(300.0);
+        assert!(!client.relay_event("observe", "status", Map::new()).await);
+        assert_eq!(server.request_count("/app/observer/register"), 2);
+    }
+
+    // AC 9: every failed register shape preserves disk, runtime, caller config, and stale bearer use.
+    #[tokio::test]
+    async fn failed_registration_preserves_all_stores_and_stale_bearer() {
+        for failed in [
+            Action::Disconnect,
+            Action::Response(500, json!({})),
+            Action::Response(200, json!({"name":"desktop"})),
+        ] {
+            let server = MockServer::new_actions(vec![
+                Action::Response(401, json!({})),
+                failed,
+                Action::Response(200, json!({})),
+            ])
+            .await;
+            let temp = TempDir::new().unwrap();
+            let config = Config {
+                key: "STALE-KEY".into(),
+                stream: "desktop".into(),
+                ..config(&server, &temp)
+            };
+            save_identity(
+                &ConfigPaths {
+                    base_dir: Some(config.base_dir.clone()),
+                    config_dir: Some(config.config_dir.clone()),
+                },
+                &config.key,
+                &config.stream,
+            )
+            .unwrap();
+            let before = config.clone();
+            let client = client(&config);
+
+            assert!(!client.relay_event("observe", "status", Map::new()).await);
+            assert_eq!(config, before);
+            assert_eq!(client.inner.key.lock().unwrap().as_str(), "STALE-KEY");
+            assert_eq!(
+                load_config(client.inner.paths.clone()).config.key,
+                "STALE-KEY"
+            );
+            assert!(client.relay_event("observe", "status", Map::new()).await);
+            let requests = server.requests();
+            assert_eq!(
+                requests.last().unwrap().headers["authorization"],
+                "Bearer STALE-KEY"
+            );
+        }
+    }
+
+    // AC 8: cancellation around a successful register exposes only complete stale/new identities.
+    #[tokio::test]
+    async fn cancelled_recovery_exposes_no_third_disk_identity() {
+        const STALE: &str = "STALE-KEY";
+        const NEW: &str = "NEW-KEY";
+        for cancel in [true, false] {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            let server = MockServer::new_actions(vec![
+                Action::Response(401, json!({})),
+                Action::GatedResponse(
+                    200,
+                    json!({"key":NEW,"name":"desktop-new"}),
+                    Arc::clone(&gate),
+                ),
+            ])
+            .await;
+            let temp = TempDir::new().unwrap();
+            let config = Config {
+                key: STALE.into(),
+                stream: "desktop-old".into(),
+                ..config(&server, &temp)
+            };
+            save_identity(
+                &ConfigPaths {
+                    base_dir: Some(config.base_dir.clone()),
+                    config_dir: Some(config.config_dir.clone()),
+                },
+                STALE,
+                "desktop-old",
+            )
+            .unwrap();
+            let client = Arc::new(client(&config));
+            let relay = {
+                let client = Arc::clone(&client);
+                tokio::spawn(
+                    async move { client.relay_event("observe", "status", Map::new()).await },
+                )
+            };
+            wait_for_requests(&server, 2).await;
+            if cancel {
+                client.request_stop();
+            }
+            gate.notify_one();
+            assert!(!relay.await.unwrap());
+            let saved = load_config(client.inner.paths.clone()).config;
+            let pair = (saved.key.as_str(), saved.stream.as_str());
+            assert!(
+                pair == (STALE, "desktop-old") || pair == (NEW, "desktop-new"),
+                "unexpected reachable identity {pair:?}"
+            );
+            assert_eq!(
+                pair,
+                if cancel {
+                    (STALE, "desktop-old")
+                } else {
+                    (NEW, "desktop-new")
+                }
+            );
+        }
+    }
+
+    // AC 10: already-green regression pin; failed registration keeps keyless relay offline.
+    #[tokio::test]
+    async fn failed_registration_keeps_empty_key_and_relay_offline() {
+        let server = MockServer::new(vec![(500, json!({}))]).await;
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&server, &temp);
+        config.key.clear();
+        config.sync_retry_delays = vec![0];
+        let client = client(&config);
+        assert!(!client.ensure_registered(&mut config).await);
+        let before = server.requests().len();
+        assert!(!client.relay_event("observe", "status", Map::new()).await);
+        assert_eq!(server.requests().len(), before);
+        assert!(!client.is_registered());
+    }
+
+    // AC 15: zero rejections and twenty clean relays emit no rejection warning.
+    #[tokio::test]
+    async fn clean_relays_emit_no_rejection_warning() {
+        let server = MockServer::new((0..20).map(|_| (200, json!({}))).collect()).await;
+        let temp = TempDir::new().unwrap();
+        let config = config(&server, &temp);
+        let client = client(&config);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        async {
+            for _ in 0..20 {
+                assert!(client.relay_event("observe", "status", Map::new()).await);
+            }
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            !captured.contains("Journal rejected the current key"),
+            "{captured}"
+        );
     }
 
     // tests/test_upload.py::test_upload_segment_uses_bearer_and_keyless_route
@@ -1190,15 +1711,9 @@ mod tests {
     async fn assert_403_latches(path: &str) {
         let server = MockServer::new(vec![(403, json!({}))]).await;
         let temp = TempDir::new().unwrap();
-        let mut config = config(&server, &temp);
+        let config = config(&server, &temp);
         let client = client(&config);
         match path {
-            "registration" => {
-                config.key.clear();
-                let client = self::client(&config);
-                assert!(!client.ensure_registered(&mut config).await);
-                assert!(client.is_revoked());
-            }
             "upload" => {
                 let media = write_file(&temp, "a.flac", b"a");
                 assert!(!client.upload_segment("d", "s", &[media]).await.success);
@@ -1216,10 +1731,55 @@ mod tests {
         }
     }
 
-    // AC: registration 403 latches revoked
+    // AC 18: register-route guard refusal deliberately no longer latches revocation.
     #[tokio::test]
-    async fn registration_403_latches_revoked() {
-        assert_403_latches("registration").await;
+    async fn registration_403_does_not_latch_revoked() {
+        let server =
+            MockServer::new(vec![(403, json!({"reason_code":"local_request_only"}))]).await;
+        let temp = TempDir::new().unwrap();
+        let mut config = config(&server, &temp);
+        config.key.clear();
+        let client = client(&config);
+        assert!(!client.ensure_registered(&mut config).await);
+        assert!(!client.is_revoked());
+        assert!(config.key.is_empty());
+    }
+
+    // AC 5: register guard refusal preserves the stale identity; ingest 403 still revokes it.
+    #[tokio::test]
+    async fn register_guard_refusal_does_not_revoke_but_ingest_403_does() {
+        let server = MockServer::new(vec![
+            (401, json!({})),
+            (403, json!({"reason_code":"local_request_only"})),
+            (403, json!({})),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "STALE-KEY".into(),
+            stream: "desktop".into(),
+            ..config(&server, &temp)
+        };
+        let client = client(&config);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        async {
+            assert!(!client.relay_event("observe", "status", Map::new()).await);
+            assert!(!client.is_revoked());
+            assert_eq!(client.inner.key.lock().unwrap().as_str(), "STALE-KEY");
+            assert!(!client.relay_event("observe", "status", Map::new()).await);
+            assert!(client.is_revoked());
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(captured.contains("Journal refused local identity repair"));
+        assert!(captured.contains("local_request_only"));
     }
     // AC: upload 403 latches revoked
     #[tokio::test]
@@ -1265,8 +1825,14 @@ mod tests {
     async fn submit_status_is_nonblocking_while_relay_is_blocked() {
         let (server, gate) = MockServer::gated().await;
         let temp = TempDir::new().unwrap();
-        let mut client =
-            UploadClient::with_silent_capacity(&config(&server, &temp), "host", "linux", "v", 1);
+        let mut client = UploadClient::with_silent_capacity(
+            &config(&server, &temp),
+            "host",
+            "linux",
+            "v",
+            Arc::new(MutableClock::new(0.0, 0.0)),
+            1,
+        );
         client.enqueue_status(Map::from_iter([("seq".into(), json!(1))]));
         wait_for_requests(&server, 1).await;
         let start = tokio::time::Instant::now();
@@ -1302,8 +1868,14 @@ mod tests {
     async fn silent_overflow_rejects_incoming_and_stop_is_bounded() {
         let (server, gate) = MockServer::gated().await;
         let temp = TempDir::new().unwrap();
-        let mut client =
-            UploadClient::with_silent_capacity(&config(&server, &temp), "host", "linux", "v", 1);
+        let mut client = UploadClient::with_silent_capacity(
+            &config(&server, &temp),
+            "host",
+            "linux",
+            "v",
+            Arc::new(MutableClock::new(0.0, 0.0)),
+            1,
+        );
         assert!(client.enqueue_stream_silent(Map::from_iter([("node_id".into(), json!(1))])));
         assert!(!client.enqueue_stream_silent(Map::from_iter([("node_id".into(), json!(2))])));
         wait_for_requests(&server, 1).await;
@@ -1314,5 +1886,36 @@ mod tests {
         assert_eq!(client.stop(Duration::from_secs(1)).await, 0);
         let body: Value = serde_json::from_slice(&server.requests()[0].body).unwrap();
         assert_eq!(body["node_id"], 1);
+    }
+
+    // AC 13: event recovery performs one register attempt while the bounded queue remains usable.
+    #[tokio::test]
+    async fn event_recovery_is_single_attempt_and_queue_stays_bounded() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let server = MockServer::new_actions(vec![
+            Action::Response(401, json!({})),
+            Action::GatedResponse(500, json!({}), Arc::clone(&gate)),
+        ])
+        .await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            key: "STALE-KEY".into(),
+            stream: "desktop".into(),
+            ..config(&server, &temp)
+        };
+        let mut client = client(&config);
+        client.enqueue_status(Map::new());
+        wait_for_requests(&server, 2).await;
+        for sequence in 0..20 {
+            assert!(
+                client
+                    .enqueue_stream_silent(Map::from_iter([("sequence".into(), json!(sequence),)]))
+            );
+        }
+        let started = tokio::time::Instant::now();
+        gate.notify_one();
+        assert_eq!(client.stop(Duration::from_secs(1)).await, 0);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(server.request_count("/app/observer/register"), 1);
     }
 }
