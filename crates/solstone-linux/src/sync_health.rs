@@ -305,7 +305,7 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
             // Some(401); losing that code would conservatively repaint the failure Revoked.
             HealthState::Unknown
         } else if facts.pending_confirmed == Some(0)
-            && facts.link.as_ref().is_none_or(|link| {
+            && facts.link.as_ref().is_some_and(|link| {
                 link.carrier_proven
                     && link.observer_registered
                     && !link.transport_unavailable
@@ -374,6 +374,22 @@ fn optional_int(data: &Map<String, Value>, key: &str) -> Option<i64> {
     data.get(key).and_then(Value::as_i64)
 }
 
+fn load_link_facts(data: &Map<String, Value>) -> Option<LinkFactState> {
+    let link = data.get("link")?.as_object()?;
+    let boolean = |key| link.get(key).and_then(Value::as_bool).unwrap_or(false);
+    Some(LinkFactState {
+        pairing_required: boolean("pairing_required"),
+        private_state_invalid: boolean("private_state_invalid"),
+        config_sanitation_failed: boolean("config_sanitation_failed"),
+        listener_ready: boolean("listener_ready"),
+        carrier_proven: boolean("carrier_proven"),
+        observer_registered: boolean("observer_registered"),
+        transport_unavailable: boolean("transport_unavailable"),
+        terminal_revocation: boolean("terminal_revocation"),
+        token_persistence_failure: boolean("token_persistence_failure"),
+    })
+}
+
 pub fn load_facts(state_dir: &Path) -> SyncFacts {
     let Ok(text) = fs::read_to_string(sync_health_path(state_dir)) else {
         return SyncFacts::default();
@@ -396,7 +412,7 @@ pub fn load_facts(state_dir: &Path) -> SyncFacts {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-        link: None,
+        link: load_link_facts(&data),
     }
 }
 
@@ -413,6 +429,17 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
         "pending_confirmed": facts.pending_confirmed,
         "in_progress": facts.in_progress,
         "progress": facts.progress,
+        "link": facts.link.as_ref().map(|link| json!({
+            "pairing_required": link.pairing_required,
+            "private_state_invalid": link.private_state_invalid,
+            "config_sanitation_failed": link.config_sanitation_failed,
+            "listener_ready": link.listener_ready,
+            "carrier_proven": link.carrier_proven,
+            "observer_registered": link.observer_registered,
+            "transport_unavailable": link.transport_unavailable,
+            "terminal_revocation": link.terminal_revocation,
+            "token_persistence_failure": link.token_persistence_failure,
+        })),
     }))
     .map_err(io::Error::other)?;
     text.push('\n');
@@ -546,11 +573,16 @@ mod tests {
         assert!(health.tooltip.contains("last contact"));
     }
 
-    // tests/test_sync_health.py::test_pending_confirmed_zero_is_only_connected_gate
+    // Connected requires both zero pending custody and positive linked-transport evidence.
     #[test]
-    fn pending_confirmed_zero_is_only_connected_gate() {
+    fn pending_confirmed_zero_and_link_evidence_gate_connected() {
         let connected = SyncFacts {
             pending_confirmed: Some(0),
+            link: Some(LinkFactState {
+                carrier_proven: true,
+                observer_registered: true,
+                ..LinkFactState::default()
+            }),
             ..SyncFacts::default()
         };
         assert_eq!(

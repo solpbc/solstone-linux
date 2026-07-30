@@ -748,11 +748,19 @@ mod tests {
     // AC: sync health covers connected, warning, and failing doctor surfaces.
     #[test]
     fn sync_health_warn_ok_fail_matrix() {
-        use crate::sync_health::{ErrorType, SyncFacts};
+        use crate::{
+            private_link::LinkFactState,
+            sync_health::{ErrorType, SyncFacts},
+        };
         let connected = SyncFacts {
             pending_confirmed: Some(0),
             last_successful_contact: Some(100.0),
             last_successful_sync: Some(100.0),
+            link: Some(LinkFactState {
+                carrier_proven: true,
+                observer_registered: true,
+                ..LinkFactState::default()
+            }),
             ..Default::default()
         };
         let offline = SyncFacts {

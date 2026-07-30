@@ -115,15 +115,16 @@ impl SyncService {
         let notify = Arc::new(Notify::new());
         let pending_trigger = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
+        let link_facts = client.link_facts();
         let mut facts = load_facts(&config.state_dir());
         facts.in_progress = false;
         facts.progress.clear();
+        facts.link = Some(link_facts.snapshot());
         if let Err(error) = save_facts(&config.state_dir(), &facts) {
             tracing::warn!(%error, "Failed to save sync health");
         }
         let facts = Arc::new(Mutex::new(facts));
         let recent_error_count = Arc::new(AtomicU8::new(0));
-        let link_facts = client.link_facts();
         let mut worker = SyncWorker::new(
             config.clone(),
             Arc::clone(&client),
@@ -239,6 +240,7 @@ struct SyncWorker {
     running: Arc<AtomicBool>,
     facts: Arc<Mutex<SyncFacts>>,
     recent_error_count: Arc<AtomicU8>,
+    link_facts: LinkFacts,
     synced_days: HashSet<String>,
     consecutive_failures: u32,
     last_error_type: Option<ErrorType>,
@@ -267,6 +269,7 @@ impl SyncWorker {
     ) -> Self {
         let synced_days = load_synced_days(&config.state_dir());
         let last_recovery_generation = client.recovery_generation();
+        let link_facts = client.link_facts();
         Self {
             config,
             client,
@@ -276,6 +279,7 @@ impl SyncWorker {
             running: control.running,
             facts,
             recent_error_count,
+            link_facts,
             synced_days,
             consecutive_failures: 0,
             last_error_type: None,
@@ -768,7 +772,9 @@ impl SyncWorker {
     }
 
     fn save_health(&self) {
-        if let Err(error) = save_facts(&self.config.state_dir(), &self.facts.lock().unwrap()) {
+        let mut facts = self.facts.lock().unwrap();
+        facts.link = Some(self.link_facts.snapshot());
+        if let Err(error) = save_facts(&self.config.state_dir(), &facts) {
             tracing::warn!(%error, "Failed to save sync health");
         }
     }
@@ -1014,9 +1020,11 @@ fn remove_if_empty(path: &Path) {
 mod tests {
     use super::*;
     use crate::{
-        private_link::{ObserverState, publish_observer_registration, start_private_link_session},
+        private_link::{
+            LinkFactState, ObserverState, publish_observer_registration, start_private_link_session,
+        },
         private_link_test_peer::PrivateLinkPeer,
-        test_support::{MockServer, MutableClock, wait_for_requests},
+        test_support::{LinkedMockServer, MockServer, MutableClock, wait_for_requests},
         upload::ListingFile,
     };
     use serde_json::{Value, json};
@@ -1111,11 +1119,10 @@ mod tests {
         temp: &tempfile::TempDir,
         responses: Vec<(u16, Value)>,
         retention: i64,
-    ) -> (MockServer, SyncWorker) {
-        let server = MockServer::new(responses).await;
+    ) -> (LinkedMockServer, SyncWorker) {
+        let server = LinkedMockServer::new(responses).await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
+            stream: "desktop".to_owned(),
             sync_retry_delays: vec![0],
             cache_retention_days: retention,
             base_dir: temp.path().to_path_buf(),
@@ -1126,8 +1133,9 @@ mod tests {
             wall: 1_800_000_000.0,
             mono: 100.0,
         });
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(UploadClient::new(
             &config,
+            server.capability(),
             "host",
             "linux",
             "test",
@@ -1210,9 +1218,25 @@ mod tests {
         })
     }
 
-    fn upload_hits(server: &MockServer) -> usize {
+    trait RequestLog {
+        fn logged_requests(&self) -> Vec<crate::test_support::Received>;
+    }
+
+    impl RequestLog for MockServer {
+        fn logged_requests(&self) -> Vec<crate::test_support::Received> {
+            self.requests()
+        }
+    }
+
+    impl RequestLog for LinkedMockServer {
+        fn logged_requests(&self) -> Vec<crate::test_support::Received> {
+            self.requests()
+        }
+    }
+
+    fn upload_hits(server: &impl RequestLog) -> usize {
         server
-            .requests()
+            .logged_requests()
             .iter()
             .filter(|request| request.uri == "/app/observer/ingest")
             .count()
@@ -1919,7 +1943,7 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -1960,6 +1984,11 @@ mod tests {
                     pending_confirmed: Some(0),
                     last_successful_sync: Some(1_800_000_000.0),
                     last_successful_contact: Some(1_800_000_000.0),
+                    link: Some(LinkFactState {
+                        carrier_proven: true,
+                        observer_registered: true,
+                        ..LinkFactState::default()
+                    }),
                     ..SyncFacts::default()
                 },
                 "on — connected",
@@ -2429,7 +2458,7 @@ mod tests {
     async fn open_probe_worker(
         temp: &tempfile::TempDir,
         responses: Vec<(u16, Value)>,
-    ) -> (MockServer, SyncWorker) {
+    ) -> (LinkedMockServer, SyncWorker) {
         let (server, mut worker) = test_worker(temp, responses, -1).await;
         worker.circuit_open = true;
         worker.circuit_open_since = 0.0;
@@ -2639,7 +2668,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -2770,7 +2799,7 @@ mod tests {
         responses: Vec<(u16, Value)>,
         retention: i64,
         synced: bool,
-    ) -> (MockServer, SyncWorker, PathBuf) {
+    ) -> (LinkedMockServer, SyncWorker, PathBuf) {
         let segment = create_segment(temp, name, b"screen");
         let (server, mut worker) = test_worker(temp, responses, retention).await;
         if synced {
@@ -3283,7 +3312,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -3376,7 +3405,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -3412,7 +3441,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -3458,7 +3487,7 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -3518,7 +3547,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -3566,7 +3595,7 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -3626,7 +3655,7 @@ mod tests {
         }
         assert!(server.requests().is_empty());
         notify.notify_one();
-        wait_for_requests(&server, 1).await;
+        server.wait_for_requests(1).await;
         running.store(false, Ordering::Release);
         notify.notify_one();
         task.await.unwrap();
@@ -3661,7 +3690,7 @@ mod tests {
             ..Config::default()
         };
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",
@@ -3770,7 +3799,7 @@ mod tests {
             },
         )
         .unwrap();
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             "host",
             "linux",

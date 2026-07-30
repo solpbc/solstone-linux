@@ -152,7 +152,21 @@ pub fn build(snapshot: &StateSnapshot, interval: i64, now: f64, health: &SyncHea
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync_health::{ErrorType, HealthState, SURFACE_BY_STATE, SyncFacts, derive_health};
+    use crate::{
+        private_link::LinkFactState,
+        sync_health::{ErrorType, HealthState, SURFACE_BY_STATE, SyncFacts, derive_health},
+    };
+    fn connected_facts() -> SyncFacts {
+        SyncFacts {
+            pending_confirmed: Some(0),
+            link: Some(LinkFactState {
+                carrier_proven: true,
+                observer_registered: true,
+                ..LinkFactState::default()
+            }),
+            ..SyncFacts::default()
+        }
+    }
     fn snapshot() -> StateSnapshot {
         StateSnapshot {
             mode: Mode::Screencast,
@@ -166,14 +180,7 @@ mod tests {
         }
     }
     fn connected_health() -> SyncHealth {
-        derive_health(
-            &SyncFacts {
-                pending_confirmed: Some(0),
-                ..Default::default()
-            },
-            100.0,
-            600.0,
-        )
+        derive_health(&connected_facts(), 100.0, 600.0)
     }
     #[test]
     fn countdowns_are_computed_at_read_time() {
@@ -240,13 +247,7 @@ mod tests {
     #[test]
     fn recording_and_idle_headers_cover_complete_health_axis_from_surfaces() {
         let cases = [
-            (
-                SyncFacts {
-                    pending_confirmed: Some(0),
-                    ..Default::default()
-                },
-                HealthState::Connected,
-            ),
+            (connected_facts(), HealthState::Connected),
             (
                 SyncFacts {
                     in_progress: true,
@@ -382,10 +383,7 @@ mod tests {
     #[test]
     fn sync_labels_follow_resolved_health_surfaces() {
         let facts = [
-            SyncFacts {
-                pending_confirmed: Some(0),
-                ..Default::default()
-            },
+            connected_facts(),
             SyncFacts {
                 in_progress: true,
                 progress: "3/10 segments".into(),
@@ -408,10 +406,7 @@ mod tests {
     fn icon_ladder_covers_four_statuses_by_seven_health_states() {
         let cases = [
             (
-                SyncFacts {
-                    pending_confirmed: Some(0),
-                    ..Default::default()
-                },
+                connected_facts(),
                 ["recording", "idle", "paused", "stopped"],
             ),
             (

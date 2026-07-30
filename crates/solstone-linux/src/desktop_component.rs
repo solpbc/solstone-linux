@@ -69,15 +69,13 @@ impl DesktopComponent {
         self.disabled.load(Ordering::Acquire)
     }
     /// Acquire this singleton before capture, registration, export, recovery, or any other side
-    /// effect. The wire-up lode must call this from `observer::lifecycle`'s Setup closure.
+    /// effect.
     pub fn acquire_singleton(
         &self,
         bus: &impl BusNameRequester,
         mut log: impl FnMut(&str),
     ) -> bool {
         match bus.request_name(
-            // Soak scaffolding (delete at cutover): the Python observer owns the production name
-            // while both implementations run side by side.
             std::env::var("SOLSTONE_LINUX_BUS_NAME")
                 .unwrap_or_else(|_| OBSERVER_BUS_NAME.to_owned())
                 .as_str(),

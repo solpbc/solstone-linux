@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use crate::observer::Clock;
+use crate::{
+    observer::Clock,
+    private_link::{
+        ObserverState, PrivateLinkCapability, PrivateLinkSession, publish_observer_registration,
+        start_private_link_session,
+    },
+    private_link_test_peer::PrivateLinkPeer,
+};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response,
@@ -12,13 +19,13 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     convert::Infallible,
     io,
     net::TcpListener as StdTcpListener,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -122,6 +129,108 @@ pub(crate) struct MockServer {
     pub(crate) url: String,
     received: Arc<Mutex<Vec<Received>>>,
     task: JoinHandle<()>,
+    linked: LinkedMockServer,
+}
+
+static LINKED_FIXTURES: OnceLock<Mutex<HashMap<String, PrivateLinkCapability>>> = OnceLock::new();
+
+pub(crate) fn linked_fixture_capability(origin: &str) -> Option<PrivateLinkCapability> {
+    LINKED_FIXTURES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(origin)
+        .cloned()
+}
+
+pub(crate) struct LinkedMockServer {
+    peer: PrivateLinkPeer,
+    session: PrivateLinkSession,
+}
+
+impl LinkedMockServer {
+    pub(crate) async fn new(responses: Vec<(u16, Value)>) -> Self {
+        Self::new_raw(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, body.to_string().into_bytes()))
+                .collect(),
+        )
+        .await
+    }
+
+    pub(crate) async fn new_raw(responses: Vec<(u16, Vec<u8>)>) -> Self {
+        let peer = PrivateLinkPeer::start().await;
+        for (status, body) in responses {
+            peer.enqueue_response(status, body);
+        }
+        let session = start_private_link_session(
+            &tempfile::tempdir().unwrap().keep(),
+            peer.credential(),
+            "desktop",
+        )
+        .await
+        .unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "K".to_owned(),
+                prefix: "prefix".to_owned(),
+                name: "desktop".to_owned(),
+                ingest_url: "/app/observer/ingest".to_owned(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        Self { peer, session }
+    }
+
+    pub(crate) fn capability(&self) -> PrivateLinkCapability {
+        self.session.capability("/app/observer/ingest".to_owned())
+    }
+
+    pub(crate) fn requests(&self) -> Vec<Received> {
+        self.peer
+            .requests()
+            .into_iter()
+            .map(|request| {
+                let mut headers = hyper::HeaderMap::new();
+                for (name, value) in request.headers {
+                    if let (Ok(name), Ok(value)) = (
+                        hyper::header::HeaderName::from_bytes(name.as_bytes()),
+                        hyper::header::HeaderValue::from_str(&value),
+                    ) {
+                        headers.append(name, value);
+                    }
+                }
+                Received {
+                    method: request.method,
+                    uri: request.path,
+                    headers,
+                    body: request.body,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn request_count(&self, uri_substring: &str) -> usize {
+        self.requests()
+            .iter()
+            .filter(|request| request.uri.contains(uri_substring))
+            .count()
+    }
+
+    pub(crate) async fn wait_for_requests(&self, count: usize) {
+        self.peer.wait_for_requests(count).await;
+    }
+
+    pub(crate) fn gate_responses(&self, count: usize, gate: Arc<Notify>) {
+        for _ in 0..count {
+            self.peer
+                .enqueue_gated_response(200, b"{}".to_vec(), gate.clone());
+        }
+    }
 }
 
 pub(crate) enum Action {
@@ -144,8 +253,24 @@ impl MockServer {
     }
 
     pub(crate) async fn new_actions(responses: Vec<Action>) -> Self {
+        let linked_responses = responses
+            .iter()
+            .map(|action| match action {
+                Action::Response(status, body) => (*status, body.to_string().into_bytes()),
+                Action::Raw(status, body) => (*status, body.as_bytes().to_vec()),
+                Action::OwnedRaw(status, body) => (*status, body.as_bytes().to_vec()),
+                Action::Disconnect => (503, Vec::new()),
+                Action::Stream(status, _) => (*status, Vec::new()),
+            })
+            .collect();
+        let linked = LinkedMockServer::new_raw(linked_responses).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        LINKED_FIXTURES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .insert(url.clone(), linked.capability());
         let received = Arc::new(Mutex::new(Vec::new()));
         let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
         let task_received = Arc::clone(&received);
@@ -232,25 +357,35 @@ impl MockServer {
             url,
             received,
             task,
+            linked,
         }
     }
 
     pub(crate) fn requests(&self) -> Vec<Received> {
-        self.received.lock().unwrap().clone()
+        let linked = self.linked.requests();
+        if linked.is_empty() {
+            self.received.lock().unwrap().clone()
+        } else {
+            linked
+        }
     }
 
     pub(crate) fn request_count(&self, uri_substring: &str) -> usize {
-        self.received
-            .lock()
-            .unwrap()
+        self.requests()
             .iter()
             .filter(|request| request.uri.contains(uri_substring))
             .count()
     }
 
     pub(crate) async fn gated() -> (Self, Arc<Notify>) {
+        let linked = LinkedMockServer::new_raw(Vec::new()).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        LINKED_FIXTURES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .insert(url.clone(), linked.capability());
         let received = Arc::new(Mutex::new(Vec::new()));
         let gate = Arc::new(Notify::new());
         let task_received = Arc::clone(&received);
@@ -285,11 +420,13 @@ impl MockServer {
                 });
             }
         });
+        linked.gate_responses(32, gate.clone());
         (
             Self {
                 url,
                 received,
                 task,
+                linked,
             },
             gate,
         )
@@ -298,6 +435,9 @@ impl MockServer {
 
 impl Drop for MockServer {
     fn drop(&mut self) {
+        if let Some(fixtures) = LINKED_FIXTURES.get() {
+            fixtures.lock().unwrap().remove(&self.url);
+        }
         self.task.abort();
     }
 }

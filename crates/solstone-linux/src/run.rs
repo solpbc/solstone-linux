@@ -445,12 +445,20 @@ async fn start_linked_owner(
             return Err(error);
         }
     };
-    let owner =
-        start_private_link_owner_with_lock(state_lock, credential, &stream, upload.link_facts())
-            .await
-            .inspect_err(|_| {
-                upload.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
-            })?;
+    let (hostname, platform, version) = upload.registration_metadata();
+    let owner = start_private_link_owner_with_lock(
+        state_lock,
+        credential,
+        &stream,
+        hostname,
+        platform,
+        version,
+        upload.link_facts(),
+    )
+    .await
+    .inspect_err(|_| {
+        upload.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
+    })?;
     upload.install_capability(owner.capability());
     Ok(owner)
 }
@@ -665,6 +673,7 @@ mod tests {
             publish_observer_registration,
         },
         private_link_test_peer::PrivateLinkPeer,
+        test_support::{MockServer, OpportunisticDefaultListenerTrap},
     };
     use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicUsize};
 
@@ -1052,9 +1061,14 @@ mod tests {
         temp: &tempfile::TempDir,
         transport_enabled: bool,
     ) -> (Result<PrivateLinkOwner, PrivateStateError>, LinkFactState) {
+        let legacy_origin = MockServer::new(Vec::new()).await;
+        let default_listener = OpportunisticDefaultListenerTrap::bind();
+        let pending = temp.path().join("pending.segment");
+        std::fs::write(&pending, b"pending").unwrap();
         let config = Config {
             config_dir: temp.path().to_path_buf(),
             stream: "stream".to_owned(),
+            server_url: legacy_origin.url.clone(),
             ..Config::default()
         };
         let upload = Arc::new(UploadClient::new(
@@ -1073,38 +1087,34 @@ mod tests {
             lock,
             transport_enabled,
         ));
-        assert_capture_ticks_advance();
+        assert_real_observer_ticks_advance();
         let result = start.await.unwrap();
+        assert!(pending.exists());
+        assert!(legacy_origin.requests().is_empty());
+        default_listener.assert_zero_connections();
         (result, upload.link_fact_state().unwrap())
     }
 
-    fn assert_capture_ticks_advance() {
+    fn assert_real_observer_ticks_advance() {
         let notifier = RecordingNotifier::default();
-        let mut ticks = 0_usize;
-        for _ in 0..2 {
-            tick_once(&notifier, || {
-                ticks += 1;
-                Ok(())
-            })
-            .unwrap();
-        }
-        assert_eq!(ticks, 2);
-        assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 2);
+        tick_once(&notifier, || {
+            crate::observer::tests::drive_real_observer_ticks();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(notifier.watchdogs.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn missing_credentials_capture_without_transport() {
+    async fn missing_credentials_observer_ticks_without_transport() {
         let temp = tempfile::tempdir().unwrap();
-        let pending = temp.path().join("pending.segment");
-        std::fs::write(&pending, b"pending").unwrap();
         let (result, facts) = drive_real_link_start(&temp, true).await;
         assert!(result.is_err());
         assert!(facts.pairing_required);
-        assert!(pending.exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn malformed_credentials_capture_without_transport() {
+    async fn malformed_credentials_observer_ticks_without_transport() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(CREDENTIALS_FILENAME), b"{").unwrap();
         let (result, facts) = drive_real_link_start(&temp, true).await;
@@ -1113,7 +1123,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mismatched_or_corrupt_observer_capture_then_register() {
+    async fn mismatched_or_corrupt_observer_ticks_then_register() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         persist_credential(temp.path(), &peer.credential()).unwrap();
@@ -1129,12 +1139,17 @@ mod tests {
         let (result, facts) = drive_real_link_start(&temp, true).await;
         let owner = result.unwrap();
         assert!(facts.observer_registered);
+        let registration: serde_json::Value =
+            serde_json::from_slice(&peer.requests()[0].body).unwrap();
+        assert_eq!(registration["hostname"], "host");
+        assert_eq!(registration["label"], "stream");
+        assert_ne!(registration["hostname"], registration["label"]);
         owner.shutdown().await.unwrap();
         peer.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn unavailable_carrier_capture_without_transport_wait() {
+    async fn unavailable_peer_observer_ticks_without_transport_wait() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         persist_credential(temp.path(), &peer.credential()).unwrap();
@@ -1145,18 +1160,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn failed_bootstrap_capture_without_transport_wait() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        persist_credential(temp.path(), &peer.credential()).unwrap();
-        peer.shutdown().await;
-        let (result, facts) = drive_real_link_start(&temp, true).await;
-        assert!(result.is_err());
-        assert!(facts.transport_unavailable);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn failed_initial_registration_capture_without_transport_wait() {
+    async fn failed_initial_registration_observer_ticks_without_transport_wait() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         persist_credential(temp.path(), &peer.credential()).unwrap();
@@ -1181,7 +1185,7 @@ mod tests {
         });
         peer.wait_for_requests(1).await;
         assert!(!owner.is_finished());
-        assert_capture_ticks_advance();
+        assert_real_observer_ticks_advance();
         gate.store(true, Ordering::Release);
         peer.notify_response_gates();
         let owner = owner.await.unwrap().unwrap();
@@ -1205,7 +1209,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn multithreaded_capture_advances_while_real_link_registers() {
+    async fn multithreaded_observer_ticks_advance_while_real_link_registers() {
         assert_real_initial_registration_succeeds().await;
     }
 
@@ -1323,7 +1327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_lock_failure_does_not_mutate_capture_config_or_private_state() {
+    async fn prepare_run_config_lock_failure_does_not_mutate_config_or_private_state() {
         let temp = tempfile::tempdir().unwrap();
         let lock = PrivateStateLock::acquire(temp.path()).unwrap();
         let before = std::fs::read_dir(temp.path())
@@ -1346,7 +1350,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sanitation_failure_keeps_capture_advancing_and_exposes_fact() {
+    async fn sanitation_failure_keeps_observer_ticks_advancing_and_exposes_fact() {
         let temp = tempfile::tempdir().unwrap();
         let (result, facts) = drive_real_link_start(&temp, false).await;
         assert!(result.is_err());
@@ -1389,7 +1393,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn large_backpressured_upload_does_not_stop_capture_progress() {
+    async fn large_backpressured_upload_does_not_stop_observer_ticks() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, br#"{"status":"ok","segment":"large"}"#.to_vec());
@@ -1401,7 +1405,7 @@ mod tests {
         let upload =
             tokio::spawn(async move { client.upload_segment("20260101", "large", &[media]).await });
         peer.wait_for_requests(1).await;
-        assert_capture_ticks_advance();
+        assert_real_observer_ticks_advance();
         assert!(!upload.is_finished());
         gate.store(true, Ordering::Release);
         peer.notify_response_gates();
@@ -1411,7 +1415,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn chunked_rejection_does_not_stop_capture_progress() {
+    async fn chunked_rejection_does_not_stop_observer_ticks() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         let (session, _client) = linked_upload_fixture(&temp, &peer).await;
@@ -1425,7 +1429,7 @@ mod tests {
             let capability = session.capability("/app/observer/ingest".to_owned());
             async move { capability.ingest(form).await }
         });
-        assert_capture_ticks_advance();
+        assert_real_observer_ticks_advance();
         match request.await.unwrap() {
             crate::private_link::LinkOutcome::LocalRejected { status } => {
                 assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);

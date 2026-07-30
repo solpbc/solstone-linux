@@ -674,7 +674,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::chunking::{AudioLeg, LegBlock, StereoAccumulator};
     use std::{
@@ -979,6 +979,18 @@ mod tests {
     }
     fn initialize(f: &mut Fixture) {
         f.observer.initialize().unwrap()
+    }
+
+    pub(crate) fn drive_real_observer_ticks() {
+        let mut fixture = fixture(true);
+        initialize(&mut fixture);
+        let published_after_initialize = fixture.states.0.borrow().len();
+        fixture.observer.tick().unwrap();
+        fixture.observer.tick().unwrap();
+        assert_eq!(
+            fixture.states.0.borrow().len(),
+            published_after_initialize + 2
+        );
     }
 
     // tests/test_observer.py::test_compute_rms_mic_left_sys_right

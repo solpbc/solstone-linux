@@ -71,22 +71,22 @@ fn marked_items(lines: &[&str], marker: &str) -> Vec<bool> {
                 continue;
             }
             depth = line.matches('{').count() as i64 - line.matches('}').count() as i64;
-            pending = false;
+            pending = depth == 0 && !line.contains(';');
         }
     }
     marked
 }
 
+fn constructs_origin_relative_url(line: &str) -> bool {
+    let journal_route = line.contains("/app/") || line.contains("/api/");
+    journal_route
+        && (line.contains("format!(") || line.contains(".join(") || line.contains("push_str("))
+}
+
 #[test]
 fn active_production_paths_have_no_legacy_direct_authority() {
     let root = source_root();
-    let forbidden = [
-        ".bearer_auth(",
-        "localhost:5015",
-        "Command::new(\"sol\")",
-        "format!(\"{}/app",
-        "format!(\"{}/api",
-    ];
+    let forbidden = [".bearer_auth(", "localhost:5015", "Command::new(\"sol\")"];
 
     for path in rust_sources(&root) {
         if path
@@ -100,6 +100,17 @@ fn active_production_paths_have_no_legacy_direct_authority() {
         let l3_marked = marked_items(&lines, L3_MARKER);
         let test_only = marked_items(&lines, "#[cfg(test)]");
         for (index, line) in lines.iter().enumerate() {
+            assert!(
+                !constructs_origin_relative_url(line)
+                    || path
+                        .file_name()
+                        .is_some_and(|name| name == "private_link.rs")
+                    || l3_marked[index]
+                    || test_only[index],
+                "{}:{} constructs an origin-relative Journal URL",
+                path.display(),
+                index + 1
+            );
             for needle in forbidden {
                 assert!(
                     !line.contains(needle) || l3_marked[index] || test_only[index],

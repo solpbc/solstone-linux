@@ -1117,6 +1117,17 @@ impl PrivateLinkOwner {
     }
 
     #[cfg(test)]
+    fn loopback_addr(&self) -> std::net::SocketAddr {
+        format!(
+            "{}:{}",
+            self.capability.inner.origin.host_str().unwrap(),
+            self.capability.inner.origin.port().unwrap()
+        )
+        .parse()
+        .unwrap()
+    }
+
+    #[cfg(test)]
     async fn register(&self, body: &serde_json::Value) -> LinkOutcome {
         let Ok(url) = confine_path(&self.capability.inner.origin, "/app/observer/register") else {
             return LinkOutcome::LocalRejected {
@@ -1186,17 +1197,28 @@ pub(crate) async fn start_private_link_owner_with_lock(
     state_lock: PrivateStateLock,
     credential: Credential,
     expected_name: &str,
+    hostname: String,
+    platform: String,
+    version: String,
     facts: LinkFacts,
 ) -> Result<PrivateLinkOwner, PrivateStateError> {
     let config_root = state_lock.root().to_path_buf();
     let session = start_private_link_session_inner(
         &config_root,
-        Some(state_lock),
         credential,
         expected_name,
-        Arc::new(NoWriteFault),
-        SessionTestCapture::default(),
-        Some(facts),
+        SessionStartOptions {
+            state_lock: Some(state_lock),
+            persistence_fault: Arc::new(NoWriteFault),
+            #[cfg(test)]
+            test_capture: SessionTestCapture::default(),
+            shared_facts: Some(facts),
+            registration_metadata: Some(RegistrationMetadata {
+                hostname,
+                platform,
+                version,
+            }),
+        },
     )
     .await?;
     finish_owner_start(session).await
@@ -1434,37 +1456,59 @@ pub(crate) async fn start_private_link_session(
 ) -> Result<PrivateLinkSession, PrivateStateError> {
     start_private_link_session_inner(
         config_root,
-        None,
         credential,
         expected_name,
-        Arc::new(NoWriteFault),
-        SessionTestCapture::default(),
-        None,
+        SessionStartOptions::default(),
     )
     .await
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct SessionTestCapture {
-    #[cfg(test)]
     capability: Option<Arc<Mutex<Option<String>>>>,
+}
+
+struct RegistrationMetadata {
+    hostname: String,
+    platform: String,
+    version: String,
+}
+
+struct SessionStartOptions {
+    state_lock: Option<PrivateStateLock>,
+    persistence_fault: Arc<dyn DurableWriteFault>,
+    #[cfg(test)]
+    test_capture: SessionTestCapture,
+    shared_facts: Option<LinkFacts>,
+    registration_metadata: Option<RegistrationMetadata>,
+}
+
+impl Default for SessionStartOptions {
+    fn default() -> Self {
+        Self {
+            state_lock: None,
+            persistence_fault: Arc::new(NoWriteFault),
+            #[cfg(test)]
+            test_capture: SessionTestCapture::default(),
+            shared_facts: None,
+            registration_metadata: None,
+        }
+    }
 }
 
 async fn start_private_link_session_inner(
     config_root: &Path,
-    state_lock: Option<PrivateStateLock>,
     credential: Credential,
     expected_name: &str,
-    persistence_fault: Arc<dyn DurableWriteFault>,
-    _test_capture: SessionTestCapture,
-    shared_facts: Option<LinkFacts>,
+    options: SessionStartOptions,
 ) -> Result<PrivateLinkSession, PrivateStateError> {
-    let state_lock = match state_lock {
+    let state_lock = match options.state_lock {
         Some(state_lock) => state_lock,
         None => PrivateStateLock::acquire(config_root)?,
     };
     let config_root = state_lock.root().to_path_buf();
-    let facts = shared_facts.unwrap_or_default();
+    let facts = options.shared_facts.unwrap_or_default();
     let paths = private_config_paths(&config_root);
     let sanitized = match sanitize_link_authority(&paths) {
         Ok(config) => config,
@@ -1491,7 +1535,7 @@ async fn start_private_link_session_inner(
     let (token_persistence, hook) = TokenPersistence::new(
         config_root.clone(),
         credential.clone(),
-        persistence_fault,
+        options.persistence_fault,
         transport_unavailable.clone(),
         facts.clone(),
     );
@@ -1544,7 +1588,7 @@ async fn start_private_link_session_inner(
         .bootstrap_url()
         .ok_or(PrivateStateError::BootstrapFailed)?;
     #[cfg(test)]
-    if let Some(capture) = _test_capture.capability {
+    if let Some(capture) = options.test_capture.capability {
         let capability = Url::parse(&bootstrap_url)
             .ok()
             .and_then(|url| {
@@ -1590,6 +1634,14 @@ async fn start_private_link_session_inner(
         }
         Err(error) => return Err(error),
     }
+    let registration_metadata =
+        options
+            .registration_metadata
+            .unwrap_or_else(|| RegistrationMetadata {
+                hostname: expected_name.clone(),
+                platform: "linux".to_owned(),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            });
     let registration = Arc::new(RegistrationCoordinator {
         client: client.clone(),
         origin: origin.clone(),
@@ -1597,9 +1649,9 @@ async fn start_private_link_session_inner(
         config_root: config_root.clone(),
         credential_instance_id: credential_instance_id.clone(),
         name: Mutex::new(expected_name.clone()),
-        hostname: expected_name.clone(),
-        platform: "linux".to_owned(),
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        hostname: registration_metadata.hostname,
+        platform: registration_metadata.platform,
+        version: registration_metadata.version,
         single_flight: tokio::sync::Mutex::new(()),
     });
     Ok(PrivateLinkSession {
@@ -2137,6 +2189,26 @@ mod tests {
         peer.shutdown().await;
         let recorded = stages.lock().unwrap().clone();
         (recorded, completion_order)
+    }
+
+    #[tokio::test]
+    async fn real_transport_dial_waits_for_admission_guard() {
+        let peer = PrivateLinkPeer::start().await;
+        let opener = Arc::new(PrivateLinkOpener::new(
+            TransportClient::new(peer.credential(), None).unwrap(),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let guard = opener.admission.lock().await;
+        let dial = tokio::spawn({
+            let opener = opener.clone();
+            async move { opener.dial_carrier().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!dial.is_finished());
+        drop(guard);
+        assert!(dial.await.unwrap().is_ok());
+        peer.shutdown().await;
     }
 
     impl Pairer for FakePairer {
@@ -2715,14 +2787,14 @@ mod tests {
         let captured = Arc::new(Mutex::new(None));
         let session = start_private_link_session_inner(
             temp.path(),
-            None,
             peer.credential(),
             "stream",
-            Arc::new(NoWriteFault),
-            SessionTestCapture {
-                capability: Some(captured.clone()),
+            SessionStartOptions {
+                test_capture: SessionTestCapture {
+                    capability: Some(captured.clone()),
+                },
+                ..SessionStartOptions::default()
             },
-            None,
         )
         .await
         .unwrap();
@@ -3376,15 +3448,15 @@ mod tests {
         let peer = PrivateLinkPeer::start().await;
         let session = start_private_link_session_inner(
             temp.path(),
-            None,
             peer.credential(),
             "stream",
-            Arc::new(RecordingFault {
-                stages: Arc::new(Mutex::new(Vec::new())),
-                fail: Some(stage),
-            }),
-            SessionTestCapture::default(),
-            None,
+            SessionStartOptions {
+                persistence_fault: Arc::new(RecordingFault {
+                    stages: Arc::new(Mutex::new(Vec::new())),
+                    fail: Some(stage),
+                }),
+                ..SessionStartOptions::default()
+            },
         )
         .await
         .unwrap();
@@ -3416,6 +3488,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_shutdown_joins_bridge_and_closes_listener() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(
+            200,
+            serde_json::json!({
+                "key": "K",
+                "name": "stream",
+                "prefix": "prefix",
+                "ingest_url": "/app/observer/ingest",
+                "protocol_version": 2
+            })
+            .to_string(),
+        );
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let address = owner.loopback_addr();
+        assert!(tokio::net::TcpStream::connect(address).await.is_ok());
+        owner.shutdown().await.unwrap();
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owner_shutdown_closes_active_bridge_stream() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(
+            200,
+            serde_json::json!({
+                "key": "K",
+                "name": "stream",
+                "prefix": "prefix",
+                "ingest_url": "/app/observer/ingest",
+                "protocol_version": 2
+            })
+            .to_string(),
+        );
+        peer.enqueue_response(200, br#"{"items":[],"total":0}"#.to_vec());
+        let response_gate = Arc::new(AtomicBool::new(false));
+        peer.gate_queued_response_nonblocking(1, response_gate);
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let request = tokio::spawn({
+            let capability = owner.capability();
+            async move { capability.list_day("20260101").await }
+        });
+        peer.wait_for_requests(2).await;
+        assert!(!request.is_finished());
+        tokio::time::timeout(Duration::from_secs(1), owner.shutdown())
+            .await
+            .expect("shutdown must close active bridge streams")
+            .unwrap();
+        assert!(matches!(
+            request.await.unwrap(),
+            LinkOutcome::TransportUnavailable
+        ));
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn executed_session_surfaces_do_not_disclose_secrets() {
         let peer = PrivateLinkPeer::start().await;
         let mut paired = peer.credential();
@@ -3431,14 +3566,14 @@ mod tests {
         let capability = Arc::new(Mutex::new(None));
         let session = start_private_link_session_inner(
             temp.path(),
-            None,
             paired,
             "stream",
-            Arc::new(NoWriteFault),
-            SessionTestCapture {
-                capability: Some(capability.clone()),
+            SessionStartOptions {
+                test_capture: SessionTestCapture {
+                    capability: Some(capability.clone()),
+                },
+                ..SessionStartOptions::default()
             },
-            None,
         )
         .await
         .unwrap();
