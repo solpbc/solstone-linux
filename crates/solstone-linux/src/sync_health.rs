@@ -11,6 +11,7 @@ use std::{
     sync::LazyLock,
 };
 
+// Decision 4: no new ErrorType means no new persisted string, version bump, or downgrade loss.
 pub const SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -282,24 +283,31 @@ fn fill(template: &str, values: &HashMap<&str, String>) -> String {
 }
 
 pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncHealth {
-    let state = if facts.last_error_class == Some(ErrorType::Auth) {
-        HealthState::Revoked
-    } else if facts.last_error_class == Some(ErrorType::Incompatible) {
-        HealthState::UpdateNeeded
-    } else if facts
-        .last_successful_contact
-        .is_some_and(|contact| now - contact > stale_threshold)
-    {
-        HealthState::Stale
-    } else if facts.in_progress {
-        HealthState::Syncing
-    } else if facts.pending_confirmed == Some(0) {
-        HealthState::Connected
-    } else if facts.last_error_class == Some(ErrorType::Transient) {
-        HealthState::Offline
-    } else {
-        HealthState::Unknown
-    };
+    let state =
+        if facts.last_error_class == Some(ErrorType::Auth) && facts.last_error_code != Some(401) {
+            HealthState::Revoked
+        } else if facts.last_error_class == Some(ErrorType::Incompatible) {
+            HealthState::UpdateNeeded
+        } else if facts
+            .last_successful_contact
+            .is_some_and(|contact| now - contact > stale_threshold)
+        {
+            HealthState::Stale
+        } else if facts.in_progress {
+            HealthState::Syncing
+        } else if facts.last_error_class == Some(ErrorType::Auth) {
+            // Decision 3: a 401 is explicit Unknown above Connected so persisted empty-queue
+            // facts cannot repaint a refused identity green. The live worker also clears
+            // pending_confirmed in record_failure. This depends on POST propagation retaining
+            // Some(401); losing that code would conservatively repaint the failure Revoked.
+            HealthState::Unknown
+        } else if facts.pending_confirmed == Some(0) {
+            HealthState::Connected
+        } else if facts.last_error_class == Some(ErrorType::Transient) {
+            HealthState::Offline
+        } else {
+            HealthState::Unknown
+        };
     let surface = SURFACE_BY_STATE
         .get(&state)
         .expect("every health state must have a surface");
@@ -429,12 +437,50 @@ mod tests {
         ] {
             let facts = SyncFacts {
                 last_error_class: Some(error),
+                // Auth without a response code is conservatively treated as revoked.
+                last_error_code: None,
                 ..SyncFacts::default()
             };
             assert_eq!(
                 derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64).state,
                 expected
             );
+        }
+    }
+
+    // AC 7: auth_401_is_neither_revoked_nor_connected_nor_offline pins Decision 3.
+    // The explicit 401 arm sits above Connected so persisted empty-queue facts cannot turn green.
+    #[test]
+    fn auth_401_is_neither_revoked_nor_connected_nor_offline() {
+        for pending_confirmed in [None, Some(0)] {
+            let template = SyncFacts {
+                last_successful_contact: Some(990.0),
+                pending_confirmed,
+                in_progress: false,
+                ..SyncFacts::default()
+            };
+            let state_for = |error, code| {
+                derive_health(
+                    &SyncFacts {
+                        last_error_class: Some(error),
+                        last_error_code: code,
+                        ..template.clone()
+                    },
+                    1000.0,
+                    DEFAULT_SYNC_STALE_THRESHOLD as f64,
+                )
+                .state
+            };
+            let unauthorized = state_for(ErrorType::Auth, Some(401));
+            let server_error = state_for(ErrorType::Transient, Some(500));
+            let timeout = state_for(ErrorType::Transient, None);
+            let forbidden = state_for(ErrorType::Auth, Some(403));
+
+            assert_ne!(unauthorized, HealthState::Revoked);
+            assert_ne!(unauthorized, HealthState::Connected);
+            assert_ne!(unauthorized, server_error);
+            assert_ne!(unauthorized, timeout);
+            assert_eq!(forbidden, HealthState::Revoked);
         }
     }
 

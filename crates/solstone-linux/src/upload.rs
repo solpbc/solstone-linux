@@ -31,15 +31,18 @@ pub struct UploadResult {
     pub success: bool,
     pub duplicate: bool,
     pub error_type: Option<ErrorType>,
+    /// The HTTP status of the response that produced this result; `None` when there was no response.
+    pub status_code: Option<u16>,
     pub stored_key: Option<String>,
 }
 
 impl UploadResult {
-    fn failure(error_type: Option<ErrorType>) -> Self {
+    fn failure(error_type: Option<ErrorType>, status_code: Option<u16>) -> Self {
         Self {
             success: false,
             duplicate: false,
             error_type,
+            status_code,
             stored_key: None,
         }
     }
@@ -257,18 +260,19 @@ impl UploadClient {
         files: &[PathBuf],
     ) -> UploadResult {
         if self.is_revoked() {
-            return UploadResult::failure(Some(ErrorType::Auth));
+            return UploadResult::failure(Some(ErrorType::Auth), None);
         }
         let key = self.inner.key.lock().unwrap().clone();
         if key.is_empty() || self.inner.url.is_empty() {
-            return UploadResult::failure(Some(ErrorType::Client));
+            return UploadResult::failure(Some(ErrorType::Client), None);
         }
         if !files.iter().any(|path| path.exists()) {
-            return UploadResult::failure(None);
+            return UploadResult::failure(None, None);
         }
 
         let url = format!("{}/app/observer/ingest", self.inner.url);
         let mut last_error = None;
+        let mut last_status = None;
         for attempt in 0..self.inner.immediate_attempts {
             let mut form = multipart::Form::new()
                 .text("day", day.to_owned())
@@ -288,7 +292,7 @@ impl UploadClient {
                 }
             }
             if file_count == 0 {
-                return UploadResult::failure(None);
+                return UploadResult::failure(None, None);
             }
 
             let response = self
@@ -309,6 +313,7 @@ impl UploadClient {
                                     success: true,
                                     duplicate: false,
                                     error_type: None,
+                                    status_code: Some(StatusCode::OK.as_u16()),
                                     stored_key: body
                                         .get("segment")
                                         .and_then(Value::as_str)
@@ -318,12 +323,16 @@ impl UploadClient {
                                     success: true,
                                     duplicate: true,
                                     error_type: None,
+                                    status_code: Some(StatusCode::OK.as_u16()),
                                     stored_key: body
                                         .get("existing_segment")
                                         .and_then(Value::as_str)
                                         .map(str::to_owned),
                                 },
-                                _ => UploadResult::failure(Some(ErrorType::Incompatible)),
+                                _ => UploadResult::failure(
+                                    Some(ErrorType::Incompatible),
+                                    Some(StatusCode::OK.as_u16()),
+                                ),
                             };
                         }
                         Err(error) => {
@@ -333,6 +342,7 @@ impl UploadClient {
                                 "Upload attempt returned malformed JSON"
                             );
                             last_error = Some(ErrorType::Transient);
+                            last_status = Some(StatusCode::OK.as_u16());
                         }
                     }
                 }
@@ -340,30 +350,32 @@ impl UploadClient {
                     let status = response.status();
                     let error_type = Self::classify_error(Some(status.as_u16()), false);
                     last_error = Some(error_type);
+                    last_status = Some(status.as_u16());
                     if status == StatusCode::FORBIDDEN {
                         self.inner.revoked.store(true, Ordering::Release);
                     }
                     if error_type != ErrorType::Transient {
                         tracing::error!(%status, ?error_type, "Upload rejected");
-                        return UploadResult::failure(Some(error_type));
+                        return UploadResult::failure(Some(error_type), Some(status.as_u16()));
                     }
                     tracing::warn!(attempt = attempt + 1, %status, "Upload attempt failed");
                 }
                 Err(error) => {
                     tracing::warn!(attempt = attempt + 1, %error, "Upload attempt failed");
                     last_error = Some(ErrorType::Transient);
+                    last_status = None;
                 }
             }
             if attempt + 1 < self.inner.immediate_attempts {
                 tokio::select! {
                     () = tokio::time::sleep(retry_delay(&self.inner.retry_delays, attempt)) => {}
                     () = self.inner.cancellation.cancelled() => {
-                        return UploadResult::failure(Some(ErrorType::Transient));
+                        return UploadResult::failure(Some(ErrorType::Transient), None);
                     }
                 }
             }
         }
-        UploadResult::failure(last_error)
+        UploadResult::failure(last_error, last_status)
     }
 
     pub async fn get_server_segments(&self, day: &str) -> QueryResult {
@@ -1038,6 +1050,38 @@ mod tests {
             UploadClient::classify_error(None, false),
             ErrorType::Transient
         );
+    }
+
+    // Supports AC 3/8: UploadResult preserves an HTTP status and uses None without a response.
+    #[tokio::test]
+    async fn upload_result_status_matches_terminal_attempt() {
+        for status in [401, 403] {
+            let server = MockServer::new(vec![(status, json!({}))]).await;
+            let temp = TempDir::new().unwrap();
+            let media = write_file(&temp, "a.flac", b"a");
+            let result = client(&config(&server, &temp))
+                .upload_segment("d", "s", &[media])
+                .await;
+            assert_eq!(result.error_type, Some(ErrorType::Auth));
+            assert_eq!(result.status_code, Some(status));
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let temp = TempDir::new().unwrap();
+        let transport_config = Config {
+            server_url: format!("http://{address}"),
+            key: "K".into(),
+            sync_max_retries: 1,
+            ..Config::default()
+        };
+        let media = write_file(&temp, "a.flac", b"a");
+        let result = client(&transport_config)
+            .upload_segment("d", "s", &[media])
+            .await;
+        assert_eq!(result.error_type, Some(ErrorType::Transient));
+        assert_eq!(result.status_code, None);
     }
 
     // AC: empty retry delays fall back and registration survives 500, network error, then 200

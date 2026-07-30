@@ -231,6 +231,7 @@ struct SyncWorker {
     synced_days: HashSet<String>,
     consecutive_failures: u32,
     last_error_type: Option<ErrorType>,
+    last_error_code: Option<i64>,
     circuit_open: bool,
     circuit_open_permanent: bool,
     circuit_open_since: f64,
@@ -265,6 +266,7 @@ impl SyncWorker {
             synced_days,
             consecutive_failures: 0,
             last_error_type: None,
+            last_error_code: None,
             circuit_open: false,
             circuit_open_permanent: false,
             circuit_open_since: 0.0,
@@ -359,6 +361,7 @@ impl SyncWorker {
             self.consecutive_failures = 0;
             self.recent_error_count.store(0, Ordering::Release);
             self.last_error_type = None;
+            self.last_error_code = None;
             {
                 let mut facts = self.facts.lock().unwrap();
                 facts.last_error_class = None;
@@ -475,10 +478,13 @@ impl SyncWorker {
                     self.consecutive_failures = 0;
                     self.recent_error_count.store(0, Ordering::Release);
                     self.last_error_type = None;
+                    self.last_error_code = None;
                 } else {
                     pass_success = false;
                     pass_error_type = self.last_error_type;
-                    pass_error_code = None;
+                    // Health distinguishes a rejected 401 from revocation, so the POST status
+                    // must reach both the breaker and persisted pass result.
+                    pass_error_code = self.last_error_code;
                     if self.last_error_type == Some(ErrorType::Client) {
                         quarantine_segment(
                             self.clock.wall_seconds(),
@@ -486,7 +492,7 @@ impl SyncWorker {
                             "server rejected (client error)",
                         );
                     }
-                    self.record_failure(self.last_error_type, None);
+                    self.record_failure(self.last_error_type, self.last_error_code);
                     if self.circuit_open {
                         break;
                     }
@@ -524,6 +530,7 @@ impl SyncWorker {
             Err(error) => {
                 tracing::warn!(%error, path = %segment_dir.display(), "Failed to enumerate segment files");
                 self.last_error_type = Some(ErrorType::Transient);
+                self.last_error_code = None;
                 return false;
             }
         };
@@ -543,7 +550,10 @@ impl SyncWorker {
             true
         } else {
             self.last_error_type = result.error_type;
+            self.last_error_code = result.status_code.map(i64::from);
             if self.client.is_revoked() {
+                // Retained deliberately: this latches revocation before the general failure
+                // path runs, and removing that earlier guard is an unforced risk.
                 self.circuit_open = true;
                 self.circuit_open_permanent = true;
             }
@@ -653,6 +663,7 @@ impl SyncWorker {
     fn record_failure(&mut self, error_type: Option<ErrorType>, status_code: Option<i64>) {
         let Some(error_type) = error_type else { return };
         self.last_error_type = Some(error_type);
+        self.last_error_code = status_code;
         {
             let mut facts = self.facts.lock().unwrap();
             facts.last_error_class = Some(error_type);
@@ -668,7 +679,10 @@ impl SyncWorker {
             .store(self.consecutive_failures.min(99) as u8, Ordering::Release);
         if self.consecutive_failures >= self.circuit_threshold() {
             self.circuit_open = true;
-            self.circuit_open_permanent = error_type == ErrorType::Auth;
+            // Decision 1: the client draws the 401-vs-revoked line before returning (403
+            // latches revoked, 401 never does), so one predicate covers every failure path,
+            // including segment POST failures whose caller need not interpret the status.
+            self.circuit_open_permanent = error_type == ErrorType::Auth && self.client.is_revoked();
             self.circuit_open_since = self.clock.monotonic_seconds();
             self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
         }
@@ -677,6 +691,7 @@ impl SyncWorker {
     fn reset_failures(&mut self) {
         self.consecutive_failures = 0;
         self.last_error_type = None;
+        self.last_error_code = None;
         self.recent_error_count.store(0, Ordering::Release);
     }
 
@@ -699,6 +714,7 @@ impl SyncWorker {
             self.consecutive_failures = 0;
             self.recent_error_count.store(0, Ordering::Release);
             self.last_error_type = None;
+            self.last_error_code = None;
         } else {
             facts.pending_confirmed = None;
             facts.last_error_class = error_type;
@@ -2019,18 +2035,127 @@ mod tests {
         );
     }
 
-    // tests/test_sync.py::test_auth_opens_immediately
+    // AC 1: listing_401_recovers_and_uploads_segment proves a rejected listing is recoverable.
     #[tokio::test]
-    async fn auth_opens_immediately_for_401_and_403() {
+    async fn listing_401_recovers_and_uploads_segment() {
+        let temp = tempfile::tempdir().unwrap();
+        create_segment(&temp, "120000_300", b"screen");
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![
+                (401, json!({})),
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"status":"ok","segment":"120000_300"})),
+            ],
+            -1,
+        )
+        .await;
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
+        worker.clock = clock.clone();
+
+        worker.sync_pass(true).await;
+        assert_eq!(upload_hits(&server), 0);
+        clock.set_mono(131.0);
+        assert!(worker.try_probe().await);
+        worker.sync_pass(true).await;
+        assert!(upload_hits(&server) >= 1);
+    }
+
+    // Named deviation: AC 2+5 intentionally break
+    // tests/test_sync.py::test_auth_opens_immediately parity: both statuses open immediately,
+    // but only a revoked 403 is permanent.
+    #[tokio::test]
+    async fn auth_opens_immediately_but_only_403_is_permanent() {
         for status in [401, 403] {
             let temp = tempfile::tempdir().unwrap();
             let (_server, mut worker) = test_worker(&temp, vec![(status, json!({}))], -1).await;
             worker.sync_pass(true).await;
             assert!(worker.circuit_open);
-            assert!(worker.circuit_open_permanent);
             assert_eq!(worker.consecutive_failures, 1);
+            assert_eq!(worker.circuit_open_permanent, status == 403);
             assert_eq!(worker.client.is_revoked(), status == 403);
+            assert_eq!(
+                worker.facts.lock().unwrap().last_error_code,
+                Some(i64::from(status))
+            );
         }
+    }
+
+    // AC 3: upload_401_is_recoverable_and_retries proves the rejected POST is retried.
+    #[tokio::test]
+    async fn upload_401_is_recoverable_and_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        create_segment(&temp, "120000_300", b"screen");
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"items":[],"total":0})),
+                (401, json!({})),
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"status":"ok","segment":"120000_300"})),
+            ],
+            -1,
+        )
+        .await;
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
+        worker.clock = clock.clone();
+
+        worker.sync_pass(true).await;
+        assert_eq!(upload_hits(&server), 1);
+        assert!(!worker.circuit_open_permanent);
+        clock.set_mono(131.0);
+        assert!(worker.try_probe().await);
+        worker.sync_pass(true).await;
+        assert!(upload_hits(&server) >= 2);
+    }
+
+    // AC 4: upload_403_latches_permanently pins both revocation latches, not request counts.
+    #[tokio::test]
+    async fn upload_403_latches_permanently() {
+        let temp = tempfile::tempdir().unwrap();
+        create_segment(&temp, "120000_300", b"screen");
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"items":[],"total":0})),
+                (403, json!({})),
+            ],
+            -1,
+        )
+        .await;
+        worker.sync_pass(true).await;
+        assert!(worker.circuit_open_permanent);
+        assert!(worker.client.is_revoked());
+    }
+
+    // AC 8: upload_401_records_and_persists_status pins POST status through durable facts.
+    #[tokio::test]
+    async fn upload_401_records_and_persists_status() {
+        let temp = tempfile::tempdir().unwrap();
+        create_segment(&temp, "120000_300", b"screen");
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![
+                (200, json!({"items":[],"total":0})),
+                (200, json!({"items":[],"total":0})),
+                (401, json!({})),
+            ],
+            -1,
+        )
+        .await;
+        worker.sync_pass(true).await;
+        let facts = worker.facts.lock().unwrap().clone();
+        assert_eq!(facts.last_error_class, Some(ErrorType::Auth));
+        assert_eq!(facts.last_error_code, Some(401));
+        let persisted = load_facts(&worker.config.state_dir());
+        assert_eq!(persisted.last_error_class, Some(ErrorType::Auth));
+        assert_eq!(persisted.last_error_code, Some(401));
     }
 
     // tests/test_sync.py::test_transient_allows_more_failures
@@ -2066,6 +2191,7 @@ mod tests {
         worker.circuit_cooldown = 30.0;
         worker.consecutive_failures = 5;
         worker.last_error_type = Some(ErrorType::Transient);
+        worker.last_error_code = None;
         (server, worker)
     }
 
@@ -2216,6 +2342,44 @@ mod tests {
             derive_health(&facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
             crate::sync_health::HealthState::Connected
         );
+    }
+
+    // AC 10: sustained_401_retries_stay_bounded drives only MutableClock and one wake per step.
+    // The conservative bound is 5 + ceil(log2(300 / 30)) + ceil(14400 / 300) + 1
+    // = 5 + 4 + 48 + 1 = 58; a 401 actually opens at CIRCUIT_THRESHOLD_AUTH.
+    #[tokio::test]
+    async fn sustained_401_retries_stay_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let responses = (0..240).map(|_| (401, json!({}))).collect();
+        let (server, mut worker) = open_probe_worker(&temp, responses).await;
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
+        worker.clock = clock.clone();
+        let notify = Arc::clone(&worker.notify);
+        let running = Arc::clone(&worker.running);
+        let task = tokio::spawn(async move {
+            worker.run().await;
+            worker
+        });
+
+        for step in 1..=240 {
+            clock.set_mono(f64::from(step * 60));
+            notify.notify_one();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        running.store(false, Ordering::Release);
+        notify.notify_one();
+        let worker = task.await.unwrap();
+        let ramp_steps = (CIRCUIT_COOLDOWN_MAX / CIRCUIT_COOLDOWN_INITIAL)
+            .log2()
+            .ceil() as usize;
+        let capped_steps = (14_400.0 / CIRCUIT_COOLDOWN_MAX).ceil() as usize;
+        let bound = CIRCUIT_THRESHOLD_TRANSIENT as usize + ramp_steps + capped_steps + 1;
+        assert!(
+            server.request_count("/app/observer/ingest/segments/") <= bound,
+            "listing retries exceeded conservative bound {bound}"
+        );
+        assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_MAX);
     }
 
     // AC: sync shutdown releases the walker without retaining or cancelling the upload client.
