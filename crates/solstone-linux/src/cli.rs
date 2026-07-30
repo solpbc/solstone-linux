@@ -883,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_pairs_over_private_link_and_never_uses_legacy_registration() {
+    fn setup_source_policy_uses_private_link_and_excludes_legacy_registration() {
         let source = include_str!("cli.rs");
         assert!(source.contains("setup_with_stream("));
         assert!(!source.contains(&["UploadClient", "::new("].concat()));

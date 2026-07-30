@@ -621,7 +621,12 @@ impl LinkFacts {
             LinkFact::ConfigSanitationFailed => state.config_sanitation_failed = true,
             LinkFact::ListenerReady => state.listener_ready = true,
             LinkFact::CarrierProven => state.carrier_proven = true,
-            LinkFact::ObserverRegistered => state.observer_registered = true,
+            LinkFact::ObserverRegistered => {
+                state.observer_registered = true;
+                if !state.token_persistence_failure {
+                    state.transport_unavailable = false;
+                }
+            }
             LinkFact::TransportUnavailable => state.transport_unavailable = true,
             LinkFact::TerminalRevocation => state.terminal_revocation = true,
             LinkFact::TokenPersistenceFailure => state.token_persistence_failure = true,
@@ -1117,6 +1122,15 @@ impl PrivateLinkOwner {
     }
 
     #[cfg(test)]
+    pub(crate) async fn shutdown_with_join_probe(
+        self,
+        joined: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Result<(), PrivateStateError> {
+        self.session.shutdown_with_join_probe(joined, release).await
+    }
+
+    #[cfg(test)]
     fn loopback_addr(&self) -> std::net::SocketAddr {
         format!(
             "{}:{}",
@@ -1173,17 +1187,11 @@ async fn finish_owner_start(
     if session.opener.generation() == 0 {
         match capability.report_unauthorized(0).await {
             RepairOutcome::Repaired { .. } | RepairOutcome::AlreadySuperseded { .. } => {}
-            RepairOutcome::PersistenceFailed => {
-                return Err(PrivateStateError::Io {
-                    operation: PrivateIoOperation::Persist,
-                    source: io::Error::other("registration persistence failed"),
-                });
+            RepairOutcome::PersistenceFailed | RepairOutcome::TransportUnavailable => {
+                capability.facts().publish(LinkFact::TransportUnavailable);
             }
             RepairOutcome::GuardRefused { .. } | RepairOutcome::InvalidRegistration => {
                 return Err(PrivateStateError::RegistrationInvalid);
-            }
-            RepairOutcome::TransportUnavailable => {
-                return Err(PrivateStateError::BridgeUnavailable);
             }
         }
     }
@@ -1310,7 +1318,20 @@ impl PrivateLinkSession {
     }
 
     pub(crate) async fn shutdown(self) -> Result<(), PrivateStateError> {
+        self.shutdown_inner(None).await
+    }
+
+    async fn shutdown_inner(
+        self,
+        #[cfg(test)] join_probe: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        #[cfg(not(test))] _join_probe: Option<()>,
+    ) -> Result<(), PrivateStateError> {
         let status = self.handle.shutdown_and_wait().await;
+        #[cfg(test)]
+        if let Some((joined, release)) = join_probe {
+            joined.notify_one();
+            release.notified().await;
+        }
         if status.listener_active || status.active_requests != 0 {
             return Err(PrivateStateError::ShutdownFailed);
         }
@@ -1318,6 +1339,15 @@ impl PrivateLinkSession {
             return Err(PrivateStateError::TokenPersistenceFailed);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    async fn shutdown_with_join_probe(
+        self,
+        joined: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Result<(), PrivateStateError> {
+        self.shutdown_inner(Some((joined, release))).await
     }
 
     #[cfg(test)]
@@ -1539,8 +1569,12 @@ async fn start_private_link_session_inner(
         transport_unavailable.clone(),
         facts.clone(),
     );
-    let transport = TransportClient::new(credential, Some(hook))
-        .map_err(|_| PrivateStateError::BridgeUnavailable)?;
+    let transport = if credential.endpoints.is_empty() {
+        TransportClient::new_relay_only(credential, Some(hook))
+    } else {
+        TransportClient::new(credential, Some(hook))
+    }
+    .map_err(|_| PrivateStateError::BridgeUnavailable)?;
     let opener = Arc::new(PrivateLinkOpener::new(
         transport,
         transport_unavailable,
@@ -1699,6 +1733,60 @@ mod tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.unwrap();
         response
+    }
+
+    fn base64url_no_pad(input: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut output = String::new();
+        let mut index = 0;
+        while index + 3 <= input.len() {
+            let chunk = ((input[index] as u32) << 16)
+                | ((input[index + 1] as u32) << 8)
+                | input[index + 2] as u32;
+            output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+            output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+            output.push(TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+            output.push(TABLE[(chunk & 0x3f) as usize] as char);
+            index += 3;
+        }
+        match input.len() - index {
+            1 => {
+                let chunk = (input[index] as u32) << 16;
+                output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+                output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+            }
+            2 => {
+                let chunk = ((input[index] as u32) << 16) | ((input[index + 1] as u32) << 8);
+                output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+                output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+                output.push(TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+            }
+            _ => {}
+        }
+        output
+    }
+
+    fn test_jwt(exp: i64) -> String {
+        let claims = format!(r#"{{"iat":{},"exp":{exp}}}"#, exp - 3600);
+        format!(
+            "{}.{}.sig",
+            base64url_no_pad(b"{}"),
+            base64url_no_pad(claims.as_bytes())
+        )
+    }
+
+    async fn read_http_head(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+        }
+        request
     }
 
     fn credential() -> Credential {
@@ -3096,21 +3184,62 @@ mod tests {
     #[tokio::test]
     async fn sanitation_precedes_pairer_bridge_carrier_and_peer() {
         let temp = tempfile::tempdir().unwrap();
+        let traps = LegacyNetworkTraps::bind();
+        let peer = PrivateLinkPeer::start().await;
         fs::write(
             temp.path().join("config.json"),
-            r#"{"server_url":"http://127.0.0.1:9","key":"secret","stream":"stream"}"#,
+            format!(
+                r#"{{"server_url":"{}","key":"secret","stream":"stream"}}"#,
+                traps.configured_origin()
+            ),
         )
         .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let pairer = SanitizedConfigPairer {
             config_path: temp.path().join("config.json"),
             calls: calls.clone(),
-            result: credential(),
+            result: peer.credential(),
         };
         setup_with_pairer(&pairer, temp.path(), "device", Cursor::new(b"pair"))
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let config_path = temp.path().join("config.json");
+        let mut reacquired: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        reacquired["server_url"] = serde_json::json!(traps.configured_origin());
+        reacquired["key"] = serde_json::json!("reintroduced");
+        fs::write(&config_path, serde_json::to_vec(&reacquired).unwrap()).unwrap();
+
+        peer.enqueue_response(200, br#"{"items":[],"total":0}"#.to_vec());
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let sanitized: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert!(sanitized.get("server_url").is_none());
+        assert!(sanitized.get("key").is_none());
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                ..observer("/ingest")
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            session
+                .capability("/ingest".to_owned())
+                .list_day("20260101")
+                .await,
+            LinkOutcome::Success { .. }
+        ));
+        assert_eq!(peer.accepted_carriers(), 1);
+        assert_eq!(peer.requests().len(), 1);
+        traps.assert_zero_connections();
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     struct LegacyNetworkTraps {
@@ -3248,7 +3377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_mismatch_retries_without_manual_cleanup() {
+    async fn restart_mismatch_starts_unregistered_without_deleting_observer() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         let credential = peer.credential();
@@ -3316,7 +3445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_repair_preserves_usable_prior_credential() {
+    async fn failed_two_file_publish_preserves_usable_prior_credential() {
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, b"{}".to_vec());
         let (_temp, session) = start_peer_session(&peer).await;
@@ -3348,7 +3477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_repair_invalidates_prior_instance_observer() {
+    async fn credential_instance_mismatch_rejects_prior_observer() {
         let temp = tempfile::tempdir().unwrap();
         persist_observer(temp.path(), &observer("/ingest")).unwrap();
         let peer = PrivateLinkPeer::start().await;
@@ -3363,7 +3492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repaired_instance_registers_before_first_data_request() {
+    async fn published_registration_authenticates_first_data_request() {
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, b"{}".to_vec());
         let temp = tempfile::tempdir().unwrap();
@@ -3547,6 +3676,69 @@ mod tests {
             request.await.unwrap(),
             LinkOutcome::TransportUnavailable
         ));
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn refreshed_relay_token_is_durable_before_owner_shutdown_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let relay_origin = format!("http://{}", listener.local_addr().unwrap());
+        let refreshed = test_jwt(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                + 3600,
+        );
+        let relay_refreshed = refreshed.clone();
+        let relay = tokio::spawn(async move {
+            let (mut refresh, _) = listener.accept().await.unwrap();
+            let request = read_http_head(&mut refresh).await;
+            assert!(
+                request.starts_with(b"POST /token/refresh HTTP/1.1"),
+                "{}",
+                String::from_utf8_lossy(&request)
+            );
+            let body = serde_json::json!({"device_token": relay_refreshed}).to_string();
+            refresh
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let (mut dial, _) = listener.accept().await.unwrap();
+            let _ = read_http_head(&mut dial).await;
+            dial.write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        });
+        let mut credential = peer.credential();
+        credential.endpoints.clear();
+        credential.relay_origin = Some(relay_origin);
+        credential.device_token = Some(test_jwt(1));
+        credential.device_token_expires_at = Some(1);
+        let owner = start_private_link_owner(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+        relay.await.unwrap();
+        let persisted = load_credential(temp.path()).unwrap().unwrap();
+        assert_eq!(persisted.device_token.as_deref(), Some(refreshed.as_str()));
+        owner.shutdown().await.unwrap();
+        let persisted_after_shutdown = load_credential(temp.path()).unwrap().unwrap();
+        assert_eq!(
+            persisted_after_shutdown.device_token.as_deref(),
+            Some(refreshed.as_str())
+        );
         peer.shutdown().await;
     }
 

@@ -2909,7 +2909,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_linked_response_does_not_block_capture_or_delete_unproven_segment() {
+    async fn slow_linked_response_does_not_delete_unproven_segment() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let legacy = MockServer::new(vec![]).await;
@@ -2978,9 +2978,6 @@ mod tests {
                 }
             } => {}
         }
-        let capture_ticks = AtomicUsize::new(0);
-        capture_ticks.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(capture_ticks.load(Ordering::SeqCst), 1);
         assert!(segment.exists());
         gate.notify_one();
         cleanup.await;

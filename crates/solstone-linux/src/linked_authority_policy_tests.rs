@@ -77,10 +77,49 @@ fn marked_items(lines: &[&str], marker: &str) -> Vec<bool> {
     marked
 }
 
-fn constructs_origin_relative_url(line: &str) -> bool {
-    let journal_route = line.contains("/app/") || line.contains("/api/");
-    journal_route
-        && (line.contains("format!(") || line.contains(".join(") || line.contains("push_str("))
+fn origin_relative_constructions(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut findings = Vec::new();
+    for needle in ["format!(", ".join(", "push_str("] {
+        let mut offset = 0;
+        while let Some(relative) = source[offset..].find(needle) {
+            let start = offset + relative;
+            let mut depth = 0_i32;
+            let mut quoted = false;
+            let mut escaped = false;
+            let mut end = start;
+            for (index, byte) in bytes[start..].iter().copied().enumerate() {
+                end = start + index + 1;
+                if quoted {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        quoted = false;
+                    }
+                    continue;
+                }
+                match byte {
+                    b'"' => quoted = true,
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let construction = &source[start..end];
+            if construction.contains("/app/") || construction.contains("/api/") {
+                findings.push(start);
+            }
+            offset = end.max(start + needle.len());
+        }
+    }
+    findings
 }
 
 #[test]
@@ -99,18 +138,19 @@ fn active_production_paths_have_no_legacy_direct_authority() {
         let lines = production_prefix(&source).lines().collect::<Vec<_>>();
         let l3_marked = marked_items(&lines, L3_MARKER);
         let test_only = marked_items(&lines, "#[cfg(test)]");
-        for (index, line) in lines.iter().enumerate() {
+        for byte in origin_relative_constructions(production_prefix(&source)) {
+            let line = production_prefix(&source)[..byte]
+                .lines()
+                .count()
+                .saturating_sub(1);
             assert!(
-                !constructs_origin_relative_url(line)
-                    || path
-                        .file_name()
-                        .is_some_and(|name| name == "private_link.rs")
-                    || l3_marked[index]
-                    || test_only[index],
+                l3_marked[line] || test_only[line],
                 "{}:{} constructs an origin-relative Journal URL",
                 path.display(),
-                index + 1
+                line + 1
             );
+        }
+        for (index, line) in lines.iter().enumerate() {
             for needle in forbidden {
                 assert!(
                     !line.contains(needle) || l3_marked[index] || test_only[index],
@@ -128,6 +168,17 @@ fn active_production_paths_have_no_legacy_direct_authority() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn origin_construction_scan_handles_split_invocations_and_routes() {
+    for source in [
+        "format!(\n\"{origin}/app/observer\"\n)",
+        "format!(\n\"{}{}\",\norigin,\n\"/app/observer\"\n)",
+        "origin\n.join(\n\"/app/observer\"\n)",
+    ] {
+        assert_eq!(origin_relative_constructions(source).len(), 1);
     }
 }
 

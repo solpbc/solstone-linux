@@ -1060,11 +1060,13 @@ mod tests {
     async fn drive_real_link_start(
         temp: &tempfile::TempDir,
         transport_enabled: bool,
-    ) -> (Result<PrivateLinkOwner, PrivateStateError>, LinkFactState) {
+    ) -> (
+        Result<PrivateLinkOwner, PrivateStateError>,
+        LinkFactState,
+        Arc<UploadClient>,
+    ) {
         let legacy_origin = MockServer::new(Vec::new()).await;
         let default_listener = OpportunisticDefaultListenerTrap::bind();
-        let pending = temp.path().join("pending.segment");
-        std::fs::write(&pending, b"pending").unwrap();
         let config = Config {
             config_dir: temp.path().to_path_buf(),
             stream: "stream".to_owned(),
@@ -1089,10 +1091,9 @@ mod tests {
         ));
         assert_real_observer_ticks_advance();
         let result = start.await.unwrap();
-        assert!(pending.exists());
         assert!(legacy_origin.requests().is_empty());
         default_listener.assert_zero_connections();
-        (result, upload.link_fact_state().unwrap())
+        (result, upload.link_fact_state().unwrap(), upload)
     }
 
     fn assert_real_observer_ticks_advance() {
@@ -1108,7 +1109,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missing_credentials_observer_ticks_without_transport() {
         let temp = tempfile::tempdir().unwrap();
-        let (result, facts) = drive_real_link_start(&temp, true).await;
+        let (result, facts, _upload) = drive_real_link_start(&temp, true).await;
         assert!(result.is_err());
         assert!(facts.pairing_required);
     }
@@ -1117,7 +1118,7 @@ mod tests {
     async fn malformed_credentials_observer_ticks_without_transport() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(CREDENTIALS_FILENAME), b"{").unwrap();
-        let (result, facts) = drive_real_link_start(&temp, true).await;
+        let (result, facts, _upload) = drive_real_link_start(&temp, true).await;
         assert!(result.is_err());
         assert!(facts.private_state_invalid);
     }
@@ -1136,7 +1137,7 @@ mod tests {
             })
             .to_string(),
         );
-        let (result, facts) = drive_real_link_start(&temp, true).await;
+        let (result, facts, _upload) = drive_real_link_start(&temp, true).await;
         let owner = result.unwrap();
         assert!(facts.observer_registered);
         let registration: serde_json::Value =
@@ -1154,9 +1155,10 @@ mod tests {
         let peer = PrivateLinkPeer::start().await;
         persist_credential(temp.path(), &peer.credential()).unwrap();
         peer.shutdown().await;
-        let (result, facts) = drive_real_link_start(&temp, true).await;
-        assert!(result.is_err());
+        let (result, facts, _upload) = drive_real_link_start(&temp, true).await;
+        let owner = result.expect("retryable carrier failure must retain the owner");
         assert!(facts.transport_unavailable);
+        owner.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1165,10 +1167,23 @@ mod tests {
         let peer = PrivateLinkPeer::start().await;
         persist_credential(temp.path(), &peer.credential()).unwrap();
         peer.enqueue_response(503, Vec::new());
-        let (result, facts) = drive_real_link_start(&temp, true).await;
-        assert!(result.is_err());
+        let (result, facts, upload) = drive_real_link_start(&temp, true).await;
+        let owner = result.expect("retryable registration failure must retain the owner");
         assert!(facts.transport_unavailable);
         assert_eq!(peer.requests().len(), 1);
+        enqueue_registration(&peer);
+        let mut config = Config {
+            config_dir: temp.path().to_path_buf(),
+            stream: "stream".to_owned(),
+            ..Config::default()
+        };
+        assert!(upload.ensure_registered(&mut config).await);
+        assert_eq!(peer.requests().len(), 2);
+        assert!(upload.is_registered());
+        let recovered = upload.link_fact_state().unwrap();
+        assert!(recovered.observer_registered);
+        assert!(!recovered.transport_unavailable);
+        owner.shutdown().await.unwrap();
         peer.shutdown().await;
     }
 
@@ -1214,17 +1229,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_initial_demand_performs_one_registration() {
+    async fn concurrent_ensure_registered_waiters_share_one_attempt_and_result() {
         assert_concurrent_initial_registration(200, true).await;
-    }
-
-    #[tokio::test]
-    async fn initial_registration_waiters_share_one_success() {
-        assert_concurrent_initial_registration(200, true).await;
-    }
-
-    #[tokio::test]
-    async fn initial_registration_waiters_share_one_unavailable_result() {
         assert_concurrent_initial_registration(503, false).await;
     }
 
@@ -1242,6 +1248,8 @@ mod tests {
             })
             .to_string(),
         );
+        let response_gate = Arc::new(AtomicBool::new(false));
+        peer.gate_next_response_nonblocking(response_gate.clone());
         let session = start_private_link_session(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
@@ -1267,6 +1275,15 @@ mod tests {
                 client.ensure_registered(&mut config).await
             }));
         }
+        peer.wait_for_requests(1).await;
+        assert!(demands.iter().all(|demand| !demand.is_finished()));
+        assert!(
+            peer.requests()
+                .iter()
+                .all(|request| request.path == "/app/observer/register")
+        );
+        response_gate.store(true, Ordering::Release);
+        peer.notify_response_gates();
         for demand in demands {
             assert_eq!(demand.await.unwrap(), expected);
         }
@@ -1287,7 +1304,18 @@ mod tests {
             PrivateStateLock::acquire(temp.path()),
             Err(PrivateStateError::LockContended)
         ));
-        owner.shutdown().await.unwrap();
+        let joined = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let shutdown =
+            tokio::spawn(owner.shutdown_with_join_probe(joined.clone(), release.clone()));
+        joined.notified().await;
+        assert!(!shutdown.is_finished());
+        assert!(matches!(
+            PrivateStateLock::acquire(temp.path()),
+            Err(PrivateStateError::LockContended)
+        ));
+        release.notify_one();
+        shutdown.await.unwrap().unwrap();
         let lock = PrivateStateLock::acquire(temp.path()).unwrap();
         drop(lock);
         peer.shutdown().await;
@@ -1305,7 +1333,17 @@ mod tests {
             PrivateStateLock::acquire(temp.path()),
             Err(PrivateStateError::LockContended)
         ));
-        owner.shutdown().await.unwrap();
+        let joined = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let shutdown =
+            tokio::spawn(owner.shutdown_with_join_probe(joined.clone(), release.clone()));
+        joined.notified().await;
+        assert!(matches!(
+            PrivateStateLock::acquire(temp.path()),
+            Err(PrivateStateError::LockContended)
+        ));
+        release.notify_one();
+        shutdown.await.unwrap().unwrap();
         assert!(PrivateStateLock::acquire(temp.path()).is_ok());
         peer.shutdown().await;
     }
@@ -1350,9 +1388,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sanitation_failure_keeps_observer_ticks_advancing_and_exposes_fact() {
+    async fn disabled_transport_keeps_observer_ticks_advancing_and_exposes_sanitation_fact() {
         let temp = tempfile::tempdir().unwrap();
-        let (result, facts) = drive_real_link_start(&temp, false).await;
+        let (result, facts, _upload) = drive_real_link_start(&temp, false).await;
         assert!(result.is_err());
         assert!(facts.config_sanitation_failed);
     }
@@ -1393,7 +1431,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn large_backpressured_upload_does_not_stop_observer_ticks() {
+    async fn slow_large_upload_response_does_not_stop_observer_ticks() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, br#"{"status":"ok","segment":"large"}"#.to_vec());
