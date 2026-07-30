@@ -7,7 +7,9 @@ use crate::{
     config::Config,
     event_sender::{EventSender, SILENT_QUEUE_MAX},
     observer::Clock,
-    private_link::{EventBody, LinkOutcome, PrivateLinkCapability, RepairOutcome},
+    private_link::{
+        EventBody, LinkOutcome, MAX_REQUEST_BODY_BYTES, PrivateLinkCapability, RepairOutcome,
+    },
     sync_health::ErrorType,
 };
 #[cfg(test)]
@@ -38,7 +40,6 @@ const OBSERVER_PROTOCOL_VERSION_HEADER: &str = "X-Solstone-Protocol-Version";
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const MAX_IMMEDIATE_ATTEMPTS: usize = 2;
 const RECOVERY_COOLDOWN: Duration = Duration::from_secs(300);
-const MAX_LINK_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 const TELLING_WINDOW: Duration = Duration::from_secs(300);
 const TELLING_BURST_LIMIT: usize = 12;
 pub(crate) const KEY_PREFIX_CHARS: usize = 8;
@@ -98,6 +99,9 @@ pub struct QueryResult {
 
 pub(crate) struct Inner {
     capability: std::sync::RwLock<Option<PrivateLinkCapability>>,
+    fallback_link_facts: crate::private_link::LinkFacts,
+    #[cfg(test)]
+    expose_link_facts: AtomicBool,
     #[cfg(test)]
     url: String,
     #[cfg(test)]
@@ -193,6 +197,9 @@ impl UploadClient {
         };
         let inner = Arc::new(Inner {
             capability: std::sync::RwLock::new(capability),
+            fallback_link_facts: crate::private_link::LinkFacts::default(),
+            #[cfg(test)]
+            expose_link_facts: AtomicBool::new(true),
             #[cfg(test)]
             url: config.server_url.trim_end_matches('/').to_owned(),
             #[cfg(test)]
@@ -243,8 +250,8 @@ impl UploadClient {
     }
 
     pub fn is_registered(&self) -> bool {
-        if self.inner.capability().is_some() {
-            return true;
+        if let Some(capability) = self.inner.capability() {
+            return capability.is_registered();
         }
         #[cfg(test)]
         {
@@ -256,6 +263,30 @@ impl UploadClient {
 
     pub(crate) fn recovery_generation(&self) -> u64 {
         self.inner.recovery_generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn link_fact_state(&self) -> Option<crate::private_link::LinkFactState> {
+        #[cfg(test)]
+        if !self.inner.expose_link_facts.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(
+            self.inner
+                .capability()
+                .map_or_else(
+                    || self.inner.fallback_link_facts.clone(),
+                    |capability| capability.facts(),
+                )
+                .snapshot(),
+        )
+    }
+
+    pub(crate) fn link_facts(&self) -> crate::private_link::LinkFacts {
+        self.inner.fallback_link_facts.clone()
+    }
+
+    pub(crate) fn publish_link_fact(&self, fact: crate::private_link::LinkFact) {
+        self.inner.publish_link_fact(fact);
     }
 
     pub fn request_stop(&self) {
@@ -280,7 +311,22 @@ impl UploadClient {
             return true;
         }
         if let Some(capability) = self.inner.capability() {
-            return match capability.report_unauthorized(0).await {
+            let _registration = self.inner.recovery_lock.lock().await;
+            if self.is_registered() {
+                return true;
+            }
+            let now = self.inner.clock.monotonic_seconds();
+            if self.inner.recovery_on_cooldown(now) {
+                return false;
+            }
+            let outcome = capability.report_unauthorized(0).await;
+            if !matches!(
+                outcome,
+                RepairOutcome::Repaired { .. } | RepairOutcome::AlreadySuperseded { .. }
+            ) {
+                *self.inner.last_recovery_attempt.lock().unwrap() = Some(now);
+            }
+            return match outcome {
                 RepairOutcome::Repaired { generation, name } => {
                     self.inner
                         .recovery_generation
@@ -378,44 +424,22 @@ impl UploadClient {
         if !files.iter().any(|path| path.exists()) {
             return UploadResult::failure(None, None);
         }
-        let declared_file_bytes = files
-            .iter()
-            .filter_map(|path| std::fs::metadata(path).ok())
-            .map(|metadata| metadata.len())
-            .try_fold(0_u64, u64::checked_add);
-        if declared_file_bytes.is_none_or(|bytes| bytes > MAX_LINK_REQUEST_BODY_BYTES) {
-            return UploadResult::failure(Some(ErrorType::Client), Some(413));
-        }
-
         #[cfg(test)]
         let url = format!("{}/app/observer/ingest", self.inner.url);
         let mut last_error = None;
         let mut last_status = None;
         for attempt in 0..self.inner.immediate_attempts {
-            let mut form = multipart::Form::new()
-                .text("day", day.to_owned())
-                .text("segment", segment.to_owned());
-            let mut file_count = 0;
-            for path in files.iter().filter(|path| path.exists()) {
-                // Named deviation: Python propagates file-open errors; Rust skips
-                // unreadable files so one bad capture does not crash the observer.
-                match multipart_part(path).await {
-                    Ok(part) => {
-                        form = form.part("files", part);
-                        file_count += 1;
-                    }
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), %error, "File not found, skipping")
-                    }
-                }
-            }
-            if file_count == 0 {
+            let Some((form, framed_length)) = build_multipart_form(day, segment, files).await
+            else {
                 return UploadResult::failure(None, None);
+            };
+            if framed_length > MAX_REQUEST_BODY_BYTES {
+                return UploadResult::failure(Some(ErrorType::Client), Some(413));
             }
 
             if let Some(capability) = self.inner.capability() {
                 match capability.ingest(form).await {
-                    LinkOutcome::Success { status, body } if status == StatusCode::OK => {
+                    LinkOutcome::Success { status, body, .. } if status == StatusCode::OK => {
                         match serde_json::from_slice::<Value>(&body) {
                             Ok(body) => {
                                 return parse_upload_body(body);
@@ -450,6 +474,8 @@ impl UploadClient {
                     }
                     LinkOutcome::Forbidden => {
                         self.inner.revoked.store(true, Ordering::Release);
+                        self.inner
+                            .publish_link_fact(crate::private_link::LinkFact::TerminalRevocation);
                         return UploadResult::failure(
                             Some(ErrorType::Auth),
                             Some(StatusCode::FORBIDDEN.as_u16()),
@@ -498,8 +524,6 @@ impl UploadClient {
                             last_status = Some(status.as_u16());
                             if status == StatusCode::FORBIDDEN {
                                 self.inner.revoked.store(true, Ordering::Release);
-                            } else if status == StatusCode::UNAUTHORIZED {
-                                self.inner.recover_after_401("upload", false).await;
                             }
                             if error_type != ErrorType::Transient {
                                 tracing::error!(%status, ?error_type, "Upload rejected");
@@ -565,6 +589,8 @@ impl UploadClient {
                 }
                 LinkOutcome::Forbidden => {
                     self.inner.revoked.store(true, Ordering::Release);
+                    self.inner
+                        .publish_link_fact(crate::private_link::LinkFact::TerminalRevocation);
                     query_failure(ErrorType::Auth, Some(StatusCode::FORBIDDEN.as_u16()))
                 }
                 LinkOutcome::TransportUnavailable => query_failure(ErrorType::Transient, None),
@@ -592,8 +618,6 @@ impl UploadClient {
                 let error_type = Self::classify_error(Some(status.as_u16()), false);
                 if status == StatusCode::FORBIDDEN {
                     self.inner.revoked.store(true, Ordering::Release);
-                } else if status == StatusCode::UNAUTHORIZED {
-                    self.inner.recover_after_401("listing", false).await;
                 }
                 tracing::warn!(%status, ?error_type, "Segments query failed");
                 return query_failure(error_type, Some(status.as_u16()));
@@ -648,7 +672,7 @@ pub(crate) fn capability_less_client_for_test(
     version: impl Into<String>,
     clock: Arc<dyn Clock + Send + Sync>,
 ) -> UploadClient {
-    UploadClient::with_silent_capacity(
+    let client = UploadClient::with_silent_capacity(
         config,
         None,
         hostname,
@@ -656,10 +680,24 @@ pub(crate) fn capability_less_client_for_test(
         version,
         clock,
         SILENT_QUEUE_MAX,
-    )
+    );
+    client
+        .inner
+        .expose_link_facts
+        .store(false, Ordering::Release);
+    client
 }
 
 impl Inner {
+    fn publish_link_fact(&self, fact: crate::private_link::LinkFact) {
+        self.capability()
+            .map_or_else(
+                || self.fallback_link_facts.clone(),
+                |capability| capability.facts(),
+            )
+            .publish(fact);
+    }
+
     fn capability(&self) -> Option<PrivateLinkCapability> {
         self.capability
             .read()
@@ -706,8 +744,12 @@ impl Inner {
             RepairOutcome::AlreadySuperseded {
                 generation: repaired,
             } => {
-                self.recovery_generation.store(repaired, Ordering::Release);
-                self.tell_outcome("already_recovered", "", &current_key, "", now);
+                if repaired == generation {
+                    self.tell_outcome("same_key_returned", "", &current_key, &current_key, now);
+                } else {
+                    self.recovery_generation.store(repaired, Ordering::Release);
+                    self.tell_outcome("already_recovered", "", &current_key, "", now);
+                }
             }
             RepairOutcome::GuardRefused { reason_code } => {
                 self.tell_guard_refusal(reason_code.as_deref(), &current_key, now);
@@ -848,59 +890,6 @@ impl Inner {
         );
     }
 
-    #[cfg(test)]
-    async fn recover_after_401(&self, route: &str, rejected_event: bool) {
-        // A 403 latch is an authorization boundary: no trigger may attempt recovery once set.
-        if self.revoked.load(Ordering::Acquire) {
-            return;
-        }
-        if rejected_event {
-            self.dropped_events.fetch_add(1, Ordering::AcqRel);
-        }
-        let now = self.clock.monotonic_seconds();
-        let current_key = self.key.lock().unwrap().clone();
-        self.tell_first_rejection(route, &current_key, now);
-        if self.recovery_on_cooldown(now) {
-            return;
-        }
-
-        let _recovery = self.recovery_lock.lock().await;
-        // Recheck both authorization and cooldown after waiting for a concurrent trigger.
-        if self.revoked.load(Ordering::Acquire) {
-            return;
-        }
-        let now = self.clock.monotonic_seconds();
-        if self.recovery_on_cooldown(now) {
-            return;
-        }
-        *self.last_recovery_attempt.lock().unwrap() = Some(now);
-        // Mitigation 1 compares against the key rejected by this attempt, never a prior response.
-        let rejected_key = self.key.lock().unwrap().clone();
-        let attempt = self.register_once().await;
-        if self.revoked.load(Ordering::Acquire) {
-            return;
-        }
-        match attempt {
-            RegisterAttempt::Registered { key, name } if key == rejected_key => {
-                self.tell_outcome("same_key_returned", &name, &rejected_key, &key, now);
-            }
-            RegisterAttempt::Registered { key, name } => {
-                if let Err(error) = save_identity(&self.paths, &key, &name) {
-                    tracing::error!(%error, "Failed to persist repaired journal identity");
-                    return;
-                }
-                *self.key.lock().unwrap() = key.clone();
-                *self.stream.lock().unwrap() = name.clone();
-                self.recovery_generation.fetch_add(1, Ordering::AcqRel);
-                self.tell_outcome("recovered", &name, &rejected_key, &key, now);
-            }
-            RegisterAttempt::GuardRefused { reason_code } => {
-                self.tell_guard_refusal(reason_code.as_deref(), &rejected_key, now);
-            }
-            RegisterAttempt::Failed => {}
-        }
-    }
-
     pub(crate) async fn relay_event(
         &self,
         tract: &str,
@@ -937,6 +926,7 @@ impl Inner {
                 }
                 LinkOutcome::Forbidden => {
                     self.revoked.store(true, Ordering::Release);
+                    self.publish_link_fact(crate::private_link::LinkFact::TerminalRevocation);
                     false
                 }
                 LinkOutcome::TransportUnavailable | LinkOutcome::LocalRejected { .. } => false,
@@ -961,8 +951,6 @@ impl Inner {
                 Ok(response) => {
                     if response.status() == StatusCode::FORBIDDEN {
                         self.revoked.store(true, Ordering::Release);
-                    } else if response.status() == StatusCode::UNAUTHORIZED {
-                        self.recover_after_401("event", true).await;
                     }
                     false
                 }
@@ -1006,16 +994,99 @@ fn retry_delay(delays: &[i64], attempt: usize) -> Duration {
     Duration::from_secs(delays[attempt.min(delays.len() - 1)].max(0) as u64)
 }
 
-async fn multipart_part(path: &Path) -> Result<multipart::Part, std::io::Error> {
+async fn multipart_part(
+    path: &Path,
+) -> Result<(multipart::Part, u64, String, &'static str), std::io::Error> {
     let content_type = match path.extension().and_then(|value| value.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("flac") => "audio/flac",
         Some(extension) if extension.eq_ignore_ascii_case("webm") => "video/webm",
         _ => "application/octet-stream",
     };
-    multipart::Part::file(path)
-        .await?
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let file = tokio::fs::File::open(path).await?;
+    let length = file.metadata().await?.len();
+    let part = multipart::Part::stream_with_length(file, length)
+        .file_name(file_name.clone())
         .mime_str(content_type)
-        .map_err(std::io::Error::other)
+        .map_err(std::io::Error::other)?;
+    Ok((part, length, file_name, content_type))
+}
+
+fn multipart_field_length(
+    boundary: &str,
+    name: &str,
+    value_length: u64,
+    filename: Option<&str>,
+    content_type: Option<&str>,
+) -> Option<u64> {
+    let mut header = format!("Content-Disposition: form-data; name=\"{name}\"");
+    if let Some(filename) = filename {
+        let filename = filename
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\r', "\\\r")
+            .replace('\n', "\\\n");
+        header.push_str(&format!("; filename=\"{filename}\""));
+    }
+    if let Some(content_type) = content_type {
+        header.push_str("\r\nContent-Type: ");
+        header.push_str(content_type);
+    }
+    2_u64
+        .checked_add(boundary.len() as u64)?
+        .checked_add(2)?
+        .checked_add(header.len() as u64)?
+        .checked_add(4)?
+        .checked_add(value_length)?
+        .checked_add(2)
+}
+
+async fn build_multipart_form(
+    day: &str,
+    segment: &str,
+    files: &[PathBuf],
+) -> Option<(multipart::Form, u64)> {
+    let mut form = multipart::Form::new();
+    let boundary = form.boundary().to_owned();
+    let mut length =
+        multipart_field_length(&boundary, "day", day.len() as u64, None, None)?.checked_add(
+            multipart_field_length(&boundary, "segment", segment.len() as u64, None, None)?,
+        )?;
+    form = form
+        .text("day", day.to_owned())
+        .text("segment", segment.to_owned());
+    let mut file_count = 0_u64;
+    for path in files.iter().filter(|path| path.exists()) {
+        // Named deviation: Python propagates file-open errors; Rust skips unreadable
+        // files so one bad capture does not crash the observer.
+        match multipart_part(path).await {
+            Ok((part, file_length, filename, content_type)) => {
+                length = length.checked_add(multipart_field_length(
+                    &boundary,
+                    "files",
+                    file_length,
+                    Some(&filename),
+                    Some(content_type),
+                )?)?;
+                form = form.part("files", part);
+                file_count += 1;
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "File not found, skipping")
+            }
+        }
+    }
+    if file_count == 0 {
+        return None;
+    }
+    length = length
+        .checked_add(2)?
+        .checked_add(boundary.len() as u64)?
+        .checked_add(4)?;
+    Some((form, length))
 }
 
 fn query_failure(error_type: ErrorType, status_code: Option<u16>) -> QueryResult {
@@ -1173,6 +1244,68 @@ mod tests {
         (temp, legacy, peer, session, client)
     }
 
+    async fn linked_recovery_client(
+        clock: Arc<MutableClock>,
+    ) -> (
+        TempDir,
+        PrivateLinkPeer,
+        crate::private_link::PrivateLinkSession,
+        UploadClient,
+    ) {
+        let peer = PrivateLinkPeer::start().await;
+        let temp = TempDir::new().unwrap();
+        let config = Config {
+            stream: "desktop".into(),
+            config_dir: temp.path().to_path_buf(),
+            ..Config::default()
+        };
+        let session = start_private_link_session(temp.path(), peer.credential(), "desktop")
+            .await
+            .unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "STALE-KEY".into(),
+                prefix: "prefix".into(),
+                name: "desktop".into(),
+                ingest_url: "/app/observer/ingest".into(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        let client = UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".into()),
+            "host",
+            "linux",
+            "test",
+            clock,
+        );
+        (temp, peer, session, client)
+    }
+
+    fn registration(key: &str, name: &str) -> Value {
+        json!({
+            "key": key,
+            "name": name,
+            "prefix": "prefix",
+            "ingest_url": "/app/observer/ingest",
+            "protocol_version": 2
+        })
+    }
+
+    fn peer_header<'a>(
+        request: &'a crate::private_link_test_peer::PeerRequest,
+        name: &str,
+    ) -> Option<&'a str> {
+        request
+            .headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
     fn write_file(temp: &TempDir, name: &str, body: &[u8]) -> PathBuf {
         let path = temp.path().join(name);
         std::fs::write(&path, body).unwrap();
@@ -1275,15 +1408,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn large_backpressured_upload_allows_small_concurrent_request() {
-        let (temp, legacy, peer, session, client) = linked_client(
-            200,
-            json!({"status":"ok","segment":"large","items":[],"total":0}),
-        )
-        .await;
-        peer.enqueue_response(
-            200,
-            json!({"status":"ok","segment":"large","items":[],"total":0}).to_string(),
-        );
+        let (temp, legacy, peer, session, client) =
+            linked_client(200, json!({"status":"ok","segment":"large"})).await;
+        let response_gate = Arc::new(AtomicBool::new(false));
+        peer.gate_next_response_nonblocking(response_gate.clone());
+        peer.enqueue_response(200, json!({"items":[],"total":0}).to_string());
         let media = write_file(&temp, "screen.webm", &vec![0x57; 17 * 1024 * 1024]);
         let client = Arc::new(client);
         let upload_client = Arc::clone(&client);
@@ -1292,11 +1421,17 @@ mod tests {
                 .upload_segment("20260101", "large", &[media])
                 .await
         });
+        peer.wait_for_requests(1).await;
+        assert!(!upload.is_finished());
         let listing_client = Arc::clone(&client);
         let listing =
             tokio::spawn(async move { listing_client.get_server_segments("20260101").await });
-        assert!(upload.await.unwrap().success);
+        peer.wait_for_requests(2).await;
         assert!(listing.await.unwrap().segments.is_some());
+        assert!(!upload.is_finished());
+        response_gate.store(true, Ordering::Release);
+        peer.notify_response_gates();
+        assert!(upload.await.unwrap().success);
         assert_eq!(peer.requests().len(), 2);
         assert!(legacy.requests().is_empty());
         drop(client);
@@ -1317,6 +1452,30 @@ mod tests {
             .await;
         assert_eq!(result.status_code, Some(413));
         assert_eq!(result.error_type, Some(ErrorType::Client));
+        assert!(media.exists());
+        assert!(peer.requests().is_empty());
+        assert!(legacy.requests().is_empty());
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn multipart_overhead_crossing_64mib_is_local_413() {
+        let (temp, legacy, peer, session, client) =
+            linked_client(200, json!({"status":"ok"})).await;
+        let media = temp.path().join("boundary.webm");
+        let file = std::fs::File::create(&media).unwrap();
+        file.set_len(MAX_REQUEST_BODY_BYTES - 1).unwrap();
+        drop(file);
+        let (_, framed_length) =
+            build_multipart_form("20260101", "boundary", std::slice::from_ref(&media))
+                .await
+                .unwrap();
+        assert!(framed_length > MAX_REQUEST_BODY_BYTES);
+        let result = client
+            .upload_segment("20260101", "boundary", std::slice::from_ref(&media))
+            .await;
+        assert_eq!(result.status_code, Some(413));
         assert!(media.exists());
         assert!(peer.requests().is_empty());
         assert!(legacy.requests().is_empty());
@@ -1589,85 +1748,47 @@ mod tests {
     // AC 1/2: a stale-key 401 registers, persists a distinct replacement, and the next relay uses it.
     #[tokio::test]
     async fn later_safe_retry_uses_new_generation() {
-        const STALE: &str = "STALE-KEY-111";
         const NEW: &str = "NEW-KEY-222";
-        let server = MockServer::new(vec![
-            (401, json!({})),
-            (200, json!({"key":NEW,"name":"desktop-new"})),
-            (200, json!({})),
-        ])
-        .await;
-        let temp = TempDir::new().unwrap();
-        let config = Config {
-            key: STALE.into(),
-            stream: "desktop".into(),
-            ..config(&server, &temp)
-        };
-        save_identity(
-            &ConfigPaths {
-                base_dir: Some(config.base_dir.clone()),
-                config_dir: Some(config.config_dir.clone()),
-            },
-            STALE,
-            "desktop",
-        )
-        .unwrap();
-        let client = client(&config);
-
+        let (_temp, peer, session, client) =
+            linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration(NEW, "desktop-new").to_string());
+        peer.enqueue_response(200, b"{}".to_vec());
         assert!(!client.relay_event("observe", "status", Map::new()).await);
-        assert_eq!(server.request_count("/app/observer/register"), 1);
-        assert_eq!(client.inner.key.lock().unwrap().as_str(), NEW);
-        assert_eq!(load_config(client.inner.paths.clone()).config.key, "");
         assert!(client.relay_event("observe", "status", Map::new()).await);
-        let requests = server.requests();
+        let requests = peer.requests();
+        assert_eq!(requests.len(), 3);
         assert_eq!(
-            requests[2]
-                .headers
-                .get("authorization")
-                .unwrap()
-                .to_str()
-                .unwrap(),
+            peer_header(&requests[2], "authorization").unwrap(),
             format!("Bearer {NEW}")
         );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     #[tokio::test]
     async fn rejected_request_is_never_blindly_replayed() {
-        let server = MockServer::new(vec![
-            (401, json!({})),
-            (200, json!({"key":"NEW-KEY","name":"desktop-new"})),
-        ])
-        .await;
-        let temp = TempDir::new().unwrap();
-        let config = Config {
-            key: "STALE-KEY".into(),
-            stream: "desktop".into(),
-            ..config(&server, &temp)
-        };
-        let client = client(&config);
+        let (_temp, peer, session, client) =
+            linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration("NEW-KEY", "desktop-new").to_string());
         assert!(!client.relay_event("observe", "status", Map::new()).await);
-        let requests = server.requests();
+        let requests = peer.requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].uri, "/app/observer/ingest/event");
-        assert_eq!(requests[1].uri, "/app/observer/register");
+        assert_eq!(requests[0].path, "/app/observer/ingest/event");
+        assert_eq!(requests[1].path, "/app/observer/register");
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 3/7: an idempotent same-key response is not recovery and still arms cooldown.
     #[tokio::test]
     async fn same_key_repair_reports_truthfully_without_generation_publish() {
-        let server = MockServer::new(vec![
-            (401, json!({})),
-            (200, json!({"key":"STALE-KEY","name":"desktop"})),
-            (401, json!({})),
-        ])
-        .await;
-        let temp = TempDir::new().unwrap();
-        let config = Config {
-            key: "STALE-KEY".into(),
-            stream: "desktop".into(),
-            ..config(&server, &temp)
-        };
-        let client = client(&config);
+        let (_temp, peer, session, client) =
+            linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration("STALE-KEY", "desktop").to_string());
+        peer.enqueue_response(401, Vec::new());
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
         let subscriber = tracing_subscriber::fmt()
@@ -1675,39 +1796,42 @@ mod tests {
             .with_ansi(false)
             .with_writer(move || writer.clone())
             .finish();
+        let generation = client.recovery_generation();
         async {
             assert!(!client.relay_event("observe", "status", Map::new()).await);
-            assert_eq!(client.recovery_generation(), 0);
+            assert_eq!(client.recovery_generation(), generation);
             assert!(!client.relay_event("observe", "status", Map::new()).await);
         }
         .with_subscriber(subscriber)
         .await;
-        assert_eq!(server.request_count("/app/observer/register"), 1);
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1
+        );
         let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(
             captured.contains("outcome=\"same_key_returned\""),
             "{captured}"
         );
         assert!(!captured.contains("outcome=\"recovered\""), "{captured}");
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 6: the real sync-query/event race shares one in-flight recovery attempt.
     #[tokio::test]
     async fn concurrent_401_burst_registers_once_per_generation() {
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let server = MockServer::new_actions(vec![
-            Action::GatedResponse(401, json!({}), Arc::clone(&gate)),
-            Action::GatedResponse(401, json!({}), Arc::clone(&gate)),
-            Action::Response(200, json!({"key":"NEW-KEY","name":"desktop-new"})),
-        ])
-        .await;
-        let temp = TempDir::new().unwrap();
-        let config = Config {
-            key: "STALE-KEY".into(),
-            stream: "desktop".into(),
-            ..config(&server, &temp)
-        };
-        let client = Arc::new(client(&config));
+        let (_temp, peer, session, client) =
+            linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration("NEW-KEY", "desktop-new").to_string());
+        let gate = Arc::new(AtomicBool::new(false));
+        peer.gate_queued_responses_nonblocking(2, gate.clone());
+        let client = Arc::new(client);
         let listing = {
             let client = Arc::clone(&client);
             tokio::spawn(async move { client.get_server_segments("20260101").await })
@@ -1716,95 +1840,82 @@ mod tests {
             let client = Arc::clone(&client);
             tokio::spawn(async move { client.relay_event("observe", "status", Map::new()).await })
         };
-        wait_for_requests(&server, 2).await;
-        tokio::task::yield_now().await;
-        gate.notify_waiters();
+        peer.wait_for_requests(2).await;
+        gate.store(true, Ordering::Release);
+        peer.notify_response_gates();
         let (listing, event) = tokio::join!(listing, event);
         let listing = listing.unwrap();
         let event = event.unwrap();
         assert!(listing.segments.is_none());
         assert!(!event);
-        assert_eq!(server.request_count("/app/observer/register"), 1);
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1
+        );
+        drop(client);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 7: a burst is bounded by cooldown and the next 300-second window starts fresh.
     #[tokio::test]
     async fn cooldown_suppresses_registration_until_next_generation_window() {
-        let mut responses = vec![
-            (401, json!({})),
-            (200, json!({"key":"STALE-KEY","name":"desktop"})),
-        ];
-        responses.extend((0..19).map(|_| (401, json!({}))));
-        responses.extend([
-            (401, json!({})),
-            (200, json!({"key":"STALE-KEY","name":"desktop"})),
-        ]);
-        let server = MockServer::new(responses).await;
-        let temp = TempDir::new().unwrap();
-        let config = Config {
-            key: "STALE-KEY".into(),
-            stream: "desktop".into(),
-            ..config(&server, &temp)
-        };
         let clock = Arc::new(MutableClock::new(0.0, 0.0));
-        let client = crate::upload::capability_less_client_for_test(
-            &config,
-            "host",
-            "linux",
-            "test",
-            clock.clone(),
-        );
+        let (_temp, peer, session, client) = linked_recovery_client(clock.clone()).await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration("STALE-KEY", "desktop").to_string());
+        for _ in 0..20 {
+            peer.enqueue_response(401, Vec::new());
+        }
+        peer.enqueue_response(200, registration("STALE-KEY", "desktop").to_string());
         for _ in 0..20 {
             assert!(!client.relay_event("observe", "status", Map::new()).await);
         }
-        assert_eq!(server.request_count("/app/observer/register"), 1);
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1
+        );
         clock.set_mono(300.0);
         assert!(!client.relay_event("observe", "status", Map::new()).await);
-        assert_eq!(server.request_count("/app/observer/register"), 2);
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            2
+        );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 9: every failed register shape preserves disk, runtime, caller config, and stale bearer use.
     #[tokio::test]
     async fn failed_registration_preserves_all_stores_and_stale_bearer() {
-        for failed in [
-            Action::Disconnect,
-            Action::Response(500, json!({})),
-            Action::Response(200, json!({"name":"desktop"})),
-        ] {
-            let server = MockServer::new_actions(vec![
-                Action::Response(401, json!({})),
-                failed,
-                Action::Response(200, json!({})),
-            ])
-            .await;
-            let temp = TempDir::new().unwrap();
-            let config = Config {
-                key: "STALE-KEY".into(),
-                stream: "desktop".into(),
-                ..config(&server, &temp)
-            };
-            save_identity(
-                &ConfigPaths {
-                    base_dir: Some(config.base_dir.clone()),
-                    config_dir: Some(config.config_dir.clone()),
-                },
-                &config.key,
-                &config.stream,
-            )
-            .unwrap();
-            let before = config.clone();
-            let client = client(&config);
-
+        for failed in [(500, json!({})), (200, json!({"name":"desktop"}))] {
+            let (temp, peer, session, client) =
+                linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+            peer.enqueue_response(401, Vec::new());
+            peer.enqueue_response(failed.0, failed.1.to_string());
+            peer.enqueue_response(200, b"{}".to_vec());
             assert!(!client.relay_event("observe", "status", Map::new()).await);
-            assert_eq!(config, before);
-            assert_eq!(client.inner.key.lock().unwrap().as_str(), "STALE-KEY");
-            assert_eq!(load_config(client.inner.paths.clone()).config.key, "");
             assert!(client.relay_event("observe", "status", Map::new()).await);
-            let requests = server.requests();
+            let requests = peer.requests();
             assert_eq!(
-                requests.last().unwrap().headers["authorization"],
-                "Bearer STALE-KEY"
+                peer_header(requests.last().unwrap(), "authorization"),
+                Some("Bearer STALE-KEY")
             );
+            let observer: ObserverState =
+                serde_json::from_slice(&std::fs::read(temp.path().join("observer.json")).unwrap())
+                    .unwrap();
+            assert_eq!(observer.key, "STALE-KEY");
+            session.shutdown().await.unwrap();
+            peer.shutdown().await;
         }
     }
 
@@ -1814,61 +1925,35 @@ mod tests {
     // pair. Those are therefore the only two identities reachable on disk.
     #[tokio::test]
     async fn cancellation_boundary_exposes_only_stale_or_new_disk_identity() {
-        const STALE: &str = "STALE-KEY";
         const NEW: &str = "NEW-KEY";
         for cancel in [true, false] {
-            let gate = Arc::new(tokio::sync::Notify::new());
-            let server = MockServer::new_actions(vec![
-                Action::Response(401, json!({})),
-                Action::GatedResponse(
-                    200,
-                    json!({"key":NEW,"name":"desktop-new"}),
-                    Arc::clone(&gate),
-                ),
-            ])
-            .await;
-            let temp = TempDir::new().unwrap();
-            let config = Config {
-                key: STALE.into(),
-                stream: "desktop-old".into(),
-                ..config(&server, &temp)
-            };
-            save_identity(
-                &ConfigPaths {
-                    base_dir: Some(config.base_dir.clone()),
-                    config_dir: Some(config.config_dir.clone()),
-                },
-                STALE,
-                "desktop-old",
-            )
-            .unwrap();
-            let client = Arc::new(client(&config));
+            let (temp, peer, session, client) =
+                linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+            peer.enqueue_response(401, Vec::new());
+            peer.enqueue_response(200, registration(NEW, "desktop-new").to_string());
+            let gate = Arc::new(AtomicBool::new(false));
+            peer.gate_queued_response_nonblocking(1, gate.clone());
+            let client = Arc::new(client);
             let relay = {
                 let client = Arc::clone(&client);
                 tokio::spawn(
                     async move { client.relay_event("observe", "status", Map::new()).await },
                 )
             };
-            wait_for_requests(&server, 2).await;
+            peer.wait_for_requests(2).await;
             if cancel {
-                client.request_stop();
+                relay.abort();
             }
-            gate.notify_one();
-            assert!(!relay.await.unwrap());
-            let saved = load_config(client.inner.paths.clone()).config;
-            let pair = (saved.key.as_str(), saved.stream.as_str());
-            assert!(
-                pair == ("", "desktop-old") || pair == ("", "desktop-new"),
-                "unexpected reachable identity {pair:?}"
-            );
-            assert_eq!(
-                pair,
-                if cancel {
-                    ("", "desktop-old")
-                } else {
-                    ("", "desktop-new")
-                }
-            );
+            gate.store(true, Ordering::Release);
+            peer.notify_response_gates();
+            let _ = relay.await;
+            let observer: ObserverState =
+                serde_json::from_slice(&std::fs::read(temp.path().join("observer.json")).unwrap())
+                    .unwrap();
+            assert_eq!(observer.key, if cancel { "STALE-KEY" } else { NEW });
+            drop(client);
+            session.shutdown().await.unwrap();
+            peer.shutdown().await;
         }
     }
 
@@ -2532,42 +2617,41 @@ mod tests {
     // AC 18: register-route guard refusal deliberately no longer latches revocation.
     #[tokio::test]
     async fn registration_route_guard_refusal_keeps_prior_authority_and_does_not_latch_or_pair() {
-        let server =
-            MockServer::new(vec![(403, json!({"reason_code":"local_request_only"}))]).await;
         let temp = TempDir::new().unwrap();
-        let mut config = config(&server, &temp);
-        config.key.clear();
-        let client = client(&config);
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(403, json!({"reason_code":"local_request_only"}).to_string());
+        let session = start_private_link_session(temp.path(), peer.credential(), "desktop")
+            .await
+            .unwrap();
+        let mut config = Config {
+            config_dir: temp.path().to_path_buf(),
+            stream: "desktop".to_owned(),
+            ..Config::default()
+        };
+        let client = UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".to_owned()),
+            "host",
+            "linux",
+            "1",
+            Arc::new(MutableClock::new(0.0, 0.0)),
+        );
         assert!(!client.ensure_registered(&mut config).await);
         assert!(!client.is_revoked());
         assert!(config.key.is_empty());
+        assert_eq!(peer.requests().len(), 1);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 5: register guard refusal preserves the stale identity; ingest 403 still revokes it.
     #[tokio::test]
     async fn register_guard_refusal_does_not_revoke_but_ingest_403_does() {
-        let server = MockServer::new(vec![
-            (401, json!({})),
-            (403, json!({"reason_code":"local_request_only"})),
-            (403, json!({})),
-        ])
-        .await;
-        let temp = TempDir::new().unwrap();
-        let config = Config {
-            key: "STALE-KEY".into(),
-            stream: "desktop".into(),
-            ..config(&server, &temp)
-        };
-        save_identity(
-            &ConfigPaths {
-                base_dir: Some(config.base_dir.clone()),
-                config_dir: Some(config.config_dir.clone()),
-            },
-            &config.key,
-            &config.stream,
-        )
-        .unwrap();
-        let client = client(&config);
+        let (_temp, peer, session, client) =
+            linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(403, json!({"reason_code":"local_request_only"}).to_string());
+        peer.enqueue_response(403, Vec::new());
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
         let subscriber = tracing_subscriber::fmt()
@@ -2578,10 +2662,6 @@ mod tests {
         async {
             assert!(!client.relay_event("observe", "status", Map::new()).await);
             assert!(!client.is_revoked());
-            assert_eq!(client.inner.key.lock().unwrap().as_str(), "STALE-KEY");
-            let saved = load_config(client.inner.paths.clone()).config;
-            assert_eq!(saved.key, "");
-            assert_eq!(saved.stream, "desktop");
             assert!(!client.relay_event("observe", "status", Map::new()).await);
             assert!(client.is_revoked());
         }
@@ -2590,6 +2670,8 @@ mod tests {
         let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(captured.contains("Journal refused local identity repair"));
         assert!(captured.contains("local_request_only"));
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
     // AC: upload 403 latches revoked
     #[tokio::test]
@@ -2754,22 +2836,21 @@ mod tests {
     // register request's EVENT_TIMEOUT without making this a 30-second real-time test.
     #[tokio::test]
     async fn event_recovery_is_single_attempt_and_queue_stays_bounded() {
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let server = MockServer::new_actions(vec![
-            Action::Response(401, json!({})),
-            Action::GatedResponse(500, json!({}), Arc::clone(&gate)),
-        ])
-        .await;
-        let temp = TempDir::new().unwrap();
-        let config = Config {
-            key: "STALE-KEY".into(),
-            stream: "desktop".into(),
-            ..config(&server, &temp)
-        };
-        let mut client = client(&config);
+        let (_temp, peer, session, mut client) =
+            linked_recovery_client(Arc::new(MutableClock::new(0.0, 0.0))).await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(500, Vec::new());
+        let gate = Arc::new(AtomicBool::new(false));
+        peer.gate_queued_response_nonblocking(1, gate.clone());
         client.enqueue_status(Map::new());
-        wait_for_requests(&server, 2).await;
-        assert_eq!(server.request_count("/app/observer/register"), 1);
+        peer.wait_for_requests(2).await;
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1
+        );
         for sequence in 0..20 {
             assert!(
                 client
@@ -2777,9 +2858,18 @@ mod tests {
             );
         }
         let started = tokio::time::Instant::now();
-        gate.notify_one();
+        gate.store(true, Ordering::Release);
+        peer.notify_response_gates();
         assert_eq!(client.stop(Duration::from_secs(1)).await, 0);
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(server.request_count("/app/observer/register"), 1);
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1
+        );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 }

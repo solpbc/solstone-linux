@@ -130,7 +130,6 @@ pub(crate) enum Action {
     OwnedRaw(u16, String),
     Disconnect,
     Stream(u16, mpsc::Receiver<Result<Bytes, std::io::Error>>),
-    GatedResponse(u16, Value, Arc<Notify>),
 }
 
 impl MockServer {
@@ -212,15 +211,6 @@ impl MockServer {
                                 }
                                 Action::Stream(status, receiver) => {
                                     (status, ReceiverBody(receiver).boxed())
-                                }
-                                Action::GatedResponse(status, value, gate) => {
-                                    gate.notified().await;
-                                    (
-                                        status,
-                                        Full::new(Bytes::from(value.to_string()))
-                                            .map_err(|never| match never {})
-                                            .boxed(),
-                                    )
                                 }
                             };
                             Ok::<_, std::io::Error>(

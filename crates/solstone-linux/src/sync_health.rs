@@ -170,7 +170,7 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
                 sni: "NeedsAttention",
                 cli: "Sync: update needed — update solstone-linux; pending unconfirmed",
                 doctor_severity: "fail",
-                doctor_detail: "sync health: update needed; server route returned 404",
+                doctor_detail: "sync health: update needed; the journal returned 404",
                 dbus: "update-needed",
             },
         ),

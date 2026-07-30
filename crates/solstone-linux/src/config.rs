@@ -260,7 +260,9 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
         });
         return LoadedConfig { config, warnings };
     };
+    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
     config.server_url = load_string(values, "server_url", &mut warnings);
+    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
     config.key = load_string(values, "key", &mut warnings);
     config.stream = load_string(values, "stream", &mut warnings);
     config.segment_interval = load_int(values, "segment_interval", 300, &mut warnings);
@@ -330,7 +332,9 @@ fn write_link_config(
 ) -> io::Result<Config> {
     let _guard = acquire_config_write_lock()?;
     let mut config = load_config(paths.clone()).config;
+    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
     config.server_url.clear();
+    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
     config.key.clear();
     if let Some(stream) = stream {
         config.stream = stream.to_owned();

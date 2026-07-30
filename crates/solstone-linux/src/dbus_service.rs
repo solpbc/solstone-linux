@@ -82,7 +82,6 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
         String::new()
     }
     #[zbus(property)]
-    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
     fn server_url(&self) -> String {
         String::new()
     }

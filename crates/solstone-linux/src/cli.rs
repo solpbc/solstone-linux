@@ -5,8 +5,8 @@ use crate::{
     capture_stats::{
         compute_quarantine_stats, compute_status_capture_stats, format_quarantine_line,
     },
-    config::{Config, ConfigPaths, load_config, save_config},
-    private_link::{PrivateStateError, setup_with_stream},
+    config::{Config, ConfigPaths, load_config, sanitize_link_authority, save_config},
+    private_link::{PrivateStateError, PrivateStateLock, setup_with_stream},
     session_env::{self, Output, Runner},
     streams::stream_name,
     sync_health::{derive_health, load_facts},
@@ -403,7 +403,6 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
     }
 }
 
-// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
 fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -> i32 {
     let loaded = load_config(paths);
     let config = loaded.config;
@@ -480,11 +479,14 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
 }
 
 fn cmd_run(interval: Option<i64>) -> i32 {
-    let loaded = load_config(ConfigPaths::default());
-    for warning in &loaded.warnings {
-        tracing::warn!("{warning}");
-    }
-    let mut config = loaded.config;
+    let paths = ConfigPaths::default();
+    let (state_lock, mut config, transport_enabled) = match prepare_run_config(paths) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::error!(%error, "Linked private state is already in use");
+            return 1;
+        }
+    };
     if let Err(error) = config.ensure_dirs() {
         tracing::error!("Failed to create observer directories: {error}");
         return exit_code(Err(RunFailure::Other));
@@ -516,7 +518,38 @@ fn cmd_run(interval: Option<i64>) -> i32 {
         }
         return 1;
     }
-    crate::run::run_observer(config, hostname().unwrap_or_else(|_| "linux".into()))
+    crate::run::run_observer(
+        config,
+        hostname().unwrap_or_else(|_| "linux".into()),
+        state_lock,
+        transport_enabled,
+    )
+}
+
+pub(crate) fn prepare_run_config(
+    paths: ConfigPaths,
+) -> Result<(PrivateStateLock, Config, bool), crate::private_link::PrivateStateError> {
+    let config_root = paths
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| Config::default().config_dir);
+    let state_lock = PrivateStateLock::acquire(&config_root)?;
+    let loaded = load_config(paths.clone());
+    for warning in &loaded.warnings {
+        tracing::warn!("{warning}");
+    }
+    let mut config = loaded.config;
+    let transport_enabled = match sanitize_link_authority(&paths) {
+        Ok(sanitized) => {
+            config = sanitized;
+            true
+        }
+        Err(error) => {
+            tracing::error!(%error, "Could not safely update linked config; capture will continue");
+            false
+        }
+    };
+    Ok((state_lock, config, transport_enabled))
 }
 
 #[cfg(test)]

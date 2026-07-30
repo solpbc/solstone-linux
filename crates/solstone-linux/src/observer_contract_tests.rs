@@ -695,13 +695,28 @@ async fn assert_listing_contract(
         };
         let temp = tempfile::tempdir().unwrap();
         let harness = LinkedHarness::start(&temp).await;
-        harness.peer.enqueue_response_with_headers(
-            200,
-            vec![("x-solstone-protocol-version".to_owned(), "2".to_owned())],
-            payload.to_string(),
-        );
+        let response_headers = vector_id
+            .and_then(|id| vectors[id]["decision"]["header"].as_str())
+            .map_or_else(
+                || vec![("x-solstone-protocol-version".to_owned(), "2".to_owned())],
+                |header| match header {
+                    "absent" => Vec::new(),
+                    "unparseable" => vec![(
+                        "x-solstone-protocol-version".to_owned(),
+                        "unparseable".to_owned(),
+                    )],
+                    value => vec![("x-solstone-protocol-version".to_owned(), value.to_owned())],
+                },
+            );
+        harness
+            .peer
+            .enqueue_response_with_headers(200, response_headers, payload.to_string());
         let result = harness.client.get_server_segments("20260618").await;
-        assert_eq!((result.legacy, result.truncated), (legacy, truncated));
+        assert_eq!(
+            (result.legacy, result.truncated),
+            (legacy, truncated),
+            "{fixture_id}"
+        );
         let requests = harness.peer.requests();
         let request = &requests[0];
         assert_eq!(request.method, "GET");

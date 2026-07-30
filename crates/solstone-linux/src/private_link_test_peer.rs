@@ -49,6 +49,7 @@ struct PeerResponse {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     gate: Option<Arc<Notify>>,
+    nonblocking_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 struct OutboundResponse {
@@ -63,6 +64,11 @@ struct PeerState {
     requests: Arc<Mutex<Vec<PeerRequest>>>,
     request_arrived: Arc<Notify>,
     accepted: Arc<AtomicUsize>,
+    response_gate_changed: Arc<Notify>,
+    hold_request_credit: Arc<std::sync::atomic::AtomicBool>,
+    request_credit_changed: Arc<Notify>,
+    max_request_staged: Arc<AtomicUsize>,
+    request_staged_changed: Arc<Notify>,
 }
 
 pub(crate) struct PrivateLinkPeer {
@@ -80,6 +86,11 @@ impl PrivateLinkPeer {
             requests: Arc::new(Mutex::new(Vec::new())),
             request_arrived: Arc::new(Notify::new()),
             accepted: Arc::new(AtomicUsize::new(0)),
+            response_gate_changed: Arc::new(Notify::new()),
+            hold_request_credit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            request_credit_changed: Arc::new(Notify::new()),
+            max_request_staged: Arc::new(AtomicUsize::new(0)),
+            request_staged_changed: Arc::new(Notify::new()),
         };
         let task_state = state.clone();
         let task = tokio::spawn(async move {
@@ -111,6 +122,7 @@ impl PrivateLinkPeer {
                 headers: Vec::new(),
                 body: body.into(),
                 gate: None,
+                nonblocking_gate: None,
             });
     }
     pub(crate) fn enqueue_response_with_headers(
@@ -128,6 +140,7 @@ impl PrivateLinkPeer {
                 headers,
                 body: body.into(),
                 gate: None,
+                nonblocking_gate: None,
             });
     }
     pub(crate) fn enqueue_gated_response(
@@ -145,7 +158,65 @@ impl PrivateLinkPeer {
                 headers: Vec::new(),
                 body: body.into(),
                 gate: Some(gate),
+                nonblocking_gate: None,
             });
+    }
+    pub(crate) fn gate_next_response_nonblocking(&self, gate: Arc<std::sync::atomic::AtomicBool>) {
+        self.state
+            .responses
+            .lock()
+            .unwrap()
+            .front_mut()
+            .expect("response to gate")
+            .nonblocking_gate = Some(gate);
+    }
+    pub(crate) fn gate_queued_responses_nonblocking(
+        &self,
+        count: usize,
+        gate: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        for response in self.state.responses.lock().unwrap().iter_mut().take(count) {
+            response.nonblocking_gate = Some(gate.clone());
+        }
+    }
+    pub(crate) fn gate_queued_response_nonblocking(
+        &self,
+        index: usize,
+        gate: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.state
+            .responses
+            .lock()
+            .unwrap()
+            .get_mut(index)
+            .expect("response to gate")
+            .nonblocking_gate = Some(gate);
+    }
+    pub(crate) fn notify_response_gates(&self) {
+        self.state.response_gate_changed.notify_waiters();
+    }
+    pub(crate) fn hold_request_credit(&self) {
+        self.state
+            .hold_request_credit
+            .store(true, Ordering::Release);
+    }
+    pub(crate) fn release_request_credit(&self) {
+        self.state
+            .hold_request_credit
+            .store(false, Ordering::Release);
+        self.state.request_credit_changed.notify_waiters();
+    }
+    pub(crate) fn max_request_staged(&self) -> usize {
+        self.state.max_request_staged.load(Ordering::Acquire)
+    }
+    pub(crate) async fn wait_for_request_staged_at_least(&self, count: usize) {
+        loop {
+            let notified = self.state.request_staged_changed.notified();
+            if self.max_request_staged() >= count {
+                return;
+            }
+            notified.await;
+        }
     }
     pub(crate) fn requests(&self) -> Vec<PeerRequest> {
         self.state.requests.lock().unwrap().clone()
@@ -235,9 +306,41 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
     let mut decoder = FrameDecoder::new();
     let mut requests: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut outbound: HashMap<u32, OutboundResponse> = HashMap::new();
+    let mut gated: HashMap<u32, PeerResponse> = HashMap::new();
+    let mut pending_request_credit: HashMap<u32, usize> = HashMap::new();
     let mut buffer = [0; 16 * 1024];
     loop {
-        let count = tls.read(&mut buffer).await?;
+        let count = tokio::select! {
+            count = tls.read(&mut buffer) => count?,
+            () = state.response_gate_changed.notified() => {
+                let ready = gated
+                    .iter()
+                    .filter(|(_, response)| {
+                        response
+                            .nonblocking_gate
+                            .as_ref()
+                            .is_none_or(|gate| gate.load(Ordering::Acquire))
+                    })
+                    .map(|(stream, _)| *stream)
+                    .collect::<Vec<_>>();
+                for stream in ready {
+                    let mut response = encode_response(gated.remove(&stream).unwrap());
+                    flush_response(&mut tls, stream, &mut response).await?;
+                    if response.offset != response.bytes.len() {
+                        outbound.insert(stream, response);
+                    }
+                }
+                continue;
+            }
+            () = state.request_credit_changed.notified() => {
+                if !state.hold_request_credit.load(Ordering::Acquire) {
+                    for (stream, credit) in pending_request_credit.drain() {
+                        write_frame(&mut tls, Frame::window(stream, credit as u32)).await?;
+                    }
+                }
+                continue;
+            }
+        };
         if count == 0 {
             return Ok(());
         }
@@ -254,15 +357,22 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                 requests.entry(frame.stream_id).or_default();
             }
             if frame.flags & FLAG_DATA != 0 {
-                requests
-                    .entry(frame.stream_id)
-                    .or_default()
-                    .extend_from_slice(&frame.payload);
-                write_frame(
-                    &mut tls,
-                    Frame::window(frame.stream_id, frame.payload.len() as u32),
-                )
-                .await?;
+                let request = requests.entry(frame.stream_id).or_default();
+                request.extend_from_slice(&frame.payload);
+                state
+                    .max_request_staged
+                    .fetch_max(request.len(), Ordering::AcqRel);
+                state.request_staged_changed.notify_waiters();
+                if state.hold_request_credit.load(Ordering::Acquire) {
+                    *pending_request_credit.entry(frame.stream_id).or_default() +=
+                        frame.payload.len();
+                } else {
+                    write_frame(
+                        &mut tls,
+                        Frame::window(frame.stream_id, frame.payload.len() as u32),
+                    )
+                    .await?;
+                }
             }
             if frame.flags & FLAG_CLOSE != 0 {
                 let raw = requests.remove(&frame.stream_id).unwrap_or_default();
@@ -281,9 +391,18 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                             headers: Vec::new(),
                             body: Vec::new(),
                             gate: None,
+                            nonblocking_gate: None,
                         });
                 if let Some(gate) = &response.gate {
                     gate.notified().await;
+                }
+                if response
+                    .nonblocking_gate
+                    .as_ref()
+                    .is_some_and(|gate| !gate.load(Ordering::Acquire))
+                {
+                    gated.insert(frame.stream_id, response);
+                    continue;
                 }
                 let mut response = encode_response(response);
                 flush_response(&mut tls, frame.stream_id, &mut response).await?;

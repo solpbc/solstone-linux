@@ -22,6 +22,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 use crate::{
     config::Config,
     observer::{Clock, HealthBeacon},
+    private_link::LinkFacts,
     segment::timestamp_parts,
     sync_health::{ErrorType, SyncFacts, SyncHealth, derive_health, load_facts, save_facts},
     upload::{ListingEntry, UploadClient},
@@ -45,6 +46,7 @@ pub struct SyncService {
     recent_error_count: Arc<AtomicU8>,
     stale_threshold: f64,
     clock: Arc<dyn Clock + Send + Sync>,
+    link_facts: LinkFacts,
     abort: tokio::task::AbortHandle,
     task: JoinHandle<()>,
 }
@@ -55,12 +57,16 @@ pub struct SyncSampler {
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     pub(crate) stale_threshold: f64,
     pub(crate) poison_reports: Arc<AtomicUsize>,
+    pub(crate) link_facts: LinkFacts,
 }
 
 impl SyncSampler {
     fn with_facts<R>(&self, read: impl FnOnce(&SyncFacts) -> R) -> R {
         match self.facts.lock() {
-            Ok(facts) => read(&facts),
+            Ok(mut facts) => {
+                facts.link = Some(self.link_facts.snapshot());
+                read(&facts)
+            }
             Err(error) => {
                 if self
                     .poison_reports
@@ -69,7 +75,9 @@ impl SyncSampler {
                 {
                     tracing::warn!("sync facts lock poisoned; recovering sampler state");
                 }
-                read(&error.into_inner())
+                let mut facts = error.into_inner();
+                facts.link = Some(self.link_facts.snapshot());
+                read(&facts)
             }
         }
     }
@@ -115,6 +123,7 @@ impl SyncService {
         }
         let facts = Arc::new(Mutex::new(facts));
         let recent_error_count = Arc::new(AtomicU8::new(0));
+        let link_facts = client.link_facts();
         let mut worker = SyncWorker::new(
             config.clone(),
             Arc::clone(&client),
@@ -137,6 +146,7 @@ impl SyncService {
             recent_error_count,
             stale_threshold: config.sync_stale_threshold as f64,
             clock,
+            link_facts,
             abort,
             task,
         }
@@ -160,6 +170,7 @@ impl SyncService {
             clock: Arc::clone(&self.clock),
             stale_threshold: self.stale_threshold,
             poison_reports: Arc::new(AtomicUsize::new(0)),
+            link_facts: self.link_facts.clone(),
         }
     }
 
@@ -400,6 +411,7 @@ impl SyncWorker {
     }
 
     async fn sync_pass(&mut self, force_full: bool) {
+        self.facts.lock().unwrap().link = self.client.link_fact_state();
         // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
         let today = timestamp_parts(self.clock.wall_seconds()).0;
         let segments_by_day = collect_segments(&self.config.captures_dir());
@@ -1060,6 +1072,7 @@ mod tests {
             }),
             stale_threshold: 600.0,
             poison_reports: Arc::new(AtomicUsize::new(0)),
+            link_facts: LinkFacts::default(),
         };
         assert_eq!(sampler.health().dbus, "syncing");
         assert_eq!(sampler.progress(), "1/2");
@@ -1133,6 +1146,68 @@ mod tests {
             Arc::new(AtomicU8::new(0)),
         );
         (server, worker)
+    }
+
+    async fn linked_worker(
+        temp: &tempfile::TempDir,
+        peer: &PrivateLinkPeer,
+        clock: Arc<dyn Clock + Send + Sync>,
+        retention: i64,
+    ) -> (crate::private_link::PrivateLinkSession, SyncWorker) {
+        let config = Config {
+            stream: "desktop".to_owned(),
+            sync_retry_delays: vec![0],
+            cache_retention_days: retention,
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
+            .await
+            .unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id: peer.credential().instance_id,
+                key: "STALE-KEY-FULL".to_owned(),
+                prefix: "prefix".to_owned(),
+                name: "desktop".to_owned(),
+                ingest_url: "/app/observer/ingest".to_owned(),
+                protocol_version: 2,
+            },
+        )
+        .unwrap();
+        let client = Arc::new(UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".to_owned()),
+            "host",
+            "linux",
+            "test",
+            clock.clone(),
+        ));
+        let worker = SyncWorker::new(
+            config,
+            client,
+            clock,
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+        );
+        (session, worker)
+    }
+
+    fn registration(key: &str, name: &str) -> Value {
+        json!({
+            "key": key,
+            "name": name,
+            "prefix": "prefix",
+            "ingest_url": "/app/observer/ingest",
+            "protocol_version": 2
+        })
     }
 
     fn upload_hits(server: &MockServer) -> usize {
@@ -2076,30 +2151,23 @@ mod tests {
     #[tokio::test]
     async fn recovery_generation_skips_breaker_wait_once_with_empty_event_queue() {
         let temp = tempfile::tempdir().unwrap();
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (401, json!({})),
-                (200, json!({"key":"NEW-KEY","name":"desktop-new"})),
-                (200, json!({"items":[],"total":0})),
-            ],
-            -1,
-        )
-        .await;
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration("NEW-KEY", "desktop-new").to_string());
+        peer.enqueue_response(200, json!({"items":[],"total":0}).to_string());
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
-        worker.clock = clock.clone();
+        let (session, mut worker) = linked_worker(&temp, &peer, clock.clone(), -1).await;
 
         worker.sync_pass(true).await;
         assert!(worker.circuit_open);
-        assert_eq!(worker.client.recovery_generation(), 1);
+        assert_eq!(worker.client.recovery_generation(), 2);
         assert!(clock.monotonic_seconds() < worker.circuit_open_since + worker.circuit_cooldown);
-        let before = server.request_count("/app/observer/ingest/segments/");
+        let before = peer.requests().len();
         assert!(worker.try_probe().await);
-        assert_eq!(
-            server.request_count("/app/observer/ingest/segments/"),
-            before + 1
-        );
+        assert_eq!(peer.requests().len(), before + 1);
         assert_eq!(clock.monotonic_seconds(), 100.0);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 14: positive-control the sync-path record, then prove it contains prefixes but no full key.
@@ -2108,43 +2176,14 @@ mod tests {
         const STALE: &str = "STALE-KEY-FULL";
         const NEW: &str = "NEW-KEY-FULL";
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![
-            (401, json!({})),
-            (200, json!({"key":NEW,"name":"desktop-new"})),
-        ])
-        .await;
-        let config = Config {
-            server_url: server.url.clone(),
-            key: STALE.into(),
-            stream: "desktop".into(),
-            sync_retry_delays: vec![0],
-            base_dir: temp.path().to_path_buf(),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration(NEW, "desktop-new").to_string());
         let clock = Arc::new(FixedClock {
             wall: 1_800_000_000.0,
             mono: 100.0,
         });
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
-            &config,
-            "host",
-            "linux",
-            "test",
-            clock.clone(),
-        ));
-        let mut worker = SyncWorker::new(
-            config,
-            client,
-            clock,
-            SyncControl {
-                notify: Arc::new(Notify::new()),
-                pending_trigger: Arc::new(AtomicBool::new(false)),
-                running: Arc::new(AtomicBool::new(true)),
-            },
-            Arc::new(Mutex::new(SyncFacts::default())),
-            Arc::new(AtomicU8::new(0)),
-        );
+        let (session, mut worker) = linked_worker(&temp, &peer, clock, -1).await;
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
         let subscriber = tracing_subscriber::fmt()
@@ -2165,15 +2204,25 @@ mod tests {
         assert!(captured.contains("NEW-KEY-"), "{captured}");
         assert!(!captured.contains(STALE), "{captured}");
         assert!(!captured.contains(NEW), "{captured}");
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 15: twenty sync-path rejections emit exactly one first-rejection warning.
     #[tokio::test]
     async fn first_rejection_warning_is_once_per_window() {
-        let mut responses = vec![(401, json!({})), (200, json!({"key":"K","name":"desktop"}))];
-        responses.extend((0..19).map(|_| (401, json!({}))));
         let temp = tempfile::tempdir().unwrap();
-        let (server, worker) = test_worker(&temp, responses, -1).await;
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration("STALE-KEY-FULL", "desktop").to_string());
+        for _ in 0..19 {
+            peer.enqueue_response(401, Vec::new());
+        }
+        let clock = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let (session, worker) = linked_worker(&temp, &peer, clock, -1).await;
         let client = Arc::clone(&worker.client);
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
@@ -2192,7 +2241,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(server.request_count("/app/observer/register"), 1);
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1
+        );
         let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert_eq!(
             captured
@@ -2201,18 +2256,22 @@ mod tests {
             1,
             "{captured}"
         );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC 15: one sync-path rejection emits exactly one first-rejection warning.
     #[tokio::test]
     async fn one_rejection_emits_one_first_rejection_warning() {
         let temp = tempfile::tempdir().unwrap();
-        let (server, worker) = test_worker(
-            &temp,
-            vec![(401, json!({})), (200, json!({"key":"K","name":"desktop"}))],
-            -1,
-        )
-        .await;
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(401, Vec::new());
+        peer.enqueue_response(200, registration("STALE-KEY-FULL", "desktop").to_string());
+        let clock = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let (session, worker) = linked_worker(&temp, &peer, clock, -1).await;
         let client = Arc::clone(&worker.client);
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
@@ -2229,7 +2288,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(server.request_count("/app/observer/register"), 1);
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1
+        );
         let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert_eq!(
             captured
@@ -2238,6 +2303,8 @@ mod tests {
             1,
             "{captured}"
         );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // Named deviation from the legacy breaker AC 2+5:

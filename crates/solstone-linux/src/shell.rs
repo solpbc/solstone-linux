@@ -535,6 +535,7 @@ mod tests {
             clock: Arc::new(TestClock(Arc::new(AtomicU64::new(0)))),
             stale_threshold: 600.0,
             poison_reports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            link_facts: crate::private_link::LinkFacts::default(),
         }
     }
 
