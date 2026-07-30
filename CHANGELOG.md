@@ -4,6 +4,12 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+- a single refusal from your journal no longer stops uploads for the rest of the session. one refused request used to close sending for as long as sol kept running, with nothing shown anywhere. a refusal sol can recover from now backs off and retries on the existing schedule, and a device you have removed from your journal still stops for good.
+- sol now recovers on its own when your journal no longer recognises this machine. sol used to keep running with nothing arriving and nothing said about it. it now renews its identity with your journal once, resumes where it left off, and writes down what it did so you can confirm afterwards that it was a recovery. a machine you have removed from your journal is never brought back this way.
+
 ## [0.4.5] - 2026-07-13
 
 ### Fixed
