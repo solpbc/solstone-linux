@@ -6,7 +6,6 @@ use std::{
     fs::{self, File},
     future::Future,
     io::{self, Read},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, RwLock},
@@ -26,8 +25,8 @@ use spl_transport::{
 };
 
 use crate::private_file::{
-    DurableWriteFault, PrivateFileError, atomic_write_bytes, atomic_write_bytes_with_fault,
-    ensure_private_directory, open_regular_readonly,
+    DurableWriteFault, NoWriteFault, PrivateFileError, atomic_write_bytes,
+    atomic_write_bytes_with_fault, ensure_private_directory, open_regular_readonly,
 };
 
 pub(crate) const CREDENTIALS_FILENAME: &str = "credentials.json";
@@ -68,7 +67,6 @@ pub(crate) enum PrivateIoOperation {
     Chmod,
     Lock,
     Read,
-    Serialize,
     Persist,
 }
 
@@ -242,9 +240,22 @@ impl PrivateStateLock {
                 operation: PrivateIoOperation::Canonicalize,
                 source,
             })?;
-        let descriptor = rustix::fs::openat(
+        let root_descriptor = rustix::fs::openat(
             rustix::fs::CWD,
-            canonical_root.join(PRIVATE_STATE_LOCK_FILENAME),
+            &canonical_root,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|source| PrivateStateError::Io {
+            operation: PrivateIoOperation::Open,
+            source: source.into(),
+        })?;
+        let descriptor = rustix::fs::openat(
+            &root_descriptor,
+            PRIVATE_STATE_LOCK_FILENAME,
             rustix::fs::OFlags::RDWR
                 | rustix::fs::OFlags::CLOEXEC
                 | rustix::fs::OFlags::NOFOLLOW
@@ -268,11 +279,13 @@ impl PrivateStateLock {
                 kind: PrivateTargetKind::Lock,
             });
         }
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|source| PrivateStateError::Io {
+        rustix::fs::fchmod(&file, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR).map_err(
+            |source| PrivateStateError::Io {
                 operation: PrivateIoOperation::Chmod,
-                source,
-            })?;
+                source: source.into(),
+            },
+        )?;
+        verify_private_lock(&file)?;
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => {}
             Err(rustix::io::Errno::WOULDBLOCK) => return Err(PrivateStateError::LockContended),
@@ -292,6 +305,22 @@ impl PrivateStateLock {
     pub(crate) fn root(&self) -> &Path {
         &self.canonical_root
     }
+}
+
+fn verify_private_lock(file: &File) -> Result<(), PrivateStateError> {
+    let stat = rustix::fs::fstat(file).map_err(|source| PrivateStateError::Io {
+        operation: PrivateIoOperation::Inspect,
+        source: source.into(),
+    })?;
+    let expected_mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
+        || rustix::fs::Mode::from_raw_mode(stat.st_mode) != expected_mode
+    {
+        return Err(PrivateStateError::InvalidTarget {
+            kind: PrivateTargetKind::Lock,
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn read_pair_link<R: Read>(input: R) -> Result<String, PrivateStateError> {
@@ -340,6 +369,8 @@ impl Pairer for SplPairer {
     }
 }
 
+// The cutover lode will call this setup root.
+#[allow(dead_code)]
 pub(crate) async fn setup<R: Read>(
     config_root: &Path,
     device_label: &str,
@@ -348,7 +379,7 @@ pub(crate) async fn setup<R: Read>(
     setup_with_pairer(&SplPairer, config_root, device_label, input).await
 }
 
-pub(crate) async fn setup_with_pairer<R: Read>(
+async fn setup_with_pairer<R: Read>(
     pairer: &dyn Pairer,
     config_root: &Path,
     device_label: &str,
@@ -385,6 +416,8 @@ fn read_private_file(
     Ok(Some(bytes))
 }
 
+// The cutover lode will load credentials through this root.
+#[allow(dead_code)]
 pub(crate) fn load_credential(config_root: &Path) -> Result<Option<Credential>, PrivateStateError> {
     let Some(bytes) = read_private_file(
         &config_root.join(CREDENTIALS_FILENAME),
@@ -443,6 +476,7 @@ pub(crate) fn load_observer(
     Ok(Some(observer))
 }
 
+#[cfg(test)]
 pub(crate) fn persist_observer(
     config_root: &Path,
     observer: &ObserverState,
@@ -458,7 +492,7 @@ pub(crate) fn persist_observer(
 }
 
 fn contains_invalid_header_value(value: &str) -> bool {
-    value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+    reqwest::header::HeaderValue::from_bytes(value.as_bytes()).is_err()
 }
 
 fn persist_and_publish_observer(
@@ -562,10 +596,13 @@ pub(crate) struct PrivateLinkSession {
     origin: Url,
     opener: Arc<PrivateLinkOpener>,
     handle: JournalBridgeHandle,
-    token_persistence: Option<Arc<TokenPersistence>>,
+    token_persistence: Arc<TokenPersistence>,
+    state_lock: PrivateStateLock,
 }
 
 impl PrivateLinkSession {
+    // The cutover lode will issue confined requests through this root.
+    #[allow(dead_code)]
     pub(crate) fn request(
         &self,
         method: Method,
@@ -578,13 +615,11 @@ impl PrivateLinkSession {
             .timeout(LOOPBACK_REQUEST_TIMEOUT))
     }
 
+    // The cutover lode will explicitly quiesce sessions through this root.
+    #[allow(dead_code)]
     pub(crate) async fn shutdown(self) -> Result<(), PrivateStateError> {
         let status = self.handle.shutdown_and_wait().await;
-        if self
-            .token_persistence
-            .as_ref()
-            .is_some_and(|state| state.failed())
-        {
+        if self.token_persistence.failed() {
             return Err(PrivateStateError::TokenPersistenceFailed);
         }
         if status.listener_active || status.active_requests != 0 {
@@ -592,6 +627,33 @@ impl PrivateLinkSession {
         }
         Ok(())
     }
+
+    fn publish_observer(&self, observer: &ObserverState) -> Result<(), PrivateStateError> {
+        persist_and_publish_observer(
+            self.state_lock.root(),
+            observer,
+            &self.opener,
+            &NoWriteFault,
+        )
+    }
+
+    #[cfg(test)]
+    fn publish_observer_with_fault(
+        &self,
+        observer: &ObserverState,
+        fault: &dyn DurableWriteFault,
+    ) -> Result<(), PrivateStateError> {
+        persist_and_publish_observer(self.state_lock.root(), observer, &self.opener, fault)
+    }
+}
+
+// The cutover lode will publish completed registrations through this root.
+#[allow(dead_code)]
+pub(crate) fn publish_observer_registration(
+    session: &PrivateLinkSession,
+    observer: &ObserverState,
+) -> Result<(), PrivateStateError> {
+    session.publish_observer(observer)
 }
 
 struct TokenPersistence {
@@ -647,30 +709,48 @@ impl TokenPersistence {
     }
 }
 
+// The cutover lode will start runtime sessions through this root.
+#[allow(dead_code)]
 pub(crate) async fn start_private_link_session(
+    config_root: &Path,
     credential: Credential,
     expected_name: &str,
 ) -> Result<PrivateLinkSession, PrivateStateError> {
-    start_private_link_session_inner(credential, expected_name, None, None).await
+    start_private_link_session_inner(
+        config_root,
+        credential,
+        expected_name,
+        Arc::new(NoWriteFault),
+        SessionTestCapture::default(),
+    )
+    .await
+}
+
+#[derive(Default)]
+struct SessionTestCapture {
+    #[cfg(test)]
+    capability: Option<Arc<Mutex<Option<String>>>>,
 }
 
 async fn start_private_link_session_inner(
+    config_root: &Path,
     credential: Credential,
     expected_name: &str,
-    persistence: Option<(PathBuf, Arc<dyn DurableWriteFault>)>,
-    capability_capture: Option<&Mutex<Option<String>>>,
+    persistence_fault: Arc<dyn DurableWriteFault>,
+    _test_capture: SessionTestCapture,
 ) -> Result<PrivateLinkSession, PrivateStateError> {
+    let state_lock = PrivateStateLock::acquire(config_root)?;
+    let config_root = state_lock.root().to_path_buf();
+    let credential_instance_id = credential.instance_id.clone();
     let endpoint_hosts = credential
         .endpoints
         .iter()
         .map(|endpoint| endpoint.host.clone())
         .collect();
-    let (token_persistence, hook) = persistence.map_or((None, None), |(root, fault)| {
-        let (state, hook) = TokenPersistence::new(root, credential.clone(), fault);
-        (Some(state), Some(hook))
-    });
-    let transport =
-        TransportClient::new(credential, hook).map_err(|_| PrivateStateError::BridgeUnavailable)?;
+    let (token_persistence, hook) =
+        TokenPersistence::new(config_root.clone(), credential.clone(), persistence_fault);
+    let transport = TransportClient::new(credential, Some(hook))
+        .map_err(|_| PrivateStateError::BridgeUnavailable)?;
     let opener = Arc::new(PrivateLinkOpener::new(transport, expected_name.to_owned()));
     let bridge_names = BridgeNames {
         capability_cookie_name: "solstone_linux_cap".to_owned(),
@@ -712,7 +792,8 @@ async fn start_private_link_session_inner(
     let bootstrap_url = handle
         .bootstrap_url()
         .ok_or(PrivateStateError::BootstrapFailed)?;
-    if let Some(capture) = capability_capture {
+    #[cfg(test)]
+    if let Some(capture) = _test_capture.capability {
         let capability = Url::parse(&bootstrap_url)
             .ok()
             .and_then(|url| {
@@ -742,12 +823,21 @@ async fn start_private_link_session_inner(
         handle.begin_shutdown();
         return Err(PrivateStateError::BootstrapFailed);
     }
+    if let Some(observer) = load_observer(
+        &config_root,
+        &credential_instance_id,
+        expected_name,
+        &origin,
+    )? {
+        opener.set_registered(&observer)?;
+    }
     Ok(PrivateLinkSession {
         client,
         origin,
         opener,
         handle,
         token_persistence,
+        state_lock,
     })
 }
 
@@ -760,7 +850,7 @@ mod tests {
     use std::{
         io::Cursor,
         net::TcpListener,
-        os::unix::fs::{MetadataExt, symlink},
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         process::Command,
         sync::{
             Arc,
@@ -799,9 +889,22 @@ mod tests {
         }
     }
 
-    fn assert_load_rejection_keeps_opener_unregistered(state: ObserverState) {
+    async fn start_peer_session(peer: &PrivateLinkPeer) -> (tempfile::TempDir, PrivateLinkSession) {
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        (temp, session)
+    }
+
+    async fn assert_load_rejection_keeps_opener_unregistered(state: ObserverState) {
         let temp = tempfile::tempdir().unwrap();
         persist_observer(temp.path(), &state).unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let opener = PrivateLinkOpener::new(
+            TransportClient::new(peer.credential(), None).unwrap(),
+            "stream".to_owned(),
+        );
         let loaded = load_observer(
             temp.path(),
             "instance",
@@ -809,19 +912,22 @@ mod tests {
             &Url::parse("http://127.0.0.1:1").unwrap(),
         )
         .unwrap();
-        assert!(loaded.is_none());
-        let headers = proxy_headers_for_auth(&[], &OpenerAuth::Unregistered);
+        if let Some(observer) = loaded {
+            opener.set_registered(&observer).unwrap();
+        }
+        let headers = opener.proxy_headers(&[]).unwrap();
         assert_eq!(
             headers,
             vec![(PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned())]
         );
+        peer.shutdown().await;
     }
 
     macro_rules! opener_rejection_test {
         ($name:ident, $state:expr) => {
-            #[test]
-            fn $name() {
-                assert_load_rejection_keeps_opener_unregistered($state);
+            #[tokio::test]
+            async fn $name() {
+                assert_load_rejection_keeps_opener_unregistered($state).await;
             }
         };
     }
@@ -850,7 +956,7 @@ mod tests {
     opener_rejection_test!(
         opener_stays_unregistered_for_unsafe_key,
         ObserverState {
-            key: "bad\rkey".into(),
+            key: "bad\u{1}key".into(),
             ..observer("/ingest")
         }
     );
@@ -890,9 +996,15 @@ mod tests {
     opener_rejection_test!(opener_stays_unregistered_for_fragment, observer("/a#f"));
     opener_rejection_test!(opener_stays_unregistered_for_backslash, observer("/a\\b"));
 
-    fn assert_redacted_rejection(bytes: &[u8]) {
+    async fn assert_redacted_setup_rejection(bytes: &[u8]) {
         let temp = tempfile::tempdir().unwrap();
-        let error = read_pair_link(Cursor::new(bytes)).unwrap_err();
+        let pairer = FakePairer {
+            calls: Arc::new(AtomicUsize::new(0)),
+            result: Some(credential()),
+        };
+        let error = setup_with_pairer(&pairer, temp.path(), "device", Cursor::new(bytes.to_vec()))
+            .await
+            .unwrap_err();
         let material = String::from_utf8_lossy(bytes);
         if !material.is_empty() {
             assert!(!format!("{error}").contains(material.as_ref()));
@@ -902,29 +1014,29 @@ mod tests {
         assert!(!temp.path().join(OBSERVER_FILENAME).exists());
     }
 
-    #[test]
-    fn pair_input_empty_is_rejected() {
-        assert_redacted_rejection(b"");
+    #[tokio::test]
+    async fn pair_input_empty_is_rejected() {
+        assert_redacted_setup_rejection(b"").await;
     }
-    #[test]
-    fn pair_input_invalid_utf8_is_rejected() {
-        assert_redacted_rejection(b"\xff");
+    #[tokio::test]
+    async fn pair_input_invalid_utf8_is_rejected() {
+        assert_redacted_setup_rejection(b"\xff").await;
     }
-    #[test]
-    fn pair_input_embedded_whitespace_is_rejected() {
-        assert_redacted_rejection(b"pair link");
+    #[tokio::test]
+    async fn pair_input_embedded_whitespace_is_rejected() {
+        assert_redacted_setup_rejection(b"pair link").await;
     }
-    #[test]
-    fn pair_input_leading_whitespace_is_rejected() {
-        assert_redacted_rejection(b" pair");
+    #[tokio::test]
+    async fn pair_input_leading_whitespace_is_rejected() {
+        assert_redacted_setup_rejection(b" pair").await;
     }
     #[test]
     fn pair_input_trailing_spaces_and_tabs_are_accepted_after_trim() {
         assert_eq!(read_pair_link(Cursor::new(b"pair \t")).unwrap(), "pair");
     }
-    #[test]
-    fn pair_input_multiple_line_endings_are_rejected() {
-        assert_redacted_rejection(b"pair\nother\n");
+    #[tokio::test]
+    async fn pair_input_multiple_line_endings_are_rejected() {
+        assert_redacted_setup_rejection(b"pair\nother\n").await;
     }
     #[test]
     fn pair_input_without_terminator_is_accepted() {
@@ -945,9 +1057,9 @@ mod tests {
             4096
         );
     }
-    #[test]
-    fn pair_input_4097_bytes_is_rejected() {
-        assert_redacted_rejection(&vec![b'a'; 4097]);
+    #[tokio::test]
+    async fn pair_input_4097_bytes_is_rejected() {
+        assert_redacted_setup_rejection(&vec![b'a'; 4097]).await;
     }
 
     struct FakePairer {
@@ -1213,6 +1325,21 @@ mod tests {
         assert!(!referent.join(PRIVATE_STATE_LOCK_FILENAME).exists());
     }
 
+    #[test]
+    fn lock_verification_rejects_unexpected_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock_path = temp.path().join(PRIVATE_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, b"").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o640)).unwrap();
+        let file = File::open(lock_path).unwrap();
+        assert!(matches!(
+            verify_private_lock(&file),
+            Err(PrivateStateError::InvalidTarget {
+                kind: PrivateTargetKind::Lock
+            })
+        ));
+    }
+
     struct CountingReader(Arc<AtomicUsize>);
     impl Read for CountingReader {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
@@ -1246,13 +1373,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn second_runtime_session_is_lock_contended() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let first = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        assert!(matches!(
+            start_private_link_session(temp.path(), peer.credential(), "stream").await,
+            Err(PrivateStateError::LockContended)
+        ));
+        first.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_restores_durable_observer_into_real_opener() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, b"{}".to_vec());
+        let durable = ObserverState {
+            credential_instance_id: peer.credential().instance_id,
+            ..observer("/ingest")
+        };
+        persist_observer(temp.path(), &durable).unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        session
+            .request(Method::GET, "/restored")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        let requests = peer.requests();
+        assert_eq!(requests.len(), 1);
+        for name in [
+            OBSERVER_HEADER_NAME,
+            PROTOCOL_VERSION_HEADER_NAME,
+            "authorization",
+        ] {
+            assert!(
+                requests[0]
+                    .headers
+                    .iter()
+                    .any(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            );
+        }
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn bridge_reuses_one_carrier_across_registration_transition() {
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, b"{}".to_vec());
         peer.enqueue_response(200, b"{}".to_vec());
-        let session = start_private_link_session(peer.credential(), "stream")
-            .await
-            .unwrap();
+        let (_temp, session) = start_peer_session(&peer).await;
         assert_eq!(
             session
                 .request(Method::GET, "/unregistered")
@@ -1263,10 +1440,7 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
-        session
-            .opener
-            .set_registered(&observer("/app/observer/ingest"))
-            .unwrap();
+        publish_observer_registration(&session, &observer("/app/observer/ingest")).unwrap();
         assert_eq!(
             session
                 .request(Method::GET, "/registered")
@@ -1336,9 +1510,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_rejects_untrusted_local_authority_and_auth_without_upstream() {
         let peer = PrivateLinkPeer::start().await;
-        let session = start_private_link_session(peer.credential(), "stream")
-            .await
-            .unwrap();
+        let (_temp, session) = start_peer_session(&peer).await;
         for (name, value) in [
             (OBSERVER_HEADER_NAME, "forged"),
             (PROTOCOL_VERSION_HEADER_NAME, "2"),
@@ -1379,9 +1551,7 @@ mod tests {
     async fn loopback_client_does_not_follow_upstream_redirects() {
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(302, Vec::new());
-        let session = start_private_link_session(peer.credential(), "stream")
-            .await
-            .unwrap();
+        let (_temp, session) = start_peer_session(&peer).await;
         let response = session
             .request(Method::GET, "/redirect")
             .unwrap()
@@ -1399,9 +1569,7 @@ mod tests {
         let peer = PrivateLinkPeer::start().await;
         let body = vec![b'x'; spl_core::mux::INITIAL_WINDOW + 131_072];
         peer.enqueue_response(200, body.clone());
-        let session = start_private_link_session(peer.credential(), "stream")
-            .await
-            .unwrap();
+        let (_temp, session) = start_peer_session(&peer).await;
         let received = session
             .request(Method::GET, "/large")
             .unwrap()
@@ -1450,9 +1618,7 @@ mod tests {
         );
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, b"{}".to_vec());
-        let session = start_private_link_session(peer.credential(), "stream")
-            .await
-            .unwrap();
+        let (_temp, session) = start_peer_session(&peer).await;
         assert_eq!(
             session
                 .request(Method::GET, "/proxy-proof")
@@ -1477,7 +1643,7 @@ mod tests {
         for _ in 0..6 {
             peer.enqueue_response(200, b"{}".to_vec());
         }
-        let session = start_private_link_session(peer.credential(), "stream")
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
         let next = ObserverState {
@@ -1493,18 +1659,23 @@ mod tests {
             DurableWriteStage::DirSync,
         ] {
             assert!(
-                persist_and_publish_observer(
-                    temp.path(),
-                    &next,
-                    &session.opener,
-                    &FailStage(stage)
-                )
-                .is_err()
+                session
+                    .publish_observer_with_fault(&next, &FailStage(stage))
+                    .is_err()
             );
-            assert_eq!(
-                fs::read(temp.path().join(OBSERVER_FILENAME)).unwrap(),
-                prior_bytes
-            );
+            let current_bytes = fs::read(temp.path().join(OBSERVER_FILENAME)).unwrap();
+            if stage == DurableWriteStage::DirSync {
+                assert!(
+                    current_bytes == prior_bytes
+                        || current_bytes == serde_json::to_vec(&next).unwrap()
+                );
+                assert!(
+                    serde_json::from_slice::<ObserverState>(&current_bytes).is_ok(),
+                    "directory-sync failure must leave one complete observer value"
+                );
+            } else {
+                assert_eq!(current_bytes, prior_bytes);
+            }
             let loaded = load_observer(
                 temp.path(),
                 "instance",
@@ -1512,7 +1683,11 @@ mod tests {
                 &Url::parse("http://127.0.0.1:1").unwrap(),
             )
             .unwrap();
-            assert!(loaded.as_ref() == Some(&prior));
+            if stage == DurableWriteStage::DirSync {
+                assert!(loaded.as_ref() == Some(&prior) || loaded.as_ref() == Some(&next));
+            } else {
+                assert!(loaded.as_ref() == Some(&prior));
+            }
             session
                 .request(Method::GET, "/still-unregistered")
                 .unwrap()
@@ -1520,13 +1695,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        persist_and_publish_observer(
-            temp.path(),
-            &next,
-            &session.opener,
-            &crate::private_file::NoWriteFault,
-        )
-        .unwrap();
+        publish_observer_registration(&session, &next).unwrap();
         session
             .request(Method::GET, "/registered-after-durable")
             .unwrap()
@@ -1596,24 +1765,18 @@ mod tests {
         let prior_bytes = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
         let peer = PrivateLinkPeer::start().await;
         let session = start_private_link_session_inner(
+            temp.path(),
             peer.credential(),
             "stream",
-            Some((
-                temp.path().to_path_buf(),
-                Arc::new(RecordingFault {
-                    stages: Arc::new(Mutex::new(Vec::new())),
-                    fail: Some(stage),
-                }),
-            )),
-            None,
+            Arc::new(RecordingFault {
+                stages: Arc::new(Mutex::new(Vec::new())),
+                fail: Some(stage),
+            }),
+            SessionTestCapture::default(),
         )
         .await
         .unwrap();
-        session
-            .token_persistence
-            .as_ref()
-            .unwrap()
-            .persist("failed-refresh", 999);
+        session.token_persistence.persist("failed-refresh", 999);
         assert_eq!(
             fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
             prior_bytes
@@ -1647,17 +1810,26 @@ mod tests {
             .to_owned();
         let device_token = "device-token-sentinel";
         paired.device_token = Some(device_token.into());
-        let capability = Mutex::new(None);
-        let session = start_private_link_session_inner(paired, "stream", None, Some(&capability))
-            .await
-            .unwrap();
-        let capability = capability.into_inner().unwrap().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let capability = Arc::new(Mutex::new(None));
+        let session = start_private_link_session_inner(
+            temp.path(),
+            paired,
+            "stream",
+            Arc::new(NoWriteFault),
+            SessionTestCapture {
+                capability: Some(capability.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let capability = capability.lock().unwrap().clone().unwrap();
         let observer_key = "observer-key-sentinel";
         let registered = ObserverState {
             key: observer_key.into(),
             ..observer("/ingest")
         };
-        session.opener.set_registered(&registered).unwrap();
+        publish_observer_registration(&session, &registered).unwrap();
         let request_debug = format!(
             "{:?}",
             session

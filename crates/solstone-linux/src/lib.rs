@@ -18,9 +18,7 @@ pub mod matching;
 pub mod observer;
 pub mod pipeline;
 pub mod positions;
-#[allow(dead_code)]
 mod private_file;
-#[allow(dead_code)]
 mod private_link;
 pub mod recovery;
 pub mod restore_token;
@@ -43,7 +41,6 @@ pub mod video;
 #[cfg(test)]
 mod observer_contract_tests;
 #[cfg(test)]
-#[allow(dead_code)]
 mod private_link_test_peer;
 #[cfg(test)]
 mod release_rail_tests;

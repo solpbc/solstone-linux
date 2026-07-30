@@ -5,8 +5,8 @@ use std::{
     fmt,
     fs::{self, File},
     io::{self, Write},
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    os::fd::AsFd,
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -102,27 +102,48 @@ pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), PrivateFileErr
 }
 
 fn set_and_verify_mode(path: &Path, mode: u32, directory: bool) -> Result<(), PrivateFileError> {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|error| PrivateFileError::io("target", "chmod", error))?;
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| PrivateFileError::io("target", "inspect", error))?;
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+        | if directory {
+            rustix::fs::OFlags::DIRECTORY
+        } else {
+            rustix::fs::OFlags::empty()
+        };
+    let descriptor = rustix::fs::openat(rustix::fs::CWD, path, flags, rustix::fs::Mode::empty())
+        .map_err(|error| {
+            if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::NOTDIR {
+                PrivateFileError::InvalidTarget("target")
+            } else {
+                PrivateFileError::io("target", "open", error.into())
+            }
+        })?;
+    let expected = rustix::fs::Mode::from_raw_mode(mode);
+    rustix::fs::fchmod(&descriptor, expected)
+        .map_err(|error| PrivateFileError::io("target", "chmod", error.into()))?;
+    let stat = rustix::fs::fstat(&descriptor)
+        .map_err(|error| PrivateFileError::io("target", "inspect", error.into()))?;
     let valid_kind = if directory {
-        metadata.is_dir()
+        rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory
     } else {
-        metadata.is_file()
+        rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile
     };
-    if metadata.file_type().is_symlink()
-        || !valid_kind
-        || metadata.permissions().mode() & 0o777 != mode
-    {
+    if !valid_kind || rustix::fs::Mode::from_raw_mode(stat.st_mode) != expected {
         return Err(PrivateFileError::InvalidTarget("target"));
     }
     Ok(())
 }
 
 pub(crate) fn open_regular_readonly(path: &Path) -> Result<File, PrivateFileError> {
+    open_regular_readonly_at(rustix::fs::CWD, path)
+}
+
+fn open_regular_readonly_at<Fd: AsFd>(
+    directory: Fd,
+    path: &Path,
+) -> Result<File, PrivateFileError> {
     let descriptor = rustix::fs::openat(
-        rustix::fs::CWD,
+        directory,
         path,
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
         rustix::fs::Mode::empty(),
@@ -156,47 +177,72 @@ pub(crate) fn atomic_write_bytes_with_fault(
     bytes: &[u8],
     fault: &dyn DurableWriteFault,
 ) -> Result<(), PrivateFileError> {
-    let previous = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(PrivateFileError::InvalidTarget("file"));
-        }
-        Ok(_) => Some(fs::read(path).map_err(|error| PrivateFileError::io("file", "read", error))?),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(PrivateFileError::io("file", "inspect", error)),
-    };
     let parent = path
         .parent()
         .ok_or(PrivateFileError::InvalidTarget("file"))?;
     let name = path
         .file_name()
-        .ok_or(PrivateFileError::InvalidTarget("file"))?
-        .to_string_lossy();
-    let temporary = parent.join(format!(
+        .ok_or(PrivateFileError::InvalidTarget("file"))?;
+    let parent_descriptor = open_directory(parent)?;
+    match open_regular_readonly_at(&parent_descriptor, Path::new(name)) {
+        Ok(file) => drop(file),
+        Err(PrivateFileError::Io {
+            kind: io::ErrorKind::NotFound,
+            ..
+        }) => {}
+        Err(error) => return Err(error),
+    }
+    let temporary = format!(
         ".{name}.{}.{}.tmp",
         std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = write_temporary(path, &temporary, parent, bytes, fault);
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
+        name = name.to_string_lossy()
+    );
+    let result = write_temporary(&parent_descriptor, name, &temporary, bytes, fault);
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-        if let Some(previous) = previous {
-            let _ = fs::write(path, previous);
-        }
+        let _ = rustix::fs::unlinkat(
+            &parent_descriptor,
+            temporary.as_str(),
+            rustix::fs::AtFlags::empty(),
+        );
+        // Before rename the target is untouched; after rename it contains the new
+        // complete value. Rewriting either value after an error cannot be made safe.
     }
     result
 }
 
+fn open_directory(path: &Path) -> Result<File, PrivateFileError> {
+    rustix::fs::openat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::DIRECTORY,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| {
+        if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::NOTDIR {
+            PrivateFileError::InvalidTarget("directory")
+        } else {
+            PrivateFileError::io("directory", "open", error.into())
+        }
+    })
+}
+
 fn write_temporary(
-    path: &Path,
-    temporary: &PathBuf,
-    parent: &Path,
+    parent: &File,
+    name: &std::ffi::OsStr,
+    temporary: &str,
     bytes: &[u8],
     fault: &dyn DurableWriteFault,
 ) -> Result<(), PrivateFileError> {
     fault
         .before(DurableWriteStage::Create)
         .map_err(|error| PrivateFileError::io("file", "create", error))?;
-    let descriptor = rustix::fs::open(
+    let descriptor = rustix::fs::openat(
+        parent,
         temporary,
         rustix::fs::OFlags::CREATE
             | rustix::fs::OFlags::EXCL
@@ -207,8 +253,8 @@ fn write_temporary(
     )
     .map_err(|error| PrivateFileError::io("file", "create", error.into()))?;
     let mut file = File::from(descriptor);
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|error| PrivateFileError::io("file", "chmod", error))?;
+    rustix::fs::fchmod(&file, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
+        .map_err(|error| PrivateFileError::io("file", "chmod", error.into()))?;
     fault
         .before(DurableWriteStage::Write)
         .map_err(|error| PrivateFileError::io("file", "write", error))?;
@@ -223,19 +269,20 @@ fn write_temporary(
     fault
         .before(DurableWriteStage::Rename)
         .map_err(|error| PrivateFileError::io("file", "rename", error))?;
-    fs::rename(temporary, path).map_err(|error| PrivateFileError::io("file", "rename", error))?;
+    rustix::fs::renameat(parent, temporary, parent, name)
+        .map_err(|error| PrivateFileError::io("file", "rename", error.into()))?;
     fault
         .before(DurableWriteStage::DirSync)
         .map_err(|error| PrivateFileError::io("directory", "fsync", error))?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    parent
+        .sync_all()
         .map_err(|error| PrivateFileError::io("directory", "fsync", error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     struct FailAt(DurableWriteStage);
     impl DurableWriteFault for FailAt {
@@ -303,7 +350,53 @@ mod tests {
     }
 
     #[test]
-    fn every_injected_stage_preserves_previous_complete_file() {
+    fn every_pre_rename_failure_preserves_previous_complete_file() {
+        for stage in [
+            DurableWriteStage::Create,
+            DurableWriteStage::Write,
+            DurableWriteStage::Fsync,
+            DurableWriteStage::Rename,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("state");
+            atomic_write_bytes(&path, b"previous").unwrap();
+            assert!(atomic_write_bytes_with_fault(&path, b"partial", &FailAt(stage)).is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"previous", "{stage:?}");
+            assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            }));
+        }
+    }
+
+    #[test]
+    fn directory_sync_failure_leaves_one_complete_json_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let previous = br#"{"value":"previous"}"#;
+        let next = br#"{"value":"next"}"#;
+        atomic_write_bytes(&path, previous).unwrap();
+        assert!(
+            atomic_write_bytes_with_fault(&path, next, &FailAt(DurableWriteStage::DirSync))
+                .is_err()
+        );
+        let current = fs::read(&path).unwrap();
+        assert!(current == previous || current == next);
+        assert!(serde_json::from_slice::<serde_json::Value>(&current).is_ok());
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn every_injected_error_cleans_up_temporary_files() {
         for stage in [
             DurableWriteStage::Create,
             DurableWriteStage::Write,
@@ -313,9 +406,7 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("state");
-            atomic_write_bytes(&path, b"previous").unwrap();
-            assert!(atomic_write_bytes_with_fault(&path, b"partial", &FailAt(stage)).is_err());
-            assert_eq!(fs::read(&path).unwrap(), b"previous", "{stage:?}");
+            assert!(atomic_write_bytes_with_fault(&path, b"complete", &FailAt(stage)).is_err());
             assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
                 !entry
                     .unwrap()

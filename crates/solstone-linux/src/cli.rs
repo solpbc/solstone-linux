@@ -1155,6 +1155,44 @@ mod tests {
         );
         assert_eq!(body["label"], "host-a");
         assert_eq!(body["stream_type"], "desktop");
+
+        for (cli_token, env_token, expected) in [
+            (Some("cli-token"), None, "cli-token"),
+            (None, Some("env-token"), "env-token"),
+            (Some("cli-wins"), Some("env-loses"), "cli-wins"),
+        ] {
+            let token_temp = tempfile::tempdir().unwrap();
+            let token_paths = paths(&token_temp);
+            let mut token_output = Vec::new();
+            let mut token_errors = Vec::new();
+            assert_eq!(
+                cmd_setup(
+                    SetupOptions {
+                        server_url: Some(server.url.clone()),
+                        token: cli_token.map(str::to_owned),
+                        stream_name: Some("host-a".into()),
+                        non_interactive: true,
+                    },
+                    token_paths.clone(),
+                    env_token.map(str::to_owned),
+                    &mut RealRegistrar,
+                    &mut token_output,
+                    &mut token_errors,
+                ),
+                0
+            );
+            assert_eq!(load_config(token_paths).config.key, expected);
+            assert!(
+                String::from_utf8(token_output)
+                    .unwrap()
+                    .contains("Using provided token; skipping registration.")
+            );
+            assert_eq!(
+                server.requests().len(),
+                1,
+                "token setup must skip registration"
+            );
+        }
         assert!(peer.requests().is_empty());
         runtime.block_on(peer.shutdown());
     }

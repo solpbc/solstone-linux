@@ -809,6 +809,44 @@ mod tests {
         path
     }
 
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    type ParsedPart<'a> = (Vec<(&'a str, &'a str)>, &'a [u8]);
+
+    fn parse_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<ParsedPart<'a>> {
+        let delimiter = format!("--{boundary}").into_bytes();
+        let next_delimiter = [b"\r\n".as_slice(), delimiter.as_slice()].concat();
+        let mut cursor = body;
+        let mut parts = Vec::new();
+        loop {
+            assert!(cursor.starts_with(&delimiter));
+            cursor = &cursor[delimiter.len()..];
+            if cursor.starts_with(b"--\r\n") {
+                assert_eq!(cursor, b"--\r\n");
+                return parts;
+            }
+            assert!(cursor.starts_with(b"\r\n"));
+            cursor = &cursor[2..];
+            let header_end = find_bytes(cursor, b"\r\n\r\n").unwrap();
+            let header_text = std::str::from_utf8(&cursor[..header_end]).unwrap();
+            let headers = header_text
+                .split("\r\n")
+                .map(|line| {
+                    let (name, value) = line.split_once(": ").unwrap();
+                    (name, value)
+                })
+                .collect();
+            cursor = &cursor[header_end + 4..];
+            let body_end = find_bytes(cursor, &next_delimiter).unwrap();
+            parts.push((headers, &cursor[..body_end]));
+            cursor = &cursor[body_end + 2..];
+        }
+    }
+
     // tests/test_upload.py::test_ensure_registered_posts_descriptor_and_persists
     #[tokio::test]
     async fn ensure_registered_posts_descriptor_and_persists() {
@@ -874,25 +912,81 @@ mod tests {
             ("POST", "/app/observer/register")
         );
         assert_eq!(
+            requests[0].headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        assert!(requests[0].headers.get("authorization").is_none());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+            json!({
+                "hostname": "host-a",
+                "label": "host-a",
+                "platform": "linux",
+                "stream_type": "desktop",
+                "version": "0.1.0",
+            })
+        );
+        assert_eq!(
             (requests[1].method.as_str(), requests[1].uri.as_str()),
             ("POST", "/app/observer/ingest")
         );
-        assert!(
+        assert_eq!(
             requests[1]
                 .headers
                 .get("authorization")
                 .unwrap()
                 .to_str()
-                .unwrap()
-                .starts_with("Bearer K123456789")
+                .unwrap(),
+            "Bearer K123456789"
         );
-        let upload = String::from_utf8_lossy(&requests[1].body);
-        assert!(upload.contains("name=\"day\""));
-        assert!(upload.contains("20260101"));
-        assert!(upload.contains("name=\"segment\""));
-        assert!(upload.contains("120000"));
-        assert!(upload.contains("name=\"files\""));
-        assert!(upload.contains("{\"event\":1}"));
+        let content_type = requests[1]
+            .headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let boundary = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .filter(|value| {
+                !value.is_empty()
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+            .unwrap();
+        assert_eq!(
+            content_type,
+            format!("multipart/form-data; boundary={boundary}")
+        );
+        let parts = parse_multipart(&requests[1].body, boundary);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            parts[0],
+            (
+                vec![("Content-Disposition", "form-data; name=\"day\"")],
+                b"20260101".as_slice()
+            )
+        );
+        assert_eq!(
+            parts[1],
+            (
+                vec![("Content-Disposition", "form-data; name=\"segment\"")],
+                b"120000".as_slice()
+            )
+        );
+        assert_eq!(
+            parts[2],
+            (
+                vec![
+                    (
+                        "Content-Disposition",
+                        "form-data; name=\"files\"; filename=\"capture.jsonl\""
+                    ),
+                    ("Content-Type", "application/octet-stream"),
+                ],
+                b"{\"event\":1}\n".as_slice()
+            )
+        );
         assert_eq!(
             (requests[2].method.as_str(), requests[2].uri.as_str()),
             ("GET", "/app/observer/ingest/segments/20260101")

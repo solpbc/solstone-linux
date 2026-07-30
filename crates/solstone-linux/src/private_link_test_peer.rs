@@ -36,10 +36,7 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 #[derive(Clone)]
 pub(crate) struct PeerRequest {
-    pub(crate) method: String,
-    pub(crate) path: String,
     pub(crate) headers: Vec<(String, String)>,
-    pub(crate) body: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -59,7 +56,6 @@ struct PeerState {
     responses: Arc<Mutex<VecDeque<PeerResponse>>>,
     requests: Arc<Mutex<Vec<PeerRequest>>>,
     accepted: Arc<AtomicUsize>,
-    uploaded: Arc<AtomicUsize>,
 }
 
 pub(crate) struct PrivateLinkPeer {
@@ -76,7 +72,6 @@ impl PrivateLinkPeer {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             accepted: Arc::new(AtomicUsize::new(0)),
-            uploaded: Arc::new(AtomicUsize::new(0)),
         };
         let task_state = state.clone();
         let task = tokio::spawn(async move {
@@ -202,9 +197,6 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                 requests.entry(frame.stream_id).or_default();
             }
             if frame.flags & FLAG_DATA != 0 {
-                state
-                    .uploaded
-                    .fetch_add(frame.payload.len(), Ordering::SeqCst);
                 requests
                     .entry(frame.stream_id)
                     .or_default()
@@ -308,16 +300,11 @@ fn parse_request(raw: &[u8]) -> Option<PeerRequest> {
     let head = std::str::from_utf8(&raw[..split]).ok()?;
     let mut lines = head.split("\r\n");
     let mut request = lines.next()?.split_whitespace();
-    let method = request.next()?.to_owned();
-    let path = request.next()?.to_owned();
+    request.next()?;
+    request.next()?;
     let headers = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.to_owned(), value.trim().to_owned()))
         .collect();
-    Some(PeerRequest {
-        method,
-        path,
-        headers,
-        body: raw[split + 4..].to_vec(),
-    })
+    Some(PeerRequest { headers })
 }
