@@ -2041,9 +2041,10 @@ mod tests {
         );
     }
 
-    // AC 1: listing_401_recovers_and_uploads_segment proves a rejected listing is recoverable.
+    // Legacy breaker criterion: a listing 401 opens a recoverable breaker and a later probe
+    // resumes segment upload; this does not exercise stale-key repair.
     #[tokio::test]
-    async fn listing_401_recovers_and_uploads_segment() {
+    async fn listing_401_opens_breaker_and_later_probe_resumes_upload() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"screen");
         let (server, mut worker) = test_worker(
@@ -2164,7 +2165,7 @@ mod tests {
         assert!(!captured.contains(NEW), "{captured}");
     }
 
-    // AC 15: one or twenty sync-path rejections emit exactly one first-rejection warning.
+    // AC 15: twenty sync-path rejections emit exactly one first-rejection warning.
     #[tokio::test]
     async fn first_rejection_warning_is_once_per_window() {
         let mut responses = vec![(401, json!({})), (200, json!({"key":"K","name":"desktop"}))];
@@ -2200,7 +2201,44 @@ mod tests {
         );
     }
 
-    // Named deviation: AC 2+5 intentionally break
+    // AC 15: one sync-path rejection emits exactly one first-rejection warning.
+    #[tokio::test]
+    async fn one_rejection_emits_one_first_rejection_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let (server, worker) = test_worker(
+            &temp,
+            vec![(401, json!({})), (200, json!({"key":"K","name":"desktop"}))],
+            -1,
+        )
+        .await;
+        let client = Arc::clone(&worker.client);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tokio::spawn(
+            async move {
+                let _ = client.get_server_segments("20260101").await;
+            }
+            .with_subscriber(subscriber),
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.request_count("/app/observer/register"), 1);
+        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            captured
+                .matches("Journal rejected the current key; attempting identity repair")
+                .count(),
+            1,
+            "{captured}"
+        );
+    }
+
+    // Named deviation from the legacy breaker AC 2+5:
     // tests/test_sync.py::test_auth_opens_immediately parity: both statuses open immediately,
     // but only a revoked 403 is permanent.
     #[tokio::test]
@@ -2220,9 +2258,10 @@ mod tests {
         }
     }
 
-    // AC 3: upload_401_is_recoverable_and_retries proves the rejected POST is retried.
+    // Legacy breaker criterion: an upload 401 opens a recoverable breaker and a later probe
+    // permits the segment POST to be retried; this does not exercise successful stale-key repair.
     #[tokio::test]
-    async fn upload_401_is_recoverable_and_retries() {
+    async fn upload_401_opens_recoverable_breaker_and_later_retries() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"screen");
         let (server, mut worker) = test_worker(

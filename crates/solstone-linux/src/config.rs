@@ -19,7 +19,7 @@ pub const DEFAULT_SERVER_URL: &str = "http://localhost:5015";
 pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
-const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_millis(1);
+const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_micros(100);
 static CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -278,6 +278,9 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
 }
 
 fn acquire_config_write_lock() -> io::Result<MutexGuard<'static, ()>> {
+    // The guard protects filesystem syscalls only (read, write, chmod, and rename), never an
+    // await or interactive prompt. Normal contention is therefore sub-millisecond; the bounded
+    // deadline is a backstop for a stalled writer rather than an expected wait.
     let lock = CONFIG_WRITE_LOCK.get_or_init(|| Mutex::new(()));
     let deadline = Instant::now() + CONFIG_WRITE_LOCK_TIMEOUT;
     loop {
@@ -311,31 +314,64 @@ fn write_config(config: &Config) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
-pub fn save_config(config: &Config) -> io::Result<()> {
-    // This bounded critical section contains filesystem syscalls only. It never spans a prompt,
-    // an await, or any caller-visible guard, so an abandoned interactive settings session cannot
-    // prevent the running app from repairing its identity.
+enum IdentityWrite<'a> {
+    PreserveDisk,
+    Provided { key: &'a str, stream: &'a str },
+}
+
+fn save_config_inner(
+    paths: &ConfigPaths,
+    source: Option<&Config>,
+    identity: IdentityWrite<'_>,
+) -> io::Result<()> {
     let _guard = acquire_config_write_lock()?;
-    let mut merged = config.clone();
-    if config.config_path().exists() {
-        let disk = load_config(ConfigPaths {
-            base_dir: Some(config.base_dir.clone()),
-            config_dir: Some(config.config_dir.clone()),
-        })
-        .config;
-        merged.key = disk.key;
-        merged.stream = disk.stream;
+    let mut merged = source
+        .cloned()
+        .unwrap_or_else(|| load_config(paths.clone()).config);
+    match identity {
+        IdentityWrite::PreserveDisk if merged.config_path().exists() => {
+            let disk = load_config(paths.clone()).config;
+            merged.key = disk.key;
+            merged.stream = disk.stream;
+        }
+        // On the first write there is no disk identity to preserve, so save_config necessarily
+        // writes the caller's identity. Existing configs remain safe-by-default.
+        IdentityWrite::PreserveDisk => {}
+        IdentityWrite::Provided { key, stream } => {
+            merged.key = key.to_owned();
+            merged.stream = stream.to_owned();
+        }
     }
     write_config(&merged)
 }
 
+pub fn save_config(config: &Config) -> io::Result<()> {
+    save_config_inner(
+        &ConfigPaths {
+            base_dir: Some(config.base_dir.clone()),
+            config_dir: Some(config.config_dir.clone()),
+        },
+        Some(config),
+        IdentityWrite::PreserveDisk,
+    )
+}
+
+pub fn save_config_with_identity(config: &Config) -> io::Result<()> {
+    save_config_inner(
+        &ConfigPaths {
+            base_dir: Some(config.base_dir.clone()),
+            config_dir: Some(config.config_dir.clone()),
+        },
+        Some(config),
+        IdentityWrite::Provided {
+            key: &config.key,
+            stream: &config.stream,
+        },
+    )
+}
+
 pub fn save_identity(paths: &ConfigPaths, key: &str, stream: &str) -> io::Result<()> {
-    // See save_config: lock acquisition is bounded and the guard covers filesystem work only.
-    let _guard = acquire_config_write_lock()?;
-    let mut config = load_config(paths.clone()).config;
-    config.key = key.to_owned();
-    config.stream = stream.to_owned();
-    write_config(&config)
+    save_config_inner(paths, None, IdentityWrite::Provided { key, stream })
 }
 
 fn migrate(config: &Config) -> io::Result<()> {

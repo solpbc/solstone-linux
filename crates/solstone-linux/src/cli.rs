@@ -5,7 +5,10 @@ use crate::{
     capture_stats::{
         compute_quarantine_stats, compute_status_capture_stats, format_quarantine_line,
     },
-    config::{Config, ConfigPaths, DEFAULT_SERVER_URL, load_config, save_config, save_identity},
+    config::{
+        Config, ConfigPaths, DEFAULT_SERVER_URL, load_config, save_config,
+        save_config_with_identity,
+    },
     session_env::{self, Output, Runner},
     streams::stream_name,
     sync_health::{derive_health, load_facts},
@@ -325,13 +328,9 @@ fn cmd_setup(
     }
     if let Some(token) = token {
         config.key = token;
-        let identity_paths = ConfigPaths {
-            base_dir: Some(config.base_dir.clone()),
-            config_dir: Some(config.config_dir.clone()),
-        };
-        if let Err(error) = save_config(&config)
-            .and_then(|()| save_identity(&identity_paths, &config.key, &config.stream))
-        {
+        // The one-line API swap is unavoidable after save_config became identity-preserving:
+        // setup still performs its original single whole-config write when given a token.
+        if let Err(error) = save_config_with_identity(&config) {
             let _ = write_line(errors, format!("Error saving config: {error}"));
             return 1;
         }
@@ -630,6 +629,7 @@ fn cmd_run(interval: Option<i64>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::save_identity;
     use clap::CommandFactory;
     use std::{cell::Cell, path::Path};
 

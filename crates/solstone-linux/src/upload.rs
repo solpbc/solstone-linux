@@ -110,7 +110,6 @@ struct TellingState {
     window_start: Option<f64>,
     records: usize,
     rejection_warned: bool,
-    suppressed_records: usize,
 }
 
 enum RegisterAttempt {
@@ -236,10 +235,14 @@ impl UploadClient {
                     return true;
                 }
                 RegisterAttempt::GuardRefused { reason_code } => {
+                    // One-shot CLI setup deliberately does not consume the daemon telling window.
                     tracing::error!(
                         status = 403,
                         reason_code = reason_code.as_deref(),
-                        "Journal refused local registration"
+                        key_prefix = key_prefix(&self.inner.key.lock().unwrap()),
+                        recovery_generation =
+                            self.inner.recovery_generation.load(Ordering::Acquire),
+                        "Journal refused local identity repair"
                     );
                     return false;
                 }
@@ -533,7 +536,6 @@ impl Inner {
         }
         telling.rejection_warned = true;
         if telling.records >= TELLING_BURST_LIMIT {
-            telling.suppressed_records += 1;
             return;
         }
         telling.records += 1;
@@ -549,14 +551,13 @@ impl Inner {
     }
 
     fn tell_outcome(&self, outcome: &str, name: &str, old_key: &str, new_key: &str, now: f64) {
+        let dropped_events_lower_bound = self.dropped_events.swap(0, Ordering::AcqRel);
         let mut telling = self.prepare_telling(now);
         if telling.records >= TELLING_BURST_LIMIT {
-            telling.suppressed_records += 1;
             return;
         }
         telling.records += 1;
         drop(telling);
-        let dropped_events_lower_bound = self.dropped_events.swap(0, Ordering::AcqRel);
         tracing::warn!(
             outcome,
             name,
@@ -573,7 +574,6 @@ impl Inner {
     fn tell_guard_refusal(&self, reason_code: Option<&str>, key: &str, now: f64) {
         let mut telling = self.prepare_telling(now);
         if telling.records >= TELLING_BURST_LIMIT {
-            telling.suppressed_records += 1;
             return;
         }
         telling.records += 1;
@@ -1045,9 +1045,12 @@ mod tests {
         }
     }
 
-    // AC 8: cancellation around a successful register exposes only complete stale/new identities.
+    // AC 8: persistence after a successful register is synchronous and await-free, so
+    // cancellation cannot be scheduled between the response and persistence. Cancellation before
+    // the response leaves the exact stale pair; uninterrupted completion writes the exact new
+    // pair. Those are therefore the only two identities reachable on disk.
     #[tokio::test]
-    async fn cancelled_recovery_exposes_no_third_disk_identity() {
+    async fn cancellation_boundary_exposes_only_stale_or_new_disk_identity() {
         const STALE: &str = "STALE-KEY";
         const NEW: &str = "NEW-KEY";
         for cancel in [true, false] {
@@ -1122,7 +1125,7 @@ mod tests {
         assert!(!client.is_registered());
     }
 
-    // AC 15: zero rejections and twenty clean relays emit no rejection warning.
+    // AC 15: twenty clean relays emit no rejection warning.
     #[tokio::test]
     async fn clean_relays_emit_no_rejection_warning() {
         let server = MockServer::new((0..20).map(|_| (200, json!({}))).collect()).await;
@@ -1143,6 +1146,28 @@ mod tests {
         }
         .with_subscriber(subscriber)
         .await;
+        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            !captured.contains("Journal rejected the current key"),
+            "{captured}"
+        );
+    }
+
+    // AC 15: a directly-awaited path with no relay and no rejection is silent.
+    #[tokio::test]
+    async fn zero_rejections_emit_no_rejection_warning() {
+        let server = MockServer::new(vec![]).await;
+        let temp = TempDir::new().unwrap();
+        let config = config(&server, &temp);
+        let _client = client(&config);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        async {}.with_subscriber(subscriber).await;
         let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(
             !captured.contains("Journal rejected the current key"),
@@ -1760,6 +1785,15 @@ mod tests {
             stream: "desktop".into(),
             ..config(&server, &temp)
         };
+        save_identity(
+            &ConfigPaths {
+                base_dir: Some(config.base_dir.clone()),
+                config_dir: Some(config.config_dir.clone()),
+            },
+            &config.key,
+            &config.stream,
+        )
+        .unwrap();
         let client = client(&config);
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
@@ -1772,6 +1806,9 @@ mod tests {
             assert!(!client.relay_event("observe", "status", Map::new()).await);
             assert!(!client.is_revoked());
             assert_eq!(client.inner.key.lock().unwrap().as_str(), "STALE-KEY");
+            let saved = load_config(client.inner.paths.clone()).config;
+            assert_eq!(saved.key, "STALE-KEY");
+            assert_eq!(saved.stream, "desktop");
             assert!(!client.relay_event("observe", "status", Map::new()).await);
             assert!(client.is_revoked());
         }
@@ -1888,7 +1925,9 @@ mod tests {
         assert_eq!(body["node_id"], 1);
     }
 
-    // AC 13: event recovery performs one register attempt while the bounded queue remains usable.
+    // AC 13: event recovery performs exactly one register request while the bounded queue remains
+    // usable. There is no retry loop on this path, so a stalled worker is bounded by the single
+    // register request's EVENT_TIMEOUT without making this a 30-second real-time test.
     #[tokio::test]
     async fn event_recovery_is_single_attempt_and_queue_stays_bounded() {
         let gate = Arc::new(tokio::sync::Notify::new());
@@ -1906,6 +1945,7 @@ mod tests {
         let mut client = client(&config);
         client.enqueue_status(Map::new());
         wait_for_requests(&server, 2).await;
+        assert_eq!(server.request_count("/app/observer/register"), 1);
         for sequence in 0..20 {
             assert!(
                 client
