@@ -3,10 +3,10 @@
 
 use std::{
     fmt,
-    fs::{self, File},
+    fs::File,
     io::{self, Write},
     os::fd::AsFd,
-    path::Path,
+    path::{Component, Path},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -75,60 +75,78 @@ pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), PrivateFileErr
     if path.as_os_str().is_empty() || path.parent().is_none() {
         return Err(PrivateFileError::InvalidTarget("directory"));
     }
-    let mut missing = Vec::new();
-    let mut current = path;
-    loop {
-        match fs::symlink_metadata(current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(PrivateFileError::InvalidTarget("directory"));
-            }
-            Ok(_) => break,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                missing.push(current.to_path_buf());
-                current = current
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .ok_or(PrivateFileError::InvalidTarget("directory"))?;
-            }
-            Err(error) => return Err(PrivateFileError::io("directory", "inspect", error)),
+    let mut current = open_walk_start(path.is_absolute())?;
+    let mut saw_component = false;
+    for component in path.components() {
+        let name = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => Path::new("..").as_os_str(),
+            Component::Normal(name) => name,
+            Component::Prefix(_) => return Err(PrivateFileError::InvalidTarget("directory")),
+        };
+        saw_component = true;
+        let (next, created) = open_or_create_directory(&current, name)?;
+        if created {
+            set_and_verify_directory(&next)?;
         }
+        current = next;
     }
-    for directory in missing.iter().rev() {
-        fs::create_dir(directory)
-            .map_err(|error| PrivateFileError::io("directory", "create", error))?;
-        set_and_verify_mode(directory, 0o700, true)?;
+    if !saw_component {
+        return Err(PrivateFileError::InvalidTarget("directory"));
     }
-    set_and_verify_mode(path, 0o700, true)
+    set_and_verify_directory(&current)
 }
 
-fn set_and_verify_mode(path: &Path, mode: u32, directory: bool) -> Result<(), PrivateFileError> {
-    let flags = rustix::fs::OFlags::RDONLY
-        | rustix::fs::OFlags::CLOEXEC
-        | rustix::fs::OFlags::NOFOLLOW
-        | if directory {
-            rustix::fs::OFlags::DIRECTORY
+fn open_walk_start(absolute: bool) -> Result<File, PrivateFileError> {
+    open_directory_at(
+        rustix::fs::CWD,
+        if absolute {
+            Path::new("/")
         } else {
-            rustix::fs::OFlags::empty()
-        };
-    let descriptor = rustix::fs::openat(rustix::fs::CWD, path, flags, rustix::fs::Mode::empty())
-        .map_err(|error| {
-            if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::NOTDIR {
-                PrivateFileError::InvalidTarget("target")
-            } else {
-                PrivateFileError::io("target", "open", error.into())
+            Path::new(".")
+        },
+    )
+}
+
+fn open_or_create_directory(
+    parent: &File,
+    name: &std::ffi::OsStr,
+) -> Result<(File, bool), PrivateFileError> {
+    match open_directory_at(parent, Path::new(name)) {
+        Ok(directory) => Ok((directory, false)),
+        Err(PrivateFileError::Io {
+            kind: io::ErrorKind::NotFound,
+            ..
+        }) => {
+            match rustix::fs::mkdirat(
+                parent,
+                name,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR,
+            ) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::EXIST) => {
+                    return open_directory_at(parent, Path::new(name))
+                        .map(|directory| (directory, false));
+                }
+                Err(error) => {
+                    return Err(PrivateFileError::io("directory", "create", error.into()));
+                }
             }
-        })?;
-    let expected = rustix::fs::Mode::from_raw_mode(mode);
-    rustix::fs::fchmod(&descriptor, expected)
+            open_directory_at(parent, Path::new(name)).map(|directory| (directory, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn set_and_verify_directory(descriptor: &File) -> Result<(), PrivateFileError> {
+    let expected = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR;
+    rustix::fs::fchmod(descriptor, expected)
         .map_err(|error| PrivateFileError::io("target", "chmod", error.into()))?;
-    let stat = rustix::fs::fstat(&descriptor)
+    let stat = rustix::fs::fstat(descriptor)
         .map_err(|error| PrivateFileError::io("target", "inspect", error.into()))?;
-    let valid_kind = if directory {
-        rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory
-    } else {
-        rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile
-    };
-    if !valid_kind || rustix::fs::Mode::from_raw_mode(stat.st_mode) != expected {
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory
+        || rustix::fs::Mode::from_raw_mode(stat.st_mode) != expected
+    {
         return Err(PrivateFileError::InvalidTarget("target"));
     }
     Ok(())
@@ -198,22 +216,16 @@ pub(crate) fn atomic_write_bytes_with_fault(
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
         name = name.to_string_lossy()
     );
-    let result = write_temporary(&parent_descriptor, name, &temporary, bytes, fault);
-    if result.is_err() {
-        let _ = rustix::fs::unlinkat(
-            &parent_descriptor,
-            temporary.as_str(),
-            rustix::fs::AtFlags::empty(),
-        );
-        // Before rename the target is untouched; after rename it contains the new
-        // complete value. Rewriting either value after an error cannot be made safe.
-    }
-    result
+    write_temporary(&parent_descriptor, name, &temporary, bytes, fault)
 }
 
 fn open_directory(path: &Path) -> Result<File, PrivateFileError> {
+    open_directory_at(rustix::fs::CWD, path)
+}
+
+fn open_directory_at<Fd: AsFd>(parent: Fd, path: &Path) -> Result<File, PrivateFileError> {
     rustix::fs::openat(
-        rustix::fs::CWD,
+        parent,
         path,
         rustix::fs::OFlags::RDONLY
             | rustix::fs::OFlags::CLOEXEC
@@ -253,36 +265,49 @@ fn write_temporary(
     )
     .map_err(|error| PrivateFileError::io("file", "create", error.into()))?;
     let mut file = File::from(descriptor);
-    rustix::fs::fchmod(&file, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
-        .map_err(|error| PrivateFileError::io("file", "chmod", error.into()))?;
-    fault
-        .before(DurableWriteStage::Write)
-        .map_err(|error| PrivateFileError::io("file", "write", error))?;
-    file.write_all(bytes)
-        .and_then(|()| file.flush())
-        .map_err(|error| PrivateFileError::io("file", "write", error))?;
-    fault
-        .before(DurableWriteStage::Fsync)
-        .map_err(|error| PrivateFileError::io("file", "fsync", error))?;
-    file.sync_all()
-        .map_err(|error| PrivateFileError::io("file", "fsync", error))?;
-    fault
-        .before(DurableWriteStage::Rename)
-        .map_err(|error| PrivateFileError::io("file", "rename", error))?;
-    rustix::fs::renameat(parent, temporary, parent, name)
-        .map_err(|error| PrivateFileError::io("file", "rename", error.into()))?;
-    fault
-        .before(DurableWriteStage::DirSync)
-        .map_err(|error| PrivateFileError::io("directory", "fsync", error))?;
-    parent
-        .sync_all()
-        .map_err(|error| PrivateFileError::io("directory", "fsync", error))
+    let mut temporary_exists = true;
+    let result = (|| {
+        rustix::fs::fchmod(&file, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
+            .map_err(|error| PrivateFileError::io("file", "chmod", error.into()))?;
+        fault
+            .before(DurableWriteStage::Write)
+            .map_err(|error| PrivateFileError::io("file", "write", error))?;
+        file.write_all(bytes)
+            .and_then(|()| file.flush())
+            .map_err(|error| PrivateFileError::io("file", "write", error))?;
+        fault
+            .before(DurableWriteStage::Fsync)
+            .map_err(|error| PrivateFileError::io("file", "fsync", error))?;
+        file.sync_all()
+            .map_err(|error| PrivateFileError::io("file", "fsync", error))?;
+        fault
+            .before(DurableWriteStage::Rename)
+            .map_err(|error| PrivateFileError::io("file", "rename", error))?;
+        rustix::fs::renameat(parent, temporary, parent, name)
+            .map_err(|error| PrivateFileError::io("file", "rename", error.into()))?;
+        temporary_exists = false;
+        fault
+            .before(DurableWriteStage::DirSync)
+            .map_err(|error| PrivateFileError::io("directory", "fsync", error))?;
+        parent
+            .sync_all()
+            .map_err(|error| PrivateFileError::io("directory", "fsync", error))
+    })();
+    if result.is_err() && temporary_exists {
+        let _ = rustix::fs::unlinkat(parent, temporary, rustix::fs::AtFlags::empty());
+        // Before rename the target is untouched; after rename it contains the new
+        // complete value. Rewriting either value after an error cannot be made safe.
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+    };
 
     struct FailAt(DurableWriteStage);
     impl DurableWriteFault for FailAt {
@@ -415,6 +440,34 @@ mod tests {
                     .ends_with(".tmp")
             }));
         }
+    }
+
+    #[test]
+    fn create_collision_does_not_remove_an_unowned_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = open_directory(temp.path()).unwrap();
+        let temporary = ".state.collision.tmp";
+        fs::write(temp.path().join(temporary), b"owned elsewhere").unwrap();
+        let error = write_temporary(
+            &parent,
+            std::ffi::OsStr::new("state"),
+            temporary,
+            b"replacement",
+            &NoWriteFault,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PrivateFileError::Io {
+                kind: io::ErrorKind::AlreadyExists,
+                ..
+            }
+        ));
+        assert_eq!(
+            fs::read(temp.path().join(temporary)).unwrap(),
+            b"owned elsewhere"
+        );
+        assert!(!temp.path().join("state").exists());
     }
 
     #[test]

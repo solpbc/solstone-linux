@@ -36,7 +36,10 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 #[derive(Clone)]
 pub(crate) struct PeerRequest {
+    pub(crate) method: String,
+    pub(crate) path: String,
     pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -300,11 +303,16 @@ fn parse_request(raw: &[u8]) -> Option<PeerRequest> {
     let head = std::str::from_utf8(&raw[..split]).ok()?;
     let mut lines = head.split("\r\n");
     let mut request = lines.next()?.split_whitespace();
-    request.next()?;
-    request.next()?;
+    let method = request.next()?.to_owned();
+    let path = request.next()?.to_owned();
     let headers = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.to_owned(), value.trim().to_owned()))
         .collect();
-    Some(PeerRequest { headers })
+    Some(PeerRequest {
+        method,
+        path,
+        headers,
+        body: raw[split + 4..].to_vec(),
+    })
 }

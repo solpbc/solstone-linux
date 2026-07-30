@@ -461,44 +461,32 @@ pub(crate) fn load_observer(
     };
     let observer = serde_json::from_slice::<ObserverState>(&bytes)
         .map_err(|_| PrivateStateError::MalformedObserver)?;
-    if observer.credential_instance_id != credential_instance_id
-        || observer.name != expected_name
-        || observer.protocol_version != 2
-        || observer.key.is_empty()
-        || observer.prefix.is_empty()
-        || observer.name.is_empty()
-        || observer.ingest_url.is_empty()
-        || contains_invalid_header_value(&observer.key)
-        || confine_path(origin, &observer.ingest_url).is_err()
-    {
+    if !observer_is_valid(&observer, credential_instance_id, expected_name, origin) {
         return Ok(None);
     }
     Ok(Some(observer))
 }
 
-#[cfg(test)]
-pub(crate) fn persist_observer(
-    config_root: &Path,
+fn observer_is_valid(
     observer: &ObserverState,
-) -> Result<(), PrivateStateError> {
-    let bytes = serde_json::to_vec(observer).map_err(|_| PrivateStateError::MalformedObserver)?;
-    atomic_write_bytes(&config_root.join(OBSERVER_FILENAME), &bytes).map_err(|error| {
-        map_private_file(
-            error,
-            PrivateTargetKind::Observer,
-            PrivateIoOperation::Persist,
-        )
-    })
+    credential_instance_id: &str,
+    expected_name: &str,
+    origin: &Url,
+) -> bool {
+    observer.credential_instance_id == credential_instance_id
+        && observer.name == expected_name
+        && observer.protocol_version == 2
+        && !observer.key.is_empty()
+        && !observer.prefix.is_empty()
+        && !observer.name.is_empty()
+        && !observer.ingest_url.is_empty()
+        && !contains_invalid_header_value(&observer.key)
+        && confine_path(origin, &observer.ingest_url).is_ok()
 }
 
-fn contains_invalid_header_value(value: &str) -> bool {
-    reqwest::header::HeaderValue::from_bytes(value.as_bytes()).is_err()
-}
-
-fn persist_and_publish_observer(
+fn write_observer_durably(
     config_root: &Path,
     observer: &ObserverState,
-    opener: &PrivateLinkOpener,
     fault: &dyn DurableWriteFault,
 ) -> Result<(), PrivateStateError> {
     let bytes = serde_json::to_vec(observer).map_err(|_| PrivateStateError::MalformedObserver)?;
@@ -510,7 +498,34 @@ fn persist_and_publish_observer(
                 PrivateIoOperation::Persist,
             )
         },
-    )?;
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn persist_observer(
+    config_root: &Path,
+    observer: &ObserverState,
+) -> Result<(), PrivateStateError> {
+    write_observer_durably(config_root, observer, &NoWriteFault)
+}
+
+fn contains_invalid_header_value(value: &str) -> bool {
+    reqwest::header::HeaderValue::from_bytes(value.as_bytes()).is_err()
+}
+
+fn persist_and_publish_observer(
+    config_root: &Path,
+    credential_instance_id: &str,
+    expected_name: &str,
+    origin: &Url,
+    observer: &ObserverState,
+    opener: &PrivateLinkOpener,
+    fault: &dyn DurableWriteFault,
+) -> Result<(), PrivateStateError> {
+    if !observer_is_valid(observer, credential_instance_id, expected_name, origin) {
+        return Err(PrivateStateError::RegistrationInvalid);
+    }
+    write_observer_durably(config_root, observer, fault)?;
     opener.set_registered(observer)
 }
 
@@ -598,6 +613,8 @@ pub(crate) struct PrivateLinkSession {
     handle: JournalBridgeHandle,
     token_persistence: Arc<TokenPersistence>,
     state_lock: PrivateStateLock,
+    credential_instance_id: String,
+    expected_name: String,
 }
 
 impl PrivateLinkSession {
@@ -631,6 +648,9 @@ impl PrivateLinkSession {
     fn publish_observer(&self, observer: &ObserverState) -> Result<(), PrivateStateError> {
         persist_and_publish_observer(
             self.state_lock.root(),
+            &self.credential_instance_id,
+            &self.expected_name,
+            &self.origin,
             observer,
             &self.opener,
             &NoWriteFault,
@@ -643,7 +663,15 @@ impl PrivateLinkSession {
         observer: &ObserverState,
         fault: &dyn DurableWriteFault,
     ) -> Result<(), PrivateStateError> {
-        persist_and_publish_observer(self.state_lock.root(), observer, &self.opener, fault)
+        persist_and_publish_observer(
+            self.state_lock.root(),
+            &self.credential_instance_id,
+            &self.expected_name,
+            &self.origin,
+            observer,
+            &self.opener,
+            fault,
+        )
     }
 }
 
@@ -838,6 +866,8 @@ async fn start_private_link_session_inner(
         handle,
         token_persistence,
         state_lock,
+        credential_instance_id,
+        expected_name: expected_name.to_owned(),
     })
 }
 
@@ -886,6 +916,22 @@ mod tests {
             name: "stream".into(),
             ingest_url: path.into(),
             protocol_version: 2,
+        }
+    }
+
+    fn assert_registered_auth(request: &crate::private_link_test_peer::PeerRequest, key: &str) {
+        for (name, expected) in [
+            (OBSERVER_HEADER_NAME, key.to_owned()),
+            ("authorization", format!("Bearer {key}")),
+            (PROTOCOL_VERSION_HEADER_NAME, "2".to_owned()),
+        ] {
+            let values = request
+                .headers
+                .iter()
+                .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(values, vec![expected.as_str()], "{name}");
         }
     }
 
@@ -995,6 +1041,105 @@ mod tests {
     opener_rejection_test!(opener_stays_unregistered_for_query, observer("/a?q"));
     opener_rejection_test!(opener_stays_unregistered_for_fragment, observer("/a#f"));
     opener_rejection_test!(opener_stays_unregistered_for_backslash, observer("/a\\b"));
+
+    async fn assert_publish_rejection(mutate: impl FnOnce(&mut ObserverState)) {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, b"{}".to_vec());
+        let credential = peer.credential();
+        let mut state = ObserverState {
+            credential_instance_id: credential.instance_id.clone(),
+            ..observer("/ingest")
+        };
+        mutate(&mut state);
+        let session = start_private_link_session(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+        assert!(matches!(
+            publish_observer_registration(&session, &state),
+            Err(PrivateStateError::RegistrationInvalid)
+        ));
+        assert!(!temp.path().join(OBSERVER_FILENAME).exists());
+        session
+            .request(Method::GET, "/still-unregistered")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        let requests = peer.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .iter()
+                .filter(|(name, _)| {
+                    name.eq_ignore_ascii_case(PROTOCOL_VERSION_HEADER_NAME)
+                        || name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
+                        || name.eq_ignore_ascii_case("authorization")
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![(PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned())],
+        );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    macro_rules! publish_rejection_test {
+        ($name:ident, $field:ident, $value:expr) => {
+            #[tokio::test]
+            async fn $name() {
+                assert_publish_rejection(|state| state.$field = $value.into()).await;
+            }
+        };
+    }
+
+    publish_rejection_test!(
+        publish_rejects_credential_instance_mismatch,
+        credential_instance_id,
+        "other"
+    );
+    publish_rejection_test!(publish_rejects_name_mismatch, name, "other");
+    #[tokio::test]
+    async fn publish_rejects_unsupported_protocol() {
+        assert_publish_rejection(|state| state.protocol_version = 3).await;
+    }
+    publish_rejection_test!(publish_rejects_empty_key, key, "");
+    publish_rejection_test!(publish_rejects_unsafe_key, key, "bad\u{1}key");
+    publish_rejection_test!(publish_rejects_empty_prefix, prefix, "");
+    publish_rejection_test!(publish_rejects_empty_name, name, "");
+    publish_rejection_test!(publish_rejects_empty_ingest_path, ingest_url, "");
+    publish_rejection_test!(publish_rejects_relative_ingest_path, ingest_url, "relative");
+    publish_rejection_test!(
+        publish_rejects_scheme_relative_ingest_path,
+        ingest_url,
+        "//host/x"
+    );
+    publish_rejection_test!(publish_rejects_raw_ingest_traversal, ingest_url, "/a/../b");
+    publish_rejection_test!(
+        publish_rejects_encoded_ingest_traversal,
+        ingest_url,
+        "/a/%2e%2e/b"
+    );
+    publish_rejection_test!(
+        publish_rejects_mixed_encoded_ingest_traversal,
+        ingest_url,
+        "/a/%2E./b"
+    );
+    publish_rejection_test!(publish_rejects_encoded_ingest_slash, ingest_url, "/a/%2f/b");
+    publish_rejection_test!(
+        publish_rejects_encoded_ingest_backslash,
+        ingest_url,
+        "/a/%5c/b"
+    );
+    publish_rejection_test!(
+        publish_rejects_double_encoded_ingest_traversal,
+        ingest_url,
+        "/a/%252e%252e/b"
+    );
+    publish_rejection_test!(publish_rejects_query_ingest_path, ingest_url, "/a?q");
+    publish_rejection_test!(publish_rejects_fragment_ingest_path, ingest_url, "/a#f");
+    publish_rejection_test!(publish_rejects_backslash_ingest_path, ingest_url, "/a\\b");
 
     async fn assert_redacted_setup_rejection(bytes: &[u8]) {
         let temp = tempfile::tempdir().unwrap();
@@ -1408,18 +1553,7 @@ mod tests {
             .unwrap();
         let requests = peer.requests();
         assert_eq!(requests.len(), 1);
-        for name in [
-            OBSERVER_HEADER_NAME,
-            PROTOCOL_VERSION_HEADER_NAME,
-            "authorization",
-        ] {
-            assert!(
-                requests[0]
-                    .headers
-                    .iter()
-                    .any(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            );
-        }
+        assert_registered_auth(&requests[0], "observer-key");
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -1427,6 +1561,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_reuses_one_carrier_across_registration_transition() {
         let peer = PrivateLinkPeer::start().await;
+        let credential_instance_id = peer.credential().instance_id;
         peer.enqueue_response(200, b"{}".to_vec());
         peer.enqueue_response(200, b"{}".to_vec());
         let (_temp, session) = start_peer_session(&peer).await;
@@ -1440,7 +1575,14 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
-        publish_observer_registration(&session, &observer("/app/observer/ingest")).unwrap();
+        publish_observer_registration(
+            &session,
+            &ObserverState {
+                credential_instance_id,
+                ..observer("/app/observer/ingest")
+            },
+        )
+        .unwrap();
         assert_eq!(
             session
                 .request(Method::GET, "/registered")
@@ -1453,6 +1595,9 @@ mod tests {
         );
         let requests = peer.requests();
         assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/unregistered");
+        assert!(requests[0].body.is_empty());
         assert_eq!(
             requests[0]
                 .headers
@@ -1468,18 +1613,10 @@ mod tests {
                 .any(|(name, _)| name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
                     || name.eq_ignore_ascii_case("authorization"))
         );
-        for name in [
-            OBSERVER_HEADER_NAME,
-            PROTOCOL_VERSION_HEADER_NAME,
-            "authorization",
-        ] {
-            assert!(
-                requests[1]
-                    .headers
-                    .iter()
-                    .any(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            );
-        }
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(requests[1].path, "/registered");
+        assert!(requests[1].body.is_empty());
+        assert_registered_auth(&requests[1], "observer-key");
         assert_eq!(peer.accepted_carriers(), 1);
         session.shutdown().await.unwrap();
         peer.shutdown().await;
@@ -1640,6 +1777,7 @@ mod tests {
         persist_observer(temp.path(), &prior).unwrap();
         let prior_bytes = fs::read(temp.path().join(OBSERVER_FILENAME)).unwrap();
         let peer = PrivateLinkPeer::start().await;
+        let credential_instance_id = peer.credential().instance_id;
         for _ in 0..6 {
             peer.enqueue_response(200, b"{}".to_vec());
         }
@@ -1647,6 +1785,7 @@ mod tests {
             .await
             .unwrap();
         let next = ObserverState {
+            credential_instance_id,
             key: "new-observer-key".into(),
             ingest_url: "/new".into(),
             ..observer("/new")
@@ -1676,18 +1815,8 @@ mod tests {
             } else {
                 assert_eq!(current_bytes, prior_bytes);
             }
-            let loaded = load_observer(
-                temp.path(),
-                "instance",
-                "stream",
-                &Url::parse("http://127.0.0.1:1").unwrap(),
-            )
-            .unwrap();
-            if stage == DurableWriteStage::DirSync {
-                assert!(loaded.as_ref() == Some(&prior) || loaded.as_ref() == Some(&next));
-            } else {
-                assert!(loaded.as_ref() == Some(&prior));
-            }
+            let decoded: ObserverState = serde_json::from_slice(&current_bytes).unwrap();
+            assert!(decoded == prior || decoded == next);
             session
                 .request(Method::GET, "/still-unregistered")
                 .unwrap()
@@ -1713,18 +1842,7 @@ mod tests {
                     || name.eq_ignore_ascii_case("authorization")
             }));
         }
-        for name in [
-            OBSERVER_HEADER_NAME,
-            PROTOCOL_VERSION_HEADER_NAME,
-            "authorization",
-        ] {
-            assert!(
-                requests[5]
-                    .headers
-                    .iter()
-                    .any(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            );
-        }
+        assert_registered_auth(&requests[5], "new-observer-key");
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -1826,6 +1944,7 @@ mod tests {
         let capability = capability.lock().unwrap().clone().unwrap();
         let observer_key = "observer-key-sentinel";
         let registered = ObserverState {
+            credential_instance_id: session.credential_instance_id.clone(),
             key: observer_key.into(),
             ..observer("/ingest")
         };
