@@ -719,10 +719,13 @@ mod tests {
         observer::StateSink,
         private_link::{
             CREDENTIALS_FILENAME, LinkFactState, OBSERVER_FILENAME, ObserverState,
-            PrivateLinkOwner, PrivateStateError, PrivateStateLock, persist_credential,
-            publish_observer_registration,
+            PRIVATE_STATE_READY_LOCK_FILENAME, PrivateLinkOwner, PrivateStateError,
+            PrivateStateLock, persist_credential, publish_observer_registration,
         },
         private_link_test_peer::PrivateLinkPeer,
+        sync_health::{
+            ProcessEpoch, SyncFacts, derive_health, load_facts_with_liveness, save_facts,
+        },
         test_support::{MockServer, OpportunisticDefaultListenerTrap},
     };
     use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicUsize};
@@ -1448,6 +1451,77 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(after, before);
         drop(lock);
+    }
+
+    #[tokio::test]
+    async fn prepare_run_config_reset_failure_releases_lock_and_starts_no_private_link_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let base_dir = temp.path().join("data");
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let state_path = base_dir.join("state");
+        let prior_bytes = br#"{"schema_version":2,"link_epoch":"0808080808080808080808080808080808080808080808080808080808080808","link":{"listener_ready":true,"carrier_proven":true,"observer_registered":true}}"#;
+        std::fs::write(&state_path, prior_bytes).unwrap();
+
+        assert!(matches!(
+            crate::cli::prepare_run_config(crate::config::ConfigPaths {
+                base_dir: Some(base_dir.clone()),
+                config_dir: Some(config_dir.clone()),
+            }),
+            Err(PrivateStateError::HealthInitializationFailed)
+        ));
+        assert_eq!(std::fs::read(&state_path).unwrap(), prior_bytes);
+        assert!(!config_dir.join(PRIVATE_STATE_READY_LOCK_FILENAME).exists());
+        let reacquired = PrivateStateLock::acquire(&config_dir).unwrap();
+        drop(reacquired);
+        assert!(peer.requests().is_empty());
+        assert_eq!(peer.accepted_carriers(), 0);
+
+        std::fs::remove_file(&state_path).unwrap();
+        save_facts(
+            &state_path,
+            &SyncFacts {
+                pending_confirmed: Some(0),
+                link: Some(LinkFactState {
+                    listener_ready: true,
+                    carrier_proven: true,
+                    observer_registered: true,
+                    ..Default::default()
+                }),
+                link_epoch: Some(ProcessEpoch::for_test(8)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let unready_owner = PrivateStateLock::acquire(&config_dir).unwrap();
+        let liveness = PrivateStateLock::try_probe(&config_dir).unwrap();
+        assert_eq!(
+            liveness,
+            crate::private_link::PrivateStateLockLiveness::LiveOwnerNotReady
+        );
+        let facts = load_facts_with_liveness(&state_path, liveness);
+        assert!(facts.link.is_none());
+        assert!(!matches!(
+            derive_health(&facts, 1_000.0, 600.0).state,
+            crate::sync_health::HealthState::ListenerReady
+                | crate::sync_health::HealthState::Syncing
+                | crate::sync_health::HealthState::Connected
+        ));
+        drop(unready_owner);
+        let mut ready_owner = PrivateStateLock::acquire(&config_dir).unwrap();
+        ready_owner.mark_ready().unwrap();
+        let ready_liveness = PrivateStateLock::try_probe(&config_dir).unwrap();
+        assert_eq!(
+            ready_liveness,
+            crate::private_link::PrivateStateLockLiveness::LiveOwner
+        );
+        assert!(
+            load_facts_with_liveness(&state_path, ready_liveness)
+                .link
+                .is_some()
+        );
+        peer.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

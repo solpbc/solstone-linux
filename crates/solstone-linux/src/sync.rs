@@ -2072,8 +2072,9 @@ mod tests {
             ..Config::default()
         };
         fs::create_dir_all(&config.config_dir).unwrap();
-        let owner_lock =
+        let mut owner_lock =
             crate::private_link::PrivateStateLock::acquire(&config.config_dir).unwrap();
+        owner_lock.mark_ready().unwrap();
         let server = MockServer::new(Vec::new()).await;
         let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
             wall: 1_800_000_000.0,

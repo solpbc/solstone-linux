@@ -533,7 +533,7 @@ fn cmd_run(interval: Option<i64>) -> i32 {
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            tracing::error!(%error, "Linked private state is already in use");
+            tracing::error!(%error, "{}", run_preparation_error_guidance(&error));
             return 1;
         }
     };
@@ -577,6 +577,16 @@ fn cmd_run(interval: Option<i64>) -> i32 {
     )
 }
 
+fn run_preparation_error_guidance(error: &PrivateStateError) -> &'static str {
+    match error {
+        PrivateStateError::LockContended => "Linked private state is already in use",
+        PrivateStateError::HealthInitializationFailed => {
+            "Startup could not continue because sol could not clear the sync status from the previous run. Make sure sol can write its local data, then try again."
+        }
+        _ => "Startup could not continue because sol could not safely prepare its private state.",
+    }
+}
+
 pub(crate) fn prepare_run_config(
     paths: ConfigPaths,
 ) -> Result<
@@ -587,7 +597,7 @@ pub(crate) fn prepare_run_config(
         .config_dir
         .clone()
         .unwrap_or_else(|| Config::default().config_dir);
-    let state_lock = PrivateStateLock::acquire(&config_root)?;
+    let mut state_lock = PrivateStateLock::acquire(&config_root)?;
     let loaded = load_config(paths.clone());
     for warning in &loaded.warnings {
         tracing::warn!("{warning}");
@@ -615,9 +625,9 @@ pub(crate) fn prepare_run_config(
         link_epoch: process_epoch.clone(),
         ..Default::default()
     };
-    if let Err(error) = save_facts(&config.state_dir(), &reset) {
-        tracing::warn!(%error, "Failed to reset sync health for the new owner");
-    }
+    save_facts(&config.state_dir(), &reset)
+        .map_err(|_| PrivateStateError::HealthInitializationFailed)?;
+    state_lock.mark_ready()?;
     Ok((
         state_lock,
         config,
@@ -917,13 +927,67 @@ mod tests {
         };
         save_facts(&config.state_dir(), &prior).unwrap();
 
-        let (_lock, config, _, _) = prepare_run_config(paths).unwrap();
-        let current =
-            load_facts_with_liveness(&config.state_dir(), PrivateStateLockLiveness::LiveOwner);
-        assert_ne!(
-            derive_health(&current, 1_000.0, 600.0).state,
-            crate::sync_health::HealthState::Connected
+        let (_lock, config, _, process_epoch) = prepare_run_config(paths).unwrap();
+        let liveness = PrivateStateLock::try_probe(&config.config_dir).unwrap();
+        assert_eq!(liveness, PrivateStateLockLiveness::LiveOwner);
+        let current = load_facts_with_liveness(&config.state_dir(), liveness);
+        assert_eq!(current.link_epoch, process_epoch);
+        let link = current.link.unwrap();
+        assert!(!link.pairing_required);
+        assert!(!link.private_state_invalid);
+        assert!(!link.config_sanitation_failed);
+        assert!(!link.listener_ready);
+        assert!(!link.carrier_proven);
+        assert!(!link.observer_registered);
+        assert!(!link.transport_unavailable);
+        assert!(!link.terminal_revocation);
+        assert!(!link.token_persistence_failure);
+    }
+
+    #[test]
+    fn live_unready_owner_does_not_expose_prior_connected_facts() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(&temp);
+        let config = load_config(paths).config;
+        save_facts(
+            &config.state_dir(),
+            &SyncFacts {
+                pending_confirmed: Some(0),
+                link: Some(crate::private_link::LinkFactState {
+                    listener_ready: true,
+                    carrier_proven: true,
+                    observer_registered: true,
+                    ..Default::default()
+                }),
+                link_epoch: Some(ProcessEpoch::for_test(8)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let _lock = PrivateStateLock::acquire(&config.config_dir).unwrap();
+        let liveness = PrivateStateLock::try_probe(&config.config_dir).unwrap();
+        assert_eq!(liveness, PrivateStateLockLiveness::LiveOwnerNotReady);
+        let facts = load_facts_with_liveness(&config.state_dir(), liveness);
+        assert!(facts.link.is_none());
+        assert!(!matches!(
+            derive_health(&facts, 1_000.0, 600.0).state,
+            crate::sync_health::HealthState::ListenerReady
+                | crate::sync_health::HealthState::Syncing
+                | crate::sync_health::HealthState::Connected
+        ));
+    }
+
+    #[test]
+    fn run_preparation_errors_have_distinct_owner_guidance() {
+        let contention = run_preparation_error_guidance(&PrivateStateError::LockContended);
+        let initialization =
+            run_preparation_error_guidance(&PrivateStateError::HealthInitializationFailed);
+        assert_eq!(contention, "Linked private state is already in use");
+        assert_eq!(
+            initialization,
+            "Startup could not continue because sol could not clear the sync status from the previous run. Make sure sol can write its local data, then try again."
         );
+        assert_ne!(contention, initialization);
     }
 
     #[test]

@@ -40,6 +40,8 @@ use crate::private_file::{
 pub(crate) const CREDENTIALS_FILENAME: &str = "credentials.json";
 pub(crate) const OBSERVER_FILENAME: &str = "observer.json";
 const PRIVATE_STATE_LOCK_FILENAME: &str = ".solstone-linux.private-state.lock";
+pub(crate) const PRIVATE_STATE_READY_LOCK_FILENAME: &str =
+    ".solstone-linux.private-state.ready.lock";
 const MAX_PAIR_LINK_BYTES: u64 = 4096;
 pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -103,6 +105,7 @@ pub(crate) enum PrivateStateError {
     RegistrationInvalid,
     TokenPersistenceFailed,
     ShutdownFailed,
+    HealthInitializationFailed,
 }
 
 impl fmt::Display for PrivateStateError {
@@ -122,6 +125,7 @@ impl fmt::Display for PrivateStateError {
             Self::RegistrationInvalid => formatter.write_str("RegistrationInvalid"),
             Self::TokenPersistenceFailed => formatter.write_str("TokenPersistenceFailed"),
             Self::ShutdownFailed => formatter.write_str("ShutdownFailed"),
+            Self::HealthInitializationFailed => formatter.write_str("HealthInitializationFailed"),
         }
     }
 }
@@ -232,12 +236,14 @@ fn hex(byte: u8) -> Result<u8, PrivateStateError> {
 
 pub(crate) struct PrivateStateLock {
     _file: File,
+    readiness_file: Option<File>,
     canonical_root: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrivateStateLockLiveness {
     LiveOwner,
+    LiveOwnerNotReady,
     NoLiveOwner,
 }
 
@@ -304,9 +310,52 @@ impl PrivateStateLock {
         {
             return Err(PrivateStateProbeError::InvalidTarget);
         }
+        let readiness_descriptor = match rustix::fs::openat(
+            &root,
+            PRIVATE_STATE_READY_LOCK_FILENAME,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(_) => {
+                let locks = fs::read_to_string("/proc/locks")
+                    .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
+                return if probe_lock_table(&locks, stat.st_dev, stat.st_ino)? {
+                    Ok(PrivateStateLockLiveness::LiveOwnerNotReady)
+                } else {
+                    Ok(PrivateStateLockLiveness::NoLiveOwner)
+                };
+            }
+        };
+        let readiness_file = File::from(readiness_descriptor);
+        let readiness_stat = match rustix::fs::fstat(&readiness_file) {
+            Ok(stat) => stat,
+            Err(_) => {
+                let locks = fs::read_to_string("/proc/locks")
+                    .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
+                return if probe_lock_table(&locks, stat.st_dev, stat.st_ino)? {
+                    Ok(PrivateStateLockLiveness::LiveOwnerNotReady)
+                } else {
+                    Ok(PrivateStateLockLiveness::NoLiveOwner)
+                };
+            }
+        };
+        let readiness_valid = rustix::fs::FileType::from_raw_mode(readiness_stat.st_mode)
+            == rustix::fs::FileType::RegularFile
+            && rustix::fs::Mode::from_raw_mode(readiness_stat.st_mode) == expected_mode
+            && readiness_stat.st_uid == rustix::process::geteuid().as_raw();
         let locks = fs::read_to_string("/proc/locks")
             .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
-        probe_lock_table(&locks, stat.st_dev, stat.st_ino)
+        if !probe_lock_table(&locks, stat.st_dev, stat.st_ino)? {
+            return Ok(PrivateStateLockLiveness::NoLiveOwner);
+        }
+        if readiness_valid
+            && probe_lock_table(&locks, readiness_stat.st_dev, readiness_stat.st_ino)?
+        {
+            Ok(PrivateStateLockLiveness::LiveOwner)
+        } else {
+            Ok(PrivateStateLockLiveness::LiveOwnerNotReady)
+        }
     }
 
     pub(crate) fn acquire(config_root: &Path) -> Result<Self, PrivateStateError> {
@@ -380,8 +429,40 @@ impl PrivateStateLock {
         }
         Ok(Self {
             _file: file,
+            readiness_file: None,
             canonical_root,
         })
+    }
+
+    pub(crate) fn mark_ready(&mut self) -> Result<(), PrivateStateError> {
+        let root_descriptor = rustix::fs::openat(
+            rustix::fs::CWD,
+            &self.canonical_root,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|_| PrivateStateError::HealthInitializationFailed)?;
+        let descriptor = rustix::fs::openat(
+            &root_descriptor,
+            PRIVATE_STATE_READY_LOCK_FILENAME,
+            rustix::fs::OFlags::RDWR
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CREATE,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .map_err(|_| PrivateStateError::HealthInitializationFailed)?;
+        let file = File::from(descriptor);
+        rustix::fs::fchmod(&file, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
+            .map_err(|_| PrivateStateError::HealthInitializationFailed)?;
+        verify_private_lock(&file).map_err(|_| PrivateStateError::HealthInitializationFailed)?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_| PrivateStateError::HealthInitializationFailed)?;
+        self.readiness_file = Some(file);
+        Ok(())
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -393,6 +474,15 @@ impl PrivateStateLock {
             _file: self
                 ._file
                 .try_clone()
+                .map_err(|source| PrivateStateError::Io {
+                    operation: PrivateIoOperation::Lock,
+                    source,
+                })?,
+            readiness_file: self
+                .readiness_file
+                .as_ref()
+                .map(File::try_clone)
+                .transpose()
                 .map_err(|source| PrivateStateError::Io {
                     operation: PrivateIoOperation::Lock,
                     source,
@@ -410,11 +500,7 @@ fn linux_device_minor(device: u64) -> u64 {
     (device & 0xff) | ((device >> 12) & 0xffff_ff00)
 }
 
-fn probe_lock_table(
-    locks: &str,
-    device: u64,
-    inode: u64,
-) -> Result<PrivateStateLockLiveness, PrivateStateProbeError> {
+fn probe_lock_table(locks: &str, device: u64, inode: u64) -> Result<bool, PrivateStateProbeError> {
     let expected_major = linux_device_major(device);
     let expected_minor = linux_device_minor(device);
     for line in locks.lines() {
@@ -448,10 +534,10 @@ fn probe_lock_table(
             && minor == expected_minor
             && candidate_inode == inode
         {
-            return Ok(PrivateStateLockLiveness::LiveOwner);
+            return Ok(true);
         }
     }
-    Ok(PrivateStateLockLiveness::NoLiveOwner)
+    Ok(false)
 }
 
 fn verify_private_lock(file: &File) -> Result<(), PrivateStateError> {
@@ -462,6 +548,7 @@ fn verify_private_lock(file: &File) -> Result<(), PrivateStateError> {
     let expected_mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
     if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
         || rustix::fs::Mode::from_raw_mode(stat.st_mode) != expected_mode
+        || stat.st_uid != rustix::process::geteuid().as_raw()
     {
         return Err(PrivateStateError::InvalidTarget {
             kind: PrivateTargetKind::Lock,
@@ -2814,9 +2901,14 @@ mod tests {
     #[test]
     fn read_only_probe_reports_live_and_unlocked_without_mutation() {
         let temp = tempfile::tempdir().unwrap();
-        let held = PrivateStateLock::acquire(temp.path()).unwrap();
+        let mut held = PrivateStateLock::acquire(temp.path()).unwrap();
         let lock_path = temp.path().join(PRIVATE_STATE_LOCK_FILENAME);
         let before = fs::metadata(&lock_path).unwrap();
+        assert_eq!(
+            PrivateStateLock::try_probe(temp.path()).unwrap(),
+            PrivateStateLockLiveness::LiveOwnerNotReady
+        );
+        held.mark_ready().unwrap();
         assert_eq!(
             PrivateStateLock::try_probe(temp.path()).unwrap(),
             PrivateStateLockLiveness::LiveOwner
@@ -2866,10 +2958,7 @@ mod tests {
             probe_lock_table("not a lock table", 0, 0),
             Err(PrivateStateProbeError::LocksMalformed)
         ));
-        assert_eq!(
-            probe_lock_table("1: POSIX ADVISORY READ 1 00:00:1 0 EOF\n", 0, 2).unwrap(),
-            PrivateStateLockLiveness::NoLiveOwner
-        );
+        assert!(!probe_lock_table("1: POSIX ADVISORY READ 1 00:00:1 0 EOF\n", 0, 2).unwrap());
     }
 
     #[test]
@@ -2892,7 +2981,8 @@ mod tests {
         )
         .unwrap();
 
-        let held = PrivateStateLock::acquire(temp.path()).unwrap();
+        let mut held = PrivateStateLock::acquire(temp.path()).unwrap();
+        held.mark_ready().unwrap();
         let sampled_live = PrivateStateLock::try_probe(temp.path()).unwrap();
         drop(held);
         assert_eq!(
@@ -2906,7 +2996,8 @@ mod tests {
         );
 
         let sampled_absent = PrivateStateLock::try_probe(temp.path()).unwrap();
-        let held = PrivateStateLock::acquire(temp.path()).unwrap();
+        let mut held = PrivateStateLock::acquire(temp.path()).unwrap();
+        held.mark_ready().unwrap();
         assert!(
             load_facts_with_liveness(&state, sampled_absent)
                 .link
