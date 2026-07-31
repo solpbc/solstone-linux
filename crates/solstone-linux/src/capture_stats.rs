@@ -188,17 +188,18 @@ pub fn compute_quarantine_stats(root: &Path, now: f64) -> QuarantineStats {
     }
 }
 
+/// A held segment has two possible histories and the suffix does not record which: the
+/// journal declined it, or startup recovery could not finalize an interrupted one and it
+/// was never sent at all. Naming either cause asserts something we cannot know — say only
+/// what is true of both, which is that the segment is held and will not be retried.
 pub fn format_quarantine_line(stats: &QuarantineStats) -> Option<String> {
     if stats.count == 0 {
         return None;
     }
     match stats.oldest_age_seconds {
-        None => Some(format!(
-            "Quarantine: {} rejected segment(s) held",
-            stats.count
-        )),
+        None => Some(format!("Held: {} segment(s) not sent", stats.count)),
         Some(age) => Some(format!(
-            "Quarantine: {} rejected segment(s) held, oldest {}d",
+            "Held: {} segment(s) not sent, oldest {}d",
             stats.count,
             (age / 86_400.0) as u64
         )),
@@ -309,7 +310,7 @@ mod tests {
                 oldest_age_seconds: None
             })
             .as_deref(),
-            Some("Quarantine: 2 rejected segment(s) held")
+            Some("Held: 2 segment(s) not sent")
         );
     }
     #[test]
@@ -320,7 +321,7 @@ mod tests {
                 oldest_age_seconds: Some(5.9 * 86_400.0)
             })
             .as_deref(),
-            Some("Quarantine: 2 rejected segment(s) held, oldest 5d")
+            Some("Held: 2 segment(s) not sent, oldest 5d")
         );
     }
     // AC: injected now clamps future mtimes to zero age.

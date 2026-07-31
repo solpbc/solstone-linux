@@ -548,15 +548,19 @@ mod tests {
     // tests/test_doctor.py::test_run_doctor_omits_empty_quarantine_line
     #[test]
     fn quarantine_optional() {
-        for value in [Some("Quarantine: 1 rejected segment(s) held".into()), None] {
+        for value in [Some("Held: 1 segment(s) not sent".to_owned()), None] {
             let mut checks = FakeChecks::all(Severity::Ok);
             checks.quarantine = value.clone();
             let mut out = Vec::new();
             run_doctor(&mut checks, &mut out);
-            assert_eq!(
-                String::from_utf8(out).unwrap().contains("Quarantine:"),
-                value.is_some()
-            );
+            let rendered = String::from_utf8(out).unwrap();
+            // Assert against the fixture itself rather than a separately-copied literal:
+            // the previous form pinned its own substring and silently stopped matching the
+            // line it was meant to be checking when that line's wording changed.
+            match &value {
+                Some(line) => assert!(rendered.contains(line.as_str())),
+                None => assert!(!rendered.contains("segment(s) not sent")),
+            }
         }
     }
     // AC: aggregation keeps warnings non-fatal and failures fatal for each warn-capable slot.
