@@ -1256,7 +1256,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("        Quarantine: 1 rejected segment(s) held, oldest 0d"));
+        assert!(out.contains("        Held: 1 segment(s) not sent, oldest 0d"));
         assert!(!out.contains("Service:"));
     }
 
