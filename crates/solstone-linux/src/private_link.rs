@@ -1911,8 +1911,8 @@ impl TokenPersistence {
         });
         let hook_state = state.clone();
         let hook: TokenPersistHook = Arc::new(move |token, expires_at| {
-            // The admission guard encloses the only pinned refresh path and this
-            // synchronous hook, so no dialed carrier escapes before durability.
+            // Persistence here is synchronous and completes before carrier release;
+            // admit_dial owns the ordering invariant that guarantees it.
             hook_state.persist(token, expires_at);
         });
         (state, hook)
