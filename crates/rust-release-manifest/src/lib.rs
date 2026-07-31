@@ -29,6 +29,8 @@ mod elf64;
 mod package_audit;
 pub use audit::*;
 pub use package_audit::audit_packages;
+mod spl_pin;
+pub use spl_pin::validate_spl_pin;
 mod transaction;
 pub use transaction::*;
 mod transparency;
@@ -44,6 +46,7 @@ pub(crate) const CONTEXT_BINDING_NAME: &str = ".release-context.json";
 pub(crate) const CONTEXT_ARCHIVE_NAME: &str = ".release-context.tar";
 pub const MANIFEST_OK_MESSAGE: &str =
     "Named manifest and artifacts verified; this is NOT candidate-readiness classification.";
+pub const SPL_PIN_OK_MESSAGE: &str = "SPL dependency pin verified.";
 pub const RELEASE_DIR_OK_MESSAGE: &str =
     "Release directory verified as a complete five-file candidate.";
 pub const LEDGER_SCHEMA_SHA256: &str =
@@ -284,7 +287,11 @@ impl RepoRoot {
         }
         let workspace: toml::Value =
             toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).map_err(display_error)?)
-                .map_err(display_error)?;
+                .map_err(|cause| {
+                    Error::new(format!(
+                        "workspace manifest parse mismatch: expected valid TOML, actual Cargo.toml: {cause}\nrepair: restore valid TOML in Cargo.toml"
+                    ))
+                })?;
         let members = workspace["workspace"]["members"]
             .as_array()
             .ok_or_else(|| {

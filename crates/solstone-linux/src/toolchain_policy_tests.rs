@@ -704,8 +704,10 @@ fn dependency_policy_denies_wildcards_and_unknown_sources() {
     }
 }
 
+// Manifest-level Git-route and revision enforcement lives in validate_spl_pin in
+// the rust-release-manifest crate.
 #[test]
-fn dependency_policy_pins_the_single_spl_git_source() {
+fn dependency_policy_allows_only_the_approved_sources() {
     let root = workspace_root();
     let deny = read_toml(&root.join("deny.toml"));
     let strings = |value: &toml::Value| {
@@ -724,28 +726,6 @@ fn dependency_policy_pins_the_single_spl_git_source() {
         strings(&deny["sources"]["allow-git"]),
         ["https://github.com/solpbc/spl-rust"]
     );
-    assert_eq!(deny["sources"]["unknown-registry"].as_str(), Some("deny"));
-    assert_eq!(deny["sources"]["unknown-git"].as_str(), Some("deny"));
-    assert_eq!(deny["bans"]["wildcards"].as_str(), Some("deny"));
-
-    let manifest = read_toml(&root.join("crates/solstone-linux/Cargo.toml"));
-    for name in ["spl-core", "spl-transport"] {
-        let dependency = &manifest["dependencies"][name];
-        assert_eq!(dependency["version"].as_str(), Some("0.1.0"));
-        assert_eq!(
-            dependency["git"].as_str(),
-            Some("https://github.com/solpbc/spl-rust")
-        );
-        assert_eq!(
-            dependency["rev"].as_str(),
-            Some("e86c6d0fa0518fcde1fdc1d0e6b9c1ba090a9dbe")
-        );
-    }
-    for (name, dependency) in manifest["dependencies"].as_table().unwrap() {
-        if dependency.get("git").is_some() {
-            assert!(matches!(name.as_str(), "spl-core" | "spl-transport"));
-        }
-    }
 }
 
 #[test]
@@ -764,14 +744,8 @@ fn app_reqwest_edge_has_no_direct_tls_feature() {
     );
 
     // This is deliberately an assertion about the application's direct reqwest
-    // edge. The pinned S/PL crates may retain TLS and crypto in their own
+    // edge. Transitive dependencies may retain TLS and crypto in their own
     // dependency closure; this policy does not assert whole-lockfile absence.
-    for name in ["spl-core", "spl-transport"] {
-        assert_eq!(
-            manifest["dependencies"][name]["rev"].as_str(),
-            Some("e86c6d0fa0518fcde1fdc1d0e6b9c1ba090a9dbe")
-        );
-    }
 }
 
 #[test]

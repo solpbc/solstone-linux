@@ -4,9 +4,10 @@
 use clap::{Args, Parser, Subcommand};
 use rust_release_manifest::{
     AuditRequest, Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE, ProcessEnvironment,
-    ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, RepoRoot, audit_packages, classify_release_dir,
-    create_candidate, emit_lane_handoff, emit_proof_handoff, prove_candidate, publish_transparency,
-    recover_candidate, resign_transparency_pointer, run_audit, verify_manifest_mode,
+    ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, RepoRoot, SPL_PIN_OK_MESSAGE, audit_packages,
+    classify_release_dir, create_candidate, emit_lane_handoff, emit_proof_handoff, prove_candidate,
+    publish_transparency, recover_candidate, resign_transparency_pointer, run_audit,
+    validate_spl_pin, verify_manifest_mode,
 };
 use std::path::PathBuf;
 
@@ -44,6 +45,7 @@ enum Command {
         #[arg(long, conflicts_with = "manifest")]
         release_dir: Option<PathBuf>,
     },
+    ValidateSplPin,
     #[command(hide = true)]
     LaneHandoff(Box<LaneHandoffArgs>),
     #[command(hide = true)]
@@ -179,6 +181,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{RELEASE_DIR_OK_MESSAGE}");
         }
         Command::Validate { .. } => return Err("exactly one validation path is required".into()),
+        Command::ValidateSplPin => {
+            let root = RepoRoot::resolve()?;
+            validate_spl_pin(&root)?;
+            println!("{SPL_PIN_OK_MESSAGE}");
+        }
         Command::LaneHandoff(args) => {
             let LaneHandoffArgs {
                 lane,
