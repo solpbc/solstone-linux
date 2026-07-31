@@ -446,7 +446,11 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
         prompt.write_line(&format!(
             "\nSettings saved to {}",
             config.config_path().display()
-        ))
+        ))?;
+        // Config is read once at startup and never re-read, so a running sol keeps the
+        // old values. Saying only "saved" invites the owner to believe otherwise.
+        prompt.write_line("These take effect the next time sol starts.")?;
+        prompt.write_line("  systemctl --user restart solstone-linux")
     })();
     if let Err(error) = result {
         eprintln!("Error editing settings: {error}");
@@ -464,12 +468,20 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
     } else {
         &config.stream
     };
+    // Resolved before the first line is written: "managed privately" describes a link that
+    // exists. Printing it while sol is telling the owner to pair contradicts the sync line
+    // two lines below it.
+    let link_line = if crate::private_link::credential_present(&config.config_dir) {
+        "Journal link: managed privately"
+    } else {
+        "Journal link: not paired"
+    };
     let mut render = || -> io::Result<()> {
         write_line(
             output,
             format!("Config: {}", config.config_path().display()),
         )?;
-        write_line(output, "Journal link: managed privately")?;
+        write_line(output, link_line)?;
         write_line(output, format!("Stream: {stream}"))?;
         write_line(output, "")?;
         let captures = config.captures_dir();
@@ -1212,6 +1224,9 @@ mod tests {
         let mut config = load_config(paths(t)).config;
         config.stream = "test-stream".into();
         save_config(&config).unwrap();
+        // These fixtures model a configured observer, which is a paired one. The link line
+        // is presence-only, so the bytes never have to be a real credential.
+        fs::write(config.config_dir.join("credentials.json"), "{}").unwrap();
         config
     }
 
@@ -1266,6 +1281,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         fs::create_dir_all(t.path().join("config")).unwrap();
         fs::write(t.path().join("config/config.json"), "[]").unwrap();
+        fs::write(t.path().join("config/credentials.json"), "{}").unwrap();
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         assert!(
@@ -1273,6 +1289,22 @@ mod tests {
                 .unwrap()
                 .contains("Journal link: managed privately")
         );
+    }
+
+    // AC: the link line reports the link that exists, so it cannot contradict a sync line
+    // telling the owner to pair. This is the upgrade shape — config present, never paired.
+    #[test]
+    fn status_reports_an_absent_link_as_not_paired() {
+        let t = tempfile::tempdir().unwrap();
+        let mut config = load_config(paths(&t)).config;
+        config.stream = "test-stream".into();
+        save_config(&config).unwrap();
+        assert!(!config.config_dir.join("credentials.json").exists());
+        let mut out = Vec::new();
+        assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("Journal link: not paired"));
+        assert!(!out.contains("managed privately"));
     }
 
     #[test]
@@ -1288,6 +1320,7 @@ mod tests {
                 "stream":"desktop"
             }"#,
         )
+        .and_then(|()| fs::write(t.path().join("config/credentials.json"), "{}"))
         .unwrap();
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);

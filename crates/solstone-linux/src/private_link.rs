@@ -704,6 +704,16 @@ fn read_private_file(
     Ok(Some(bytes))
 }
 
+/// Whether pairing material exists, without reading or parsing it.
+///
+/// Status rendering needs to know that a link exists; it has no business holding the
+/// credential to find that out. A present-but-unreadable file still counts as present —
+/// the health surfaces already distinguish broken private state from absent state, and
+/// reporting "not paired" for a file we merely failed to read would be its own lie.
+pub(crate) fn credential_present(config_root: &Path) -> bool {
+    config_root.join(CREDENTIALS_FILENAME).exists()
+}
+
 pub(crate) fn load_credential(config_root: &Path) -> Result<Option<Credential>, PrivateStateError> {
     let Some(bytes) = read_private_file(
         &config_root.join(CREDENTIALS_FILENAME),
