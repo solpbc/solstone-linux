@@ -22,7 +22,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 use crate::{
     config::Config,
     observer::{Clock, HealthBeacon},
-    private_link::LinkFacts,
+    private_link::{LinkFactState, LinkFacts},
     segment::timestamp_parts,
     sync_health::{
         ErrorType, ProcessEpoch, SyncFacts, SyncHealth, derive_health, load_facts, save_facts,
@@ -40,6 +40,33 @@ pub const QUARANTINE_TTL_DAYS: i64 = 30;
 pub const CONTACT_FLUSH_INTERVAL: f64 = 30.0;
 pub const SERVER_KEY_FILENAME: &str = ".server_key";
 
+struct LinkFactPersistence {
+    state_dir: PathBuf,
+    facts: Arc<Mutex<SyncFacts>>,
+    last_persisted: Mutex<Option<LinkFactState>>,
+    failures: Arc<AtomicUsize>,
+}
+
+impl LinkFactPersistence {
+    fn persist(&self, link_facts: &LinkFacts) {
+        // Lock order: persistence serialization, SyncFacts, then LinkFactState.
+        let mut last_persisted = self.last_persisted.lock().unwrap();
+        let mut facts = self.facts.lock().unwrap();
+        let snapshot = link_facts.snapshot();
+        if last_persisted.as_ref() == Some(&snapshot) {
+            return;
+        }
+        facts.link = Some(snapshot.clone());
+        if let Err(error) = save_facts(&self.state_dir, &facts) {
+            if self.failures.fetch_add(1, Ordering::AcqRel) == 0 {
+                tracing::error!(%error, path = %self.state_dir.display(), "Failed to persist link health");
+            }
+            return;
+        }
+        *last_persisted = Some(snapshot);
+    }
+}
+
 pub struct SyncService {
     notify: Arc<Notify>,
     pending_trigger: Arc<AtomicBool>,
@@ -49,6 +76,7 @@ pub struct SyncService {
     stale_threshold: f64,
     clock: Arc<dyn Clock + Send + Sync>,
     link_facts: LinkFacts,
+    link_persistence_failures: Arc<AtomicUsize>,
     abort: tokio::task::AbortHandle,
     task: JoinHandle<()>,
 }
@@ -133,10 +161,15 @@ impl SyncService {
         facts.progress.clear();
         facts.link = Some(link_facts.snapshot());
         facts.link_epoch = process_epoch;
-        if let Err(error) = save_facts(&config.state_dir(), &facts) {
-            tracing::warn!(%error, "Failed to save sync health");
-        }
         let facts = Arc::new(Mutex::new(facts));
+        let link_persistence_failures = Arc::new(AtomicUsize::new(0));
+        let persistence = Arc::new(LinkFactPersistence {
+            state_dir: config.state_dir(),
+            facts: Arc::clone(&facts),
+            last_persisted: Mutex::new(None),
+            failures: Arc::clone(&link_persistence_failures),
+        });
+        link_facts.install_sink(Arc::new(move |facts| persistence.persist(facts)));
         let recent_error_count = Arc::new(AtomicU8::new(0));
         let mut worker = SyncWorker::new(
             config.clone(),
@@ -161,6 +194,7 @@ impl SyncService {
             stale_threshold: config.sync_stale_threshold as f64,
             clock,
             link_facts,
+            link_persistence_failures,
             abort,
             task,
         }
@@ -211,6 +245,10 @@ impl SyncService {
 
     pub fn progress(&self) -> String {
         self.sampler_handle().progress()
+    }
+
+    pub fn link_persistence_failure_count(&self) -> usize {
+        self.link_persistence_failures.load(Ordering::Acquire)
     }
 
     pub fn health_beacon(&self) -> HealthBeacon {
@@ -2139,6 +2177,190 @@ mod tests {
 
         service.shutdown(Duration::from_secs(1)).await.unwrap();
         drop(owner_lock);
+    }
+
+    #[tokio::test]
+    async fn link_facts_published_after_sync_start_persist_change_only() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        fs::create_dir_all(&config.config_dir).unwrap();
+        let mut owner_lock =
+            crate::private_link::PrivateStateLock::acquire(&config.config_dir).unwrap();
+        owner_lock.mark_ready().unwrap();
+        let server = MockServer::new(Vec::new()).await;
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
+            &config,
+            &server.url,
+            "host",
+            "linux",
+            "test",
+            Arc::clone(&clock),
+        ));
+        let epoch = ProcessEpoch::for_test(8);
+        let service = SyncService::start_with_epoch(
+            config.clone(),
+            Arc::clone(&client),
+            Arc::clone(&clock),
+            Some(epoch),
+        );
+        let health_path = crate::sync_health::sync_health_path(&config.state_dir());
+        let cases = [
+            (
+                crate::private_link::LinkFact::PairingRequired,
+                "pairing_required",
+            ),
+            (
+                crate::private_link::LinkFact::PrivateStateInvalid,
+                "private_state_invalid",
+            ),
+            (
+                crate::private_link::LinkFact::ConfigSanitationFailed,
+                "config_sanitation_failed",
+            ),
+            (
+                crate::private_link::LinkFact::ListenerReady,
+                "listener_ready",
+            ),
+            (
+                crate::private_link::LinkFact::CarrierProven,
+                "carrier_proven",
+            ),
+            (
+                crate::private_link::LinkFact::ObserverRegistered,
+                "observer_registered",
+            ),
+            (
+                crate::private_link::LinkFact::TransportUnavailable,
+                "transport_unavailable",
+            ),
+            (
+                crate::private_link::LinkFact::TerminalRevocation,
+                "terminal_revocation",
+            ),
+            (
+                crate::private_link::LinkFact::TokenPersistenceFailure,
+                "token_persistence_failure",
+            ),
+        ];
+        for (fact, key) in cases {
+            client.begin_owner_generation();
+            let prior_file = File::open(&health_path).unwrap();
+            let prior_inode = prior_file.metadata().unwrap().ino();
+            client.publish_link_fact(fact);
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
+            assert_eq!(persisted["link_epoch"], "08".repeat(32));
+            assert_eq!(persisted["link"][key], true, "fact {key} was not persisted");
+            assert_ne!(
+                fs::metadata(&health_path).unwrap().ino(),
+                prior_inode,
+                "fact {key} did not replace the health file"
+            );
+        }
+
+        let unchanged_inode = fs::metadata(&health_path).unwrap().ino();
+        client.publish_link_fact(crate::private_link::LinkFact::TokenPersistenceFailure);
+        assert_eq!(fs::metadata(&health_path).unwrap().ino(), unchanged_inode);
+
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
+        drop(owner_lock);
+    }
+
+    #[tokio::test]
+    async fn link_fact_sink_preserves_sync_columns_and_retries_failed_write() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let server = MockServer::new(Vec::new()).await;
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
+            &config,
+            &server.url,
+            "host",
+            "linux",
+            "test",
+            Arc::clone(&clock),
+        ));
+        let service = SyncService::start_with_epoch(
+            config.clone(),
+            Arc::clone(&client),
+            Arc::clone(&clock),
+            Some(ProcessEpoch::for_test(9)),
+        );
+        client.begin_owner_generation();
+        {
+            let mut facts = service.facts.lock().unwrap();
+            facts.last_successful_sync = Some(11.0);
+            facts.last_successful_contact = Some(12.0);
+            facts.last_error_class = Some(ErrorType::Client);
+            facts.last_error_code = Some(409);
+            facts.pending_confirmed = Some(3);
+            facts.in_progress = true;
+            facts.progress = "3/4".into();
+            facts.link = Some(LinkFactState {
+                pairing_required: true,
+                ..LinkFactState::default()
+            });
+        }
+        let health_path = crate::sync_health::sync_health_path(&config.state_dir());
+        let before = fs::metadata(&health_path).unwrap().ino();
+        client.publish_link_fact(crate::private_link::LinkFact::PairingRequired);
+        assert_ne!(fs::metadata(&health_path).unwrap().ino(), before);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
+        assert_eq!(persisted["last_successful_sync"], 11.0);
+        assert_eq!(persisted["last_successful_contact"], 12.0);
+        assert_eq!(persisted["last_error_class"], "client");
+        assert_eq!(persisted["last_error_code"], 409);
+        assert_eq!(persisted["pending_confirmed"], 3);
+        assert_eq!(persisted["in_progress"], true);
+        assert_eq!(persisted["progress"], "3/4");
+
+        let state_dir = config.state_dir();
+        let backup = state_dir.with_extension("backup");
+        fs::rename(&state_dir, &backup).unwrap();
+        fs::write(&state_dir, b"block directory creation").unwrap();
+        client.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
+        assert_eq!(service.link_persistence_failure_count(), 1);
+        fs::remove_file(&state_dir).unwrap();
+        fs::rename(&backup, &state_dir).unwrap();
+        client.publish_link_fact(crate::private_link::LinkFact::ConfigSanitationFailed);
+        assert_eq!(service.link_persistence_failure_count(), 1);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
+        assert_eq!(persisted["link"]["private_state_invalid"], true);
+        assert_eq!(persisted["link"]["config_sanitation_failed"], true);
+
+        let link_facts = client.link_facts();
+        link_facts.owner_lost();
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
+        assert_eq!(persisted["link"]["transport_unavailable"], true);
+        assert_eq!(persisted["link"]["private_state_invalid"], false);
+        client.begin_owner_generation();
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
+        assert_eq!(persisted["link"]["transport_unavailable"], false);
+
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // tests/test_sync_health_surfaces.py::test_404_query_cycle_drives_failing_state_on_all_surfaces

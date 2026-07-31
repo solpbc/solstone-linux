@@ -140,7 +140,7 @@ pub(crate) fn tick_once(
     Ok(())
 }
 
-async fn shutdown_in_order<O, DF, SF, EF, LF>(
+async fn shutdown_in_order<O, DF, SF, JF, LS, EF, LF>(
     mut observer: O,
     shutdown_callbacks: (
         impl FnOnce(&mut O) -> Result<(), ObserverError>,
@@ -148,8 +148,8 @@ async fn shutdown_in_order<O, DF, SF, EF, LF>(
     ),
     desktop_shutdown: DF,
     sync_shutdown: SF,
+    linked_lifecycle: (JF, impl FnOnce(LS) -> LF),
     sender_stop: impl FnOnce() -> EF,
-    linked_shutdown: impl FnOnce() -> LF,
     trace: &mut dyn FnMut(&'static str),
 ) -> (
     Result<(), ObserverError>,
@@ -160,10 +160,12 @@ async fn shutdown_in_order<O, DF, SF, EF, LF>(
 where
     DF: std::future::Future<Output = ()>,
     SF: std::future::Future<Output = Result<(), tokio::task::JoinError>>,
+    JF: std::future::Future<Output = LS>,
     EF: std::future::Future<Output = Result<(), ObserverError>>,
     LF: std::future::Future<Output = Result<(), ObserverError>>,
 {
     let (observer_shutdown, disable_open_journal) = shutdown_callbacks;
+    let (linked_start_join, linked_shutdown) = linked_lifecycle;
     trace("open_journal_disabled");
     disable_open_journal();
     trace("desktop_shutdown");
@@ -176,10 +178,13 @@ where
         .map_err(|error| ObserverError::Io(format!("sync shutdown failed: {error}")));
     trace("sync_join_complete");
     drop(observer);
+    trace("linked_start_join");
+    let linked_start = linked_start_join.await;
+    trace("linked_start_join_complete");
     trace("event_sender_stop");
     let sender_result = sender_stop().await;
     trace("linked_owner_shutdown");
-    let linked_result = linked_shutdown().await;
+    let linked_result = linked_shutdown(linked_start).await;
     trace("linked_owner_join_complete");
     (observer_result, sync_result, sender_result, linked_result)
 }
@@ -210,7 +215,8 @@ async fn stop_upload_sender(
 // 4. the run closure constructs capture backends, sync, and the observer.
 // 5. initialize publishes the first snapshot, then desktop surfaces start and commands wake the
 //    absolute-deadline tick loop.
-// 6. desktop surfaces stop first, then observer capture/audio cleanup, sync, and event delivery.
+// 6. desktop surfaces stop first, then observer capture/audio cleanup and sync; linked startup is
+//    joined before event delivery stops so it cannot retain the upload client.
 // 7. the linked owner closes streams and joins bridge/carrier tasks last, then releases its lock.
 pub(crate) fn run_observer(
     config: Config,
@@ -430,9 +436,8 @@ fn run_capture(
             (Observer::shutdown, || open_journal.close_current()),
             desktop_shell.shutdown(SHUTDOWN_TIMEOUT),
             sync.shutdown(SHUTDOWN_TIMEOUT),
-            || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
-            || async move {
-                match linked_start.await {
+            (linked_start, |linked_start| async move {
+                match linked_start {
                     Ok(Ok(owner)) => owner.shutdown().await.map_err(|error| {
                         ObserverError::Io(format!("linked shutdown failed: {error}"))
                     }),
@@ -444,7 +449,8 @@ fn run_capture(
                         "linked startup task failed: {error}"
                     ))),
                 }
-            },
+            }),
+            || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
             &mut |_| {},
         ));
     run_result
@@ -1032,11 +1038,11 @@ mod tests {
                 events.lock().unwrap().push("desktop_stopped");
             },
             async { Ok(()) },
+            (async {}, |()| async { Ok(()) }),
             move || async move {
                 sender_events.lock().unwrap().push("sender_stopped");
                 Ok(())
             },
-            || async { Ok(()) },
             &mut trace,
         )
         .await;
@@ -1052,6 +1058,8 @@ mod tests {
                 "final_segment_trigger",
                 "sync_shutdown",
                 "sync_join_complete",
+                "linked_start_join",
+                "linked_start_join_complete",
                 "event_sender_stop",
                 "sender_stopped",
                 "linked_owner_shutdown",
@@ -1071,8 +1079,10 @@ mod tests {
                     .await
                     .unwrap_err())
             },
+            (async {}, |()| async {
+                Err(ObserverError::Io("linked failed".into()))
+            }),
             || async { Err(ObserverError::Io("sender failed".into())) },
-            || async { Err(ObserverError::Io("linked failed".into())) },
             &mut |_| {},
         )
         .await;
@@ -1097,12 +1107,12 @@ mod tests {
                 sync_events.lock().unwrap().push("sync_complete");
                 Ok(())
             },
+            (async {}, move |()| async move {
+                linked_events.lock().unwrap().push("linked_complete");
+                Ok(())
+            }),
             move || async move {
                 sender_events.lock().unwrap().push("sender_complete");
-                Ok(())
-            },
-            move || async move {
-                linked_events.lock().unwrap().push("linked_complete");
                 Ok(())
             },
             &mut |_| {},
@@ -1116,6 +1126,35 @@ mod tests {
             &*events.lock().unwrap(),
             &["sync_complete", "sender_complete", "linked_complete"]
         );
+    }
+
+    #[tokio::test]
+    async fn linked_start_join_releases_upload_before_sender_stop() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let upload = Arc::new(crate::upload::capability_less_client_for_test(
+            &config,
+            "host",
+            "linux",
+            "test",
+            Arc::new(SystemClock::new()),
+        ));
+        let linked_upload = Arc::clone(&upload);
+        let results = shutdown_in_order(
+            (),
+            (|_| Ok(()), || {}),
+            async {},
+            async { Ok(()) },
+            (async move { drop(linked_upload) }, |()| async { Ok(()) }),
+            move || stop_upload_sender(upload, Duration::from_secs(1)),
+            &mut |_| {},
+        )
+        .await;
+        assert!(results.2.is_ok());
     }
 
     async fn drive_real_link_start(

@@ -303,7 +303,7 @@ mod tests {
                 },
                 HealthState::Offline,
             ),
-            (SyncFacts::default(), HealthState::Connecting),
+            (SyncFacts::default(), HealthState::NotReported),
         ];
         for (facts, expected_state) in cases {
             let health = derive_health(&facts, 1_000.0, 600.0);

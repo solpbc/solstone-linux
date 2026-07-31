@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(
             s.sync_changed(&h, "3/10"),
             Some(ComponentSignal::SyncProgressChanged(
-                "connecting:3/10".into()
+                "not-reported:3/10".into()
             ))
         );
         assert_eq!(s.sync_changed(&h, "3/10"), None)

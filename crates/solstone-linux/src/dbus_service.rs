@@ -153,7 +153,7 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
 // TestGetStats::test_returns_cached_stats_dict -> dbus_service::tests::get_stats_returns_cached_shape.
 // TestGetStats::test_empty_captures -> dbus_service::tests::get_stats_empty_captures.
 // TestGetStats::test_uses_cached_today_count -> dbus_service::tests::get_stats_uses_cached_today_count.
-// TestSyncStatusTracking::test_initial_status -> dbus_service::tests::fresh_sync_properties_are_unknown_and_empty.
+// TestSyncStatusTracking::test_initial_status -> dbus_service::tests::fresh_sync_properties_are_not_reported_and_empty.
 // TestSyncStatusTracking::test_progress_drives_syncing_status -> dbus_service::tests::in_progress_sync_properties_pass_through.
 // TestSyncStatusTracking::test_progress_change_emits_signal -> desktop_component::tests::progress_change_emits_syncing_composite.
 // TestObserverServiceConfig::test_capture_dir -> dbus_service::tests::config_properties_match_config.
@@ -587,7 +587,7 @@ mod tests {
         assert!(second > first);
     }
     #[test]
-    fn fresh_sync_properties_are_connecting_and_empty() {
+    fn fresh_sync_properties_are_not_reported_and_empty() {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             Config::default(),
@@ -595,7 +595,7 @@ mod tests {
             "",
             0,
         );
-        assert_eq!(s.sync_status(), "connecting");
+        assert_eq!(s.sync_status(), "not-reported");
         assert_eq!(s.current_sync_progress(), "");
     }
     #[test]

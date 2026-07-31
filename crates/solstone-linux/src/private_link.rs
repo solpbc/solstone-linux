@@ -789,9 +789,17 @@ pub(crate) enum LinkFact {
     TokenPersistenceFailure,
 }
 
+pub(crate) type LinkFactSink = Arc<dyn Fn(&LinkFacts) + Send + Sync>;
+
+#[derive(Default)]
+struct LinkFactsInner {
+    state: Mutex<LinkFactState>,
+    sink: Mutex<Option<LinkFactSink>>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct LinkFacts {
-    inner: Arc<Mutex<LinkFactState>>,
+    inner: Arc<LinkFactsInner>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -809,39 +817,67 @@ pub(crate) struct LinkFactState {
 
 impl LinkFacts {
     pub(crate) fn begin_owner_generation(&self) {
-        *self.inner.lock().unwrap_or_else(|p| p.into_inner()) = LinkFactState::default();
+        *self.inner.state.lock().unwrap_or_else(|p| p.into_inner()) = LinkFactState::default();
+        self.persist();
     }
 
     pub(crate) fn owner_lost(&self) {
-        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        *state = LinkFactState {
-            transport_unavailable: true,
-            ..LinkFactState::default()
-        };
+        {
+            let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            *state = LinkFactState {
+                transport_unavailable: true,
+                ..LinkFactState::default()
+            };
+        }
+        self.persist();
     }
 
     pub(crate) fn publish(&self, fact: LinkFact) {
-        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        match fact {
-            LinkFact::PairingRequired => state.pairing_required = true,
-            LinkFact::PrivateStateInvalid => state.private_state_invalid = true,
-            LinkFact::ConfigSanitationFailed => state.config_sanitation_failed = true,
-            LinkFact::ListenerReady => state.listener_ready = true,
-            LinkFact::CarrierProven => state.carrier_proven = true,
-            LinkFact::ObserverRegistered => {
-                state.observer_registered = true;
-                if !state.token_persistence_failure {
-                    state.transport_unavailable = false;
+        {
+            let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            match fact {
+                LinkFact::PairingRequired => state.pairing_required = true,
+                LinkFact::PrivateStateInvalid => state.private_state_invalid = true,
+                LinkFact::ConfigSanitationFailed => state.config_sanitation_failed = true,
+                LinkFact::ListenerReady => state.listener_ready = true,
+                LinkFact::CarrierProven => state.carrier_proven = true,
+                LinkFact::ObserverRegistered => {
+                    state.observer_registered = true;
+                    if !state.token_persistence_failure {
+                        state.transport_unavailable = false;
+                    }
                 }
+                LinkFact::TransportUnavailable => state.transport_unavailable = true,
+                LinkFact::TerminalRevocation => state.terminal_revocation = true,
+                LinkFact::TokenPersistenceFailure => state.token_persistence_failure = true,
             }
-            LinkFact::TransportUnavailable => state.transport_unavailable = true,
-            LinkFact::TerminalRevocation => state.terminal_revocation = true,
-            LinkFact::TokenPersistenceFailure => state.token_persistence_failure = true,
         }
+        self.persist();
     }
 
     pub(crate) fn snapshot(&self) -> LinkFactState {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn install_sink(&self, sink: LinkFactSink) {
+        *self.inner.sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
+        self.persist();
+    }
+
+    fn persist(&self) {
+        let sink = self
+            .inner
+            .sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(sink) = sink {
+            sink(self);
+        }
     }
 }
 

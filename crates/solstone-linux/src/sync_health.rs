@@ -53,6 +53,7 @@ pub enum HealthState {
     TransportUnavailable,
     Offline,
     ListenerReady,
+    NotReported,
     Connecting,
     Syncing,
     Connected,
@@ -277,6 +278,23 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
             },
         ),
         (
+            HealthState::NotReported,
+            HealthSurface {
+                header_recording: "on — not reported",
+                header_idle: "idle — not reported",
+                sync_line: "sync: not reported",
+                tooltip: "sync: sol is not reporting right now",
+                accessible_recording: "on, sync not reported",
+                accessible_idle: "idle, sync not reported",
+                icon: "syncing",
+                sni: "Active",
+                cli: "Sync: not reported — sol is not running, or has not reported yet",
+                doctor_severity: "warn",
+                doctor_detail: "sol is not running, or has not reported yet",
+                dbus: "not-reported",
+            },
+        ),
+        (
             HealthState::Connecting,
             HealthSurface {
                 header_recording: "on — connecting",
@@ -389,6 +407,7 @@ fn fill(template: &str, values: &HashMap<&str, String>) -> String {
 }
 
 pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncHealth {
+    let link_missing = facts.link.is_none();
     let link = facts.link.clone().unwrap_or_default();
     let stale = facts
         .last_successful_contact
@@ -415,6 +434,8 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
         HealthState::Offline
     } else if link.listener_ready && !link.observer_registered {
         HealthState::ListenerReady
+    } else if link_missing {
+        HealthState::NotReported
     } else if !link.observer_registered {
         HealthState::Connecting
     } else if connected {
@@ -597,15 +618,42 @@ mod tests {
 
     // tests/test_sync_health.py::test_empty_facts_derive_unknown
     #[test]
-    fn empty_facts_derive_unknown() {
+    fn empty_facts_derive_not_reported() {
         let health = derive_health(
             &SyncFacts::default(),
             1000.0,
             DEFAULT_SYNC_STALE_THRESHOLD as f64,
         );
-        assert_eq!(health.state, HealthState::Connecting);
+        assert_eq!(health.state, HealthState::NotReported);
         assert_eq!(health.sni_status, "Active");
         assert_eq!(health.pending_display, "pending unconfirmed");
+    }
+
+    #[test]
+    fn missing_link_facts_use_exact_not_reported_surface() {
+        let health = derive_health(
+            &SyncFacts::default(),
+            1000.0,
+            DEFAULT_SYNC_STALE_THRESHOLD as f64,
+        );
+        assert_eq!(health.dbus, "not-reported");
+        assert_eq!(health.header_recording, "on — not reported");
+        assert_eq!(health.header_idle, "idle — not reported");
+        assert_eq!(health.sync_line, "sync: not reported");
+        assert_eq!(health.tooltip, "sync: sol is not reporting right now");
+        assert_eq!(health.accessible_recording, "on, sync not reported");
+        assert_eq!(health.accessible_idle, "idle, sync not reported");
+        assert_eq!(health.icon, "syncing");
+        assert_eq!(health.sni_status, "Active");
+        assert_eq!(
+            health.cli,
+            "Sync: not reported — sol is not running, or has not reported yet"
+        );
+        assert_eq!(health.doctor_severity, "warn");
+        assert_eq!(
+            health.doctor_detail,
+            "sol is not running, or has not reported yet"
+        );
     }
 
     #[test]
@@ -737,7 +785,7 @@ mod tests {
                 DEFAULT_SYNC_STALE_THRESHOLD as f64,
             )
             .state,
-            HealthState::Connecting
+            HealthState::NotReported
         );
     }
 
@@ -819,7 +867,7 @@ mod tests {
     // tests/test_sync_health.py::test_every_health_state_has_complete_surface
     #[test]
     fn every_health_state_has_complete_surface() {
-        assert_eq!(SURFACE_BY_STATE.len(), 11);
+        assert_eq!(SURFACE_BY_STATE.len(), 12);
         for surface in SURFACE_BY_STATE.values() {
             assert!(!surface.header_recording.is_empty());
             assert!(!surface.header_idle.is_empty());
