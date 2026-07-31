@@ -84,10 +84,16 @@ impl Runner for SystemRunner {
         timeout: Duration,
         environment: &HashMap<String, String>,
     ) -> io::Result<Output> {
+        // Only `success` and stdout reach the caller, so an inherited stderr cannot inform
+        // any decision — it can only interleave a probe's complaint into our own output.
+        // `gnome-extensions list` on a non-GNOME desktop is the standard case: it prints
+        // "Failed to connect to GNOME Shell" in the middle of the doctor report while the
+        // check itself correctly resolves to "not applicable".
         let mut child = Command::new(program)
             .args(args)
             .envs(environment)
             .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()?;
         let mut stdout = child.stdout.take().expect("piped stdout must be present");
         let reader = thread::spawn(move || {
