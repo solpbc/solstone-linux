@@ -2,7 +2,11 @@
 // Copyright (c) 2026 sol pbc
 
 use crate::{
-    Error, Result, digest,
+    Error, Result,
+    authority_vocabulary::{
+        LEGACY_COMMANDS, LEGACY_ENVIRONMENT, LEGACY_OPTIONS, LEGACY_ORIGINS, PYTHON_SETUP,
+    },
+    digest,
     elf64::{Elf64Linkage, parse_elf64},
 };
 use flate2::read::GzDecoder;
@@ -19,12 +23,13 @@ use xz2::read::XzDecoder;
 
 const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 const INSTALL_NOTES: &[u8] = include_bytes!("../../../packaging/INSTALL-NOTES");
+const PACKAGE_NOTE_PHRASES: &[&str] = &["observer key", "pipx"];
 
 // Derived with:
 // cargo build --locked --release -p solstone-linux
 // SOLSTONE_ELF_DERIVE=<workspace>/target/release/solstone-linux \
 //   cargo test --locked -p rust-release-manifest elf64::tests::derive_requested_release_binary -- --nocapture
-// Source commit: 95ea20d9ae5a726f1b4058eab3122f07fbd86fbf.
+// Source commit: eacc273a1e97b8ad365feec745c082dae7f86607.
 const EXPECTED_ELF_TYPE: u16 = 3;
 const EXPECTED_MACHINE: u16 = 62;
 const EXPECTED_INTERPRETER: &str = "/lib64/ld-linux-x86-64.so.2";
@@ -323,6 +328,126 @@ fn valid_deb_dependency_field(value: &str) -> bool {
         })
 }
 
+pub(crate) fn md5_digest(bytes: &[u8]) -> String {
+    const SHIFTS: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const TABLE: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
+    ];
+    let bit_len = (bytes.len() as u64).wrapping_mul(8);
+    let mut padded = bytes.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_le_bytes());
+    let mut state = [0x67452301_u32, 0xefcdab89, 0x98badcfe, 0x10325476];
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0_u32; 16];
+        for (word, bytes) in words.iter_mut().zip(chunk.chunks_exact(4)) {
+            *word = u32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
+        }
+        let [mut a, mut b, mut c, mut d] = state;
+        for index in 0..64 {
+            let (mixed, word) = match index {
+                0..=15 => ((b & c) | (!b & d), index),
+                16..=31 => ((d & b) | (!d & c), (5 * index + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * index + 5) % 16),
+                _ => (c ^ (b | !d), (7 * index) % 16),
+            };
+            let next = a
+                .wrapping_add(mixed)
+                .wrapping_add(TABLE[index])
+                .wrapping_add(words[word])
+                .rotate_left(SHIFTS[index])
+                .wrapping_add(b);
+            a = d;
+            d = c;
+            c = b;
+            b = next;
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+    }
+    state
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn verify_deb_md5sums(path: &Path, member: &Member, data: &[Member]) -> Result<()> {
+    let text = std::str::from_utf8(&member.bytes)
+        .map_err(|_| audit_error(path, "MalformedMetadata", "non-utf8-md5sums", "deb:md5sums"))?;
+    let mut declared = BTreeMap::new();
+    for line in text.lines() {
+        let Some((sum, member_path)) = line.split_once("  ") else {
+            return Err(audit_error(
+                path,
+                "MalformedMetadata",
+                "md5sums-grammar",
+                "deb:md5sums",
+            ));
+        };
+        if sum.len() != 32
+            || !sum.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || member_path.is_empty()
+            || normalized_path(Path::new(member_path)).as_deref() != Some(member_path)
+        {
+            return Err(audit_error(
+                path,
+                "MalformedMetadata",
+                "md5sums-grammar",
+                "deb:md5sums",
+            ));
+        }
+        if declared
+            .insert(member_path.to_owned(), sum.to_ascii_lowercase())
+            .is_some()
+        {
+            return Err(audit_error(
+                path,
+                "MalformedMetadata",
+                "md5sums-duplicate",
+                member_path,
+            ));
+        }
+    }
+    let actual = data
+        .iter()
+        .map(|member| (member.path.clone(), md5_digest(&member.bytes)))
+        .collect::<BTreeMap<_, _>>();
+    if declared != actual {
+        let offending = declared
+            .keys()
+            .chain(actual.keys())
+            .find(|member| declared.get(*member) != actual.get(*member))
+            .map(String::as_str)
+            .unwrap_or("deb:md5sums");
+        return Err(audit_error(
+            path,
+            "MalformedMetadata",
+            "md5sums-mismatch",
+            offending,
+        ));
+    }
+    Ok(())
+}
+
 fn deb_members(path: &Path) -> Result<Vec<Member>> {
     let mut archive = ar::Archive::new(
         File::open(path)
@@ -385,17 +510,10 @@ fn deb_members(path: &Path) -> Result<Vec<Member>> {
         .iter()
         .find(|member| member.path.trim_start_matches("./") == "control")
         .ok_or_else(|| audit_error(path, "MalformedMetadata", "missing-control", "deb"))?;
-    if !control
+    let md5sums = control
         .iter()
-        .any(|member| member.path.trim_start_matches("./") == "md5sums")
-    {
-        return Err(audit_error(
-            path,
-            "MalformedMetadata",
-            "missing-md5sums",
-            "deb",
-        ));
-    }
+        .find(|member| member.path.trim_start_matches("./") == "md5sums")
+        .ok_or_else(|| audit_error(path, "MalformedMetadata", "missing-md5sums", "deb"))?;
     let control_body = std::str::from_utf8(&control_member.bytes)
         .map_err(|_| audit_error(path, "MalformedMetadata", "non-utf8-control", "deb"))?;
     let mut fields = BTreeMap::new();
@@ -422,7 +540,17 @@ fn deb_members(path: &Path) -> Result<Vec<Member>> {
             ));
         }
     }
-    for dependency_field in ["Depends", "Pre-Depends", "Provides"] {
+    for dependency_field in [
+        "Depends",
+        "Pre-Depends",
+        "Recommends",
+        "Suggests",
+        "Enhances",
+        "Breaks",
+        "Conflicts",
+        "Replaces",
+        "Provides",
+    ] {
         if let Some(value) = fields.get(dependency_field) {
             if !valid_deb_dependency_field(value) {
                 return Err(audit_error(
@@ -444,40 +572,40 @@ fn deb_members(path: &Path) -> Result<Vec<Member>> {
     }
     let (data_name, data_bytes) =
         data.ok_or_else(|| audit_error(path, "MalformedContainer", "missing-data", "deb"))?;
-    compressed_tar(path, &data_name, data_bytes)
+    let data = compressed_tar(path, &data_name, data_bytes)?;
+    verify_deb_md5sums(path, md5sums, &data)?;
+    Ok(data)
 }
 
 fn rpm_members(path: &Path) -> Result<Vec<Member>> {
     let package = rpm::Package::open(path)
         .map_err(|error| audit_error(path, "MalformedContainer", &error.to_string(), "rpm"))?;
-    for dependency in package
-        .metadata
-        .get_requires()
-        .map_err(|error| {
+    for (field, dependencies) in [
+        ("Requires", package.metadata.get_requires()),
+        ("Provides", package.metadata.get_provides()),
+        ("Recommends", package.metadata.get_recommends()),
+        ("Suggests", package.metadata.get_suggests()),
+        ("Supplements", package.metadata.get_supplements()),
+        ("Enhances", package.metadata.get_enhances()),
+        ("Conflicts", package.metadata.get_conflicts()),
+        ("Obsoletes", package.metadata.get_obsoletes()),
+    ] {
+        for dependency in dependencies.map_err(|error| {
             audit_error(
                 path,
                 "MalformedMetadata",
                 &error.to_string(),
-                "rpm:Requires",
+                &format!("rpm:{field}"),
             )
-        })?
-        .into_iter()
-        .chain(package.metadata.get_provides().map_err(|error| {
-            audit_error(
-                path,
-                "MalformedMetadata",
-                &error.to_string(),
-                "rpm:Provides",
-            )
-        })?)
-    {
-        if let Some(token) = forbidden_dependency(&dependency.name) {
-            return Err(audit_error(
-                path,
-                "ForbiddenDependency",
-                token,
-                "rpm:Requires/Provides",
-            ));
+        })? {
+            if let Some(token) = forbidden_dependency(&dependency.name) {
+                return Err(audit_error(
+                    path,
+                    "ForbiddenDependency",
+                    token,
+                    &format!("rpm:{field}"),
+                ));
+            }
         }
     }
     for (name, present) in [
@@ -642,17 +770,17 @@ fn inspect_payload(
                 let notes = std::str::from_utf8(&member.bytes)
                     .map_err(|_| audit_error(path, "StaleInstallNotes", "non-utf8", &expected))?;
                 let normalized = notes.to_ascii_lowercase();
-                for token in [
-                    "--server-url",
-                    "localhost:5015",
-                    "127.0.0.1:5015",
-                    "solstone_token",
-                    "observer key",
-                    "pip install",
-                    "pipx",
-                ] {
-                    if normalized.contains(token) {
-                        return Err(audit_error(path, "StaleInstallNotes", token, &expected));
+                for token in LEGACY_ENVIRONMENT
+                    .iter()
+                    .chain(LEGACY_OPTIONS)
+                    .chain(LEGACY_ORIGINS)
+                    .chain(LEGACY_COMMANDS)
+                    .chain(PYTHON_SETUP)
+                    .chain(PACKAGE_NOTE_PHRASES)
+                {
+                    let token = token.to_ascii_lowercase();
+                    if normalized.contains(&token) {
+                        return Err(audit_error(path, "StaleInstallNotes", &token, &expected));
                     }
                 }
                 if member.bytes != INSTALL_NOTES {
@@ -869,6 +997,75 @@ mod tests {
                 inspect_payload(artifact(format), format, fixture_members(format)).unwrap();
             inspect_elf(artifact(format), &executable).unwrap();
             assert_eq!(nonbinary.len(), PAYLOAD_AUTHORITY.len() - 1);
+        }
+    }
+
+    #[test]
+    fn deb_md5sums_are_closed_and_digest_bound() {
+        assert_eq!(md5_digest(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_digest(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+
+        let data = vec![
+            Member {
+                path: "usr/bin/solstone-linux".to_owned(),
+                mode: 0o755,
+                bytes: b"binary".to_vec(),
+            },
+            Member {
+                path: "usr/share/doc/solstone-linux/LICENSE".to_owned(),
+                mode: 0o644,
+                bytes: b"license".to_vec(),
+            },
+        ];
+        let valid = Member {
+            path: "md5sums".to_owned(),
+            mode: 0o644,
+            bytes: format!(
+                "{}  usr/bin/solstone-linux\n{}  usr/share/doc/solstone-linux/LICENSE\n",
+                md5_digest(b"binary"),
+                md5_digest(b"license")
+            )
+            .into_bytes(),
+        };
+        verify_deb_md5sums(artifact(Format::Deb), &valid, &data).unwrap();
+        for (bytes, token, member) in [
+            (
+                b"not-an-md5-line\n".to_vec(),
+                "md5sums-grammar",
+                "deb:md5sums",
+            ),
+            (
+                format!(
+                    "{}  usr/bin/solstone-linux\n{}  usr/bin/solstone-linux\n",
+                    md5_digest(b"binary"),
+                    md5_digest(b"binary")
+                )
+                .into_bytes(),
+                "md5sums-duplicate",
+                "usr/bin/solstone-linux",
+            ),
+            (
+                format!(
+                    "{}  usr/bin/solstone-linux\n{}  usr/share/doc/solstone-linux/LICENSE\n",
+                    md5_digest(b"different"),
+                    md5_digest(b"license")
+                )
+                .into_bytes(),
+                "md5sums-mismatch",
+                "usr/bin/solstone-linux",
+            ),
+        ] {
+            let mutated = Member {
+                bytes,
+                ..valid.clone()
+            };
+            exact(
+                Format::Deb,
+                "MalformedMetadata",
+                token,
+                member,
+                verify_deb_md5sums(artifact(Format::Deb), &mutated, &data).unwrap_err(),
+            );
         }
     }
 

@@ -9,7 +9,8 @@ use std::{
     process::Command,
 };
 use syn::{
-    Attribute, Expr, Item, ItemMod, Lit, Meta,
+    Attribute, Expr, Item, ItemMod, Lit, Meta, Token,
+    punctuated::Punctuated,
     visit::{self, Visit},
 };
 
@@ -422,6 +423,8 @@ fn scan_items(
                         "generated include is not the tray icon input",
                     ));
                 }
+                let generated = PathBuf::from(env!("OUT_DIR")).join("tray_icons.rs");
+                scan_rust_file(root, &generated, identity.clone(), inventory, visited)?;
             }
             IncludeInput::Unclassifiable(detail) => {
                 return Err(ScanError::new(
@@ -439,12 +442,42 @@ fn scan_items(
 fn inherit_context(attributes: &[Attribute], identity: &mut SourceIdentity) {
     for attribute in attributes {
         let rendered = quote_attribute(attribute);
-        if rendered.contains("cfg") {
+        if attribute.path().is_ident("cfg") {
             identity.cfg_context.push(rendered.clone());
         }
-        if rendered.contains("test") {
+        if attribute.path().is_ident("test") || cfg_attribute_requires_test(attribute) {
             identity.test_only = true;
         }
+    }
+}
+
+pub(crate) fn cfg_attribute_requires_test(attribute: &Attribute) -> bool {
+    if !attribute.path().is_ident("cfg") {
+        return false;
+    }
+    let Meta::List(list) = &attribute.meta else {
+        return false;
+    };
+    syn::parse2::<Meta>(list.tokens.clone())
+        .is_ok_and(|predicate| cfg_predicate_requires_test(&predicate))
+}
+
+fn cfg_predicate_requires_test(predicate: &Meta) -> bool {
+    match predicate {
+        Meta::Path(path) => path.is_ident("test"),
+        Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
+            let Ok(children) =
+                list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            else {
+                return false;
+            };
+            if list.path.is_ident("all") {
+                children.iter().any(cfg_predicate_requires_test)
+            } else {
+                !children.is_empty() && children.iter().all(cfg_predicate_requires_test)
+            }
+        }
+        Meta::List(_) | Meta::NameValue(_) => false,
     }
 }
 
@@ -662,6 +695,31 @@ mod tests {
             error.to_string(),
             "source policy: identity=pkg::target[bin]::crate::item{production} path=src/main.rs rule=UnclassifiableInput detail=dynamic include"
         );
+    }
+
+    #[test]
+    fn cfg_test_context_is_structural() {
+        let attribute = |source: &str| {
+            let file = syn::parse_file(source).unwrap();
+            let Item::Mod(module) = &file.items[0] else {
+                panic!("fixture must be a module");
+            };
+            module.attrs[0].clone()
+        };
+        for source in [
+            "#[cfg(test)] mod fixture {}",
+            "#[cfg(all(unix, test))] mod fixture {}",
+            "#[cfg(any(test, all(test, unix)))] mod fixture {}",
+        ] {
+            assert!(cfg_attribute_requires_test(&attribute(source)), "{source}");
+        }
+        for source in [
+            "#[cfg(not(test))] mod fixture {}",
+            "#[cfg(feature = \"latest\")] mod fixture {}",
+            "#[cfg(any(test, unix))] mod fixture {}",
+        ] {
+            assert!(!cfg_attribute_requires_test(&attribute(source)), "{source}");
+        }
     }
 
     #[test]

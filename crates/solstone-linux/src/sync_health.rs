@@ -248,14 +248,14 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
                 header_recording: "on — offline (saving locally)",
                 header_idle: "idle — offline (saving locally)",
                 sync_line: "sync: offline; will retry",
-                tooltip: "sync: offline; saving locally",
+                tooltip: "sync: offline; saving locally; will retry",
                 accessible_recording: "sol — on, offline, saving locally",
                 accessible_idle: "sol — idle, offline, saving locally",
                 icon: "syncing",
                 sni: "Active",
-                cli: "Sync: offline — saving locally; pending unconfirmed (will retry)",
+                cli: "Sync: offline — saving locally; will retry; pending unconfirmed",
                 doctor_severity: "warn",
-                doctor_detail: "sync health: offline; pending unconfirmed; will retry",
+                doctor_detail: "sync health: offline; saving locally; will retry",
                 dbus: "offline",
             },
         ),
@@ -287,9 +287,9 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
                 accessible_idle: "sol — idle, connecting",
                 icon: "syncing",
                 sni: "Active",
-                cli: "Sync: unconfirmed — waiting for first successful journal check; pending unconfirmed",
+                cli: "Sync: connecting — wait while sol connects to your journal; pending unconfirmed",
                 doctor_severity: "warn",
-                doctor_detail: "sync health: unconfirmed; no successful journal check yet",
+                doctor_detail: "sync health: connecting; wait while sol connects to your journal",
                 dbus: "connecting",
             },
         ),
@@ -473,6 +473,7 @@ fn optional_int(data: &Map<String, Value>, key: &str) -> Option<i64> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HealthLoadError {
+    UnsupportedSchema,
     MalformedLinkEpoch,
     MalformedLink,
 }
@@ -483,6 +484,9 @@ pub(crate) fn load_link_facts(
 ) -> Result<Option<LinkFactState>, HealthLoadError> {
     if liveness != PrivateStateLockLiveness::LiveOwner {
         return Ok(None);
+    }
+    if data.get("schema_version").and_then(Value::as_u64) != Some(SCHEMA_VERSION) {
+        return Err(HealthLoadError::UnsupportedSchema);
     }
     ProcessEpoch::parse(
         data.get("link_epoch")
@@ -782,6 +786,34 @@ mod tests {
         assert_eq!(load_facts(temp.path()), SyncFacts::default());
         fs::write(sync_health_path(temp.path()), "{not-json").unwrap();
         assert_eq!(load_facts(temp.path()), SyncFacts::default());
+    }
+
+    #[test]
+    fn live_link_facts_require_current_schema() {
+        let mut data = serde_json::Map::new();
+        data.insert("schema_version".to_owned(), json!(SCHEMA_VERSION - 1));
+        data.insert(
+            "link_epoch".to_owned(),
+            json!(ProcessEpoch::for_test(1).as_str()),
+        );
+        data.insert(
+            "link".to_owned(),
+            json!({
+                "pairing_required": false,
+                "private_state_invalid": false,
+                "config_sanitation_failed": false,
+                "listener_ready": false,
+                "carrier_proven": false,
+                "observer_registered": false,
+                "transport_unavailable": false,
+                "terminal_revocation": false,
+                "token_persistence_failure": false,
+            }),
+        );
+        assert_eq!(
+            load_link_facts(&data, PrivateStateLockLiveness::LiveOwner),
+            Err(HealthLoadError::UnsupportedSchema)
+        );
     }
 
     // tests/test_sync_health.py::test_every_health_state_has_complete_surface

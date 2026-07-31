@@ -11,7 +11,7 @@ use crate::{
     },
     session_env::{self, Output, Runner},
     streams::stream_name,
-    sync_health::{derive_health, load_facts_with_liveness},
+    sync_health::{ProcessEpoch, SyncFacts, derive_health, load_facts_with_liveness, save_facts},
 };
 use clap::{Parser, Subcommand};
 use std::{
@@ -298,6 +298,13 @@ fn render_setup_result(
             );
             1
         }
+        Err(PrivateStateError::LockContended) => {
+            let _ = write_line(
+                errors,
+                "Setup could not start because sol is running. Stop sol first and try again. No input was consumed; capture, config, and private state are unchanged.",
+            );
+            1
+        }
         Err(error @ (PrivateStateError::Io { .. } | PrivateStateError::InvalidTarget { .. })) => {
             let _ = write_line(
                 errors,
@@ -522,7 +529,8 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
 
 fn cmd_run(interval: Option<i64>) -> i32 {
     let paths = ConfigPaths::default();
-    let (state_lock, mut config, transport_enabled) = match prepare_run_config(paths) {
+    let (state_lock, mut config, transport_enabled, process_epoch) = match prepare_run_config(paths)
+    {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::error!(%error, "Linked private state is already in use");
@@ -565,12 +573,16 @@ fn cmd_run(interval: Option<i64>) -> i32 {
         hostname().unwrap_or_else(|_| "linux".into()),
         state_lock,
         transport_enabled,
+        process_epoch,
     )
 }
 
 pub(crate) fn prepare_run_config(
     paths: ConfigPaths,
-) -> Result<(PrivateStateLock, Config, bool), crate::private_link::PrivateStateError> {
+) -> Result<
+    (PrivateStateLock, Config, bool, Option<ProcessEpoch>),
+    crate::private_link::PrivateStateError,
+> {
     let config_root = paths
         .config_dir
         .clone()
@@ -591,7 +603,27 @@ pub(crate) fn prepare_run_config(
             false
         }
     };
-    Ok((state_lock, config, transport_enabled))
+    let process_epoch = match ProcessEpoch::generate() {
+        Ok(epoch) => Some(epoch),
+        Err(error) => {
+            tracing::error!(%error, "Failed to create process epoch; linked work disabled");
+            None
+        }
+    };
+    let reset = SyncFacts {
+        link: Some(Default::default()),
+        link_epoch: process_epoch.clone(),
+        ..Default::default()
+    };
+    if let Err(error) = save_facts(&config.state_dir(), &reset) {
+        tracing::warn!(%error, "Failed to reset sync health for the new owner");
+    }
+    Ok((
+        state_lock,
+        config,
+        transport_enabled && process_epoch.is_some(),
+        process_epoch,
+    ))
 }
 
 #[cfg(test)]
@@ -838,6 +870,7 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
+        let mut errors = Vec::new();
         assert_eq!(
             cmd_setup(
                 SetupOptions {
@@ -849,17 +882,48 @@ mod tests {
                 },
                 &mut input,
                 &mut Vec::new(),
-                &mut Vec::new(),
+                &mut errors,
             ),
             1
         );
         assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            String::from_utf8(errors).unwrap(),
+            "Setup could not start because sol is running. Stop sol first and try again. No input was consumed; capture, config, and private state are unchanged.\n"
+        );
         let after = std::fs::read_dir(&config_root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(after, before);
         drop(lock);
+    }
+
+    #[test]
+    fn prepare_run_config_resets_prior_connected_facts_before_returning() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(&temp);
+        let config = load_config(paths.clone()).config;
+        let prior = SyncFacts {
+            pending_confirmed: Some(0),
+            link: Some(crate::private_link::LinkFactState {
+                listener_ready: true,
+                carrier_proven: true,
+                observer_registered: true,
+                ..Default::default()
+            }),
+            link_epoch: Some(ProcessEpoch::for_test(9)),
+            ..Default::default()
+        };
+        save_facts(&config.state_dir(), &prior).unwrap();
+
+        let (_lock, config, _, _) = prepare_run_config(paths).unwrap();
+        let current =
+            load_facts_with_liveness(&config.state_dir(), PrivateStateLockLiveness::LiveOwner);
+        assert_ne!(
+            derive_health(&current, 1_000.0, 600.0).state,
+            crate::sync_health::HealthState::Connected
+        );
     }
 
     #[test]
@@ -1093,7 +1157,7 @@ mod tests {
             0
         );
         let expected = format!(
-            "Config: {}\nJournal link: managed privately\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline — saving locally; pending unconfirmed (will retry)\n\nService: active\n",
+            "Config: {}\nJournal link: managed privately\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline — saving locally; will retry; pending unconfirmed\n\nService: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );

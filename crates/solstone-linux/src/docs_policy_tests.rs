@@ -58,18 +58,20 @@ fn current_changelog_lines(text: &str) -> Result<Vec<(usize, &str)>, DocsError> 
     let mut section = ChangelogSection::Current;
     let mut output = Vec::new();
     for (index, line) in text.lines().enumerate() {
-        if line.starts_with("## [") {
+        if line.starts_with("## ") {
             section = if line == "## [Unreleased]" {
                 ChangelogSection::Current
             } else if is_release_heading(line) {
                 ChangelogSection::Historical
-            } else {
+            } else if line.starts_with("## [") {
                 return Err(DocsError {
                     surface: "CHANGELOG.md".to_owned(),
                     line: index + 1,
                     rule: "changelog-heading",
                     detail: line.to_owned(),
                 });
+            } else {
+                ChangelogSection::Current
             };
         }
         if section == ChangelogSection::Current {
@@ -233,6 +235,12 @@ fn docs_changelog_history_is_structural() {
     assert_eq!(
         current_changelog_lines(malformed).unwrap_err().rule,
         "changelog-heading"
+    );
+    let resumed =
+        "## [1.2.3] - 2026-01-02\nhistorical\n## Current guidance\nuse --server-url now\n";
+    assert!(
+        scan_lines("CHANGELOG.md", current_changelog_lines(resumed).unwrap()).is_err(),
+        "a non-bracketed level-two heading must end historical classification"
     );
 }
 

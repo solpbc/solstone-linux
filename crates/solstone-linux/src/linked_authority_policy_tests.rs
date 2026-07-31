@@ -8,7 +8,7 @@ use crate::{
         },
         source_inventory::{
             CargoCommand, ScanErrorCause, SourceIdentity, SourceInventory, SourceNode,
-            scan_workspace_with_command, walk_member,
+            cfg_attribute_requires_test, scan_workspace_with_command, walk_member,
         },
     },
     release_rail_tests::{command_path, workspace_root},
@@ -21,8 +21,8 @@ use std::{
     path::PathBuf,
 };
 use syn::{
-    Attribute, Block, Expr, ExprCall, ExprMethodCall, ExprPath, ImplItemFn, ItemFn, ItemMod, Lit,
-    Macro, Signature, TraitItemFn, UseTree,
+    Attribute, Block, Expr, ExprCall, ExprMethodCall, ExprPath, ImplItemFn, ItemFn, ItemImpl,
+    ItemMod, Lit, Macro, Signature, TraitItemFn, Type, UseTree,
     visit::{self, Visit},
 };
 
@@ -65,6 +65,7 @@ struct FunctionFact {
     identity: SourceIdentity,
     path: PathBuf,
     name: String,
+    item_path: String,
     test_only: bool,
     direct_sink: Option<(&'static str, String)>,
     calls: BTreeSet<String>,
@@ -72,23 +73,7 @@ struct FunctionFact {
 
 fn attributes_are_test_only(attributes: &[Attribute]) -> bool {
     attributes.iter().any(|attribute| {
-        let name = attribute
-            .path()
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string());
-        name.as_deref() == Some("test")
-            || (name.as_deref() == Some("cfg")
-                && attribute.meta.require_list().is_ok_and(|list| {
-                    let cfg = list.tokens.to_string();
-                    cfg == "test"
-                        || (cfg.starts_with("all (")
-                            && cfg
-                                .split(|character: char| {
-                                    !(character.is_ascii_alphanumeric() || character == '_')
-                                })
-                                .any(|token| token == "test"))
-                }))
+        attribute.path().is_ident("test") || cfg_attribute_requires_test(attribute)
     })
 }
 
@@ -208,6 +193,13 @@ fn contains_env_call(expr: &Expr, aliases: &BTreeMap<String, Vec<String>>) -> bo
     }
 }
 
+fn absolute_url(expr: &Expr) -> bool {
+    literal(expr).is_some_and(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.starts_with("http://") || lower.starts_with("https://")
+    })
+}
+
 struct FunctionScanner<'a> {
     aliases: &'a BTreeMap<String, Vec<String>>,
     direct_sink: Option<(&'static str, String)>,
@@ -225,8 +217,7 @@ impl FunctionScanner<'_> {
     fn inspect_path_call(&mut self, node: &ExprCall, path: &ExprPath) {
         let canonical = canonical_path(&path.path, self.aliases);
         let joined = canonical.join("::");
-        let last = canonical.last().cloned().unwrap_or_default();
-        self.calls.insert(last);
+        self.calls.insert(joined.clone());
         if (joined.ends_with("reqwest::Client::new")
             || joined.ends_with("reqwest::Client::builder")
             || joined.ends_with("reqwest::Request::new")
@@ -234,6 +225,17 @@ impl FunctionScanner<'_> {
             && self.direct_sink.is_none()
         {
             self.sink("network-constructor", joined);
+        } else if matches!(
+            joined.as_str(),
+            "reqwest::get"
+                | "reqwest::post"
+                | "reqwest::put"
+                | "reqwest::patch"
+                | "reqwest::delete"
+                | "reqwest::head"
+                | "reqwest::request"
+        ) {
+            self.sink("free-network-request", joined);
         } else if (joined.ends_with("Url::parse") || joined.ends_with("Url::join"))
             && self.direct_sink.is_none()
         {
@@ -288,6 +290,14 @@ impl<'ast> Visit<'ast> for FunctionScanner<'_> {
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method = node.method.to_string();
+        if matches!(
+            method.as_str(),
+            "get" | "post" | "put" | "patch" | "delete" | "head"
+        ) && node.args.first().is_some_and(absolute_url)
+            || method == "request" && node.args.iter().skip(1).any(absolute_url)
+        {
+            self.sink("direct-network-request", method.clone());
+        }
         if method == "bearer_auth" {
             self.sink("caller-owned-auth", method.clone());
         }
@@ -337,31 +347,46 @@ impl<'ast> Visit<'ast> for FunctionScanner<'_> {
 
 struct FileScanner<'a> {
     node: &'a SourceNode,
-    aliases: BTreeMap<String, Vec<String>>,
+    aliases: Vec<BTreeMap<String, Vec<String>>>,
     module_test: Vec<bool>,
+    modules: Vec<String>,
+    impl_types: Vec<Option<String>>,
     facts: Vec<FunctionFact>,
 }
 
 impl<'a> FileScanner<'a> {
-    fn new(node: &'a SourceNode) -> Self {
+    fn aliases_for_items(items: &[syn::Item]) -> BTreeMap<String, Vec<String>> {
         let mut aliases = BTreeMap::new();
-        for item in &node.syntax.items {
+        for item in items {
             if let syn::Item::Use(item) = item {
                 flatten_use(&item.tree, Vec::new(), &mut aliases);
             }
         }
+        aliases
+    }
+
+    fn new(node: &'a SourceNode) -> Self {
         Self {
             node,
-            aliases,
+            aliases: vec![Self::aliases_for_items(&node.syntax.items)],
             module_test: vec![node.identity.test_only],
+            modules: node.identity.module.clone(),
+            impl_types: vec![None],
             facts: Vec::new(),
         }
     }
 
     fn record_function(&mut self, signature: &Signature, attributes: &[Attribute], block: &Block) {
         let test_only = *self.module_test.last().unwrap() || attributes_are_test_only(attributes);
+        let mut aliases = BTreeMap::new();
+        for scope in &self.aliases {
+            aliases.extend(scope.clone());
+        }
+        let mut local_aliases = LocalUseCollector::default();
+        local_aliases.visit_block(block);
+        aliases.extend(local_aliases.aliases);
         let mut scanner = FunctionScanner {
-            aliases: &self.aliases,
+            aliases: &aliases,
             direct_sink: None,
             calls: BTreeSet::new(),
             pushed_literals: String::new(),
@@ -370,10 +395,22 @@ impl<'a> FileScanner<'a> {
         let mut identity = self.node.identity.clone();
         identity.item = Some(signature.ident.to_string());
         identity.test_only = test_only;
+        let owner = self.impl_types.last().and_then(Clone::clone);
+        let mut item_path = self.modules.join("::");
+        if !item_path.is_empty() {
+            item_path.push_str("::");
+        }
+        if let Some(owner) = owner {
+            item_path.push_str("impl ");
+            item_path.push_str(&owner);
+            item_path.push_str("::");
+        }
+        item_path.push_str(&signature.ident.to_string());
         self.facts.push(FunctionFact {
             identity,
             path: self.node.path.clone(),
             name: signature.ident.to_string(),
+            item_path,
             test_only,
             direct_sink: scanner.direct_sink,
             calls: scanner.calls,
@@ -386,8 +423,23 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
         let inherited = *self.module_test.last().unwrap();
         self.module_test
             .push(inherited || attributes_are_test_only(&node.attrs));
+        self.modules.push(node.ident.to_string());
+        let aliases = node
+            .content
+            .as_ref()
+            .map(|(_, items)| Self::aliases_for_items(items))
+            .unwrap_or_default();
+        self.aliases.push(aliases);
         visit::visit_item_mod(self, node);
+        self.aliases.pop();
+        self.modules.pop();
         self.module_test.pop();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        self.impl_types.push(type_identity(&node.self_ty));
+        visit::visit_item_impl(self, node);
+        self.impl_types.pop();
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
@@ -405,30 +457,49 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
     }
 }
 
+#[derive(Default)]
+struct LocalUseCollector {
+    aliases: BTreeMap<String, Vec<String>>,
+}
+
+impl<'ast> Visit<'ast> for LocalUseCollector {
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        flatten_use(&node.tree, Vec::new(), &mut self.aliases);
+    }
+}
+
+fn type_identity(value: &Type) -> Option<String> {
+    let Type::Path(path) = value else {
+        return None;
+    };
+    Some(
+        path.path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+    )
+}
+
 fn permitted_capability(fact: &FunctionFact) -> bool {
     fact.path
         .ends_with("crates/solstone-linux/src/private_link.rs")
-        && matches!(
-            fact.name.as_str(),
-            "start_private_link_session_with_options"
-                | "start_private_link_session_inner"
-                | "confine_path"
-                | "ensure_registered_inner"
-                | "register"
-                | "send"
-                | "request"
-        )
+        && (fact
+            .item_path
+            .starts_with("private_link::impl PrivateLinkCapability::")
+            || matches!(
+                fact.item_path.as_str(),
+                "private_link::confine_path" | "private_link::start_private_link_session_inner"
+            ))
 }
 
 fn analyze_inventory(inventory: &SourceInventory) -> Result<(), PolicyError> {
     let mut facts = Vec::new();
     for node in &inventory.nodes {
-        if node
-            .syntax
-            .items
-            .iter()
-            .any(|item| matches!(item, syn::Item::Mod(module) if module.ident == "chat_bridge"))
-        {
+        let mut deleted = DeletedModuleVisitor::default();
+        deleted.visit_file(&node.syntax);
+        if deleted.found {
             return Err(PolicyError {
                 identity: node.identity.to_string(),
                 path: node.path.clone(),
@@ -440,7 +511,7 @@ fn analyze_inventory(inventory: &SourceInventory) -> Result<(), PolicyError> {
         scanner.visit_file(&node.syntax);
         facts.extend(scanner.facts);
     }
-    let key = |fact: &FunctionFact| (fact.path.clone(), fact.name.clone(), fact.test_only);
+    let key = |fact: &FunctionFact| (fact.path.clone(), fact.item_path.clone(), fact.test_only);
     let mut sink_keys = facts
         .iter()
         .filter(|fact| fact.direct_sink.is_some() && !fact.test_only && !permitted_capability(fact))
@@ -453,15 +524,21 @@ fn analyze_inventory(inventory: &SourceInventory) -> Result<(), PolicyError> {
                 !fact.test_only
                     && !permitted_capability(fact)
                     && fact.calls.iter().any(|callee| {
-                        let local = (fact.path.clone(), callee.clone(), fact.test_only);
-                        if sink_keys.contains(&local) {
-                            return true;
-                        }
+                        let callee = callee
+                            .strip_prefix("crate::")
+                            .or_else(|| callee.strip_prefix("self::"))
+                            .unwrap_or(callee);
+                        let unqualified = !callee.contains("::");
                         let matches = facts
                             .iter()
                             .filter(|candidate| {
-                                candidate.name == *callee
-                                    && (!fact.test_only || candidate.test_only == fact.test_only)
+                                (!fact.test_only || candidate.test_only == fact.test_only)
+                                    && if unqualified {
+                                        candidate.path == fact.path && candidate.name == callee
+                                    } else {
+                                        candidate.item_path == callee
+                                            || candidate.item_path.ends_with(&format!("::{callee}"))
+                                    }
                             })
                             .collect::<Vec<_>>();
                         matches.len() == 1 && sink_keys.contains(&key(matches[0]))
@@ -490,6 +567,20 @@ fn analyze_inventory(inventory: &SourceInventory) -> Result<(), PolicyError> {
         });
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct DeletedModuleVisitor {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for DeletedModuleVisitor {
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        if node.ident == "chat_bridge" {
+            self.found = true;
+        }
+        visit::visit_item_mod(self, node);
+    }
 }
 
 fn current_inventory() -> SourceInventory {
@@ -565,6 +656,49 @@ fn linked_authority_mutation_aliases_are_semantic() {
         "fn moved(r: reqwest::RequestBuilder) { let _ = r.header(\"authorization\", \"x\"); }",
         "reserved-header",
     );
+    assert_mutation(
+        "mod nested { use reqwest::Client as Renamed; fn moved() { let _ = Renamed::builder(); } }",
+        "network-constructor",
+    );
+    assert_mutation(
+        "fn moved() { use reqwest::Client as Renamed; let _ = Renamed::builder(); }",
+        "network-constructor",
+    );
+}
+
+#[test]
+fn linked_authority_mutation_production_cfg_is_not_test_context() {
+    for source in [
+        "#[cfg(not(test))] mod direct { fn moved() { let _ = reqwest::Client::new(); } }",
+        "#[cfg(feature=\"latest\")] mod direct { fn moved() { let _ = reqwest::Client::new(); } }",
+    ] {
+        assert_mutation(source, "network-constructor");
+    }
+}
+
+#[test]
+fn linked_authority_mutation_free_and_method_requests_are_sinks() {
+    assert_mutation(
+        "async fn moved() { let _ = reqwest::get(\"https://journal.invalid\").await; }",
+        "free-network-request",
+    );
+    assert_mutation(
+        "fn moved(client: reqwest::Client) { let _ = client.post(\"https://journal.invalid\"); }",
+        "direct-network-request",
+    );
+}
+
+#[test]
+fn linked_authority_mutation_nested_deleted_module_is_rejected() {
+    assert_mutation("mod nested { mod chat_bridge {} }", "deleted-module");
+}
+
+#[test]
+fn linked_authority_capability_permission_uses_exact_item_identity() {
+    let mut inventory = mutation("fn send() { let _ = reqwest::Client::new(); }", false);
+    inventory.nodes[0].path = workspace_root().join("crates/solstone-linux/src/private_link.rs");
+    let error = analyze_inventory(&inventory).unwrap_err();
+    assert_eq!(error.rule, "network-constructor");
 }
 
 #[test]

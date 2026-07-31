@@ -274,6 +274,15 @@ impl PrivateStateLock {
             }
             Err(_) => return Err(PrivateStateProbeError::Inspect),
         };
+        let root_stat = rustix::fs::fstat(&root).map_err(|_| PrivateStateProbeError::Inspect)?;
+        let expected_root_mode =
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR;
+        if rustix::fs::FileType::from_raw_mode(root_stat.st_mode) != rustix::fs::FileType::Directory
+            || rustix::fs::Mode::from_raw_mode(root_stat.st_mode) != expected_root_mode
+            || root_stat.st_uid != rustix::process::geteuid().as_raw()
+        {
+            return Err(PrivateStateProbeError::InvalidTarget);
+        }
         let descriptor = match rustix::fs::openat(
             &root,
             PRIVATE_STATE_LOCK_FILENAME,
@@ -1019,6 +1028,9 @@ impl OpenJournalCapability {
     }
 
     pub(crate) fn open(&self) -> Result<(), ()> {
+        // Opening necessarily hands the approved target to the desktop browser.
+        // The target is accepted in child argv here; it remains excluded from the
+        // secrecy contract's logs, errors, status, clipboard, D-Bus, state, and Debug surfaces.
         self.open_inner(|target| open::that_detached(target).map_err(|_| ()))
     }
 
@@ -2832,6 +2844,11 @@ mod tests {
         );
 
         fs::create_dir(&missing).unwrap();
+        assert!(matches!(
+            PrivateStateLock::try_probe(&missing),
+            Err(PrivateStateProbeError::InvalidTarget)
+        ));
+        fs::set_permissions(&missing, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             PrivateStateLock::try_probe(&missing).unwrap(),
             PrivateStateLockLiveness::NoLiveOwner

@@ -24,6 +24,7 @@ use xz2::read::XzDecoder;
 mod candidate;
 pub use candidate::*;
 mod audit;
+pub mod authority_vocabulary;
 mod elf64;
 mod package_audit;
 pub use audit::*;

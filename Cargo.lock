@@ -2695,6 +2695,7 @@ dependencies = [
  "reqwest",
  "resvg",
  "roxmltree",
+ "rust-release-manifest",
  "rustix",
  "rustls",
  "sd-notify",

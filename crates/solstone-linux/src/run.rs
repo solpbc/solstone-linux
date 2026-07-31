@@ -217,6 +217,7 @@ pub(crate) fn run_observer(
     host: String,
     state_lock: PrivateStateLock,
     transport_enabled: bool,
+    process_epoch: Option<ProcessEpoch>,
 ) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -264,6 +265,7 @@ pub(crate) fn run_observer(
                 connection,
                 state_lock,
                 transport_enabled,
+                process_epoch,
             )
         },
         || Ok(()),
@@ -278,6 +280,7 @@ fn run_capture(
     connection: Option<Connection>,
     state_lock: PrivateStateLock,
     transport_enabled: bool,
+    process_epoch: Option<ProcessEpoch>,
 ) -> Result<(), ObserverError> {
     let notifier: Arc<dyn ServiceNotifier> = Arc::new(SdNotifier);
     let stopped = Arc::new(AtomicBool::new(false));
@@ -295,14 +298,9 @@ fn run_capture(
         Arc::new(clock.clone()),
     ));
     let open_journal = crate::private_link::OpenJournalAccess::default();
-    let process_epoch = match ProcessEpoch::generate() {
-        Ok(epoch) => Some(epoch),
-        Err(error) => {
-            tracing::error!(%error, "Failed to create process epoch; linked work disabled");
-            upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
-            None
-        }
-    };
+    if process_epoch.is_none() {
+        upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
+    }
     let linked_upload = Arc::clone(&upload);
     let linked_root = config.config_dir.clone();
     let linked_stream = config.stream.clone();
@@ -526,8 +524,7 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
             {
                 tracing::warn!(%error, "Failed to perform desktop command");
                 if matches!(command, TrayCommand::OpenJournal) {
-                    let message =
-                        "Could not open your journal. Wait for sol to reconnect, then try again.";
+                    let message = crate::desktop_component::OPEN_JOURNAL_REMEDIATION;
                     if let Err(notification_error) = notify_rust::Notification::new()
                         .summary("sol")
                         .body(message)
@@ -1827,7 +1824,7 @@ mod tests {
             };
             write_old_config(&paths);
             let peer = PrivateLinkPeer::start().await;
-            let (lock, config, transport_enabled) =
+            let (lock, config, transport_enabled, _process_epoch) =
                 crate::cli::prepare_run_config(paths.clone()).unwrap();
             assert!(transport_enabled);
             let persisted: serde_json::Value =
@@ -2017,7 +2014,7 @@ mod tests {
             drop(released);
 
             let requests_before_final_restart = peer.requests().len();
-            let (final_lock, final_config, final_transport) =
+            let (final_lock, final_config, final_transport, _process_epoch) =
                 crate::cli::prepare_run_config(paths).unwrap();
             assert!(final_transport);
             let (final_owner, final_upload) = start_owner(&final_config, &peer, final_lock).await;

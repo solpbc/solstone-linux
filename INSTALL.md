@@ -87,10 +87,10 @@ install` explicitly establishes them and cargo-deny before installing sol.
 ## update from source
 
 ```bash
-systemctl --user stop solstone-linux
 git pull
 make ci
 make install-service
+systemctl --user stop solstone-linux
 solstone-linux setup < pair-link.txt
 systemctl --user start solstone-linux
 ```

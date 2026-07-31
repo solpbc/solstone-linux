@@ -12,6 +12,8 @@ use std::sync::{
 
 pub const OBSERVER_BUS_NAME: &str = "org.solpbc.solstone.Observer1";
 pub const ALREADY_RUNNING_MESSAGE: &str = "Another solstone-linux observer is already running (owns org.solpbc.solstone.Observer1). Check: systemctl --user status solstone-linux";
+pub(crate) const OPEN_JOURNAL_REMEDIATION: &str =
+    "Could not open your journal. Wait for sol to reconnect, then try again.";
 
 pub trait BusNameRequester {
     fn request_name(
@@ -143,9 +145,10 @@ impl DesktopComponent {
     }
     pub fn perform_desktop_command(&self, command: crate::tray::TrayCommand) -> Result<(), String> {
         match command {
-            crate::tray::TrayCommand::OpenJournal => self.open_journal.open().map_err(|_| {
-                "Could not open your journal. Wait for sol to reconnect, then try again.".into()
-            }),
+            crate::tray::TrayCommand::OpenJournal => self
+                .open_journal
+                .open()
+                .map_err(|_| OPEN_JOURNAL_REMEDIATION.into()),
             crate::tray::TrayCommand::OpenUrl(url) => {
                 open::that_detached(url).map_err(|e| e.to_string())
             }

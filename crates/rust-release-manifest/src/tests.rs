@@ -486,6 +486,7 @@ fn audit_deb_with(
     payload: &AuditPayloadOptions,
 ) -> PathBuf {
     let mut data = tar::Builder::new(Vec::new());
+    let mut md5sums = String::new();
     for authority in crate::package_audit::PAYLOAD_AUTHORITY {
         if payload.omit == Some(authority.role) {
             continue;
@@ -503,6 +504,11 @@ fn audit_deb_with(
         header.set_cksum();
         data.append_data(&mut header, member, bytes.as_slice())
             .unwrap();
+        md5sums.push_str(&format!(
+            "{}  {}\n",
+            crate::package_audit::md5_digest(&bytes),
+            authority.installed.trim_start_matches('/')
+        ));
     }
     for (installed, bytes, mode) in &payload.extras {
         let mut header = tar::Header::new_gnu();
@@ -515,13 +521,18 @@ fn audit_deb_with(
             bytes.as_slice(),
         )
         .unwrap();
+        md5sums.push_str(&format!(
+            "{}  {}\n",
+            crate::package_audit::md5_digest(bytes),
+            installed.trim_start_matches('/')
+        ));
     }
     let path = root.join("solstone-linux_1.0.0-1_amd64.deb");
     let marker = b"2.0\n";
     let mut control = tar::Builder::new(Vec::new());
     let mut control_members = vec![
         ("./control", control_body),
-        ("./md5sums", b"fixture  usr/bin/solstone-linux\n".as_slice()),
+        ("./md5sums", md5sums.as_bytes()),
     ];
     control_members.extend_from_slice(scripts);
     for (name, body) in control_members {
@@ -966,7 +977,7 @@ fn package_audit_rejects_each_rpm_dependency_and_accepts_product_name() {
             &rpm,
             "ForbiddenDependency",
             forbidden,
-            "rpm:Requires/Provides",
+            "rpm:Requires",
         );
     }
 
@@ -983,6 +994,95 @@ fn package_audit_rejects_each_rpm_dependency_and_accepts_product_name() {
         },
     );
     audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap();
+}
+
+#[test]
+fn package_audit_rejects_every_deb_relationship_field() {
+    for field in [
+        "Depends",
+        "Pre-Depends",
+        "Recommends",
+        "Suggests",
+        "Enhances",
+        "Breaks",
+        "Conflicts",
+        "Replaces",
+        "Provides",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let rpm = audit_rpm(root.path(), &executable);
+        let control = format!(
+            "Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\n{field}: journal\n"
+        );
+        let deb = audit_deb_with(
+            root.path(),
+            &executable,
+            control.as_bytes(),
+            &[],
+            &AuditPayloadOptions::default(),
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(
+            error,
+            &deb,
+            "ForbiddenDependency",
+            "journal",
+            &format!("deb:control/{field}"),
+        );
+    }
+}
+
+#[test]
+fn package_audit_rejects_every_rpm_relationship_field() {
+    type Configure = fn(&mut rpm::PackageBuilder, rpm::Dependency);
+    let fields: [(&str, Configure); 8] = [
+        ("Requires", |builder, dependency| {
+            builder.requires(dependency);
+        }),
+        ("Provides", |builder, dependency| {
+            builder.provides(dependency);
+        }),
+        ("Recommends", |builder, dependency| {
+            builder.recommends(dependency);
+        }),
+        ("Suggests", |builder, dependency| {
+            builder.suggests(dependency);
+        }),
+        ("Supplements", |builder, dependency| {
+            builder.supplements(dependency);
+        }),
+        ("Enhances", |builder, dependency| {
+            builder.enhances(dependency);
+        }),
+        ("Conflicts", |builder, dependency| {
+            builder.conflicts(dependency);
+        }),
+        ("Obsoletes", |builder, dependency| {
+            builder.obsoletes(dependency);
+        }),
+    ];
+    for (field, configure) in fields {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let deb = audit_deb(root.path(), &executable);
+        let rpm = audit_rpm_with(
+            root.path(),
+            &executable,
+            &AuditPayloadOptions::default(),
+            |builder| configure(builder, rpm::Dependency::any("journal")),
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(
+            error,
+            &rpm,
+            "ForbiddenDependency",
+            "journal",
+            &format!("rpm:{field}"),
+        );
+    }
 }
 
 #[test]

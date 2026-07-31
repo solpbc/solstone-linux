@@ -44,6 +44,7 @@ sd-notify = "0.5.0"
 resvg = { version = "0.47", default-features = false }
 
 [dev-dependencies]
+rust-release-manifest = { version = "1.0.0", path = "../rust-release-manifest" }
 proc-macro2 = "1"
 syn = { version = "2", features = ["full", "visit"] }
 tempfile = "3"
