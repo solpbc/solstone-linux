@@ -738,7 +738,7 @@ fn dependency_policy_pins_the_single_spl_git_source() {
         );
         assert_eq!(
             dependency["rev"].as_str(),
-            Some("742bc9dc789c5a75658844849a04d75033aeb6e3")
+            Some("e86c6d0fa0518fcde1fdc1d0e6b9c1ba090a9dbe")
         );
     }
     for (name, dependency) in manifest["dependencies"].as_table().unwrap() {
@@ -769,7 +769,7 @@ fn app_reqwest_edge_has_no_direct_tls_feature() {
     for name in ["spl-core", "spl-transport"] {
         assert_eq!(
             manifest["dependencies"][name]["rev"].as_str(),
-            Some("742bc9dc789c5a75658844849a04d75033aeb6e3")
+            Some("e86c6d0fa0518fcde1fdc1d0e6b9c1ba090a9dbe")
         );
     }
 }
