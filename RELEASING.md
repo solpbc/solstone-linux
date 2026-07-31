@@ -190,6 +190,30 @@ observer long enough to produce a new audio segment, confirm the observer remain
 alive, and validate that exact segment with `flac -t` (including each split mono
 FLAC when applicable). An encoder crash or decode failure blocks release handling.
 
+`flac -t` proves the stream decodes. It does not prove the stream carries anything.
+A file whose entire system channel is digital silence passes `flac -t` with `ok` and
+exit 0 — which is exactly how a build that recorded no system audio at all reached
+owners and stayed there for nine days. **Decode integrity is not content evidence.**
+
+So drive both legs during the window and then measure them separately. Play audio
+through the default sink and speak into the microphone while the segment is open,
+then assert that neither channel is silent:
+
+```bash
+ffmpeg -v quiet -i <segment>/audio.flac -f s16le -ac 2 -ar 16000 - \
+  | python3 -c 'import array,math,sys
+a=array.array("h"); a.frombytes(sys.stdin.buffer.read())
+for name,ch in (("mic",a[0::2]),("system",a[1::2])):
+    peak=max(abs(v) for v in ch)/32768.0
+    print(f"{name} peak={peak:.6f}")
+    assert peak > 0.001, f"{name} channel is silent"'
+```
+
+A silent channel blocks release handling exactly as a decode failure does. For a
+muted segment the split mono files are checked the same way, one channel each.
+If a leg is legitimately expected to be silent on the test desktop, say which and
+why in the release evidence — do not skip the measurement.
+
 This live checkpoint is separate operator evidence. It does not modify the ledger,
 proofs, bundle digest, or candidate status.
 
