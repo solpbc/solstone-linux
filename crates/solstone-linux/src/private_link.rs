@@ -10,7 +10,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -238,6 +238,7 @@ pub(crate) struct PrivateStateLock {
     _file: File,
     readiness_file: Option<File>,
     canonical_root: PathBuf,
+    handle_count: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -409,6 +410,7 @@ impl PrivateStateLock {
             _file: file,
             readiness_file: None,
             canonical_root,
+            handle_count: Arc::new(AtomicUsize::new(1)),
         })
     }
 
@@ -448,25 +450,46 @@ impl PrivateStateLock {
     }
 
     pub(crate) fn try_clone(&self) -> Result<Self, PrivateStateError> {
+        let file = self
+            ._file
+            .try_clone()
+            .map_err(|source| PrivateStateError::Io {
+                operation: PrivateIoOperation::Lock,
+                source,
+            })?;
+        let readiness_file = self
+            .readiness_file
+            .as_ref()
+            .map(File::try_clone)
+            .transpose()
+            .map_err(|source| PrivateStateError::Io {
+                operation: PrivateIoOperation::Lock,
+                source,
+            })?;
+        self.handle_count.fetch_add(1, Ordering::AcqRel);
         Ok(Self {
-            _file: self
-                ._file
-                .try_clone()
-                .map_err(|source| PrivateStateError::Io {
-                    operation: PrivateIoOperation::Lock,
-                    source,
-                })?,
-            readiness_file: self
-                .readiness_file
-                .as_ref()
-                .map(File::try_clone)
-                .transpose()
-                .map_err(|source| PrivateStateError::Io {
-                    operation: PrivateIoOperation::Lock,
-                    source,
-                })?,
+            _file: file,
+            readiness_file,
             canonical_root: self.canonical_root.clone(),
+            handle_count: Arc::clone(&self.handle_count),
         })
+    }
+}
+
+impl Drop for PrivateStateLock {
+    fn drop(&mut self) {
+        if self.handle_count.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        if let Some(readiness_file) = &self.readiness_file
+            && let Err(error) =
+                rustix::fs::flock(readiness_file, rustix::fs::FlockOperation::Unlock)
+        {
+            tracing::error!(%error, "Failed to release private state readiness lock");
+        }
+        if let Err(error) = rustix::fs::flock(&self._file, rustix::fs::FlockOperation::Unlock) {
+            tracing::error!(%error, "Failed to release private state lock");
+        }
     }
 }
 
