@@ -83,9 +83,17 @@ pub fn transition(mut state: SubscriptionState, event: SubscriptionEvent) -> Tra
             }),
         SubscriptionEvent::ServerSubscriptionChanged => vec![QueryDefaultSink],
         SubscriptionEvent::SourcesResolved(Ok(selection)) => {
+            // The redetect backstop re-resolves sources every few seconds. Announce a
+            // selection only when it actually changes, or a steady-state desktop writes
+            // the same two lines to the system log every tick, forever.
+            let changed = state.source_selection.as_ref() != Some(&selection);
             state.source_selection = Some(selection.clone());
             state.degraded_reason = None;
-            vec![ApplySourceSelection(selection)]
+            if changed {
+                vec![ApplySourceSelection(selection)]
+            } else {
+                Vec::new()
+            }
         }
         SubscriptionEvent::SourcesResolved(Err(error)) => {
             let reason = error.to_string();

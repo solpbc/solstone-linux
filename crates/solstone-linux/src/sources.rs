@@ -52,9 +52,22 @@ pub fn classify_sources(
     default_sink_name: Option<&str>,
     microphone_override: Option<&str>,
 ) -> Result<SourceSelection, SourceSelectionError> {
-    let monitor = sources
-        .iter()
-        .find(|source| source.monitor_of_sink.is_some())
+    // The default sink's monitor is the one carrying what the owner actually hears.
+    // Enumeration order is not that: a USB microphone that also exposes an output
+    // sorts ahead of the real speakers, and its monitor is permanently silent.
+    // Fall back to the first monitor only when there is no default sink to match.
+    let monitor = default_sink_name
+        .and_then(|default| {
+            sources.iter().find(|source| {
+                source.monitor_of_sink.is_some()
+                    && source.monitor_of_sink_name.as_deref() == Some(default)
+            })
+        })
+        .or_else(|| {
+            sources
+                .iter()
+                .find(|source| source.monitor_of_sink.is_some())
+        })
         .cloned();
     let microphone = if let Some(name) = microphone_override {
         match sources
@@ -130,6 +143,45 @@ mod tests {
         assert_eq!(selected.microphone.index, 1);
         assert_eq!(selected.monitor.index, 2);
         assert_eq!(selected.monitor_matches_default_sink, Some(true));
+    }
+
+    #[test]
+    fn default_sink_monitor_wins_over_enumeration_order() {
+        // The shape that silenced system audio in the field: a USB microphone that
+        // also exposes an output enumerates first, so its monitor — which nothing
+        // ever plays to — was chosen over the default sink's.
+        let sources = vec![
+            microphone(1, "usb-mic"),
+            monitor(2, "usb-mic.monitor", Some("usb-mic-sink")),
+            monitor(3, "speakers.monitor", Some("speakers")),
+        ];
+        let selected = classify_sources(&sources, Some("speakers"), None).unwrap();
+        assert_eq!(selected.monitor.index, 3);
+        assert_eq!(selected.monitor_matches_default_sink, Some(true));
+    }
+
+    #[test]
+    fn unmatched_default_sink_falls_back_to_first_monitor() {
+        let sources = vec![
+            microphone(1, "mic"),
+            monitor(2, "a.monitor", Some("sink-a")),
+            monitor(3, "b.monitor", Some("sink-b")),
+        ];
+        let selected = classify_sources(&sources, Some("absent-sink"), None).unwrap();
+        assert_eq!(selected.monitor.index, 2);
+        assert_eq!(selected.monitor_matches_default_sink, Some(false));
+    }
+
+    #[test]
+    fn no_default_sink_falls_back_to_first_monitor() {
+        let sources = vec![
+            microphone(1, "mic"),
+            monitor(2, "a.monitor", Some("sink-a")),
+            monitor(3, "b.monitor", Some("sink-b")),
+        ];
+        let selected = classify_sources(&sources, None, None).unwrap();
+        assert_eq!(selected.monitor.index, 2);
+        assert_eq!(selected.monitor_matches_default_sink, None);
     }
 
     #[test]
