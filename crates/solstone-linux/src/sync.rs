@@ -50,8 +50,16 @@ struct LinkFactPersistence {
 impl LinkFactPersistence {
     fn persist(&self, link_facts: &LinkFacts) {
         // Lock order: persistence serialization, SyncFacts, then LinkFactState.
-        let mut last_persisted = self.last_persisted.lock().unwrap();
-        let mut facts = self.facts.lock().unwrap();
+        // The memo is sink-owned because samplers replace facts.link on every sample; comparing
+        // against facts.link could let an interleaved sample suppress a needed write indefinitely.
+        let mut last_persisted = self
+            .last_persisted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut facts = self
+            .facts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let snapshot = link_facts.snapshot();
         if last_persisted.as_ref() == Some(&snapshot) {
             return;
@@ -2274,6 +2282,83 @@ mod tests {
 
         service.shutdown(Duration::from_secs(1)).await.unwrap();
         drop(owner_lock);
+    }
+
+    #[tokio::test]
+    async fn concurrent_link_fact_publishers_persist_final_live_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let server = MockServer::new(Vec::new()).await;
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
+            &config,
+            &server.url,
+            "host",
+            "linux",
+            "test",
+            Arc::clone(&clock),
+        ));
+        let service = SyncService::start_with_epoch(
+            config.clone(),
+            Arc::clone(&client),
+            Arc::clone(&clock),
+            Some(ProcessEpoch::for_test(10)),
+        );
+        client.begin_owner_generation();
+        client.publish_link_fact(crate::private_link::LinkFact::TokenPersistenceFailure);
+
+        let facts = [
+            crate::private_link::LinkFact::PairingRequired,
+            crate::private_link::LinkFact::PrivateStateInvalid,
+            crate::private_link::LinkFact::ConfigSanitationFailed,
+            crate::private_link::LinkFact::ListenerReady,
+            crate::private_link::LinkFact::CarrierProven,
+            crate::private_link::LinkFact::ObserverRegistered,
+            crate::private_link::LinkFact::TransportUnavailable,
+            crate::private_link::LinkFact::TerminalRevocation,
+            crate::private_link::LinkFact::TokenPersistenceFailure,
+        ];
+        let publishers = facts.map(|fact| {
+            let client = Arc::clone(&client);
+            std::thread::spawn(move || client.publish_link_fact(fact))
+        });
+        for publisher in publishers {
+            publisher.join().unwrap();
+        }
+
+        let snapshot = client.link_facts().snapshot();
+        let expected = serde_json::json!({
+            "pairing_required": snapshot.pairing_required,
+            "private_state_invalid": snapshot.private_state_invalid,
+            "config_sanitation_failed": snapshot.config_sanitation_failed,
+            "listener_ready": snapshot.listener_ready,
+            "carrier_proven": snapshot.carrier_proven,
+            "observer_registered": snapshot.observer_registered,
+            "transport_unavailable": snapshot.transport_unavailable,
+            "terminal_revocation": snapshot.terminal_revocation,
+            "token_persistence_failure": snapshot.token_persistence_failure,
+        });
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &fs::read(crate::sync_health::sync_health_path(&config.state_dir())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["link"], expected);
+        assert!(
+            persisted["link"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|value| value.as_bool() == Some(true))
+        );
+
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     #[tokio::test]

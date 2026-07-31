@@ -232,7 +232,7 @@ mod tests {
             process_start_mono: 0.0,
         }
     }
-    fn unknown_health() -> SyncHealth {
+    fn not_reported_health() -> SyncHealth {
         crate::sync_health::derive_health(&Default::default(), 0.0, 600.0)
     }
     fn service(
@@ -382,7 +382,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Screencast, false),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -393,7 +393,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -404,7 +404,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Screencast, true),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -415,7 +415,7 @@ mod tests {
         let (s, c, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -430,7 +430,7 @@ mod tests {
         let (s, c, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -445,7 +445,7 @@ mod tests {
         let (s, c, _) = service(
             snapshot(crate::observer::Mode::Idle, true),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -460,14 +460,14 @@ mod tests {
         let mut v = snapshot(crate::observer::Mode::Screencast, false);
         v.segment_open = true;
         v.segment_start_mono = Some(100.0);
-        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 160);
+        let (s, _, _) = service(v, Config::default(), not_reported_health(), "", 160);
         assert_eq!(s.segment_timer(), 240);
     }
     #[test]
     fn segment_timer_zero_when_paused() {
         let mut v = snapshot(crate::observer::Mode::Screencast, true);
         v.segment_start_mono = Some(100.0);
-        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 160);
+        let (s, _, _) = service(v, Config::default(), not_reported_health(), "", 160);
         assert_eq!(s.segment_timer(), 0);
     }
     #[test]
@@ -475,7 +475,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Screencast, false),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             160,
         );
@@ -485,14 +485,14 @@ mod tests {
     fn pause_remaining_during_timed_pause() {
         let mut v = snapshot(crate::observer::Mode::Idle, true);
         v.pause_until = Some(220.0);
-        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 100);
+        let (s, _, _) = service(v, Config::default(), not_reported_health(), "", 100);
         assert_eq!(s.pause_remaining(), 120);
     }
     #[test]
     fn pause_remaining_zero_when_not_paused() {
         let mut v = snapshot(crate::observer::Mode::Idle, false);
         v.pause_until = Some(220.0);
-        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 100);
+        let (s, _, _) = service(v, Config::default(), not_reported_health(), "", 100);
         assert_eq!(s.pause_remaining(), 0);
     }
     #[test]
@@ -500,7 +500,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Idle, true),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             100,
         );
@@ -510,7 +510,7 @@ mod tests {
     fn pause_remaining_decreases_between_property_reads() {
         let mut v = snapshot(crate::observer::Mode::Idle, true);
         v.pause_until = Some(220.0);
-        let (s, _, clock) = service(v, Config::default(), unknown_health(), "", 100);
+        let (s, _, clock) = service(v, Config::default(), not_reported_health(), "", 100);
         let first = s.pause_remaining();
         clock.store(101, std::sync::atomic::Ordering::Release);
         assert!(s.pause_remaining() < first);
@@ -521,7 +521,7 @@ mod tests {
         v.captures_today = 7;
         v.total_size_mb = 42;
         v.process_start_mono = 50.0;
-        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 100);
+        let (s, _, _) = service(v, Config::default(), not_reported_health(), "", 100);
         let stats = s.get_stats();
         assert_eq!(stats.len(), 3);
         assert_eq!(
@@ -542,7 +542,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -560,7 +560,7 @@ mod tests {
     fn get_stats_uses_cached_today_count() {
         let mut v = snapshot(crate::observer::Mode::Idle, false);
         v.captures_today = 1;
-        let (s, _, _) = service(v, Config::default(), unknown_health(), "", 0);
+        let (s, _, _) = service(v, Config::default(), not_reported_health(), "", 0);
         assert_eq!(
             s.get_stats().get("captures_today"),
             Some(&zbus::zvariant::OwnedValue::from(1i32))
@@ -570,7 +570,7 @@ mod tests {
     fn get_stats_uptime_increases_between_reads() {
         let mut v = snapshot(crate::observer::Mode::Idle, false);
         v.process_start_mono = 50.0;
-        let (s, _, clock) = service(v, Config::default(), unknown_health(), "", 100);
+        let (s, _, clock) = service(v, Config::default(), not_reported_health(), "", 100);
         let first = i32::try_from(
             s.get_stats()
                 .remove("uptime_seconds")
@@ -591,7 +591,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             Config::default(),
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
@@ -634,7 +634,7 @@ mod tests {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             config,
-            unknown_health(),
+            not_reported_health(),
             "",
             0,
         );
