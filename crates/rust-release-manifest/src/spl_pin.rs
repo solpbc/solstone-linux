@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use super::{Error, RepoRoot, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -10,6 +10,11 @@ use std::process::Command;
 const SPL_SOURCE: &str = "https://github.com/solpbc/spl-rust";
 const PACKAGES: [&str; 2] = ["spl-core", "spl-transport"];
 const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+struct WorkspacePins {
+    revisions: BTreeMap<String, String>,
+    versions: BTreeMap<String, String>,
+}
 
 fn error(message: String) -> Error {
     Error::new(message)
@@ -90,12 +95,13 @@ fn selector_actual(table: &toml::value::Table) -> String {
     }
 }
 
-fn validate_workspace(root: &toml::Value) -> Result<BTreeMap<String, String>> {
+fn validate_workspace(root: &toml::Value) -> Result<WorkspacePins> {
     let dependencies = root
         .get("workspace")
         .and_then(|value| value.get("dependencies"))
         .and_then(toml::Value::as_table);
     let mut revisions = BTreeMap::new();
+    let mut versions = BTreeMap::new();
     for package in PACKAGES {
         let matches = dependencies
             .into_iter()
@@ -117,6 +123,20 @@ fn validate_workspace(root: &toml::Value) -> Result<BTreeMap<String, String>> {
                 "SPL package {package} source mismatch: expected {SPL_SOURCE}, actual non-table\nrepair: declare {package} from the approved SPL Git source in root Cargo.toml"
             ))
         })?;
+        if table.contains_key("path") {
+            return Err(error(format!(
+                "SPL package {package} path dependency mismatch: expected absent, actual Cargo.toml:{}\nrepair: remove the local path route for {package} from Cargo.toml",
+                matches[0].0
+            )));
+        }
+        let version = table
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                error(format!(
+                    "SPL package {package} version mismatch: expected declared version, actual missing\nrepair: declare {package} with the resolved version in root Cargo.toml"
+                ))
+            })?;
         let source = table
             .get("git")
             .and_then(toml::Value::as_str)
@@ -146,6 +166,7 @@ fn validate_workspace(root: &toml::Value) -> Result<BTreeMap<String, String>> {
             )));
         }
         revisions.insert(package.to_owned(), revision.to_owned());
+        versions.insert(package.to_owned(), version.to_owned());
     }
     if revisions["spl-core"] != revisions["spl-transport"] {
         return Err(error(format!(
@@ -165,12 +186,18 @@ fn validate_workspace(root: &toml::Value) -> Result<BTreeMap<String, String>> {
             }
         }
     }
-    Ok(revisions)
+    Ok(WorkspacePins {
+        revisions,
+        versions,
+    })
 }
 
 fn validate_member_dependencies(manifests: &[(PathBuf, toml::Value)]) -> Result<()> {
+    let mut inherited = BTreeMap::from([
+        ("spl-core", BTreeSet::new()),
+        ("spl-transport", BTreeSet::new()),
+    ]);
     for (path, manifest) in manifests {
-        let mut inherited = BTreeMap::from([("spl-core", 0_usize), ("spl-transport", 0_usize)]);
         for table in dependency_tables(manifest) {
             for (key, dependency) in table {
                 let package = package_identity(key, dependency);
@@ -184,7 +211,6 @@ fn validate_member_dependencies(manifests: &[(PathBuf, toml::Value)]) -> Result<
                     continue;
                 };
                 if PACKAGES.contains(&package.as_str()) {
-                    *inherited.get_mut(package.as_str()).unwrap() += 1;
                     if details.contains_key("path") {
                         return Err(error(format!(
                             "SPL package {package} path dependency mismatch: expected absent, actual {}:{key}\nrepair: remove the local path route for {package} from {}",
@@ -209,6 +235,10 @@ fn validate_member_dependencies(manifests: &[(PathBuf, toml::Value)]) -> Result<
                             path.display()
                         )));
                     }
+                    inherited
+                        .get_mut(package.as_str())
+                        .unwrap()
+                        .insert(path.clone());
                 } else if let Some(source) = details.get("git").and_then(toml::Value::as_str) {
                     return Err(error(format!(
                         "Cargo package {package} Git source mismatch: expected no unapproved member Git dependency, actual {}:{key}={source}\nrepair: remove the unapproved Git dependency from {}",
@@ -218,15 +248,23 @@ fn validate_member_dependencies(manifests: &[(PathBuf, toml::Value)]) -> Result<
                 }
             }
         }
-        if path == Path::new("crates/solstone-linux/Cargo.toml") {
-            for package in PACKAGES {
-                if inherited[package] != 1 {
-                    return Err(error(format!(
-                        "SPL package {package} leaf inheritance mismatch: expected workspace = true, actual missing\nrepair: inherit {package} from root [workspace.dependencies] in {}",
-                        path.display()
-                    )));
-                }
-            }
+    }
+    for package in PACKAGES {
+        let manifests = &inherited[package];
+        if manifests.is_empty() {
+            return Err(error(format!(
+                "SPL package {package} leaf inheritance mismatch: expected workspace = true, actual missing\nrepair: inherit {package} from root [workspace.dependencies] in a workspace member"
+            )));
+        }
+        if manifests.len() > 1 {
+            let actual = manifests
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(error(format!(
+                "SPL package {package} leaf inheritance mismatch: expected exactly one inheriting workspace member, actual {actual}\nrepair: inherit {package} from root [workspace.dependencies] in only one workspace member"
+            )));
         }
     }
     Ok(())
@@ -248,6 +286,7 @@ fn validate_overrides(root: &toml::Value) -> Result<()> {
         }
     }
     if let Some(replacements) = root.get("replace").and_then(toml::Value::as_table) {
+        // Cargo identifies the replaced package in the package-ID key; there is no rename key.
         for package_id in replacements.keys() {
             let package = package_id.split(':').next().unwrap_or(package_id);
             if PACKAGES.contains(&package) {
@@ -265,12 +304,12 @@ fn validate_config(repo: &Path) -> Result<()> {
         if !repo.join(relative).exists() {
             continue;
         }
-        let config = read_toml(repo, relative, "workspace manifest")?;
+        let config = read_toml(repo, relative, "Cargo configuration")?;
         if let Some(sources) = config.get("source").and_then(toml::Value::as_table) {
             for (source, value) in sources {
                 if let Some(replacement) = value.get("replace-with").and_then(toml::Value::as_str) {
                     return Err(error(format!(
-                        "SPL package spl-core Cargo source replacement mismatch: expected absent, actual {}:{source}->{replacement}\nrepair: remove the source replace-with route affecting spl-core",
+                        "Cargo configuration source replacement mismatch: expected absent, actual {}:{source}->{replacement}\nrepair: remove the replace-with route so the SPL packages resolve from the declared workspace source",
                         relative.display()
                     )));
                 }
@@ -298,7 +337,7 @@ fn validate_in_tree(repo: &Path) -> Result<()> {
         .filter(|value| !value.is_empty())
     {
         let relative = PathBuf::from(String::from_utf8(bytes.to_vec()).map_err(|cause| error(format!("tracked manifest inventory mismatch: expected UTF-8 paths, actual {cause}\nrepair: restore the Git checkout before validating SPL pins")))?);
-        let manifest = read_toml(repo, &relative, "workspace manifest")?;
+        let manifest = read_toml(repo, &relative, "tracked manifest")?;
         if let Some(package) = manifest
             .get("package")
             .and_then(|value| value.get("name"))
@@ -314,7 +353,7 @@ fn validate_in_tree(repo: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_lock(repo: &Path, revisions: &BTreeMap<String, String>) -> Result<()> {
+fn validate_lock(repo: &Path, pins: &WorkspacePins) -> Result<()> {
     let text = fs::read_to_string(repo.join("Cargo.lock")).map_err(|cause| error(format!("lockfile parse mismatch: expected valid TOML, actual {cause}\nrepair: restore a valid Cargo.lock before validating the SPL pin")))?;
     let lock: toml::Value = toml::from_str(&text).map_err(|cause| error(format!("lockfile parse mismatch: expected valid TOML, actual {cause}\nrepair: restore a valid Cargo.lock before validating the SPL pin")))?;
     let records = lock
@@ -336,6 +375,16 @@ fn validate_lock(repo: &Path, revisions: &BTreeMap<String, String>) -> Result<()
             return Err(error(format!(
                 "SPL package {package} lockfile record mismatch: expected exactly one package record, actual {}\nrepair: regenerate Cargo.lock with one resolved {package} package",
                 matches.len()
+            )));
+        }
+        let lock_version = matches[0]
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("missing");
+        if lock_version != pins.versions[package] {
+            return Err(error(format!(
+                "SPL package {package} version mismatch: expected {lock_version}, actual {}\nrepair: declare {package} at the resolved version in root Cargo.toml",
+                pins.versions[package]
             )));
         }
         let source = matches[0]
@@ -372,16 +421,16 @@ fn validate_lock(repo: &Path, revisions: &BTreeMap<String, String>) -> Result<()
             )));
         }
         let query_revision = pairs[0].1;
-        if query_revision != revisions[package] {
+        if query_revision != pins.revisions[package] {
             return Err(error(format!(
                 "SPL package {package} lockfile revision query mismatch: expected {}, actual {query_revision}\nrepair: regenerate Cargo.lock from the approved {package} workspace revision",
-                revisions[package]
+                pins.revisions[package]
             )));
         }
-        if fragment != revisions[package] {
+        if fragment != pins.revisions[package] {
             return Err(error(format!(
                 "SPL package {package} lockfile resolved revision mismatch: expected {}, actual {fragment}\nrepair: regenerate Cargo.lock so {package} resolves to the approved workspace revision",
-                revisions[package]
+                pins.revisions[package]
             )));
         }
     }
@@ -390,7 +439,7 @@ fn validate_lock(repo: &Path, revisions: &BTreeMap<String, String>) -> Result<()
 
 pub fn validate_spl_pin(repo: &RepoRoot) -> Result<()> {
     let root = read_toml(repo.path(), Path::new("Cargo.toml"), "workspace manifest")?;
-    let revisions = validate_workspace(&root)?;
+    let pins = validate_workspace(&root)?;
     validate_overrides(&root)?;
     let members = root.get("workspace").and_then(|value| value.get("members")).and_then(toml::Value::as_array).ok_or_else(|| error("workspace manifest parse mismatch: expected valid TOML, actual Cargo.toml: missing workspace.members\nrepair: restore valid TOML in Cargo.toml".to_owned()))?;
     let mut manifests = Vec::new();
@@ -405,7 +454,7 @@ pub fn validate_spl_pin(repo: &RepoRoot) -> Result<()> {
     validate_member_dependencies(&manifests)?;
     validate_config(repo.path())?;
     validate_in_tree(repo.path())?;
-    validate_lock(repo.path(), &revisions)
+    validate_lock(repo.path(), &pins)
 }
 
 #[cfg(test)]
