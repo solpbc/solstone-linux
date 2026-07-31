@@ -20,7 +20,7 @@ CARGO_DEB_VERSION := 3.7.0
 CARGO_GENERATE_RPM_VERSION := 0.21.0
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
 UBUNTU_STOCK_BASE := sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890
-FEDORA_STOCK_BASE := sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56
+FEDORA_STOCK_BASE := sha256:8c219b734f781909b9384edc01eb52318330b57fa58e0410dfcf973b01d28fcd
 SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/install.sh
 
 all: install
