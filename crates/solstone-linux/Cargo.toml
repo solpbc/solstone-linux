@@ -62,6 +62,7 @@ toml = "1"
 # prefix is cargo-deb's special workspace-aware spelling for a built binary.
 [package.metadata.deb]
 maintainer = "sol pbc <jer@solpbc.org>"
+copyright = "2026 sol pbc"
 license-file = ["../../LICENSE", "0"]
 extended-description = "A standalone Linux desktop observer that experiences screen and audio along with its owner and syncs segments to their solstone journal."
 depends = "$auto"

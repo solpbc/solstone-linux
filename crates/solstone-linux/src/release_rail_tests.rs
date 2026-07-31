@@ -106,6 +106,7 @@ fn package_metadata_and_resolved_licenses() {
 
     let deb = &member["package"]["metadata"]["deb"];
     assert!(deb.get("license").is_none());
+    assert_eq!(deb["copyright"].as_str(), Some("2026 sol pbc"));
     assert_eq!(
         deb["license-file"].as_array().unwrap(),
         &[

@@ -487,6 +487,21 @@ fn audit_deb_with(
 ) -> PathBuf {
     let mut data = tar::Builder::new(Vec::new());
     let mut md5sums = String::new();
+    let copyright_path = "usr/share/doc/solstone-linux/copyright";
+    let mut copyright_header = tar::Header::new_gnu();
+    copyright_header.set_size(crate::package_audit::DEB_COPYRIGHT.len() as u64);
+    copyright_header.set_mode(0o644);
+    copyright_header.set_cksum();
+    data.append_data(
+        &mut copyright_header,
+        format!("./{copyright_path}"),
+        crate::package_audit::DEB_COPYRIGHT,
+    )
+    .unwrap();
+    md5sums.push_str(&format!(
+        "{}  {copyright_path}\n",
+        crate::package_audit::md5_digest(crate::package_audit::DEB_COPYRIGHT)
+    ));
     for authority in crate::package_audit::PAYLOAD_AUTHORITY {
         if payload.omit == Some(authority.role) {
             continue;
@@ -909,7 +924,7 @@ fn package_audit_rejects_each_deb_dependency_and_accepts_product_name() {
     let deb = audit_deb_with(
         root.path(),
         &executable,
-        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6, solstone-linux\n",
+        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6, solstone-linux\nDescription: solstone-linux\n A continuation line is valid Debian control syntax.\n .\n So is a second paragraph in the field.\n",
         &[],
         &AuditPayloadOptions::default(),
     );
@@ -1345,6 +1360,14 @@ pub(super) fn release_fixture_with(executables: [&[u8]; 3]) -> tempfile::TempDir
     producer_tarball_with(temp.path(), &version, executables[0]);
     deb_with(temp.path(), &version, executables[1]);
     rpm_file_with(temp.path(), &version, executables[2]);
+    temp
+}
+
+pub(super) fn audit_release_fixture_with(executables: [&[u8]; 3]) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    audit_tar(temp.path(), executables[0]);
+    audit_deb(temp.path(), executables[1]);
+    audit_rpm(temp.path(), executables[2]);
     temp
 }
 

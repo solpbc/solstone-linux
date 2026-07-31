@@ -23,6 +23,15 @@ use xz2::read::XzDecoder;
 
 const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 const INSTALL_NOTES: &[u8] = include_bytes!("../../../packaging/INSTALL-NOTES");
+pub(crate) const DEB_COPYRIGHT: &[u8] = concat!(
+    "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n",
+    "Upstream-Name: solstone-linux\n",
+    "Source: https://github.com/solpbc/solstone-linux\n",
+    "Copyright: 2026 sol pbc\n",
+    "License: AGPL-3.0-only\n",
+    include_str!("../../../LICENSE")
+)
+.as_bytes();
 const PACKAGE_NOTE_PHRASES: &[&str] = &["observer key", "pipx"];
 
 // Derived with:
@@ -201,14 +210,23 @@ fn regular_artifact(path: &Path) -> Result<()> {
 }
 
 fn normalized_path(path: &Path) -> Option<String> {
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if path.is_absolute() {
         return None;
     }
-    path.to_str().map(str::to_owned)
+    let mut normalized = String::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => {
+                if !normalized.is_empty() {
+                    normalized.push('/');
+                }
+                normalized.push_str(value.to_str()?);
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn tar_inventory<R: Read>(artifact: &Path, reader: R) -> Result<Vec<Member>> {
@@ -517,11 +535,52 @@ fn deb_members(path: &Path) -> Result<Vec<Member>> {
     let control_body = std::str::from_utf8(&control_member.bytes)
         .map_err(|_| audit_error(path, "MalformedMetadata", "non-utf8-control", "deb"))?;
     let mut fields = BTreeMap::new();
+    let mut current = None;
+    let mut paragraph_ended = false;
     for line in control_body.lines() {
+        if line.is_empty() {
+            paragraph_ended = true;
+            current = None;
+            continue;
+        }
+        if paragraph_ended {
+            return Err(audit_error(
+                path,
+                "MalformedMetadata",
+                "control-paragraph",
+                "deb",
+            ));
+        }
+        if line.starts_with([' ', '\t']) {
+            let name = current.as_ref().ok_or_else(|| {
+                audit_error(path, "MalformedMetadata", "control-continuation", "deb")
+            })?;
+            let value: &mut String = fields
+                .get_mut(name)
+                .expect("current field is inserted before continuations");
+            value.push('\n');
+            value.push_str(line);
+            continue;
+        }
         let (name, value) = line
             .split_once(':')
             .ok_or_else(|| audit_error(path, "MalformedMetadata", "control-line", "deb"))?;
-        if fields.insert(name, value.trim()).is_some() {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(audit_error(
+                path,
+                "MalformedMetadata",
+                "control-field",
+                "deb",
+            ));
+        }
+        if fields
+            .insert(name.to_owned(), value.trim().to_owned())
+            .is_some()
+        {
             return Err(audit_error(
                 path,
                 "MalformedMetadata",
@@ -529,6 +588,7 @@ fn deb_members(path: &Path) -> Result<Vec<Member>> {
                 name,
             ));
         }
+        current = Some(name.to_owned());
     }
     for required in ["Package", "Version", "Architecture"] {
         if !fields.contains_key(required) {
@@ -743,6 +803,23 @@ fn inspect_payload(
         .collect::<BTreeMap<_, _>>();
     let mut executable = None;
     let mut nonbinary = BTreeMap::new();
+    if matches!(format, Format::Deb) {
+        let expected = "usr/share/doc/solstone-linux/copyright";
+        let copyright = by_path
+            .remove(expected)
+            .ok_or_else(|| audit_error(path, "PayloadClosure", "missing", expected))?;
+        if copyright.mode & 0o7777 != 0o644 {
+            return Err(audit_error(
+                path,
+                "PayloadClosure",
+                &format!("mode:{:04o}", copyright.mode),
+                expected,
+            ));
+        }
+        if copyright.bytes != DEB_COPYRIGHT {
+            return Err(audit_error(path, "DivergentPayload", "copyright", expected));
+        }
+    }
     for authority in PAYLOAD_AUTHORITY {
         let expected = expected_path(format, authority);
         let member = by_path
@@ -962,7 +1039,7 @@ mod tests {
     }
 
     fn fixture_members(format: Format) -> Vec<Member> {
-        PAYLOAD_AUTHORITY
+        let mut members = PAYLOAD_AUTHORITY
             .into_iter()
             .map(|authority| {
                 let bytes = match authority.role {
@@ -977,7 +1054,15 @@ mod tests {
                     bytes,
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if matches!(format, Format::Deb) {
+            members.push(Member {
+                path: "usr/share/doc/solstone-linux/copyright".into(),
+                mode: 0o644,
+                bytes: DEB_COPYRIGHT.to_vec(),
+            });
+        }
+        members
     }
 
     fn exact(format: Format, class: &str, token: &str, member: &str, error: Error) {
@@ -998,6 +1083,49 @@ mod tests {
             inspect_elf(artifact(format), &executable).unwrap();
             assert_eq!(nonbinary.len(), PAYLOAD_AUTHORITY.len() - 1);
         }
+    }
+
+    #[test]
+    fn deb_copyright_is_required_mode_locked_and_byte_exact() {
+        let expected = "usr/share/doc/solstone-linux/copyright";
+        let mut missing = fixture_members(Format::Deb);
+        missing.retain(|member| member.path != expected);
+        exact(
+            Format::Deb,
+            "PayloadClosure",
+            "missing",
+            expected,
+            inspect_payload(artifact(Format::Deb), Format::Deb, missing).unwrap_err(),
+        );
+
+        let mut changed = fixture_members(Format::Deb);
+        changed
+            .iter_mut()
+            .find(|member| member.path == expected)
+            .unwrap()
+            .bytes
+            .push(b' ');
+        exact(
+            Format::Deb,
+            "DivergentPayload",
+            "copyright",
+            expected,
+            inspect_payload(artifact(Format::Deb), Format::Deb, changed).unwrap_err(),
+        );
+
+        let mut executable = fixture_members(Format::Deb);
+        executable
+            .iter_mut()
+            .find(|member| member.path == expected)
+            .unwrap()
+            .mode = 0o755;
+        exact(
+            Format::Deb,
+            "PayloadClosure",
+            "mode:0755",
+            expected,
+            inspect_payload(artifact(Format::Deb), Format::Deb, executable).unwrap_err(),
+        );
     }
 
     #[test]
@@ -1311,8 +1439,17 @@ mod tests {
     #[test]
     fn tar_inventory_rejects_duplicate_links_devices_and_truncation() {
         let artifact = Path::new("fixture.tar.gz");
+        let dot_prefixed = tar_fixture(&[("./member", b"a", EntryType::Regular, 0o644)]);
+        assert_eq!(
+            tar_inventory(artifact, Cursor::new(dot_prefixed))
+                .unwrap()
+                .into_iter()
+                .map(|member| member.path)
+                .collect::<Vec<_>>(),
+            vec!["member"]
+        );
         let duplicate = tar_fixture(&[
-            ("member", b"a", EntryType::Regular, 0o644),
+            ("./member", b"a", EntryType::Regular, 0o644),
             ("member", b"b", EntryType::Regular, 0o644),
         ]);
         exact(

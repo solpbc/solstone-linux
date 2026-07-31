@@ -66,10 +66,21 @@ RUN actual="$(cargo deb --version)" \
     && cargo deb --locked --no-build -p solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && test "$VERSION" = "$RELEASE_VERSION" \
-    && DEB="target/debian/solstone-linux_${VERSION}-1_amd64.deb" \
+    && DEB="/src/target/debian/solstone-linux_${VERSION}-1_amd64.deb" \
     && { test -f "$DEB" \
         || { echo "error: Debian artifact mismatch: expected ${DEB}, actual missing" >&2; \
              echo "repair: cargo deb --locked --no-build -p solstone-linux" >&2; exit 1; }; } \
+    && DEB_ROOT=$(mktemp -d) \
+    && dpkg-deb --raw-extract "$DEB" "$DEB_ROOT" \
+    && cd "$DEB_ROOT" \
+    && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' \
+        | LC_ALL=C sort -z \
+        | xargs -0 -r md5sum -- > DEBIAN/md5sums \
+    && test "$(wc -l < DEBIAN/md5sums)" -eq 17 \
+    && chmod 0644 DEBIAN/md5sums \
+    && dpkg-deb --root-owner-group -Zxz -z9 --build "$DEB_ROOT" "${DEB}.sealed" >/dev/null \
+    && mv "${DEB}.sealed" "$DEB" \
+    && cd /src \
     && DEB_OUT="/release/solstone-linux_${VERSION}-1_amd64.deb" \
     && TAR_OUT="/release/solstone-linux-${VERSION}-linux-x86_64.tar.gz" \
     && cp "$DEB" "$DEB_OUT" \

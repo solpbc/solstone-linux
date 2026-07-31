@@ -1736,6 +1736,18 @@ fn create_candidate_locked(
         })?;
         let baseline_executable =
             reconcile_lanes(&deb, &rpm, &staging.deb_lane, &staging.rpm_lane, &version)?;
+        audit_packages(
+            &staging
+                .deb_lane
+                .join(&artifact_by_kind(&deb.artifacts, "tar")?.path),
+            &staging
+                .deb_lane
+                .join(&artifact_by_kind(&deb.artifacts, "deb")?.path),
+            &staging
+                .rpm_lane
+                .join(&artifact_by_kind(&rpm.artifacts, "rpm")?.path),
+            &baseline_executable.sha256,
+        )?;
         let finalized = finalize_candidate(FinalizeInput {
             root,
             staging: &staging,

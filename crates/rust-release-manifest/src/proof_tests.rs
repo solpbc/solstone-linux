@@ -1953,10 +1953,15 @@ fn sha256_git_fixture_flows_through_context_lane_status_and_recovery() {
     );
 }
 
-fn docker_create_templates(root: &RepoRoot, directory: &Path, executables: Option<[&[u8]; 3]>) {
-    let products = executables.map_or_else(crate::tests::release_fixture, |values| {
-        crate::tests::release_fixture_with(values)
-    });
+fn docker_create_templates(root: &RepoRoot, directory: &Path, divergent: Option<usize>) {
+    let baseline = crate::elf64::pinned_elf64_for_test();
+    let mut alternate = baseline.clone();
+    alternate.push(0);
+    let mut executables = [baseline.as_slice(); 3];
+    if let Some(index) = divergent {
+        executables[index] = &alternate;
+    }
+    let products = crate::tests::audit_release_fixture_with(executables);
     for entry in fs::read_dir(products.path()).unwrap() {
         let entry = entry.unwrap();
         fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
@@ -2058,7 +2063,7 @@ fn docker_create_candidate_is_offline_normalized_and_recoverable() {
     docker_create_candidate_harness(None);
 }
 
-fn docker_create_candidate_harness(divergent: Option<[&[u8]; 3]>) {
+fn docker_create_candidate_harness(divergent: Option<usize>) {
     let repo = crate::candidate_tests::fixture();
     let db = crate::candidate_tests::git_repo();
     let descriptor_dir = tempfile::tempdir().unwrap();
@@ -2181,7 +2186,7 @@ exit 94
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("candidate executable identity mismatch"),
+            error.contains("class=DivergentExecutable"),
             "unexpected creation error: {error}"
         );
         assert!(!error.contains("candidate-proven"));
@@ -2280,15 +2285,15 @@ exit 94
 
 #[test]
 fn production_creation_rejects_divergent_tar_executable() {
-    docker_create_candidate_harness(Some(divergent_executables(0)));
+    docker_create_candidate_harness(Some(0));
 }
 
 #[test]
 fn production_creation_rejects_divergent_deb_executable() {
-    docker_create_candidate_harness(Some(divergent_executables(1)));
+    docker_create_candidate_harness(Some(1));
 }
 
 #[test]
 fn production_creation_rejects_divergent_rpm_executable() {
-    docker_create_candidate_harness(Some(divergent_executables(2)));
+    docker_create_candidate_harness(Some(2));
 }
