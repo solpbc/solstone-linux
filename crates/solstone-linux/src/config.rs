@@ -19,8 +19,6 @@ use crate::private_file::{
     DurableWriteFault, NoWriteFault, atomic_write_bytes_with_fault, ensure_private_directory,
 };
 
-// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-pub const DEFAULT_SERVER_URL: &str = "http://localhost:5015";
 pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
@@ -30,19 +28,12 @@ static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-    #[serde(default, skip_serializing)]
-    pub server_url: String,
-    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-    #[serde(default, skip_serializing)]
-    pub key: String,
     pub stream: String,
     pub segment_interval: i64,
     pub sync_retry_delays: Vec<i64>,
     pub sync_max_retries: i64,
     pub sync_stale_threshold: i64,
     pub cache_retention_days: i64,
-    pub chat_bridge_enabled: bool,
     pub capture_framerate: i64,
     pub draw_cursor: bool,
     pub start_paused: bool,
@@ -66,15 +57,12 @@ impl Default for Config {
     fn default() -> Self {
         let home = home_dir();
         Self {
-            server_url: String::new(),
-            key: String::new(),
             stream: String::new(),
             segment_interval: 300,
             sync_retry_delays: DEFAULT_RETRY_DELAYS.to_vec(),
             sync_max_retries: 10,
             sync_stale_threshold: DEFAULT_SYNC_STALE_THRESHOLD,
             cache_retention_days: 7,
-            chat_bridge_enabled: true,
             capture_framerate: 1,
             draw_cursor: true,
             start_paused: false,
@@ -260,10 +248,11 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
         });
         return LoadedConfig { config, warnings };
     };
-    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-    config.server_url = load_string(values, "server_url", &mut warnings);
-    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-    config.key = load_string(values, "key", &mut warnings);
+    let mut values = values.clone();
+    for legacy in ["server_url", "key", "chat_bridge_enabled"] {
+        values.remove(legacy);
+    }
+    let values = &values;
     config.stream = load_string(values, "stream", &mut warnings);
     config.segment_interval = load_int(values, "segment_interval", 300, &mut warnings);
     config.sync_retry_delays = load_int_list(
@@ -280,8 +269,6 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
         &mut warnings,
     );
     config.cache_retention_days = load_int(values, "cache_retention_days", 7, &mut warnings);
-    // Python stores this raw, but all consumers use truthiness, so typed coercion is behaviorally equivalent.
-    config.chat_bridge_enabled = json_truthy(values.get("chat_bridge_enabled"), true);
     config.capture_framerate = load_int(values, "capture_framerate", 1, &mut warnings).clamp(1, 10);
     config.draw_cursor = json_truthy(values.get("draw_cursor"), true);
     config.start_paused = json_truthy(values.get("start_paused"), false);
@@ -332,10 +319,6 @@ fn write_link_config(
 ) -> io::Result<Config> {
     let _guard = acquire_config_write_lock()?;
     let mut config = load_config(paths.clone()).config;
-    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-    config.server_url.clear();
-    // L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-    config.key.clear();
     if let Some(stream) = stream {
         config.stream = stream.to_owned();
     }
@@ -370,33 +353,13 @@ pub(crate) fn save_linked_stream_with_fault(
     write_link_config(paths, Some(stream), fault)
 }
 
-enum IdentityWrite<'a> {
-    PreserveDisk,
-    Provided { key: &'a str, stream: &'a str },
-}
-
-fn save_config_inner(
-    paths: &ConfigPaths,
-    source: Option<&Config>,
-    identity: IdentityWrite<'_>,
-) -> io::Result<()> {
+fn save_config_inner(paths: &ConfigPaths, source: Option<&Config>) -> io::Result<()> {
     let _guard = acquire_config_write_lock()?;
     let mut merged = source
         .cloned()
         .unwrap_or_else(|| load_config(paths.clone()).config);
-    match identity {
-        IdentityWrite::PreserveDisk if merged.config_path().exists() => {
-            let disk = load_config(paths.clone()).config;
-            merged.key = disk.key;
-            merged.stream = disk.stream;
-        }
-        // On the first write there is no disk identity to preserve, so save_config necessarily
-        // writes the caller's identity. Existing configs remain safe-by-default.
-        IdentityWrite::PreserveDisk => {}
-        IdentityWrite::Provided { key, stream } => {
-            merged.key = key.to_owned();
-            merged.stream = stream.to_owned();
-        }
+    if merged.config_path().exists() {
+        merged.stream = load_config(paths.clone()).config.stream;
     }
     write_config(&merged)
 }
@@ -408,28 +371,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
             config_dir: Some(config.config_dir.clone()),
         },
         Some(config),
-        IdentityWrite::PreserveDisk,
     )
-}
-
-// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-pub fn save_config_with_identity(config: &Config) -> io::Result<()> {
-    save_config_inner(
-        &ConfigPaths {
-            base_dir: Some(config.base_dir.clone()),
-            config_dir: Some(config.config_dir.clone()),
-        },
-        Some(config),
-        IdentityWrite::Provided {
-            key: &config.key,
-            stream: &config.stream,
-        },
-    )
-}
-
-// L3-CLEANUP(spl-cutover): legacy direct-HTTP authority; remove when chat/browser navigation is separated.
-pub fn save_identity(paths: &ConfigPaths, key: &str, stream: &str) -> io::Result<()> {
-    save_config_inner(paths, None, IdentityWrite::Provided { key, stream })
 }
 
 fn migrate(config: &Config) -> io::Result<()> {
@@ -514,8 +456,7 @@ mod tests {
     #[test]
     fn defaults() {
         let c = Config::default();
-        assert_eq!(c.server_url, "");
-        assert_eq!(c.key, "");
+        assert_eq!(c.stream, "");
         assert_eq!(c.segment_interval, 300);
     }
     // tests/test_config.py::test_captures_dir
@@ -559,21 +500,23 @@ mod tests {
     fn round_trip_core() {
         let t = tempfile::tempdir().unwrap();
         let c = round_trip(t.path(), |c| {
-            c.server_url = "https://example.com".into();
-            c.key = "key".into();
             c.stream = "archon".into();
             c.segment_interval = 600
         });
-        assert_eq!(
-            (c.server_url, c.key, c.stream, c.segment_interval),
-            ("".into(), "".into(), "archon".into(), 600)
-        );
+        assert_eq!((c.stream, c.segment_interval), ("archon".into(), 600));
     }
     // tests/test_config.py::test_load_missing
     #[test]
     fn load_missing() {
         let t = tempfile::tempdir().unwrap();
-        assert_eq!(load(t.path()).config.server_url, "");
+        assert_eq!(
+            load(t.path()).config,
+            Config {
+                base_dir: t.path().into(),
+                config_dir: t.path().join("cfg"),
+                ..Config::default()
+            }
+        );
     }
     // tests/test_config.py::test_load_corrupt
     #[test]
@@ -583,7 +526,7 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("config.json"), "not json!").unwrap();
         let x = load(t.path());
-        assert_eq!(x.config.server_url, "");
+        assert_eq!(x.config.stream, "");
         assert_eq!(x.warnings.len(), 1);
         assert!(
             x.warnings[0]
@@ -662,7 +605,7 @@ mod tests {
     #[test]
     fn retention_default() {
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"server_url":"http://test"}));
+        write(t.path(), json!({"stream":"old"}));
         assert_eq!(load(t.path()).config.cache_retention_days, 7);
     }
     // tests/test_config.py::test_capture_framerate_default
@@ -694,7 +637,7 @@ mod tests {
     #[test]
     fn old_framerate_defaults() {
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"server_url":"http://test"}));
+        write(t.path(), json!({"stream":"old"}));
         let c = load(t.path()).config;
         assert_eq!(c.capture_framerate, 1);
         assert!(c.draw_cursor);
@@ -728,7 +671,7 @@ mod tests {
     #[test]
     fn old_paused_default() {
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"server_url":"http://test"}));
+        write(t.path(), json!({"stream":"old"}));
         assert!(!load(t.path()).config.start_paused);
     }
     // tests/test_config.py::test_migrates_legacy_config
@@ -739,7 +682,7 @@ mod tests {
         fs::create_dir(&old).unwrap();
         fs::write(
             old.join("config.json"),
-            r#"{"server_url":"https://example.com"}"#,
+            r#"{"server_url":"https://sentinel.invalid","stream":"desktop"}"#,
         )
         .unwrap();
         fs::write(old.join("restore_token"), "tok").unwrap();
@@ -747,7 +690,7 @@ mod tests {
             base_dir: Some(t.path().into()),
             config_dir: Some(t.path().join("new")),
         });
-        assert_eq!(x.config.server_url, "https://example.com");
+        assert_eq!(x.config.stream, "desktop");
         assert_eq!(
             fs::read_to_string(t.path().join("new/restore_token")).unwrap(),
             "tok"
@@ -768,13 +711,13 @@ mod tests {
         assert_eq!(x.config.capture_framerate, 4);
         assert!(old.exists());
     }
-    // AC: all twelve persisted defaults.
+    // AC: all nine persisted defaults.
     #[test]
     fn all_defaults() {
         let c = Config::default();
         assert_eq!(
             serde_json::to_value(c).unwrap(),
-            json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"cache_retention_days":7,"chat_bridge_enabled":true,"capture_framerate":1,"draw_cursor":true,"start_paused":false})
+            json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"cache_retention_days":7,"capture_framerate":1,"draw_cursor":true,"start_paused":false})
         );
     }
     // AC: numeric coercion rejects bool and truncates floats, including list elements.
@@ -823,11 +766,11 @@ mod tests {
     #[test]
     fn non_string_field() {
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"server_url":7}));
+        write(t.path(), json!({"stream":7}));
         let x = load(t.path());
-        assert_eq!(x.config.server_url, "");
-        assert_eq!(warning_fields(&x), vec![Some("server_url")]);
-        assert!(x.warnings[0].message.contains("server_url=7"));
+        assert_eq!(x.config.stream, "");
+        assert_eq!(warning_fields(&x), vec![Some("stream")]);
+        assert!(x.warnings[0].message.contains("stream=7"));
     }
     // AC: save schema is exact and unknown keys are dropped.
     #[test]
@@ -847,7 +790,6 @@ mod tests {
                 "sync_max_retries",
                 "sync_stale_threshold",
                 "cache_retention_days",
-                "chat_bridge_enabled",
                 "capture_framerate",
                 "draw_cursor",
                 "start_paused"
@@ -867,54 +809,28 @@ mod tests {
         );
     }
 
-    // AC 11/17: identity-only recovery and a stale whole-config writer preserve both change sets.
+    // AC: a stale whole-config writer preserves a newer linked stream.
     #[test]
-    fn stale_settings_snapshot_preserves_recovered_identity() {
+    fn stale_settings_snapshot_preserves_linked_stream() {
         let t = tempfile::tempdir().unwrap();
         let initial = Config {
             base_dir: t.path().into(),
             config_dir: t.path().join("cfg"),
-            server_url: "https://journal".into(),
             cache_retention_days: 7,
             ..Config::default()
         };
         save_config(&initial).unwrap();
         let config_paths = paths(t.path());
-        save_identity(&config_paths, "STALE-KEY", "desktop-old").unwrap();
+        save_linked_stream(&config_paths, "desktop-old").unwrap();
         let mut stale_settings = load_config(config_paths.clone()).config;
 
-        save_identity(&config_paths, "NEW-KEY", "desktop-new").unwrap();
+        save_linked_stream(&config_paths, "desktop-new").unwrap();
         stale_settings.cache_retention_days = 30;
         save_config(&stale_settings).unwrap();
 
         let saved = load_config(config_paths).config;
-        assert_eq!(saved.key, "");
         assert_eq!(saved.stream, "desktop-new");
         assert_eq!(saved.cache_retention_days, 30);
-    }
-
-    // AC 12: recovery writes identity only and cannot revert newer non-identity disk state.
-    #[test]
-    fn save_identity_preserves_stream_but_not_legacy_authority() {
-        let t = tempfile::tempdir().unwrap();
-        let config_paths = paths(t.path());
-        let mut config = Config {
-            base_dir: t.path().into(),
-            config_dir: t.path().join("cfg"),
-            server_url: "https://old".into(),
-            ..Config::default()
-        };
-        save_config(&config).unwrap();
-        save_identity(&config_paths, "STALE-KEY", "desktop").unwrap();
-        config = load_config(config_paths.clone()).config;
-        config.server_url = "https://new".into();
-        save_config(&config).unwrap();
-
-        save_identity(&config_paths, "NEW-KEY", "desktop-new").unwrap();
-        let saved = load_config(config_paths).config;
-        assert_eq!(saved.server_url, "");
-        assert_eq!(saved.key, "");
-        assert_eq!(saved.stream, "desktop-new");
     }
 
     #[test]
@@ -923,8 +839,8 @@ mod tests {
         write(
             t.path(),
             json!({
-                "server_url": "https://legacy.invalid",
-                "key": "legacy-secret",
+                "server_url": "https://VALID-URL-SENTINEL.invalid",
+                "key": "VALID-KEY-SENTINEL",
                 "stream": "desktop",
                 "segment_interval": 17,
                 "sync_retry_delays": [2, 4],
@@ -939,15 +855,12 @@ mod tests {
         );
 
         let sanitized = sanitize_link_authority(&paths(t.path())).unwrap();
-        assert_eq!(sanitized.server_url, "");
-        assert_eq!(sanitized.key, "");
         assert_eq!(sanitized.stream, "desktop");
         assert_eq!(sanitized.segment_interval, 17);
         assert_eq!(sanitized.sync_retry_delays, vec![2, 4]);
         assert_eq!(sanitized.sync_max_retries, 3);
         assert_eq!(sanitized.sync_stale_threshold, 91);
         assert_eq!(sanitized.cache_retention_days, 12);
-        assert!(!sanitized.chat_bridge_enabled);
         assert_eq!(sanitized.capture_framerate, 4);
         assert!(!sanitized.draw_cursor);
         assert!(sanitized.start_paused);
@@ -955,6 +868,51 @@ mod tests {
             serde_json::from_slice(&fs::read(t.path().join("cfg/config.json")).unwrap()).unwrap();
         assert!(value.get("server_url").is_none());
         assert!(value.get("key").is_none());
+        assert!(value.get("chat_bridge_enabled").is_none());
+    }
+
+    #[test]
+    fn legacy_values_are_discarded_before_warnings_and_never_serialized() {
+        for legacy in [
+            json!({
+                "server_url": "VALID-URL-SENTINEL",
+                "key": "VALID-KEY-SENTINEL",
+                "chat_bridge_enabled": "VALID-CHAT-SENTINEL",
+                "stream": "desktop"
+            }),
+            json!({
+                "server_url": {"secret": "WRONG-URL-SENTINEL"},
+                "key": ["WRONG-KEY-SENTINEL"],
+                "chat_bridge_enabled": {"secret": "WRONG-CHAT-SENTINEL"},
+                "stream": "desktop"
+            }),
+        ] {
+            let t = tempfile::tempdir().unwrap();
+            write(t.path(), legacy);
+            let loaded = load(t.path());
+            assert_eq!(loaded.config.stream, "desktop");
+            let warning_text = loaded
+                .warnings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let debug = format!("{:?}", loaded.config);
+            let serialized = serde_json::to_string(&loaded.config).unwrap();
+            for sentinel in [
+                "VALID-URL-SENTINEL",
+                "VALID-KEY-SENTINEL",
+                "VALID-CHAT-SENTINEL",
+                "WRONG-URL-SENTINEL",
+                "WRONG-KEY-SENTINEL",
+                "WRONG-CHAT-SENTINEL",
+            ] {
+                assert!(!warning_text.contains(sentinel));
+                assert!(!debug.contains(sentinel));
+                assert!(!serialized.contains(sentinel));
+            }
+            assert!(loaded.warnings.is_empty());
+        }
     }
 
     #[test]
@@ -966,7 +924,26 @@ mod tests {
         let value: Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("server_url").is_none());
         assert!(value.get("key").is_none());
+        assert!(value.get("chat_bridge_enabled").is_none());
         assert_eq!(value["stream"], "");
+        assert_eq!(
+            text,
+            concat!(
+                "{\n",
+                "  \"stream\": \"\",\n",
+                "  \"segment_interval\": 300,\n",
+                "  \"sync_retry_delays\": [\n",
+                "    5,\n    30,\n    120,\n    300\n",
+                "  ],\n",
+                "  \"sync_max_retries\": 10,\n",
+                "  \"sync_stale_threshold\": 600,\n",
+                "  \"cache_retention_days\": 7,\n",
+                "  \"capture_framerate\": 1,\n",
+                "  \"draw_cursor\": true,\n",
+                "  \"start_paused\": false\n",
+                "}\n"
+            )
+        );
     }
 
     #[test]
@@ -1029,7 +1006,7 @@ mod tests {
             let t = tempfile::tempdir().unwrap();
             write(
                 t.path(),
-                json!({"server_url":"https://legacy.invalid","key":"secret","stream":"old"}),
+                json!({"server_url":"VALID-URL-SENTINEL","key":"VALID-KEY-SENTINEL","chat_bridge_enabled":"VALID-CHAT-SENTINEL","stream":"old"}),
             );
             let path = t.path().join("cfg/config.json");
             let before = fs::read(&path).unwrap();
@@ -1040,6 +1017,7 @@ mod tests {
                 assert_eq!(value["stream"], "old");
                 assert!(value.get("server_url").is_none());
                 assert!(value.get("key").is_none());
+                assert!(value.get("chat_bridge_enabled").is_none());
             } else {
                 assert_eq!(fs::read(path).unwrap(), before, "{stage:?}");
             }

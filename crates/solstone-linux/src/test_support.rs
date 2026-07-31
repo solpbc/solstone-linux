@@ -49,7 +49,7 @@ impl OpportunisticDefaultListenerTrap {
             }
             Err(error) => {
                 eprintln!(
-                    "criterion 12 note: localhost:5015 opportunistic zero-connection clause did not execute: {error}"
+                    "criterion 12 note: opportunistic default-listener trap did not execute: {error}"
                 );
                 Self(None)
             }
@@ -236,8 +236,6 @@ impl LinkedMockServer {
 pub(crate) enum Action {
     Response(u16, Value),
     Raw(u16, &'static str),
-    OwnedRaw(u16, String),
-    Disconnect,
     Stream(u16, mpsc::Receiver<Result<Bytes, std::io::Error>>),
 }
 
@@ -258,8 +256,6 @@ impl MockServer {
             .map(|action| match action {
                 Action::Response(status, body) => (*status, body.to_string().into_bytes()),
                 Action::Raw(status, body) => (*status, body.as_bytes().to_vec()),
-                Action::OwnedRaw(status, body) => (*status, body.as_bytes().to_vec()),
-                Action::Disconnect => (503, Vec::new()),
                 Action::Stream(status, _) => (*status, Vec::new()),
             })
             .collect();
@@ -315,25 +311,6 @@ impl MockServer {
                                         .map_err(|never| match never {})
                                         .boxed(),
                                 ),
-                                Action::OwnedRaw(status, body) => (
-                                    status,
-                                    Full::new(Bytes::from(body))
-                                        .map_err(|never| match never {})
-                                        .boxed(),
-                                ),
-                                Action::Disconnect => {
-                                    return Err::<
-                                        Response<
-                                            http_body_util::combinators::BoxBody<Bytes, BoxError>,
-                                        >,
-                                        _,
-                                    >(
-                                        std::io::Error::new(
-                                            std::io::ErrorKind::ConnectionAborted,
-                                            "mock disconnect",
-                                        ),
-                                    );
-                                }
                                 Action::Stream(status, receiver) => {
                                     (status, ReceiverBody(receiver).boxed())
                                 }

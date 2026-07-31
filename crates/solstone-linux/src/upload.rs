@@ -229,6 +229,10 @@ impl UploadClient {
         self.inner.publish_link_fact(fact);
     }
 
+    pub(crate) fn begin_owner_generation(&self) {
+        self.link_facts().begin_owner_generation();
+    }
+
     pub(crate) fn registration_metadata(&self) -> (String, String, String) {
         (
             self.inner.hostname.clone(),
@@ -495,12 +499,13 @@ pub(crate) fn capability_less_client_for_test(
 #[cfg(test)]
 pub(crate) fn linked_fixture_client_for_test(
     config: &Config,
+    origin: &str,
     hostname: impl Into<String>,
     platform: impl Into<String>,
     version: impl Into<String>,
     clock: Arc<dyn Clock + Send + Sync>,
 ) -> UploadClient {
-    let capability = crate::test_support::linked_fixture_capability(&config.server_url)
+    let capability = crate::test_support::linked_fixture_capability(origin)
         .expect("linked fixture registered for configured test origin");
     UploadClient::with_silent_capacity(
         config,
@@ -899,7 +904,6 @@ mod tests {
         },
     };
     use tempfile::TempDir;
-    use tokio::net::TcpListener;
     use tracing::instrument::WithSubscriber;
 
     #[derive(Clone)]
@@ -916,19 +920,18 @@ mod tests {
         }
     }
 
-    fn config(server: &MockServer, temp: &TempDir) -> Config {
+    fn config(_server: &MockServer, temp: &TempDir) -> Config {
         Config {
-            server_url: server.url.clone(),
-            key: "K".into(),
             base_dir: temp.path().join("data"),
             config_dir: temp.path().join("config"),
             ..Config::default()
         }
     }
 
-    fn client(config: &Config) -> UploadClient {
+    fn client(config: &Config, origin: &str) -> UploadClient {
         crate::upload::linked_fixture_client_for_test(
             config,
+            origin,
             "host-a",
             "linux",
             "0.1.0",
@@ -951,7 +954,6 @@ mod tests {
         peer.enqueue_response(status, serde_json::to_vec(&body).unwrap());
         let temp = TempDir::new().unwrap();
         let config = Config {
-            key: "K".into(),
             stream: "host-a".into(),
             ..config(&legacy, &temp)
         };
@@ -962,7 +964,7 @@ mod tests {
             &session,
             &ObserverState {
                 credential_instance_id: peer.credential().instance_id,
-                key: "K".into(),
+                key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host-a".into(),
                 ingest_url: "/app/observer/ingest".into(),
@@ -1245,7 +1247,6 @@ mod tests {
         peer.enqueue_response(200, b"{}".to_vec());
         let temp = TempDir::new().unwrap();
         let mut config = config(&server, &temp);
-        config.key = "K123456789".into();
         config.stream = "host-a".into();
         let session = start_private_link_session(&config.config_dir, peer.credential(), "host-a")
             .await
@@ -1457,7 +1458,11 @@ mod tests {
         let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
         let mut config = config(&server, &temp);
-        assert!(client(&config).ensure_registered(&mut config).await);
+        assert!(
+            client(&config, &server.url)
+                .ensure_registered(&mut config)
+                .await
+        );
         assert!(server.requests().is_empty());
     }
 
@@ -1679,7 +1684,7 @@ mod tests {
         let server = MockServer::new((0..20).map(|_| (200, json!({}))).collect()).await;
         let temp = TempDir::new().unwrap();
         let config = config(&server, &temp);
-        let client = client(&config);
+        let client = client(&config, &server.url);
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
         let subscriber = tracing_subscriber::fmt()
@@ -1707,7 +1712,7 @@ mod tests {
         let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
         let config = config(&server, &temp);
-        let _client = client(&config);
+        let _client = client(&config, &server.url);
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
         let subscriber = tracing_subscriber::fmt()
@@ -1737,7 +1742,7 @@ mod tests {
             write_file(&temp, "notes.bin", b"binary-content"),
         ];
         assert!(
-            client(&config)
+            client(&config, &server.url)
                 .upload_segment("20260101", "120000_005", &files)
                 .await
                 .success
@@ -1793,7 +1798,7 @@ mod tests {
             let temp = TempDir::new().unwrap();
             let config = config(&server, &temp);
             let media = write_file(&temp, "audio.flac", b"audio");
-            let result = client(&config)
+            let result = client(&config, &server.url)
                 .upload_segment("day", "segment", &[media])
                 .await;
             assert!(result.success);
@@ -1809,7 +1814,7 @@ mod tests {
         config.sync_max_retries = max_retries;
         config.sync_retry_delays = vec![0];
         let media = write_file(&temp, "audio.flac", b"audio");
-        let result = client(&config)
+        let result = client(&config, &server.url)
             .upload_segment("day", "segment", &[media])
             .await;
         (server.requests().len(), result)
@@ -1843,7 +1848,9 @@ mod tests {
             config.sync_max_retries = 10;
             config.sync_retry_delays = vec![0];
             let media = write_file(&temp, "audio.flac", b"audio");
-            let result = client(&config).upload_segment("d", "s", &[media]).await;
+            let result = client(&config, &server.url)
+                .upload_segment("d", "s", &[media])
+                .await;
             assert_eq!(result.error_type, Some(expected));
             assert_eq!(server.requests().len(), 1);
         }
@@ -1857,7 +1864,7 @@ mod tests {
         let mut config = config(&server, &temp);
         config.sync_max_retries = 10;
         let media = write_file(&temp, "audio.flac", b"audio");
-        let client = client(&config);
+        let client = client(&config, &server.url);
         client.request_stop();
         let result = tokio::time::timeout(
             Duration::from_millis(500),
@@ -1877,7 +1884,7 @@ mod tests {
         let mut config = config(&server, &temp);
         config.sync_max_retries = 1;
         let media = write_file(&temp, "audio.flac", b"audio");
-        let client = client(&config);
+        let client = client(&config, &server.url);
         client.request_stop();
         let result = client.upload_segment("d", "s", &[media]).await;
         assert_eq!(result.error_type, Some(ErrorType::Client));
@@ -1893,7 +1900,7 @@ mod tests {
         config.sync_retry_delays = vec![0];
         let media = write_file(&temp, "audio.flac", b"complete-on-retry");
         assert!(
-            client(&config)
+            client(&config, &server.url)
                 .upload_segment("d", "s", &[media])
                 .await
                 .success
@@ -1920,7 +1927,9 @@ mod tests {
         let mut config = config(&server, &temp);
         config.sync_retry_delays = vec![0];
         let media = write_file(&temp, "audio.flac", b"audio");
-        let result = client(&config).upload_segment("d", "s", &[media]).await;
+        let result = client(&config, &server.url)
+            .upload_segment("d", "s", &[media])
+            .await;
         assert!(result.success);
         assert_eq!(server.requests().len(), 2);
 
@@ -1929,7 +1938,7 @@ mod tests {
         let mut terminal_config = self::config(&terminal_server, &terminal_temp);
         terminal_config.sync_max_retries = 1;
         let terminal_media = write_file(&terminal_temp, "audio.flac", b"audio");
-        let terminal_result = client(&terminal_config)
+        let terminal_result = client(&terminal_config, &terminal_server.url)
             .upload_segment("d", "s", &[terminal_media])
             .await;
         assert_eq!(terminal_result.error_type, Some(ErrorType::Transient));
@@ -1938,13 +1947,8 @@ mod tests {
     // AC: a client without a linked capability is classified Transient.
     #[tokio::test]
     async fn capability_less_upload_is_transient() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
         let temp = TempDir::new().unwrap();
         let config = Config {
-            server_url: format!("http://{address}"),
-            key: "K".into(),
             sync_max_retries: 1,
             ..Config::default()
         };
@@ -1970,7 +1974,7 @@ mod tests {
         let mut fields = Map::new();
         fields.insert("mode".into(), json!("idle"));
         assert!(
-            client(&config)
+            client(&config, &server.url)
                 .relay_event("observe", "status", fields)
                 .await
         );
@@ -1989,7 +1993,7 @@ mod tests {
     async fn relay_401_does_not_latch_revoked() {
         let server = MockServer::new(vec![(401, json!({}))]).await;
         let temp = TempDir::new().unwrap();
-        let client = client(&config(&server, &temp));
+        let client = client(&config(&server, &temp), &server.url);
         assert!(!client.relay_event("observe", "status", Map::new()).await);
         assert!(!client.is_revoked());
     }
@@ -1999,7 +2003,7 @@ mod tests {
     async fn listing_uses_bearer_protocol_and_keyless_route() {
         let server = MockServer::new(vec![(200, json!([]))]).await;
         let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp))
+        let result = client(&config(&server, &temp), &server.url)
             .get_server_segments("20260101")
             .await;
         assert_eq!(result.segments, Some(vec![]));
@@ -2018,7 +2022,7 @@ mod tests {
             json!({"items":[{"key":"new", "original_key":"old", "files":[{"name":"a.flac"}]}]});
         let server = MockServer::new(vec![(200, body)]).await;
         let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp))
+        let result = client(&config(&server, &temp), &server.url)
             .get_server_segments("20260101")
             .await;
         assert!(!result.legacy && !result.truncated);
@@ -2044,7 +2048,7 @@ mod tests {
         )])
         .await;
         let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp))
+        let result = client(&config(&server, &temp), &server.url)
             .get_server_segments("20260101")
             .await;
         let entries = result.segments.unwrap();
@@ -2061,7 +2065,7 @@ mod tests {
     async fn malformed_listing_json_is_transient() {
         let server = MockServer::new_actions(vec![Action::Raw(200, "not-json")]).await;
         let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp))
+        let result = client(&config(&server, &temp), &server.url)
             .get_server_segments("20260101")
             .await;
         assert_eq!(result.segments, None);
@@ -2075,7 +2079,7 @@ mod tests {
         let server = MockServer::new(vec![(200, json!({"items":[{"key":"a"}], "total":2}))]).await;
         let temp = TempDir::new().unwrap();
         assert!(
-            client(&config(&server, &temp))
+            client(&config(&server, &temp), &server.url)
                 .get_server_segments("20260101")
                 .await
                 .truncated
@@ -2087,7 +2091,7 @@ mod tests {
     async fn listing_classifies_404_as_incompatible() {
         let server = MockServer::new(vec![(404, json!({}))]).await;
         let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp))
+        let result = client(&config(&server, &temp), &server.url)
             .get_server_segments("20260101")
             .await;
         assert_eq!(result.error_type, Some(ErrorType::Incompatible));
@@ -2099,7 +2103,7 @@ mod tests {
     async fn all_missing_files_make_no_request() {
         let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp))
+        let result = client(&config(&server, &temp), &server.url)
             .upload_segment("d", "s", &[temp.path().join("missing")])
             .await;
         assert_eq!(result.error_type, None);
@@ -2172,20 +2176,15 @@ mod tests {
             let server = MockServer::new(vec![(status, json!({}))]).await;
             let temp = TempDir::new().unwrap();
             let media = write_file(&temp, "a.flac", b"a");
-            let result = client(&config(&server, &temp))
+            let result = client(&config(&server, &temp), &server.url)
                 .upload_segment("d", "s", &[media])
                 .await;
             assert_eq!(result.error_type, Some(ErrorType::Auth));
             assert_eq!(result.status_code, Some(status));
         }
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
         let temp = TempDir::new().unwrap();
         let transport_config = Config {
-            server_url: format!("http://{address}"),
-            key: "K".into(),
             sync_max_retries: 1,
             ..Config::default()
         };
@@ -2210,7 +2209,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut config = config(&server, &temp);
         config.sync_retry_delays.clear();
-        let client = client(&config);
+        let client = client(&config, &server.url);
         assert_eq!(client.inner.retry_delays, vec![5, 30, 120, 300]);
     }
 
@@ -2222,7 +2221,7 @@ mod tests {
         let mut config = config(&server, &temp);
         config.sync_retry_delays = vec![30];
         let media = write_file(&temp, "a.flac", b"a");
-        let client = Arc::new(client(&config));
+        let client = Arc::new(client(&config, &server.url));
         let worker = {
             let client = Arc::clone(&client);
             tokio::spawn(async move { client.upload_segment("d", "s", &[media]).await })
@@ -2294,7 +2293,6 @@ mod tests {
         );
         assert!(!client.ensure_registered(&mut config).await);
         assert!(!client.is_revoked());
-        assert!(config.key.is_empty());
         assert_eq!(peer.requests().len(), 1);
         session.shutdown().await.unwrap();
         peer.shutdown().await;
@@ -2352,7 +2350,6 @@ mod tests {
         let peer = PrivateLinkPeer::start().await;
         let temp = TempDir::new().unwrap();
         let config = Config {
-            key: "K".into(),
             stream: "host-a".into(),
             ..config(&legacy, &temp)
         };
@@ -2363,7 +2360,7 @@ mod tests {
             &session,
             &ObserverState {
                 credential_instance_id: peer.credential().instance_id,
-                key: "K".into(),
+                key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host-a".into(),
                 ingest_url: "/app/observer/ingest".into(),
@@ -2400,7 +2397,7 @@ mod tests {
         let server = MockServer::new(vec![(403, json!({}))]).await;
         let temp = TempDir::new().unwrap();
         let config = config(&server, &temp);
-        let client = client(&config);
+        let client = client(&config, &server.url);
         assert!(!client.relay_event("observe", "status", Map::new()).await);
         assert!(client.is_revoked());
         let before = server.requests().len();
@@ -2448,7 +2445,7 @@ mod tests {
     async fn status_supersession_delivers_newest() {
         let (server, gate) = MockServer::gated().await;
         let temp = TempDir::new().unwrap();
-        let mut client = client(&config(&server, &temp));
+        let mut client = client(&config(&server, &temp), &server.url);
         client.enqueue_status(Map::from_iter([("seq".into(), json!(1))]));
         wait_for_requests(&server, 1).await;
         client.enqueue_status(Map::from_iter([("seq".into(), json!(2))]));

@@ -1,6 +1,8 @@
 # solstone-linux
 
-Standalone Linux desktop observer for [solstone](https://solpbc.org). Experiences your screen and audio along with you on a GNOME Wayland session, stores segments locally, and syncs to your solstone journal.
+sol for Linux experiences your screen and audio along with you on a GNOME
+Wayland session, stores segments locally, and syncs them to your journal on
+[solstone](https://solpbc.org).
 
 **Note:** Activity detection uses screen-lock and power-save signals to notice when you step away. Coverage varies by desktop: GNOME provides both signals; KDE (Wayland) provides screen lock only; any X11 session also provides DPMS power save; other Wayland desktops provide screen lock where the compositor exposes it. Where neither signal is available, solstone-linux still experiences your screen and audio, but activity-based segment boundaries won't trigger.
 
@@ -28,7 +30,9 @@ sudo zypper install libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins
 
 ## Install
 
-solstone (the journal) must already be installed and running on the host this observer reports to. If it isn't, start with the [journal install](https://solstone.app/install).
+Your journal must already be available. If it is not, start with the
+[solstone install](https://solstone.app/install). In your journal, create a pair
+link for this device and save it as `pair-link.txt`.
 
 Install a native Debian/RPM package from the release. From a matching source
 checkout, the portable archive installer is:
@@ -36,7 +40,9 @@ checkout, the portable archive installer is:
 ```bash
 scripts/install.sh solstone-linux-<VERSION>-linux-x86_64.tar.gz
 solstone-linux install-service
-solstone-linux setup
+systemctl --user stop solstone-linux
+solstone-linux setup < pair-link.txt
+systemctl --user start solstone-linux
 ```
 
 The installer is distributed in the source repository, not inside the
@@ -46,7 +52,11 @@ to a directory on `PATH` and `share/icons/hicolor` beneath the same prefix.
 
 The archive includes `packaging/INSTALL-NOTES`, the canonical runtime-dependency list. See `INSTALL.md` for package installation, tray notes, and troubleshooting.
 
-`setup` registers the observer against your journal over the local `http://localhost:5015` link, so there's no URL to type. If this machine reaches your solstone host directly instead, run `solstone-linux setup --server-url <journal-url>`. (Legacy fallback: mint a key on the journal host with `journal observer create <name>` and paste it during setup.)
+Pairing is the only setup path. The pair link comes from your journal. A journal
+on the same machine connects through the same private link as any other journal;
+there is no URL, key, local Python installation, or direct fallback to configure.
+Sol can continue capturing while unpaired or offline and will save segments
+locally.
 
 ### Developers building from source
 
@@ -54,13 +64,27 @@ The archive includes `packaging/INSTALL-NOTES`, the canonical runtime-dependency
 git clone https://github.com/solpbc/solstone-linux.git
 cd solstone-linux
 make install-service
-solstone-linux setup
+systemctl --user stop solstone-linux
+solstone-linux setup < pair-link.txt
+systemctl --user start solstone-linux
 ```
 
 ## Setup
 
 ```bash
-solstone-linux setup
+solstone-linux setup < pair-link.txt
+```
+
+Setup and runtime deliberately share one private-state lock. Stop sol before
+pairing. If sol is running, setup exits before consuming the pair link and leaves
+capture, config, and private state unchanged.
+
+For an upgrade that needs a new pair link:
+
+```bash
+systemctl --user stop solstone-linux
+solstone-linux setup < pair-link.txt
+systemctl --user start solstone-linux
 ```
 
 ## Run
@@ -76,9 +100,9 @@ solstone-linux run
 solstone-linux status
 ```
 
-Registered observers also include a diagnostics-only status beacon in the
-journal: identity, version, uptime, and sync liveness counts only, with no
-captured or experienced content.
+Paired devices also include a diagnostics-only status beacon in your journal:
+identity, version, uptime, and sync liveness counts only, with none of the
+screen or audio sol experiences with you.
 
 ## Observer contract
 

@@ -235,6 +235,20 @@ pub(crate) struct PrivateStateLock {
     canonical_root: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateStateLockLiveness {
+    LiveOwner,
+    NoLiveOwner,
+}
+
+#[derive(Debug)]
+pub(crate) enum PrivateStateProbeError {
+    InvalidTarget,
+    Inspect,
+    LocksUnavailable,
+    LocksMalformed,
+}
+
 impl Drop for PrivateStateLock {
     fn drop(&mut self) {
         let _ = rustix::fs::flock(&self._file, rustix::fs::FlockOperation::Unlock);
@@ -242,6 +256,50 @@ impl Drop for PrivateStateLock {
 }
 
 impl PrivateStateLock {
+    pub(crate) fn try_probe(
+        config_root: &Path,
+    ) -> Result<PrivateStateLockLiveness, PrivateStateProbeError> {
+        let root = match rustix::fs::openat(
+            rustix::fs::CWD,
+            config_root,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(root) => root,
+            Err(rustix::io::Errno::NOENT) => {
+                return Ok(PrivateStateLockLiveness::NoLiveOwner);
+            }
+            Err(_) => return Err(PrivateStateProbeError::Inspect),
+        };
+        let descriptor = match rustix::fs::openat(
+            &root,
+            PRIVATE_STATE_LOCK_FILENAME,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(rustix::io::Errno::NOENT) => {
+                return Ok(PrivateStateLockLiveness::NoLiveOwner);
+            }
+            Err(_) => return Err(PrivateStateProbeError::Inspect),
+        };
+        let file = File::from(descriptor);
+        let stat = rustix::fs::fstat(&file).map_err(|_| PrivateStateProbeError::Inspect)?;
+        let expected_mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
+            || rustix::fs::Mode::from_raw_mode(stat.st_mode) != expected_mode
+            || stat.st_uid != rustix::process::geteuid().as_raw()
+        {
+            return Err(PrivateStateProbeError::InvalidTarget);
+        }
+        let locks = fs::read_to_string("/proc/locks")
+            .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
+        probe_lock_table(&locks, stat.st_dev, stat.st_ino)
+    }
+
     pub(crate) fn acquire(config_root: &Path) -> Result<Self, PrivateStateError> {
         ensure_private_directory(config_root).map_err(|error| {
             map_private_file(
@@ -333,6 +391,58 @@ impl PrivateStateLock {
             canonical_root: self.canonical_root.clone(),
         })
     }
+}
+
+fn linux_device_major(device: u64) -> u64 {
+    ((device >> 8) & 0xfff) | ((device >> 32) & 0xffff_f000)
+}
+
+fn linux_device_minor(device: u64) -> u64 {
+    (device & 0xff) | ((device >> 12) & 0xffff_ff00)
+}
+
+fn probe_lock_table(
+    locks: &str,
+    device: u64,
+    inode: u64,
+) -> Result<PrivateStateLockLiveness, PrivateStateProbeError> {
+    let expected_major = linux_device_major(device);
+    let expected_minor = linux_device_minor(device);
+    for line in locks.lines() {
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        let offset = usize::from(fields.get(1) == Some(&"->"));
+        if fields.len() < 8 + offset
+            || !fields[0].ends_with(':')
+            || !matches!(fields[1 + offset], "FLOCK" | "POSIX" | "OFDLCK")
+        {
+            return Err(PrivateStateProbeError::LocksMalformed);
+        }
+        let Some(identity) = fields.get(5 + offset) else {
+            return Err(PrivateStateProbeError::LocksMalformed);
+        };
+        let mut parts = identity.split(':');
+        let (Some(major), Some(minor), Some(candidate_inode), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(PrivateStateProbeError::LocksMalformed);
+        };
+        let major =
+            u64::from_str_radix(major, 16).map_err(|_| PrivateStateProbeError::LocksMalformed)?;
+        let minor =
+            u64::from_str_radix(minor, 16).map_err(|_| PrivateStateProbeError::LocksMalformed)?;
+        let candidate_inode = candidate_inode
+            .parse::<u64>()
+            .map_err(|_| PrivateStateProbeError::LocksMalformed)?;
+        if fields[1 + offset] == "FLOCK"
+            && fields[3 + offset] == "WRITE"
+            && major == expected_major
+            && minor == expected_minor
+            && candidate_inode == inode
+        {
+            return Ok(PrivateStateLockLiveness::LiveOwner);
+        }
+    }
+    Ok(PrivateStateLockLiveness::NoLiveOwner)
 }
 
 fn verify_private_lock(file: &File) -> Result<(), PrivateStateError> {
@@ -447,6 +557,17 @@ async fn setup_with_pairer_and_stream<R: Read>(
         .pair(&link, device_label, &serde_json::Map::new())
         .await?;
     persist_credential(state_lock.root(), &credential)
+}
+
+#[cfg(test)]
+pub(crate) async fn setup_with_pairer_for_test<R: Read>(
+    pairer: &dyn Pairer,
+    config_root: &Path,
+    device_label: &str,
+    stream: Option<&str>,
+    input: R,
+) -> Result<(), PrivateStateError> {
+    setup_with_pairer_and_stream(pairer, config_root, device_label, stream, input).await
 }
 
 fn private_config_paths(config_root: &Path) -> ConfigPaths {
@@ -613,6 +734,18 @@ pub(crate) struct LinkFactState {
 }
 
 impl LinkFacts {
+    pub(crate) fn begin_owner_generation(&self) {
+        *self.inner.lock().unwrap_or_else(|p| p.into_inner()) = LinkFactState::default();
+    }
+
+    pub(crate) fn owner_lost(&self) {
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        *state = LinkFactState {
+            transport_unavailable: true,
+            ..LinkFactState::default()
+        };
+    }
+
     pub(crate) fn publish(&self, fact: LinkFact) {
         let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         match fact {
@@ -841,6 +974,7 @@ pub(crate) struct PrivateLinkSession {
     registration: Arc<RegistrationCoordinator>,
     handle: JournalBridgeHandle,
     token_persistence: Arc<TokenPersistence>,
+    bootstrap_target: Option<String>,
     _state_lock: PrivateStateLock,
     #[cfg(test)]
     credential_instance_id: String,
@@ -848,6 +982,115 @@ pub(crate) struct PrivateLinkSession {
     expected_name: String,
     #[cfg(test)]
     facts: LinkFacts,
+}
+
+enum OpenJournalGate {
+    Open(String),
+    Closed,
+}
+
+struct OpenJournalTarget {
+    gate: Mutex<OpenJournalGate>,
+}
+
+#[derive(Clone)]
+pub(crate) struct OpenJournalCapability {
+    target: std::sync::Weak<OpenJournalTarget>,
+}
+
+impl std::fmt::Debug for OpenJournalCapability {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpenJournalCapability(<redacted>)")
+    }
+}
+
+impl OpenJournalCapability {
+    fn available(&self) -> bool {
+        self.target
+            .upgrade()
+            .and_then(|target| {
+                target
+                    .gate
+                    .lock()
+                    .ok()
+                    .map(|gate| matches!(*gate, OpenJournalGate::Open(_)))
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn open(&self) -> Result<(), ()> {
+        self.open_inner(|target| open::that_detached(target).map_err(|_| ()))
+    }
+
+    fn open_inner(&self, opener: impl FnOnce(&str) -> Result<(), ()>) -> Result<(), ()> {
+        let target = self.target.upgrade().ok_or(())?;
+        let gate = target.gate.lock().map_err(|_| ())?;
+        match &*gate {
+            OpenJournalGate::Open(target) => opener(target),
+            OpenJournalGate::Closed => Err(()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with(&self, opener: impl FnOnce(&str) -> Result<(), ()>) -> Result<(), ()> {
+        self.open_inner(opener)
+    }
+
+    fn close(&self) {
+        let Some(target) = self.target.upgrade() else {
+            return;
+        };
+        match target.gate.lock() {
+            Ok(mut gate) => *gate = OpenJournalGate::Closed,
+            Err(poisoned) => *poisoned.into_inner() = OpenJournalGate::Closed,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct OpenJournalAccess {
+    current: Arc<Mutex<Option<OpenJournalCapability>>>,
+}
+
+impl OpenJournalAccess {
+    pub(crate) fn available(&self) -> bool {
+        self.current
+            .lock()
+            .ok()
+            .and_then(|current| current.clone())
+            .is_some_and(|capability| capability.available())
+    }
+
+    pub(crate) fn open(&self) -> Result<(), ()> {
+        let capability = self.current.lock().map_err(|_| ())?.clone().ok_or(())?;
+        capability.open()
+    }
+
+    pub(crate) fn install(&self, capability: OpenJournalCapability) {
+        if let Ok(mut current) = self.current.lock() {
+            *current = Some(capability);
+        }
+    }
+
+    pub(crate) fn close_current(&self) {
+        let capability = self.current.lock().ok().and_then(|current| current.clone());
+        if let Some(capability) = capability {
+            capability.close();
+            self.clear(&capability);
+        }
+    }
+
+    fn clear(&self, capability: &OpenJournalCapability) {
+        let Ok(mut current) = self.current.lock() else {
+            return;
+        };
+        if current
+            .as_ref()
+            .is_some_and(|value| value.target.ptr_eq(&capability.target))
+        {
+            *current = None;
+        }
+    }
 }
 
 pub(crate) enum LinkOutcome {
@@ -1109,7 +1352,10 @@ impl RegistrationCoordinator {
 
 pub(crate) struct PrivateLinkOwner {
     capability: PrivateLinkCapability,
-    session: PrivateLinkSession,
+    open_journal_target: Arc<OpenJournalTarget>,
+    open_journal_access: Option<OpenJournalAccess>,
+    session: Option<PrivateLinkSession>,
+    facts: LinkFacts,
 }
 
 impl PrivateLinkOwner {
@@ -1117,17 +1363,45 @@ impl PrivateLinkOwner {
         self.capability.clone()
     }
 
-    pub(crate) async fn shutdown(self) -> Result<(), PrivateStateError> {
-        self.session.shutdown().await
+    pub(crate) fn open_journal_capability(&self) -> OpenJournalCapability {
+        OpenJournalCapability {
+            target: Arc::downgrade(&self.open_journal_target),
+        }
+    }
+
+    pub(crate) fn install_open_journal_access(&mut self, access: OpenJournalAccess) {
+        let capability = self.open_journal_capability();
+        access.install(capability);
+        self.open_journal_access = Some(access);
+    }
+
+    fn close_open_journal(&self) {
+        let capability = self.open_journal_capability();
+        capability.close();
+        if let Some(access) = &self.open_journal_access {
+            access.clear(&capability);
+        }
+    }
+
+    pub(crate) async fn shutdown(mut self) -> Result<(), PrivateStateError> {
+        self.close_open_journal();
+        self.facts.owner_lost();
+        self.session.take().unwrap().shutdown().await
     }
 
     #[cfg(test)]
     pub(crate) async fn shutdown_with_join_probe(
-        self,
+        mut self,
         joined: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     ) -> Result<(), PrivateStateError> {
-        self.session.shutdown_with_join_probe(joined, release).await
+        self.close_open_journal();
+        self.facts.owner_lost();
+        self.session
+            .take()
+            .unwrap()
+            .shutdown_with_join_probe(joined, release)
+            .await
     }
 
     #[cfg(test)]
@@ -1170,6 +1444,13 @@ impl PrivateLinkOwner {
     }
 }
 
+impl Drop for PrivateLinkOwner {
+    fn drop(&mut self) {
+        self.close_open_journal();
+        self.facts.owner_lost();
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn start_private_link_owner(
     config_root: &Path,
@@ -1181,7 +1462,7 @@ pub(crate) async fn start_private_link_owner(
 }
 
 async fn finish_owner_start(
-    session: PrivateLinkSession,
+    mut session: PrivateLinkSession,
 ) -> Result<PrivateLinkOwner, PrivateStateError> {
     let capability = session.capability("/app/observer/ingest".to_owned());
     if session.opener.generation() == 0 {
@@ -1195,9 +1476,19 @@ async fn finish_owner_start(
             }
         }
     }
+    let facts = capability.facts();
+    let bootstrap_target = session
+        .bootstrap_target
+        .take()
+        .ok_or(PrivateStateError::BootstrapFailed)?;
     Ok(PrivateLinkOwner {
         capability,
-        session,
+        open_journal_target: Arc::new(OpenJournalTarget {
+            gate: Mutex::new(OpenJournalGate::Open(bootstrap_target)),
+        }),
+        open_journal_access: None,
+        session: Some(session),
+        facts,
     })
 }
 
@@ -1255,14 +1546,7 @@ pub(crate) async fn start_registered_private_link_for_test(
         },
     )
     .unwrap();
-    let capability = session.capability(ingest_path.to_owned());
-    (
-        temp,
-        PrivateLinkOwner {
-            capability,
-            session,
-        },
-    )
+    (temp, finish_owner_start(session).await.unwrap())
 }
 
 impl PrivateLinkSession {
@@ -1643,7 +1927,7 @@ async fn start_private_link_session_inner(
         .build()
         .map_err(|_| PrivateStateError::BridgeUnavailable)?;
     let response = client
-        .get(bootstrap_url)
+        .get(&bootstrap_url)
         .timeout(BOOTSTRAP_TIMEOUT)
         .send()
         .await
@@ -1695,6 +1979,7 @@ async fn start_private_link_session_inner(
         registration,
         handle,
         token_persistence,
+        bootstrap_target: Some(bootstrap_url),
         _state_lock: state_lock,
         #[cfg(test)]
         credential_instance_id,
@@ -1710,6 +1995,7 @@ mod tests {
     use super::*;
     use crate::private_file::DurableWriteStage;
     use crate::private_link_test_peer::PrivateLinkPeer;
+    use crate::sync_health::{ProcessEpoch, SyncFacts, load_facts_with_liveness, save_facts};
     use spl_transport::credential::EndpointAddr;
     use std::{
         io::Cursor,
@@ -2514,6 +2800,110 @@ mod tests {
     }
 
     #[test]
+    fn read_only_probe_reports_live_and_unlocked_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let held = PrivateStateLock::acquire(temp.path()).unwrap();
+        let lock_path = temp.path().join(PRIVATE_STATE_LOCK_FILENAME);
+        let before = fs::metadata(&lock_path).unwrap();
+        assert_eq!(
+            PrivateStateLock::try_probe(temp.path()).unwrap(),
+            PrivateStateLockLiveness::LiveOwner
+        );
+        let after = fs::metadata(&lock_path).unwrap();
+        assert_eq!(before.ino(), after.ino());
+        assert_eq!(before.permissions().mode(), after.permissions().mode());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        drop(held);
+        assert_eq!(
+            PrivateStateLock::try_probe(temp.path()).unwrap(),
+            PrivateStateLockLiveness::NoLiveOwner
+        );
+        let reacquired = PrivateStateLock::acquire(temp.path()).unwrap();
+        drop(reacquired);
+    }
+
+    #[test]
+    fn read_only_probe_is_conservative_for_missing_invalid_and_malformed_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert_eq!(
+            PrivateStateLock::try_probe(&missing).unwrap(),
+            PrivateStateLockLiveness::NoLiveOwner
+        );
+
+        fs::create_dir(&missing).unwrap();
+        assert_eq!(
+            PrivateStateLock::try_probe(&missing).unwrap(),
+            PrivateStateLockLiveness::NoLiveOwner
+        );
+        let lock_path = missing.join(PRIVATE_STATE_LOCK_FILENAME);
+        fs::write(&lock_path, b"unchanged").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o640)).unwrap();
+        let before = fs::read(&lock_path).unwrap();
+        assert!(matches!(
+            PrivateStateLock::try_probe(&missing),
+            Err(PrivateStateProbeError::InvalidTarget)
+        ));
+        assert_eq!(fs::read(&lock_path).unwrap(), before);
+        assert!(matches!(
+            probe_lock_table("not a lock table", 0, 0),
+            Err(PrivateStateProbeError::LocksMalformed)
+        ));
+        assert_eq!(
+            probe_lock_table("1: POSIX ADVISORY READ 1 00:00:1 0 EOF\n", 0, 2).unwrap(),
+            PrivateStateLockLiveness::NoLiveOwner
+        );
+    }
+
+    #[test]
+    fn liveness_sampling_races_correct_on_the_next_sample() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let connected = LinkFactState {
+            carrier_proven: true,
+            observer_registered: true,
+            ..Default::default()
+        };
+        save_facts(
+            &state,
+            &SyncFacts {
+                pending_confirmed: Some(0),
+                link: Some(connected.clone()),
+                link_epoch: Some(ProcessEpoch::for_test(3)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let held = PrivateStateLock::acquire(temp.path()).unwrap();
+        let sampled_live = PrivateStateLock::try_probe(temp.path()).unwrap();
+        drop(held);
+        assert_eq!(
+            load_facts_with_liveness(&state, sampled_live).link,
+            Some(connected.clone())
+        );
+        assert!(
+            load_facts_with_liveness(&state, PrivateStateLock::try_probe(temp.path()).unwrap())
+                .link
+                .is_none()
+        );
+
+        let sampled_absent = PrivateStateLock::try_probe(temp.path()).unwrap();
+        let held = PrivateStateLock::acquire(temp.path()).unwrap();
+        assert!(
+            load_facts_with_liveness(&state, sampled_absent)
+                .link
+                .is_none()
+        );
+        assert_eq!(
+            load_facts_with_liveness(&state, PrivateStateLock::try_probe(temp.path()).unwrap())
+                .link,
+            Some(connected)
+        );
+        drop(held);
+    }
+
+    #[test]
     fn lock_rejects_symlinked_config_root_without_touching_referent() {
         let temp = tempfile::tempdir().unwrap();
         let referent = temp.path().join("referent");
@@ -3256,7 +3646,7 @@ mod tests {
                 default.set_nonblocking(true).unwrap();
             } else {
                 eprintln!(
-                    "criterion 12 note: localhost:5015 opportunistic zero-connection clause did not execute because the port is already in use"
+                    "criterion 12 note: opportunistic default-listener trap did not execute because the address is already in use"
                 );
             }
             Self {
@@ -3639,6 +4029,257 @@ mod tests {
         owner.shutdown().await.unwrap();
         assert!(tokio::net::TcpStream::connect(address).await.is_err());
         peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn abrupt_owner_loss_clears_live_proofs_and_publishes_transport_loss() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(
+            200,
+            serde_json::json!({
+                "key": "K",
+                "name": "stream",
+                "prefix": "prefix",
+                "ingest_url": "/app/observer/ingest",
+                "protocol_version": 2
+            })
+            .to_string(),
+        );
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let facts = owner.capability().facts();
+        assert!(facts.snapshot().listener_ready);
+        drop(owner);
+        assert_eq!(
+            facts.snapshot(),
+            LinkFactState {
+                transport_unavailable: true,
+                ..Default::default()
+            }
+        );
+        peer.shutdown().await;
+    }
+
+    #[test]
+    fn owner_generation_reset_clears_every_published_fact() {
+        let facts = LinkFacts::default();
+        for fact in [
+            LinkFact::PairingRequired,
+            LinkFact::PrivateStateInvalid,
+            LinkFact::ConfigSanitationFailed,
+            LinkFact::ListenerReady,
+            LinkFact::CarrierProven,
+            LinkFact::ObserverRegistered,
+            LinkFact::TransportUnavailable,
+            LinkFact::TerminalRevocation,
+            LinkFact::TokenPersistenceFailure,
+        ] {
+            facts.publish(fact);
+        }
+        facts.begin_owner_generation();
+        assert_eq!(facts.snapshot(), LinkFactState::default());
+    }
+
+    fn open_journal_fixture(target: &str) -> (Arc<OpenJournalTarget>, OpenJournalCapability) {
+        let target = Arc::new(OpenJournalTarget {
+            gate: Mutex::new(OpenJournalGate::Open(target.to_owned())),
+        });
+        let capability = OpenJournalCapability {
+            target: Arc::downgrade(&target),
+        };
+        (target, capability)
+    }
+
+    #[test]
+    fn open_journal_epoch_matrix_never_retargets_stale_capabilities() {
+        let access = OpenJournalAccess::default();
+        assert!(!access.available());
+        assert!(access.open().is_err());
+
+        let (first_target, first) = open_journal_fixture("first-private-target");
+        access.install(first.clone());
+        assert!(access.available());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        first
+            .open_with({
+                let calls = Arc::clone(&calls);
+                move |target| {
+                    calls.lock().unwrap().push(target.to_owned());
+                    Ok(())
+                }
+            })
+            .unwrap();
+
+        first.close();
+        assert!(!access.available());
+        assert!(first.open_with(|_| panic!("closed target opened")).is_err());
+        access.clear(&first);
+        drop(first_target);
+        assert!(
+            first
+                .open_with(|_| panic!("dropped target opened"))
+                .is_err()
+        );
+
+        let (replacement_target, replacement) = open_journal_fixture("replacement-private-target");
+        access.install(replacement.clone());
+        access.clear(&first);
+        assert!(access.available());
+        assert!(
+            first
+                .open_with(|_| panic!("stale clone retargeted"))
+                .is_err()
+        );
+        replacement
+            .open_with({
+                let calls = Arc::clone(&calls);
+                move |target| {
+                    calls.lock().unwrap().push(target.to_owned());
+                    Ok(())
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["first-private-target", "replacement-private-target"]
+        );
+        drop(replacement_target);
+        assert!(!access.available());
+    }
+
+    #[test]
+    fn open_journal_open_and_shutdown_linearize_on_one_gate() {
+        let (_target, capability) = open_journal_fixture("private-target");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let opener = {
+            let capability = capability.clone();
+            let calls = Arc::clone(&calls);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                capability.open_with(|_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    entered.wait();
+                    release.wait();
+                    Ok(())
+                })
+            })
+        };
+        entered.wait();
+        let closer = {
+            let capability = capability.clone();
+            std::thread::spawn(move || capability.close())
+        };
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release.wait();
+        assert!(opener.join().unwrap().is_ok());
+        closer.join().unwrap();
+        assert!(capability.open_with(|_| panic!("post-close open")).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn opener_panic_poison_closes_capability_fail_closed() {
+        let (_target, capability) = open_journal_fixture("private-target");
+        let panic = std::panic::catch_unwind({
+            let capability = capability.clone();
+            move || {
+                let _ = capability.open_with(|_| -> Result<(), ()> {
+                    panic!("injected opener panic");
+                });
+            }
+        });
+        assert!(panic.is_err());
+        assert!(!capability.available());
+        let calls = AtomicUsize::new(0);
+        assert!(
+            capability
+                .open_with(|_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        capability.close();
+        assert!(!capability.available());
+    }
+
+    #[test]
+    fn open_journal_debug_is_always_redacted() {
+        let (_target, capability) =
+            open_journal_fixture("http://127.0.0.1:49152/?cap=capability-secret");
+        assert_eq!(
+            format!("{capability:?}"),
+            "OpenJournalCapability(<redacted>)"
+        );
+    }
+
+    #[test]
+    fn open_journal_secrets_never_enter_owner_or_serialized_surfaces_at_any_epoch() {
+        let secrets = [
+            "http://127.0.0.1:49152/?cap=capability-cookie-sentinel",
+            "49152",
+            "capability-cookie-sentinel",
+            "credential-sentinel",
+            "observer-key-sentinel",
+            "relay-token-sentinel",
+        ];
+        let access = OpenJournalAccess::default();
+        let before = format!("available={}", access.available());
+        let (_target, capability) = open_journal_fixture(secrets[0]);
+        access.install(capability.clone());
+        let live = format!("{capability:?};available={}", access.available());
+        capability.close();
+        let after = format!("{capability:?};available={}", access.available());
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Default::default()
+        };
+        let config_json = serde_json::to_string(&config).unwrap();
+        let facts = SyncFacts {
+            link_epoch: Some(ProcessEpoch::for_test(4)),
+            ..Default::default()
+        };
+        save_facts(temp.path(), &facts).unwrap();
+        let state_json = fs::read_to_string(temp.path().join("sync_health.json")).unwrap();
+        let health = crate::sync_health::derive_health(&facts, 0.0, 600.0);
+        let clipboard = crate::clipboard::agent_instructions(
+            &config.config_path().display().to_string(),
+            &config.captures_dir().display().to_string(),
+        );
+        let introspection = include_str!("../testdata/introspection/observer1.xml").to_owned();
+        let unavailable = crate::desktop_component::DesktopComponent::new(config)
+            .perform_desktop_command(crate::tray::TrayCommand::OpenJournal)
+            .unwrap_err();
+        let outputs = [
+            before,
+            live,
+            after,
+            config_json,
+            state_json,
+            health.cli,
+            health.doctor_detail,
+            health.dbus,
+            clipboard,
+            introspection,
+            unavailable,
+        ];
+        for output in outputs {
+            for secret in secrets {
+                assert!(
+                    !output.contains(secret),
+                    "owner or serialized surface disclosed a private Open Journal value"
+                );
+            }
+        }
     }
 
     #[tokio::test]

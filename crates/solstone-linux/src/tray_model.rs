@@ -30,6 +30,7 @@ pub struct TrayModel {
     pub resume: String,
     pub pause_visible: bool,
     pub resume_visible: bool,
+    pub open_journal_enabled: bool,
 }
 
 pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
@@ -124,6 +125,16 @@ pub fn icon_name(status: TrayStatus, health: &SyncHealth) -> String {
 }
 
 pub fn build(snapshot: &StateSnapshot, interval: i64, now: f64, health: &SyncHealth) -> TrayModel {
+    build_with_open_journal(snapshot, interval, now, health, false)
+}
+
+pub fn build_with_open_journal(
+    snapshot: &StateSnapshot,
+    interval: i64,
+    now: f64,
+    health: &SyncHealth,
+    open_journal_enabled: bool,
+) -> TrayModel {
     let status = status(snapshot);
     let segment = segment_remaining(snapshot, interval, now);
     let pause = pause_remaining(snapshot, now);
@@ -146,6 +157,7 @@ pub fn build(snapshot: &StateSnapshot, interval: i64, now: f64, health: &SyncHea
         },
         pause_visible: status != TrayStatus::Paused,
         resume_visible: status == TrayStatus::Paused,
+        open_journal_enabled,
     }
 }
 
@@ -193,6 +205,10 @@ mod tests {
         let syncing = derive_health(
             &SyncFacts {
                 in_progress: true,
+                link: Some(LinkFactState {
+                    observer_registered: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             100.0,
@@ -251,6 +267,10 @@ mod tests {
             (
                 SyncFacts {
                     in_progress: true,
+                    link: Some(LinkFactState {
+                        observer_registered: true,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 HealthState::Syncing,
@@ -267,23 +287,23 @@ mod tests {
                     last_error_class: Some(ErrorType::Incompatible),
                     ..Default::default()
                 },
-                HealthState::UpdateNeeded,
+                HealthState::UpdateRequired,
             ),
             (
                 SyncFacts {
                     last_error_class: Some(ErrorType::Auth),
                     ..Default::default()
                 },
-                HealthState::Revoked,
+                HealthState::RePairRequired,
             ),
             (
                 SyncFacts {
                     last_successful_contact: Some(0.0),
                     ..Default::default()
                 },
-                HealthState::Stale,
+                HealthState::Offline,
             ),
-            (SyncFacts::default(), HealthState::Unknown),
+            (SyncFacts::default(), HealthState::Connecting),
         ];
         for (facts, expected_state) in cases {
             let health = derive_health(&facts, 1_000.0, 600.0);
@@ -329,6 +349,10 @@ mod tests {
             &SyncFacts {
                 in_progress: true,
                 progress: "2/5".into(),
+                link: Some(LinkFactState {
+                    observer_registered: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             100.0,
@@ -412,6 +436,10 @@ mod tests {
             (
                 SyncFacts {
                     in_progress: true,
+                    link: Some(LinkFactState {
+                        observer_registered: true,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 ["syncing", "syncing", "paused", "stopped"],
@@ -442,7 +470,7 @@ mod tests {
                     last_successful_contact: Some(0.0),
                     ..Default::default()
                 },
-                ["error", "error", "error", "error"],
+                ["syncing", "syncing", "paused", "stopped"],
             ),
             (
                 SyncFacts::default(),

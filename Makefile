@@ -87,6 +87,17 @@ check-observer-contract: rust-preflight
 	tail -50 "$$output"; \
 	grep -Eq 'test result: ok\. 1 passed; 0 failed' "$$output" || { echo "error: observer contract named test did not execute" >&2; exit 1; }
 
+check-package-audit: rust-preflight
+	@test -n "$(strip $(TAR))" || { echo "error: TAR is required" >&2; exit 1; }
+	@test -n "$(strip $(DEB))" || { echo "error: DEB is required" >&2; exit 1; }
+	@test -n "$(strip $(RPM))" || { echo "error: RPM is required" >&2; exit 1; }
+	@test -n "$(strip $(EXPECTED_EXECUTABLE_SHA256))" || { echo "error: EXPECTED_EXECUTABLE_SHA256 is required" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- audit-packages \
+		--tar "$(TAR)" \
+		--deb "$(DEB)" \
+		--rpm "$(RPM)" \
+		--expected-executable-sha256 "$(EXPECTED_EXECUTABLE_SHA256)"
+
 check-rust-release-manifest: rust-preflight
 	@echo "Rust release manifest schema: 1"
 	@echo "Rust release manifest schema SHA-256: d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c"

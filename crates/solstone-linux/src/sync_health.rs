@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use crate::private_link::LinkFactState;
+use crate::private_link::{LinkFactState, PrivateStateLockLiveness};
 use chrono::{DateTime, Local};
 use serde_json::{Map, Value, json};
 use std::{
@@ -12,8 +12,7 @@ use std::{
     sync::LazyLock,
 };
 
-// Decision 4: no new ErrorType means no new persisted string, version bump, or downgrade loss.
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum ErrorType {
@@ -46,13 +45,46 @@ impl ErrorType {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum HealthState {
-    Connected,
-    Syncing,
+    UnsafeLinkState,
+    RePairRequired,
+    TokenPersistenceFailed,
+    PairingRequired,
+    UpdateRequired,
+    TransportUnavailable,
     Offline,
-    UpdateNeeded,
-    Revoked,
-    Stale,
-    Unknown,
+    ListenerReady,
+    Connecting,
+    Syncing,
+    Connected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessEpoch(String);
+
+impl ProcessEpoch {
+    pub(crate) fn generate() -> io::Result<Self> {
+        use std::io::Read;
+        let mut bytes = [0_u8; 32];
+        fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+        Ok(Self(
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: u8) -> Self {
+        Self(format!("{value:02x}").repeat(32))
+    }
+
+    fn parse(value: &Value) -> Option<Self> {
+        let value = value.as_str()?;
+        (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| Self(value.to_ascii_lowercase()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -66,6 +98,8 @@ pub struct SyncFacts {
     pub progress: String,
     #[doc(hidden)]
     pub(crate) link: Option<LinkFactState>,
+    #[doc(hidden)]
+    pub(crate) link_epoch: Option<ProcessEpoch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,37 +141,105 @@ pub struct SyncHealth {
 pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = LazyLock::new(|| {
     HashMap::from([
         (
-            HealthState::Connected,
+            HealthState::UnsafeLinkState,
             HealthSurface {
-                header_recording: "on — connected",
-                header_idle: "idle — connected",
-                sync_line: "sync: up to date",
-                tooltip: "sync: up to date",
-                accessible_recording: "sol — on, sync up to date",
-                accessible_idle: "sol — idle, sync up to date",
-                icon: "recording",
-                sni: "Active",
-                cli: "Sync: connected — up to date (0 pending)",
-                doctor_severity: "ok",
-                doctor_detail: "sync health: up to date; 0 pending confirmed at {sync_ts}",
-                dbus: "connected",
+                header_recording: "on — private state unsafe",
+                header_idle: "idle — private state unsafe",
+                sync_line: "sync: private state unsafe",
+                tooltip: "sync: private state unsafe; repair private state and restart sol",
+                accessible_recording: "sol — on, private state unsafe",
+                accessible_idle: "sol — idle, private state unsafe",
+                icon: "error",
+                sni: "NeedsAttention",
+                cli: "Sync: private state unsafe — repair private state and restart sol; pending unconfirmed",
+                doctor_severity: "fail",
+                doctor_detail: "sync health: private state unsafe; repair private state and restart sol",
+                dbus: "unsafe-link-state",
             },
         ),
         (
-            HealthState::Syncing,
+            HealthState::RePairRequired,
             HealthSurface {
-                header_recording: "on — syncing",
-                header_idle: "idle — syncing",
-                sync_line: "sync: {progress}",
-                tooltip: "sync: {progress}",
-                accessible_recording: "sol — on, syncing",
-                accessible_idle: "sol — idle, syncing",
-                icon: "syncing",
-                sni: "Active",
-                cli: "Sync: syncing — pending unconfirmed until this pass finishes",
-                doctor_severity: "ok",
-                doctor_detail: "sync health: sync pass active; pending unconfirmed until check completes",
-                dbus: "syncing",
+                header_recording: "on — pair again",
+                header_idle: "idle — pair again",
+                sync_line: "sync: pair again",
+                tooltip: "sync: pair this device with your journal again",
+                accessible_recording: "sol — on, pair again",
+                accessible_idle: "sol — idle, pair again",
+                icon: "error",
+                sni: "NeedsAttention",
+                cli: "Sync: pair again — pair this device with your journal again; pending unconfirmed",
+                doctor_severity: "fail",
+                doctor_detail: "sync health: pair this device with your journal again",
+                dbus: "re-pair-required",
+            },
+        ),
+        (
+            HealthState::TokenPersistenceFailed,
+            HealthSurface {
+                header_recording: "on — private state not saved",
+                header_idle: "idle — private state not saved",
+                sync_line: "sync: private state not saved",
+                tooltip: "sync: private state not saved; fix private state permissions, then restart sol",
+                accessible_recording: "sol — on, private state not saved",
+                accessible_idle: "sol — idle, private state not saved",
+                icon: "error",
+                sni: "NeedsAttention",
+                cli: "Sync: private state not saved — fix private state permissions, then restart sol; pending unconfirmed",
+                doctor_severity: "fail",
+                doctor_detail: "sync health: private state not saved; fix private state permissions, then restart sol",
+                dbus: "token-persistence-failed",
+            },
+        ),
+        (
+            HealthState::PairingRequired,
+            HealthSurface {
+                header_recording: "on — pairing required",
+                header_idle: "idle — pairing required",
+                sync_line: "sync: pairing required",
+                tooltip: "sync: pair this device with your journal",
+                accessible_recording: "sol — on, pairing required",
+                accessible_idle: "sol — idle, pairing required",
+                icon: "error",
+                sni: "NeedsAttention",
+                cli: "Sync: pairing required — pair this device with your journal; pending unconfirmed",
+                doctor_severity: "fail",
+                doctor_detail: "sync health: pair this device with your journal",
+                dbus: "pairing-required",
+            },
+        ),
+        (
+            HealthState::UpdateRequired,
+            HealthSurface {
+                header_recording: "on — update required",
+                header_idle: "idle — update required",
+                sync_line: "sync: update solstone-linux",
+                tooltip: "sync: update required; update solstone-linux",
+                accessible_recording: "sol — on, update required",
+                accessible_idle: "sol — idle, update required",
+                icon: "error",
+                sni: "NeedsAttention",
+                cli: "Sync: update required — update solstone-linux; pending unconfirmed",
+                doctor_severity: "fail",
+                doctor_detail: "sync health: update required; update solstone-linux",
+                dbus: "update-required",
+            },
+        ),
+        (
+            HealthState::TransportUnavailable,
+            HealthSurface {
+                header_recording: "on — connection unavailable (saving locally)",
+                header_idle: "idle — connection unavailable (saving locally)",
+                sync_line: "sync: connection unavailable; saving locally",
+                tooltip: "sync: connection unavailable; restart sol; if this continues, pair this device again",
+                accessible_recording: "sol — on, connection unavailable, saving locally",
+                accessible_idle: "sol — idle, connection unavailable, saving locally",
+                icon: "error",
+                sni: "NeedsAttention",
+                cli: "Sync: connection unavailable — saving locally; restart sol; if this continues, pair this device again",
+                doctor_severity: "fail",
+                doctor_detail: "sync health: connection unavailable; restart sol; if this continues, pair this device again",
+                dbus: "transport-unavailable",
             },
         ),
         (
@@ -158,76 +260,77 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
             },
         ),
         (
-            HealthState::UpdateNeeded,
+            HealthState::ListenerReady,
             HealthSurface {
-                header_recording: "on — update needed",
-                header_idle: "idle — update needed",
-                sync_line: "sync: update solstone-linux",
-                tooltip: "sync: update needed; update solstone-linux",
-                accessible_recording: "sol — on, update needed",
-                accessible_idle: "sol — idle, update needed",
-                icon: "error",
-                sni: "NeedsAttention",
-                cli: "Sync: update needed — update solstone-linux; pending unconfirmed",
-                doctor_severity: "fail",
-                doctor_detail: "sync health: update needed; the journal returned 404",
-                dbus: "update-needed",
+                header_recording: "on — confirming device",
+                header_idle: "idle — confirming device",
+                sync_line: "sync: confirming device",
+                tooltip: "sync: wait while sol confirms this device with your journal",
+                accessible_recording: "sol — on, confirming device",
+                accessible_idle: "sol — idle, confirming device",
+                icon: "syncing",
+                sni: "Active",
+                cli: "Sync: confirming device — wait while sol confirms this device with your journal; pending unconfirmed",
+                doctor_severity: "warn",
+                doctor_detail: "sync health: wait while sol confirms this device with your journal",
+                dbus: "listener-ready",
             },
         ),
         (
-            HealthState::Revoked,
+            HealthState::Connecting,
             HealthSurface {
-                header_recording: "on — re-auth needed",
-                header_idle: "idle — re-auth needed",
-                sync_line: "sync: re-auth required",
-                tooltip: "sync: access revoked; re-auth required",
-                accessible_recording: "sol — on, re-auth required",
-                accessible_idle: "sol — idle, re-auth required",
-                icon: "error",
-                sni: "NeedsAttention",
-                cli: "Sync: revoked — re-auth required; pending unconfirmed",
-                doctor_severity: "fail",
-                doctor_detail: "sync health: access revoked; re-auth required",
-                dbus: "revoked",
-            },
-        ),
-        (
-            HealthState::Stale,
-            HealthSurface {
-                header_recording: "on — sync stale",
-                header_idle: "idle — sync stale",
-                sync_line: "sync: stale; no journal response in {contact_age}",
-                tooltip: "sync: stale; last contact {contact_ts}",
-                accessible_recording: "sol — on, sync stale",
-                accessible_idle: "sol — idle, sync stale",
-                icon: "error",
-                sni: "NeedsAttention",
-                cli: "Sync: stale — no journal response in {contact_age}; check service and journal",
-                doctor_severity: "fail",
-                doctor_detail: "sync health: stale; last contact {contact_ts}, threshold {threshold}",
-                dbus: "stale",
-            },
-        ),
-        (
-            HealthState::Unknown,
-            HealthSurface {
-                header_recording: "on — sync unconfirmed",
-                header_idle: "idle — sync unconfirmed",
+                header_recording: "on — connecting",
+                header_idle: "idle — connecting",
                 sync_line: "sync: checking...",
-                tooltip: "sync: not confirmed yet",
-                accessible_recording: "sol — on, sync unconfirmed",
-                accessible_idle: "sol — idle, sync unconfirmed",
+                tooltip: "sync: wait while sol connects to your journal",
+                accessible_recording: "sol — on, connecting",
+                accessible_idle: "sol — idle, connecting",
                 icon: "syncing",
                 sni: "Active",
                 cli: "Sync: unconfirmed — waiting for first successful journal check; pending unconfirmed",
                 doctor_severity: "warn",
                 doctor_detail: "sync health: unconfirmed; no successful journal check yet",
-                dbus: "unknown",
+                dbus: "connecting",
+            },
+        ),
+        (
+            HealthState::Syncing,
+            HealthSurface {
+                header_recording: "on — syncing",
+                header_idle: "idle — syncing",
+                sync_line: "sync: {progress}",
+                tooltip: "sync: {progress}",
+                accessible_recording: "sol — on, syncing",
+                accessible_idle: "sol — idle, syncing",
+                icon: "syncing",
+                sni: "Active",
+                cli: "Sync: syncing — pending unconfirmed until this pass finishes",
+                doctor_severity: "ok",
+                doctor_detail: "sync health: sync pass active; pending unconfirmed until check completes",
+                dbus: "syncing",
+            },
+        ),
+        (
+            HealthState::Connected,
+            HealthSurface {
+                header_recording: "on — connected",
+                header_idle: "idle — connected",
+                sync_line: "sync: up to date",
+                tooltip: "sync: up to date",
+                accessible_recording: "sol — on, sync up to date",
+                accessible_idle: "sol — idle, sync up to date",
+                icon: "recording",
+                sni: "Active",
+                cli: "Sync: connected — up to date (0 pending)",
+                doctor_severity: "ok",
+                doctor_detail: "sync health: up to date; 0 pending confirmed at {sync_ts}",
+                dbus: "connected",
             },
         ),
     ])
 });
 
+#[cfg(test)]
 fn format_age(seconds: Option<f64>) -> String {
     let Some(seconds) = seconds else {
         return "unknown".to_owned();
@@ -286,39 +389,39 @@ fn fill(template: &str, values: &HashMap<&str, String>) -> String {
 }
 
 pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncHealth {
-    let state =
-        if facts.last_error_class == Some(ErrorType::Auth) && facts.last_error_code != Some(401) {
-            HealthState::Revoked
-        } else if facts.last_error_class == Some(ErrorType::Incompatible) {
-            HealthState::UpdateNeeded
-        } else if facts
-            .last_successful_contact
-            .is_some_and(|contact| now - contact > stale_threshold)
-        {
-            HealthState::Stale
-        } else if facts.in_progress {
-            HealthState::Syncing
-        } else if facts.last_error_class == Some(ErrorType::Auth) {
-            // Decision 3: a 401 is explicit Unknown above Connected so persisted empty-queue
-            // facts cannot repaint a refused identity green. The live worker also clears
-            // pending_confirmed in record_failure. This depends on POST propagation retaining
-            // Some(401); losing that code would conservatively repaint the failure Revoked.
-            HealthState::Unknown
-        } else if facts.pending_confirmed == Some(0)
-            && facts.link.as_ref().is_some_and(|link| {
-                link.carrier_proven
-                    && link.observer_registered
-                    && !link.transport_unavailable
-                    && !link.terminal_revocation
-                    && !link.token_persistence_failure
-            })
-        {
-            HealthState::Connected
-        } else if facts.last_error_class == Some(ErrorType::Transient) {
-            HealthState::Offline
-        } else {
-            HealthState::Unknown
-        };
+    let link = facts.link.clone().unwrap_or_default();
+    let stale = facts
+        .last_successful_contact
+        .is_some_and(|contact| now - contact > stale_threshold);
+    let terminal_auth =
+        facts.last_error_class == Some(ErrorType::Auth) && facts.last_error_code != Some(401);
+    let connected = link.carrier_proven
+        && link.observer_registered
+        && facts.pending_confirmed == Some(0)
+        && !facts.in_progress;
+    let state = if link.private_state_invalid || link.config_sanitation_failed {
+        HealthState::UnsafeLinkState
+    } else if link.terminal_revocation || terminal_auth {
+        HealthState::RePairRequired
+    } else if link.token_persistence_failure {
+        HealthState::TokenPersistenceFailed
+    } else if link.pairing_required {
+        HealthState::PairingRequired
+    } else if facts.last_error_class == Some(ErrorType::Incompatible) {
+        HealthState::UpdateRequired
+    } else if link.transport_unavailable {
+        HealthState::TransportUnavailable
+    } else if facts.last_error_class == Some(ErrorType::Transient) || stale {
+        HealthState::Offline
+    } else if link.listener_ready && !link.observer_registered {
+        HealthState::ListenerReady
+    } else if !link.observer_registered {
+        HealthState::Connecting
+    } else if connected {
+        HealthState::Connected
+    } else {
+        HealthState::Syncing
+    };
     let surface = SURFACE_BY_STATE
         .get(&state)
         .expect("every health state must have a surface");
@@ -330,12 +433,6 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
     let values = HashMap::from([
         ("progress", progress.to_owned()),
         ("sync_ts", format_ts(facts.last_successful_sync)),
-        ("contact_ts", format_ts(facts.last_successful_contact)),
-        (
-            "contact_age",
-            format_age(facts.last_successful_contact.map(|value| now - value)),
-        ),
-        ("threshold", format_age(Some(stale_threshold))),
     ]);
     SyncHealth {
         state,
@@ -374,23 +471,54 @@ fn optional_int(data: &Map<String, Value>, key: &str) -> Option<i64> {
     data.get(key).and_then(Value::as_i64)
 }
 
-fn load_link_facts(data: &Map<String, Value>) -> Option<LinkFactState> {
-    let link = data.get("link")?.as_object()?;
-    let boolean = |key| link.get(key).and_then(Value::as_bool).unwrap_or(false);
-    Some(LinkFactState {
-        pairing_required: boolean("pairing_required"),
-        private_state_invalid: boolean("private_state_invalid"),
-        config_sanitation_failed: boolean("config_sanitation_failed"),
-        listener_ready: boolean("listener_ready"),
-        carrier_proven: boolean("carrier_proven"),
-        observer_registered: boolean("observer_registered"),
-        transport_unavailable: boolean("transport_unavailable"),
-        terminal_revocation: boolean("terminal_revocation"),
-        token_persistence_failure: boolean("token_persistence_failure"),
-    })
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HealthLoadError {
+    MalformedLinkEpoch,
+    MalformedLink,
+}
+
+pub(crate) fn load_link_facts(
+    data: &Map<String, Value>,
+    liveness: PrivateStateLockLiveness,
+) -> Result<Option<LinkFactState>, HealthLoadError> {
+    if liveness != PrivateStateLockLiveness::LiveOwner {
+        return Ok(None);
+    }
+    ProcessEpoch::parse(
+        data.get("link_epoch")
+            .ok_or(HealthLoadError::MalformedLinkEpoch)?,
+    )
+    .ok_or(HealthLoadError::MalformedLinkEpoch)?;
+    let link = data
+        .get("link")
+        .and_then(Value::as_object)
+        .ok_or(HealthLoadError::MalformedLink)?;
+    let boolean = |key| {
+        link.get(key)
+            .and_then(Value::as_bool)
+            .ok_or(HealthLoadError::MalformedLink)
+    };
+    Ok(Some(LinkFactState {
+        pairing_required: boolean("pairing_required")?,
+        private_state_invalid: boolean("private_state_invalid")?,
+        config_sanitation_failed: boolean("config_sanitation_failed")?,
+        listener_ready: boolean("listener_ready")?,
+        carrier_proven: boolean("carrier_proven")?,
+        observer_registered: boolean("observer_registered")?,
+        transport_unavailable: boolean("transport_unavailable")?,
+        terminal_revocation: boolean("terminal_revocation")?,
+        token_persistence_failure: boolean("token_persistence_failure")?,
+    }))
 }
 
 pub fn load_facts(state_dir: &Path) -> SyncFacts {
+    load_facts_with_liveness(state_dir, PrivateStateLockLiveness::NoLiveOwner)
+}
+
+pub(crate) fn load_facts_with_liveness(
+    state_dir: &Path,
+    liveness: PrivateStateLockLiveness,
+) -> SyncFacts {
     let Ok(text) = fs::read_to_string(sync_health_path(state_dir)) else {
         return SyncFacts::default();
     };
@@ -412,7 +540,8 @@ pub fn load_facts(state_dir: &Path) -> SyncFacts {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-        link: load_link_facts(&data),
+        link: load_link_facts(&data, liveness).unwrap_or(None),
+        link_epoch: ProcessEpoch::parse(data.get("link_epoch").unwrap_or(&Value::Null)),
     }
 }
 
@@ -420,6 +549,23 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
     fs::create_dir_all(state_dir)?;
     let path = sync_health_path(state_dir);
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let link = facts
+        .link
+        .as_ref()
+        .zip(facts.link_epoch.as_ref())
+        .map(|(link, _)| {
+            json!({
+                "pairing_required": link.pairing_required,
+                "private_state_invalid": link.private_state_invalid,
+                "config_sanitation_failed": link.config_sanitation_failed,
+                "listener_ready": link.listener_ready,
+                "carrier_proven": link.carrier_proven,
+                "observer_registered": link.observer_registered,
+                "transport_unavailable": link.transport_unavailable,
+                "terminal_revocation": link.terminal_revocation,
+                "token_persistence_failure": link.token_persistence_failure,
+            })
+        });
     let mut text = serde_json::to_string(&json!({
         "schema_version": SCHEMA_VERSION,
         "last_successful_sync": facts.last_successful_sync,
@@ -429,17 +575,8 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
         "pending_confirmed": facts.pending_confirmed,
         "in_progress": facts.in_progress,
         "progress": facts.progress,
-        "link": facts.link.as_ref().map(|link| json!({
-            "pairing_required": link.pairing_required,
-            "private_state_invalid": link.private_state_invalid,
-            "config_sanitation_failed": link.config_sanitation_failed,
-            "listener_ready": link.listener_ready,
-            "carrier_proven": link.carrier_proven,
-            "observer_registered": link.observer_registered,
-            "transport_unavailable": link.transport_unavailable,
-            "terminal_revocation": link.terminal_revocation,
-            "token_persistence_failure": link.token_persistence_failure,
-        })),
+        "link_epoch": facts.link_epoch.as_ref().map(ProcessEpoch::as_str),
+        "link": link,
     }))
     .map_err(io::Error::other)?;
     text.push('\n');
@@ -462,7 +599,7 @@ mod tests {
             1000.0,
             DEFAULT_SYNC_STALE_THRESHOLD as f64,
         );
-        assert_eq!(health.state, HealthState::Unknown);
+        assert_eq!(health.state, HealthState::Connecting);
         assert_eq!(health.sni_status, "Active");
         assert_eq!(health.pending_display, "pending unconfirmed");
     }
@@ -479,7 +616,7 @@ mod tests {
         };
         assert_eq!(
             derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64).state,
-            HealthState::Unknown
+            HealthState::ListenerReady
         );
     }
 
@@ -505,8 +642,8 @@ mod tests {
     #[test]
     fn error_precedence_states() {
         for (error, expected) in [
-            (ErrorType::Auth, HealthState::Revoked),
-            (ErrorType::Incompatible, HealthState::UpdateNeeded),
+            (ErrorType::Auth, HealthState::RePairRequired),
+            (ErrorType::Incompatible, HealthState::UpdateRequired),
             (ErrorType::Transient, HealthState::Offline),
         ] {
             let facts = SyncFacts {
@@ -550,11 +687,11 @@ mod tests {
             let timeout = state_for(ErrorType::Transient, None);
             let forbidden = state_for(ErrorType::Auth, Some(403));
 
-            assert_ne!(unauthorized, HealthState::Revoked);
+            assert_ne!(unauthorized, HealthState::RePairRequired);
             assert_ne!(unauthorized, HealthState::Connected);
             assert_ne!(unauthorized, server_error);
             assert_ne!(unauthorized, timeout);
-            assert_eq!(forbidden, HealthState::Revoked);
+            assert_eq!(forbidden, HealthState::RePairRequired);
         }
     }
 
@@ -568,9 +705,9 @@ mod tests {
             ..SyncFacts::default()
         };
         let health = derive_health(&facts, 1000.0, DEFAULT_SYNC_STALE_THRESHOLD as f64);
-        assert_eq!(health.state, HealthState::Stale);
-        assert_eq!(health.sni_status, "NeedsAttention");
-        assert!(health.tooltip.contains("last contact"));
+        assert_eq!(health.state, HealthState::Offline);
+        assert_eq!(health.sni_status, "Active");
+        assert!(health.tooltip.contains("saving locally"));
     }
 
     // Connected requires both zero pending custody and positive linked-transport evidence.
@@ -596,7 +733,7 @@ mod tests {
                 DEFAULT_SYNC_STALE_THRESHOLD as f64,
             )
             .state,
-            HealthState::Unknown
+            HealthState::Connecting
         );
     }
 
@@ -607,6 +744,10 @@ mod tests {
             last_successful_sync: Some(100.0),
             last_successful_contact: Some(990.0),
             in_progress: true,
+            link: Some(LinkFactState {
+                observer_registered: true,
+                ..Default::default()
+            }),
             ..SyncFacts::default()
         };
         assert_eq!(
@@ -628,6 +769,7 @@ mod tests {
             in_progress: true,
             progress: "uploading 120000_300".to_owned(),
             link: None,
+            link_epoch: None,
         };
         save_facts(temp.path(), &facts).unwrap();
         assert_eq!(load_facts(temp.path()), facts);
@@ -645,7 +787,7 @@ mod tests {
     // tests/test_sync_health.py::test_every_health_state_has_complete_surface
     #[test]
     fn every_health_state_has_complete_surface() {
-        assert_eq!(SURFACE_BY_STATE.len(), 7);
+        assert_eq!(SURFACE_BY_STATE.len(), 11);
         for surface in SURFACE_BY_STATE.values() {
             assert!(!surface.header_recording.is_empty());
             assert!(!surface.header_idle.is_empty());
@@ -659,6 +801,237 @@ mod tests {
             assert!(!surface.doctor_severity.is_empty());
             assert!(!surface.doctor_detail.is_empty());
             assert!(!surface.dbus.is_empty());
+        }
+    }
+
+    #[test]
+    fn precedence_table_covers_single_and_conflicting_conditions() {
+        let state = |facts: SyncFacts| derive_health(&facts, 1_000.0, 600.0).state;
+        let link = |link: LinkFactState| SyncFacts {
+            link: Some(link),
+            ..Default::default()
+        };
+        let single_cases = [
+            (
+                link(LinkFactState {
+                    private_state_invalid: true,
+                    ..Default::default()
+                }),
+                HealthState::UnsafeLinkState,
+            ),
+            (
+                link(LinkFactState {
+                    config_sanitation_failed: true,
+                    ..Default::default()
+                }),
+                HealthState::UnsafeLinkState,
+            ),
+            (
+                link(LinkFactState {
+                    terminal_revocation: true,
+                    ..Default::default()
+                }),
+                HealthState::RePairRequired,
+            ),
+            (
+                link(LinkFactState {
+                    token_persistence_failure: true,
+                    ..Default::default()
+                }),
+                HealthState::TokenPersistenceFailed,
+            ),
+            (
+                link(LinkFactState {
+                    pairing_required: true,
+                    ..Default::default()
+                }),
+                HealthState::PairingRequired,
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Incompatible),
+                    ..Default::default()
+                },
+                HealthState::UpdateRequired,
+            ),
+            (
+                link(LinkFactState {
+                    transport_unavailable: true,
+                    ..Default::default()
+                }),
+                HealthState::TransportUnavailable,
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Transient),
+                    ..Default::default()
+                },
+                HealthState::Offline,
+            ),
+            (
+                link(LinkFactState {
+                    listener_ready: true,
+                    ..Default::default()
+                }),
+                HealthState::ListenerReady,
+            ),
+            (
+                link(LinkFactState {
+                    carrier_proven: true,
+                    ..Default::default()
+                }),
+                HealthState::Connecting,
+            ),
+            (
+                link(LinkFactState {
+                    observer_registered: true,
+                    ..Default::default()
+                }),
+                HealthState::Syncing,
+            ),
+        ];
+        for (facts, expected) in single_cases {
+            assert_eq!(state(facts), expected);
+        }
+
+        let all = LinkFactState {
+            pairing_required: true,
+            private_state_invalid: true,
+            config_sanitation_failed: true,
+            listener_ready: true,
+            carrier_proven: true,
+            observer_registered: true,
+            transport_unavailable: true,
+            terminal_revocation: true,
+            token_persistence_failure: true,
+        };
+        let conflicting_cases = [
+            (all.clone(), HealthState::UnsafeLinkState),
+            (
+                LinkFactState {
+                    private_state_invalid: false,
+                    config_sanitation_failed: false,
+                    ..all.clone()
+                },
+                HealthState::RePairRequired,
+            ),
+            (
+                LinkFactState {
+                    private_state_invalid: false,
+                    config_sanitation_failed: false,
+                    terminal_revocation: false,
+                    ..all.clone()
+                },
+                HealthState::TokenPersistenceFailed,
+            ),
+            (
+                LinkFactState {
+                    private_state_invalid: false,
+                    config_sanitation_failed: false,
+                    terminal_revocation: false,
+                    token_persistence_failure: false,
+                    ..all.clone()
+                },
+                HealthState::PairingRequired,
+            ),
+            (
+                LinkFactState {
+                    private_state_invalid: false,
+                    config_sanitation_failed: false,
+                    terminal_revocation: false,
+                    token_persistence_failure: false,
+                    pairing_required: false,
+                    ..all
+                },
+                HealthState::UpdateRequired,
+            ),
+        ];
+        for (link, expected) in conflicting_cases {
+            let facts = SyncFacts {
+                last_error_class: Some(ErrorType::Incompatible),
+                pending_confirmed: Some(0),
+                link: Some(link),
+                ..Default::default()
+            };
+            assert_eq!(state(facts), expected);
+        }
+    }
+
+    #[test]
+    fn replayed_connected_facts_never_override_six_current_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        save_facts(
+            temp.path(),
+            &SyncFacts {
+                pending_confirmed: Some(0),
+                link: Some(LinkFactState {
+                    carrier_proven: true,
+                    observer_registered: true,
+                    ..Default::default()
+                }),
+                link_epoch: Some(ProcessEpoch::for_test(7)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let replayed = load_facts_with_liveness(temp.path(), PrivateStateLockLiveness::NoLiveOwner);
+        assert!(replayed.link.is_none());
+        let cases = [
+            (
+                LinkFactState {
+                    pairing_required: true,
+                    ..Default::default()
+                },
+                HealthState::PairingRequired,
+            ),
+            (
+                LinkFactState {
+                    private_state_invalid: true,
+                    ..Default::default()
+                },
+                HealthState::UnsafeLinkState,
+            ),
+            (
+                LinkFactState {
+                    config_sanitation_failed: true,
+                    ..Default::default()
+                },
+                HealthState::UnsafeLinkState,
+            ),
+            (
+                LinkFactState {
+                    terminal_revocation: true,
+                    ..Default::default()
+                },
+                HealthState::RePairRequired,
+            ),
+            (
+                LinkFactState {
+                    token_persistence_failure: true,
+                    ..Default::default()
+                },
+                HealthState::TokenPersistenceFailed,
+            ),
+            (
+                LinkFactState {
+                    transport_unavailable: true,
+                    ..Default::default()
+                },
+                HealthState::TransportUnavailable,
+            ),
+        ];
+        for (current, expected) in cases {
+            let health = derive_health(
+                &SyncFacts {
+                    link: Some(current),
+                    ..replayed.clone()
+                },
+                1_000.0,
+                600.0,
+            );
+            assert_eq!(health.state, expected);
+            assert_ne!(health.state, HealthState::Connected);
+            assert!(!health.sync_line.contains("checking"));
         }
     }
 
@@ -693,6 +1066,10 @@ mod tests {
         let facts = SyncFacts {
             in_progress: true,
             progress: "  ".to_owned(),
+            link: Some(LinkFactState {
+                observer_registered: true,
+                ..Default::default()
+            }),
             ..SyncFacts::default()
         };
         let health = derive_health(&facts, 1.0, DEFAULT_SYNC_STALE_THRESHOLD as f64);

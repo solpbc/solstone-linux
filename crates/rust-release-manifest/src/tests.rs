@@ -350,6 +350,857 @@ fn rpm_file_with(root: &Path, version: &str, executable: &[u8]) -> PathBuf {
 }
 
 #[test]
+fn package_payload_authority_matches_both_manifest_dialects() {
+    use crate::package_audit::PAYLOAD_AUTHORITY;
+
+    let manifest: toml::Value = toml::from_str(include_str!("../../solstone-linux/Cargo.toml"))
+        .expect("solstone-linux manifest parses");
+    let expected = PAYLOAD_AUTHORITY
+        .iter()
+        .map(|entry| {
+            (
+                entry.source.to_owned(),
+                entry.installed.to_owned(),
+                entry.mode,
+            )
+        })
+        .collect::<Vec<_>>();
+    let deb = manifest["package"]["metadata"]["deb"]["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|asset| {
+            let asset = asset.as_array().unwrap();
+            let source = asset[0]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("../../")
+                .to_owned();
+            let mut installed = format!("/{}", asset[1].as_str().unwrap().trim_start_matches('/'));
+            if installed.ends_with('/') {
+                installed.push_str(Path::new(&source).file_name().unwrap().to_str().unwrap());
+            }
+            let mode = u32::from_str_radix(asset[2].as_str().unwrap(), 8).unwrap();
+            (source, installed, mode)
+        })
+        .collect::<Vec<_>>();
+    let rpm = manifest["package"]["metadata"]["generate-rpm"]["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|asset| {
+            let asset = asset.as_table().unwrap();
+            (
+                asset["source"].as_str().unwrap().to_owned(),
+                asset["dest"].as_str().unwrap().to_owned(),
+                u32::from_str_radix(asset["mode"].as_str().unwrap(), 8).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(deb, rpm);
+    assert_eq!(deb, expected);
+    assert_eq!(expected.len(), 16);
+}
+
+fn audit_fixture_bytes(
+    authority: crate::package_audit::PayloadAuthority,
+    executable: &[u8],
+) -> Vec<u8> {
+    match authority.role {
+        crate::package_audit::PayloadRole::Executable => executable.to_vec(),
+        crate::package_audit::PayloadRole::InstallNotes => {
+            include_bytes!("../../../packaging/INSTALL-NOTES").to_vec()
+        }
+        crate::package_audit::PayloadRole::License => b"audit fixture license\n".to_vec(),
+        crate::package_audit::PayloadRole::Icon => {
+            format!("audit fixture {}\n", authority.source).into_bytes()
+        }
+    }
+}
+
+#[derive(Default)]
+struct AuditPayloadOptions {
+    omit: Option<crate::package_audit::PayloadRole>,
+    replacement: Option<(crate::package_audit::PayloadRole, Vec<u8>, u32)>,
+    extras: Vec<(String, Vec<u8>, u32)>,
+}
+
+fn audit_tar_with_payload(
+    root: &Path,
+    executable: &[u8],
+    options: &AuditPayloadOptions,
+) -> PathBuf {
+    let path = root.join("solstone-linux-1.0.0-linux-x86_64.tar.gz");
+    let mut tar = tar::Builder::new(Vec::new());
+    for authority in crate::package_audit::PAYLOAD_AUTHORITY {
+        if options.omit == Some(authority.role) {
+            continue;
+        }
+        let relative = match authority.role {
+            crate::package_audit::PayloadRole::Executable => "bin/solstone-linux".to_owned(),
+            crate::package_audit::PayloadRole::License => "LICENSE".to_owned(),
+            crate::package_audit::PayloadRole::InstallNotes => "INSTALL-NOTES".to_owned(),
+            crate::package_audit::PayloadRole::Icon => format!(
+                "share/icons/{}",
+                authority.source.strip_prefix("contrib/icons/").unwrap()
+            ),
+        };
+        let member = format!("solstone-linux-1.0.0-linux-x86_64/{relative}");
+        let (bytes, mode) = options
+            .replacement
+            .as_ref()
+            .filter(|(role, _, _)| *role == authority.role)
+            .map(|(_, bytes, mode)| (bytes.clone(), *mode))
+            .unwrap_or_else(|| (audit_fixture_bytes(authority, executable), authority.mode));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(mode);
+        header.set_cksum();
+        tar.append_data(&mut header, member, bytes.as_slice())
+            .unwrap();
+    }
+    for (relative, bytes, mode) in &options.extras {
+        let member = format!("solstone-linux-1.0.0-linux-x86_64/{relative}");
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(*mode);
+        header.set_cksum();
+        tar.append_data(&mut header, member, bytes.as_slice())
+            .unwrap();
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&tar.into_inner().unwrap()).unwrap();
+    fs::write(&path, encoder.finish().unwrap()).unwrap();
+    path
+}
+
+fn audit_tar(root: &Path, executable: &[u8]) -> PathBuf {
+    audit_tar_with_payload(root, executable, &AuditPayloadOptions::default())
+}
+
+fn audit_deb_with(
+    root: &Path,
+    executable: &[u8],
+    control_body: &[u8],
+    scripts: &[(&str, &[u8])],
+    payload: &AuditPayloadOptions,
+) -> PathBuf {
+    let mut data = tar::Builder::new(Vec::new());
+    for authority in crate::package_audit::PAYLOAD_AUTHORITY {
+        if payload.omit == Some(authority.role) {
+            continue;
+        }
+        let member = format!(".{}", authority.installed);
+        let (bytes, mode) = payload
+            .replacement
+            .as_ref()
+            .filter(|(role, _, _)| *role == authority.role)
+            .map(|(_, bytes, mode)| (bytes.clone(), *mode))
+            .unwrap_or_else(|| (audit_fixture_bytes(authority, executable), authority.mode));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(mode);
+        header.set_cksum();
+        data.append_data(&mut header, member, bytes.as_slice())
+            .unwrap();
+    }
+    for (installed, bytes, mode) in &payload.extras {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(*mode);
+        header.set_cksum();
+        data.append_data(
+            &mut header,
+            format!("./{}", installed.trim_start_matches('/')),
+            bytes.as_slice(),
+        )
+        .unwrap();
+    }
+    let path = root.join("solstone-linux_1.0.0-1_amd64.deb");
+    let marker = b"2.0\n";
+    let mut control = tar::Builder::new(Vec::new());
+    let mut control_members = vec![
+        ("./control", control_body),
+        ("./md5sums", b"fixture  usr/bin/solstone-linux\n".as_slice()),
+    ];
+    control_members.extend_from_slice(scripts);
+    for (name, body) in control_members {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        control.append_data(&mut header, name, body).unwrap();
+    }
+    let control = gzip(&control.into_inner().unwrap());
+    let data = gzip(&data.into_inner().unwrap());
+    deb_members(
+        root,
+        path.file_name().unwrap().to_str().unwrap(),
+        &[
+            ("debian-binary", marker),
+            ("control.tar.gz", &control),
+            ("data.tar.gz", &data),
+        ],
+    )
+}
+
+fn audit_deb(root: &Path, executable: &[u8]) -> PathBuf {
+    audit_deb_with(
+        root,
+        executable,
+        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6\n",
+        &[],
+        &AuditPayloadOptions::default(),
+    )
+}
+
+fn audit_rpm_with(
+    root: &Path,
+    executable: &[u8],
+    payload: &AuditPayloadOptions,
+    configure: impl FnOnce(&mut rpm::PackageBuilder),
+) -> PathBuf {
+    let path = root.join("solstone-linux-1.0.0-1.x86_64.rpm");
+    let mut builder =
+        rpm::PackageBuilder::new(PRODUCT, "1.0.0", "AGPL-3.0-only", "x86_64", "fixture");
+    for authority in crate::package_audit::PAYLOAD_AUTHORITY {
+        if payload.omit == Some(authority.role) {
+            continue;
+        }
+        let (bytes, mode) = payload
+            .replacement
+            .as_ref()
+            .filter(|(role, _, _)| *role == authority.role)
+            .map(|(_, bytes, mode)| (bytes.clone(), *mode))
+            .unwrap_or_else(|| (audit_fixture_bytes(authority, executable), authority.mode));
+        builder
+            .with_file_contents(
+                bytes,
+                rpm::FileOptions::new(authority.installed)
+                    .permissions(u16::try_from(mode).unwrap()),
+            )
+            .unwrap();
+    }
+    for (installed, bytes, mode) in &payload.extras {
+        let installed = format!("/{}", installed.trim_start_matches('/'));
+        builder
+            .with_file_contents(
+                bytes.clone(),
+                rpm::FileOptions::new(installed).permissions(u16::try_from(*mode).unwrap()),
+            )
+            .unwrap();
+    }
+    configure(&mut builder);
+    builder
+        .build()
+        .unwrap()
+        .write(&mut File::create(&path).unwrap())
+        .unwrap();
+    path
+}
+
+fn audit_rpm(root: &Path, executable: &[u8]) -> PathBuf {
+    audit_rpm_with(root, executable, &AuditPayloadOptions::default(), |_| {})
+}
+
+#[test]
+fn package_audit_accepts_real_clean_containers_and_rejects_divergence() {
+    let requested = std::env::var_os("PACKAGE_AUDIT_FIXTURE_DIR").map(PathBuf::from);
+    let temporary = requested.is_none().then(|| tempfile::tempdir().unwrap());
+    let root = requested
+        .as_deref()
+        .unwrap_or_else(|| temporary.as_ref().unwrap().path());
+    fs::create_dir_all(root).unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root, &executable);
+    let deb = audit_deb(root, &executable);
+    let rpm = audit_rpm(root, &executable);
+    let expected = digest(&executable);
+    audit_packages(&tar, &deb, &rpm, &expected).unwrap();
+    if requested.is_some() {
+        fs::write(
+            root.join("expected-executable.sha256"),
+            format!("{expected}\n"),
+        )
+        .unwrap();
+    }
+    let error = audit_packages(&tar, &deb, &rpm, &"0".repeat(64)).unwrap_err();
+    assert!(error.to_string().contains("class=DivergentExecutable"));
+}
+
+#[test]
+fn package_audit_names_each_divergent_binary_format() {
+    for divergent_format in ["tar", "deb", "rpm"] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let mut divergent = executable.clone();
+        let last = divergent.len() - 1;
+        divergent[last] ^= 1;
+        let tar = audit_tar(
+            root.path(),
+            if divergent_format == "tar" {
+                &divergent
+            } else {
+                &executable
+            },
+        );
+        let deb = audit_deb(
+            root.path(),
+            if divergent_format == "deb" {
+                &divergent
+            } else {
+                &executable
+            },
+        );
+        let rpm = audit_rpm(
+            root.path(),
+            if divergent_format == "rpm" {
+                &divergent
+            } else {
+                &executable
+            },
+        );
+        let artifact = match divergent_format {
+            "tar" => &tar,
+            "deb" => &deb,
+            "rpm" => &rpm,
+            _ => unreachable!(),
+        };
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(
+            error,
+            artifact,
+            "DivergentExecutable",
+            &format!("sha256:{}", digest(&divergent)),
+            "executable",
+        );
+    }
+}
+
+#[test]
+fn package_audit_real_artifacts_cover_payload_rejection_matrix() {
+    use crate::package_audit::PayloadRole;
+
+    enum Mutation {
+        Extra(&'static str, Vec<u8>, u32, &'static str, &'static str),
+        Replace(PayloadRole, Vec<u8>, u32, &'static str, &'static str),
+        Omit(PayloadRole),
+    }
+    let mutations = vec![
+        Mutation::Extra(
+            "usr/share/solstone-linux/extra",
+            b"extra".to_vec(),
+            0o644,
+            "ExtraPayload",
+            "undeclared",
+        ),
+        Mutation::Extra(
+            "usr/libexec/helper.py",
+            b"print('x')".to_vec(),
+            0o644,
+            "BundledSidecar",
+            "python",
+        ),
+        Mutation::Extra(
+            "usr/libexec/helper",
+            b"#!/usr/bin/python3\n".to_vec(),
+            0o755,
+            "BundledSidecar",
+            "shebang",
+        ),
+        Mutation::Extra(
+            "usr/libexec/helper-elf",
+            crate::elf64::pinned_elf64_for_test(),
+            0o755,
+            "BundledSidecar",
+            "elf",
+        ),
+        Mutation::Extra(
+            "usr/libexec/extra-executable",
+            b"binary".to_vec(),
+            0o755,
+            "ExtraExecutable",
+            "executable-bit",
+        ),
+        Mutation::Replace(
+            PayloadRole::Icon,
+            b"icon".to_vec(),
+            0o755,
+            "ExtraExecutable",
+            "mode:0755",
+        ),
+        Mutation::Replace(
+            PayloadRole::License,
+            b"license".to_vec(),
+            0o600,
+            "PayloadClosure",
+            "mode:0600",
+        ),
+        Mutation::Replace(
+            PayloadRole::InstallNotes,
+            b"different notes".to_vec(),
+            0o644,
+            "StaleInstallNotes",
+            "digest",
+        ),
+        Mutation::Replace(
+            PayloadRole::InstallNotes,
+            b"--server-url".to_vec(),
+            0o644,
+            "StaleInstallNotes",
+            "--server-url",
+        ),
+        Mutation::Omit(PayloadRole::InstallNotes),
+        Mutation::Omit(PayloadRole::Executable),
+    ];
+
+    for format in ["tar", "deb", "rpm"] {
+        for mutation in &mutations {
+            let root = tempfile::tempdir().unwrap();
+            let executable = crate::elf64::pinned_elf64_for_test();
+            let mut options = AuditPayloadOptions::default();
+            let (class, token, member) = match mutation {
+                Mutation::Extra(path, bytes, mode, class, token) => {
+                    options
+                        .extras
+                        .push(((*path).to_owned(), bytes.clone(), *mode));
+                    (*class, *token, (*path).to_owned())
+                }
+                Mutation::Replace(role, bytes, mode, class, token) => {
+                    options.replacement = Some((*role, bytes.clone(), *mode));
+                    let authority = crate::package_audit::PAYLOAD_AUTHORITY
+                        .iter()
+                        .find(|authority| authority.role == *role)
+                        .unwrap();
+                    let member = match format {
+                        "tar" => match role {
+                            PayloadRole::Executable => "bin/solstone-linux".to_owned(),
+                            PayloadRole::License => "LICENSE".to_owned(),
+                            PayloadRole::InstallNotes => "INSTALL-NOTES".to_owned(),
+                            PayloadRole::Icon => authority
+                                .source
+                                .strip_prefix("contrib/icons/")
+                                .map(|path| format!("share/icons/{path}"))
+                                .unwrap(),
+                        },
+                        _ => authority.installed.trim_start_matches('/').to_owned(),
+                    };
+                    (*class, *token, member)
+                }
+                Mutation::Omit(role) => {
+                    options.omit = Some(*role);
+                    let authority = crate::package_audit::PAYLOAD_AUTHORITY
+                        .iter()
+                        .find(|authority| authority.role == *role)
+                        .unwrap();
+                    let member = match format {
+                        "tar" => match role {
+                            PayloadRole::Executable => "bin/solstone-linux".to_owned(),
+                            PayloadRole::License => "LICENSE".to_owned(),
+                            PayloadRole::InstallNotes => "INSTALL-NOTES".to_owned(),
+                            PayloadRole::Icon => unreachable!(),
+                        },
+                        _ => authority.installed.trim_start_matches('/').to_owned(),
+                    };
+                    ("PayloadClosure", "missing", member)
+                }
+            };
+            let tar = if format == "tar" {
+                audit_tar_with_payload(root.path(), &executable, &options)
+            } else {
+                audit_tar(root.path(), &executable)
+            };
+            let deb = if format == "deb" {
+                audit_deb_with(
+                    root.path(),
+                    &executable,
+                    b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6\n",
+                    &[],
+                    &options,
+                )
+            } else {
+                audit_deb(root.path(), &executable)
+            };
+            let rpm = if format == "rpm" {
+                audit_rpm_with(root.path(), &executable, &options, |_| {})
+            } else {
+                audit_rpm(root.path(), &executable)
+            };
+            let artifact = match format {
+                "tar" => &tar,
+                "deb" => &deb,
+                "rpm" => &rpm,
+                _ => unreachable!(),
+            };
+            let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+            assert_package_audit_diagnostic(error, artifact, class, token, &member);
+        }
+    }
+}
+
+fn clean_audit_set(root: &Path) -> (PathBuf, PathBuf, PathBuf, String) {
+    let executable = crate::elf64::pinned_elf64_for_test();
+    (
+        audit_tar(root, &executable),
+        audit_deb(root, &executable),
+        audit_rpm(root, &executable),
+        digest(&executable),
+    )
+}
+
+fn assert_package_audit_diagnostic(
+    error: Error,
+    artifact: &Path,
+    class: &str,
+    token: &str,
+    member: &str,
+) {
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "package audit: artifact={} class={class} token={token} member={member} tool=rust-release-manifest",
+            artifact.file_name().unwrap().to_str().unwrap()
+        )
+    );
+}
+
+#[test]
+fn package_audit_rejects_each_deb_dependency_and_accepts_product_name() {
+    for forbidden in ["python3", "pip", "pipx", "sol", "journal"] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let rpm = audit_rpm(root.path(), &executable);
+        let control = format!(
+            "Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6, {forbidden}\n"
+        );
+        let deb = audit_deb_with(
+            root.path(),
+            &executable,
+            control.as_bytes(),
+            &[],
+            &AuditPayloadOptions::default(),
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(
+            error,
+            &deb,
+            "ForbiddenDependency",
+            forbidden,
+            "deb:control/Depends",
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root.path(), &executable);
+    let rpm = audit_rpm(root.path(), &executable);
+    let deb = audit_deb_with(
+        root.path(),
+        &executable,
+        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6, solstone-linux\n",
+        &[],
+        &AuditPayloadOptions::default(),
+    );
+    audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap();
+}
+
+#[test]
+fn package_audit_rejects_malformed_and_non_utf8_deb_control_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root.path(), &executable);
+    let rpm = audit_rpm(root.path(), &executable);
+    let deb = audit_deb_with(
+        root.path(),
+        &executable,
+        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6,,libpulse0\n",
+        &[],
+        &AuditPayloadOptions::default(),
+    );
+    let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+    assert_package_audit_diagnostic(
+        error,
+        &deb,
+        "MalformedMetadata",
+        "dependency-grammar",
+        "deb:control/Depends",
+    );
+
+    let deb = audit_deb_with(
+        root.path(),
+        &executable,
+        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6\n\xff",
+        &[],
+        &AuditPayloadOptions::default(),
+    );
+    let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+    assert!(error.to_string().starts_with(
+        "package audit: artifact=solstone-linux_1.0.0-1_amd64.deb class=PackageIdentity token="
+    ));
+    assert!(
+        error
+            .to_string()
+            .ends_with(" member=control tool=rust-release-manifest")
+    );
+}
+
+#[test]
+fn package_audit_rejects_each_rpm_dependency_and_accepts_product_name() {
+    for forbidden in ["python3", "pip", "pipx", "sol", "journal"] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let deb = audit_deb(root.path(), &executable);
+        let rpm = audit_rpm_with(
+            root.path(),
+            &executable,
+            &AuditPayloadOptions::default(),
+            |builder| {
+                builder.requires(rpm::Dependency::any(forbidden));
+            },
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(
+            error,
+            &rpm,
+            "ForbiddenDependency",
+            forbidden,
+            "rpm:Requires/Provides",
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root.path(), &executable);
+    let deb = audit_deb(root.path(), &executable);
+    let rpm = audit_rpm_with(
+        root.path(),
+        &executable,
+        &AuditPayloadOptions::default(),
+        |builder| {
+            builder.requires(rpm::Dependency::any("solstone-linux"));
+        },
+    );
+    audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap();
+}
+
+#[test]
+fn package_audit_rejects_every_deb_control_script_even_when_empty() {
+    for script in [
+        "preinst", "postinst", "prerm", "postrm", "config", "triggers",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let rpm = audit_rpm(root.path(), &executable);
+        let name = format!("./{script}");
+        let deb = audit_deb_with(
+            root.path(),
+            &executable,
+            b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6\n",
+            &[(name.as_str(), b"")],
+            &AuditPayloadOptions::default(),
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(
+            error,
+            &deb,
+            "MaintainerScript",
+            script,
+            &format!("deb:control/{script}"),
+        );
+    }
+}
+
+#[test]
+fn package_audit_rejects_every_rpm_script_and_trigger_even_when_empty() {
+    type Configure = fn(&mut rpm::PackageBuilder);
+    let scriptlets: [(&str, Configure); 9] = [
+        ("pre", |builder| {
+            builder.pre_install_script("");
+        }),
+        ("post", |builder| {
+            builder.post_install_script("");
+        }),
+        ("preun", |builder| {
+            builder.pre_uninstall_script("");
+        }),
+        ("postun", |builder| {
+            builder.post_uninstall_script("");
+        }),
+        ("pretrans", |builder| {
+            builder.pre_trans_script("");
+        }),
+        ("posttrans", |builder| {
+            builder.post_trans_script("");
+        }),
+        ("preuntrans", |builder| {
+            builder.pre_untrans_script("");
+        }),
+        ("postuntrans", |builder| {
+            builder.post_untrans_script("");
+        }),
+        ("verifyscript", |builder| {
+            builder.verify_script("");
+        }),
+    ];
+    for (token, configure) in scriptlets {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let deb = audit_deb(root.path(), &executable);
+        let rpm = audit_rpm_with(
+            root.path(),
+            &executable,
+            &AuditPayloadOptions::default(),
+            configure,
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(error, &rpm, "MaintainerScript", token, "rpm:script");
+    }
+
+    let triggers: [Configure; 3] = [
+        |builder| {
+            builder.trigger_in("bash", None, "");
+        },
+        |builder| {
+            builder.file_trigger_in("/usr/lib", None, "");
+        },
+        |builder| {
+            builder.trans_file_trigger_in("/usr/lib", None, "");
+        },
+    ];
+    for configure in triggers {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let deb = audit_deb(root.path(), &executable);
+        let rpm = audit_rpm_with(
+            root.path(),
+            &executable,
+            &AuditPayloadOptions::default(),
+            configure,
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(error, &rpm, "MaintainerScript", "trigger", "rpm:trigger");
+    }
+}
+
+#[test]
+fn package_audit_rejects_real_rpm_symlink_payload() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root.path(), &executable);
+    let deb = audit_deb(root.path(), &executable);
+    let rpm = audit_rpm_with(
+        root.path(),
+        &executable,
+        &AuditPayloadOptions::default(),
+        |builder| {
+            builder
+                .with_symlink(rpm::FileOptions::symlink(
+                    "/usr/libexec/solstone-sidecar",
+                    "/usr/bin/solstone-linux",
+                ))
+                .unwrap();
+        },
+    );
+    let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+    assert_package_audit_diagnostic(error, &rpm, "UnsupportedMember", "non-regular", "rpm:cpio");
+}
+
+#[test]
+fn package_audit_fails_closed_for_unreadable_and_nonregular_artifacts() {
+    use std::os::unix::net::UnixListener;
+
+    let root = tempfile::tempdir().unwrap();
+    let (tar, deb, rpm, expected) = clean_audit_set(root.path());
+    let absent = root.path().join("absent.tar.gz");
+    let error = audit_packages(&absent, &deb, &rpm, &expected).unwrap_err();
+    assert_package_audit_diagnostic(error, &absent, "UnreadableArtifact", "metadata", "artifact");
+
+    let directory = root.path().join("directory.tar.gz");
+    fs::create_dir(&directory).unwrap();
+    let error = audit_packages(&directory, &deb, &rpm, &expected).unwrap_err();
+    assert_package_audit_diagnostic(
+        error,
+        &directory,
+        "InvalidArtifact",
+        "regular-file-required",
+        "artifact",
+    );
+
+    let socket = root.path().join("socket.tar.gz");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let error = audit_packages(&socket, &deb, &rpm, &expected).unwrap_err();
+    assert_package_audit_diagnostic(
+        error,
+        &socket,
+        "InvalidArtifact",
+        "regular-file-required",
+        "artifact",
+    );
+    assert!(tar.exists());
+}
+
+#[test]
+fn package_audit_fails_closed_for_wrong_and_truncated_containers() {
+    let root = tempfile::tempdir().unwrap();
+    let (tar, deb, rpm, expected) = clean_audit_set(root.path());
+
+    fs::write(&deb, fs::read(&tar).unwrap()).unwrap();
+    let error = audit_packages(&tar, &deb, &rpm, &expected).unwrap_err();
+    assert!(error.to_string().starts_with(
+        "package audit: artifact=solstone-linux_1.0.0-1_amd64.deb class=PackageIdentity token="
+    ));
+    assert!(
+        error
+            .to_string()
+            .ends_with(" member=control tool=rust-release-manifest")
+    );
+
+    let (tar, deb, rpm, expected) = clean_audit_set(root.path());
+    for (artifact, keep, member) in [
+        (&tar, 12_usize, "filename-and-metadata"),
+        (&deb, 12_usize, "control"),
+        (&rpm, 12_usize, "header"),
+    ] {
+        let bytes = fs::read(artifact).unwrap();
+        fs::write(artifact, &bytes[..keep.min(bytes.len())]).unwrap();
+        let error = audit_packages(&tar, &deb, &rpm, &expected).unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "artifact={} class=PackageIdentity",
+            artifact.file_name().unwrap().to_str().unwrap()
+        )));
+        assert!(
+            error
+                .to_string()
+                .ends_with(&format!(" member={member} tool=rust-release-manifest"))
+        );
+        let rebuilt = clean_audit_set(root.path());
+        drop(rebuilt);
+    }
+}
+
+#[test]
+fn package_audit_fails_closed_when_rpm_cpio_payload_is_truncated() {
+    let root = tempfile::tempdir().unwrap();
+    let (tar, deb, rpm, expected) = clean_audit_set(root.path());
+    let mut bytes = fs::read(&rpm).unwrap();
+    bytes.truncate(bytes.len() - 1024);
+    fs::write(&rpm, bytes).unwrap();
+    let error = audit_packages(&tar, &deb, &rpm, &expected).unwrap_err();
+    assert_package_audit_diagnostic(
+        error,
+        &rpm,
+        "MalformedContainer",
+        "incomplete frame",
+        "rpm:cpio",
+    );
+}
+
+#[test]
 fn package_member_evidence_is_bound_to_all_three_formats() {
     let fixture = release_fixture();
     let mut members = artifact_paths(fixture.path(), "1.0.0")

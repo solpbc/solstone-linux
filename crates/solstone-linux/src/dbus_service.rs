@@ -82,10 +82,6 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
         String::new()
     }
     #[zbus(property)]
-    fn server_url(&self) -> String {
-        String::new()
-    }
-    #[zbus(property)]
     fn stream(&self) -> String {
         self.config.stream.clone()
     }
@@ -161,7 +157,6 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
 // TestSyncStatusTracking::test_progress_drives_syncing_status -> dbus_service::tests::in_progress_sync_properties_pass_through.
 // TestSyncStatusTracking::test_progress_change_emits_signal -> desktop_component::tests::progress_change_emits_syncing_composite.
 // TestObserverServiceConfig::test_capture_dir -> dbus_service::tests::config_properties_match_config.
-// TestObserverServiceConfig::test_server_url -> dbus_service::tests::config_properties_match_config.
 // TestObserverServiceConfig::test_stream -> dbus_service::tests::config_properties_match_config.
 // TestObserverServiceConfig::test_segment_interval -> dbus_service::tests::config_properties_match_config.
 
@@ -592,7 +587,7 @@ mod tests {
         assert!(second > first);
     }
     #[test]
-    fn fresh_sync_properties_are_unknown_and_empty() {
+    fn fresh_sync_properties_are_connecting_and_empty() {
         let (s, _, _) = service(
             snapshot(crate::observer::Mode::Idle, false),
             Config::default(),
@@ -600,7 +595,7 @@ mod tests {
             "",
             0,
         );
-        assert_eq!(s.sync_status(), "unknown");
+        assert_eq!(s.sync_status(), "connecting");
         assert_eq!(s.current_sync_progress(), "");
     }
     #[test]
@@ -609,6 +604,10 @@ mod tests {
             &crate::sync_health::SyncFacts {
                 in_progress: true,
                 progress: "uploading 120000_300".into(),
+                link: Some(crate::private_link::LinkFactState {
+                    observer_registered: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             0.0,
@@ -628,7 +627,6 @@ mod tests {
     fn config_properties_match_config() {
         let config = Config {
             base_dir: std::path::PathBuf::from("/tmp/observer1"),
-            server_url: "https://test.example.com".into(),
             stream: "test-stream".into(),
             segment_interval: 300,
             ..Default::default()
@@ -641,7 +639,6 @@ mod tests {
             0,
         );
         assert_eq!(s.capture_dir(), "/tmp/observer1/captures");
-        assert_eq!(s.server_url(), "");
         assert_eq!(s.stream(), "test-stream");
         assert_eq!(s.segment_interval(), 300);
     }

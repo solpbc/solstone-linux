@@ -4,7 +4,6 @@
 pub mod activity;
 pub mod audio;
 pub mod capture_stats;
-pub mod chat_bridge;
 pub mod chunking;
 pub mod cli;
 pub mod clipboard;
@@ -39,9 +38,13 @@ pub mod upload;
 pub mod video;
 
 #[cfg(test)]
+mod docs_policy_tests;
+#[cfg(test)]
 mod linked_authority_policy_tests;
 #[cfg(test)]
 mod observer_contract_tests;
+#[cfg(test)]
+mod policy_test_support;
 #[cfg(test)]
 mod private_link_test_peer;
 #[cfg(test)]

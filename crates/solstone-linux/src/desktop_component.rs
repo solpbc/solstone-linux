@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use crate::{config::Config, observer::StateSnapshot, sync_health::SyncHealth, tray_model};
+use crate::{
+    config::Config, observer::StateSnapshot, private_link::OpenJournalAccess,
+    sync_health::SyncHealth, tray_model,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -57,12 +60,17 @@ impl SignalState {
 pub struct DesktopComponent {
     pub config: Config,
     disabled: Arc<AtomicBool>,
+    open_journal: OpenJournalAccess,
 }
 impl DesktopComponent {
     pub fn new(config: Config) -> Self {
+        Self::with_open_journal(config, OpenJournalAccess::default())
+    }
+    pub(crate) fn with_open_journal(config: Config, open_journal: OpenJournalAccess) -> Self {
         Self {
             config,
             disabled: Arc::new(AtomicBool::new(false)),
+            open_journal,
         }
     }
     pub fn disabled(&self) -> bool {
@@ -127,21 +135,17 @@ impl DesktopComponent {
             }
         }
     }
-    pub fn journal_url(&self) -> &str {
-        "https://solstone.app"
-    }
     pub fn command_url<'a>(&'a self, command: &'a crate::tray::TrayCommand) -> Option<&'a str> {
         match command {
-            crate::tray::TrayCommand::OpenJournal => Some(self.journal_url()),
             crate::tray::TrayCommand::OpenUrl(url) => Some(url),
             _ => None,
         }
     }
     pub fn perform_desktop_command(&self, command: crate::tray::TrayCommand) -> Result<(), String> {
         match command {
-            crate::tray::TrayCommand::OpenJournal => {
-                open::that_detached(self.journal_url()).map_err(|e| e.to_string())
-            }
+            crate::tray::TrayCommand::OpenJournal => self.open_journal.open().map_err(|_| {
+                "Could not open your journal. Wait for sol to reconnect, then try again.".into()
+            }),
             crate::tray::TrayCommand::OpenUrl(url) => {
                 open::that_detached(url).map_err(|e| e.to_string())
             }
@@ -195,7 +199,6 @@ mod tests {
     #[test]
     fn component_uses_config() {
         let c = Config {
-            server_url: "x".into(),
             base_dir: "/tmp/solstone-test".into(),
             ..Default::default()
         };
@@ -225,20 +228,9 @@ mod tests {
         assert_eq!((calls, waits), (3, 2));
     }
     #[test]
-    fn public_journal_fallback() {
-        assert_eq!(
-            DesktopComponent::new(Config::default()).journal_url(),
-            "https://solstone.app"
-        )
-    }
-    #[test]
-    fn four_url_targets_remain_distinct() {
+    fn public_links_remain_distinct_from_open_journal() {
         let component = DesktopComponent::new(Config::default());
         let commands = [
-            (
-                crate::tray::TrayCommand::OpenJournal,
-                "https://solstone.app",
-            ),
             (
                 crate::tray::TrayCommand::OpenUrl("https://solstone.app/observers"),
                 "https://solstone.app/observers",
@@ -255,6 +247,21 @@ mod tests {
         for (command, expected) in &commands {
             assert_eq!(component.command_url(command), Some(*expected));
         }
+        assert_eq!(
+            component.command_url(&crate::tray::TrayCommand::OpenJournal),
+            None
+        );
+    }
+    #[test]
+    fn unavailable_open_journal_has_one_owner_visible_remediation() {
+        assert_eq!(
+            DesktopComponent::new(Config::default())
+                .perform_desktop_command(crate::tray::TrayCommand::OpenJournal),
+            Err(
+                "Could not open your journal. Wait for sol to reconnect, then try again."
+                    .to_owned()
+            )
+        );
     }
     #[test]
     fn no_transition_means_no_signal() {
@@ -273,7 +280,9 @@ mod tests {
         let mut s = SignalState::new(&snap(), &h, "");
         assert_eq!(
             s.sync_changed(&h, "3/10"),
-            Some(ComponentSignal::SyncProgressChanged("unknown:3/10".into()))
+            Some(ComponentSignal::SyncProgressChanged(
+                "connecting:3/10".into()
+            ))
         );
         assert_eq!(s.sync_changed(&h, "3/10"), None)
     }
@@ -338,6 +347,10 @@ mod tests {
             &crate::sync_health::SyncFacts {
                 in_progress: true,
                 progress: "30s until probe".into(),
+                link: Some(crate::private_link::LinkFactState {
+                    observer_registered: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             0.0,

@@ -24,7 +24,9 @@ use crate::{
     observer::{Clock, HealthBeacon},
     private_link::LinkFacts,
     segment::timestamp_parts,
-    sync_health::{ErrorType, SyncFacts, SyncHealth, derive_health, load_facts, save_facts},
+    sync_health::{
+        ErrorType, ProcessEpoch, SyncFacts, SyncHealth, derive_health, load_facts, save_facts,
+    },
     upload::{ListingEntry, UploadClient},
 };
 
@@ -107,10 +109,20 @@ struct SyncControl {
 }
 
 impl SyncService {
+    #[cfg(test)]
     pub fn start(
         config: Config,
         client: Arc<UploadClient>,
         clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Self {
+        Self::start_with_epoch(config, client, clock, ProcessEpoch::generate().ok())
+    }
+
+    pub(crate) fn start_with_epoch(
+        config: Config,
+        client: Arc<UploadClient>,
+        clock: Arc<dyn Clock + Send + Sync>,
+        process_epoch: Option<ProcessEpoch>,
     ) -> Self {
         let notify = Arc::new(Notify::new());
         let pending_trigger = Arc::new(AtomicBool::new(false));
@@ -120,6 +132,7 @@ impl SyncService {
         facts.in_progress = false;
         facts.progress.clear();
         facts.link = Some(link_facts.snapshot());
+        facts.link_epoch = process_epoch;
         if let Err(error) = save_facts(&config.state_dir(), &facts) {
             tracing::warn!(%error, "Failed to save sync health");
         }
@@ -964,6 +977,34 @@ fn save_synced_days(state_dir: &Path, days: &HashSet<String>) -> io::Result<()> 
     fs::rename(temp, path)
 }
 
+#[cfg(test)]
+pub(crate) async fn cleanup_synced_day_for_composition(
+    config: Config,
+    client: Arc<UploadClient>,
+    clock: Arc<dyn Clock + Send + Sync>,
+    day: &str,
+) -> SyncFacts {
+    save_synced_days(&config.state_dir(), &HashSet::from([day.to_owned()])).unwrap();
+    let facts = Arc::new(Mutex::new(SyncFacts::default()));
+    let mut worker = SyncWorker::new(
+        config,
+        client,
+        clock,
+        SyncControl {
+            notify: Arc::new(Notify::new()),
+            pending_trigger: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(true)),
+        },
+        Arc::clone(&facts),
+        Arc::new(AtomicU8::new(0)),
+    );
+    worker.cleanup_synced_segments().await;
+    facts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 fn sorted_dirs(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut paths: Vec<_> = fs::read_dir(root)?
         .filter_map(Result::ok)
@@ -1024,6 +1065,7 @@ mod tests {
             LinkFactState, ObserverState, publish_observer_registration, start_private_link_session,
         },
         private_link_test_peer::PrivateLinkPeer,
+        sync_health::{HealthState, load_facts_with_liveness},
         test_support::{LinkedMockServer, MockServer, MutableClock, wait_for_requests},
         upload::ListingFile,
     };
@@ -1072,6 +1114,8 @@ mod tests {
             let _guard = poison.lock().unwrap();
             panic!("poison sampler facts");
         });
+        let link_facts = LinkFacts::default();
+        link_facts.publish(crate::private_link::LinkFact::ObserverRegistered);
         let sampler = SyncSampler {
             facts,
             clock: Arc::new(FixedClock {
@@ -1080,7 +1124,7 @@ mod tests {
             }),
             stale_threshold: 600.0,
             poison_reports: Arc::new(AtomicUsize::new(0)),
-            link_facts: LinkFacts::default(),
+            link_facts,
         };
         assert_eq!(sampler.health().dbus, "syncing");
         assert_eq!(sampler.progress(), "1/2");
@@ -1936,8 +1980,6 @@ mod tests {
         ])
         .await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
@@ -1945,6 +1987,7 @@ mod tests {
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -2003,10 +2046,10 @@ mod tests {
                     last_error_code: Some(404),
                     ..SyncFacts::default()
                 },
-                "on — update needed",
+                "on — update required",
                 "NeedsAttention",
-                "update-needed",
-                "Sync: update needed — update solstone-linux; pending unconfirmed",
+                "update-required",
+                "Sync: update required — update solstone-linux; pending unconfirmed",
                 "fail",
             ),
         ];
@@ -2018,6 +2061,83 @@ mod tests {
             assert_eq!(health.cli, cli);
             assert_eq!(health.doctor_severity, doctor);
         }
+    }
+
+    #[tokio::test]
+    async fn published_link_fact_persists_and_drives_every_owner_surface() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        fs::create_dir_all(&config.config_dir).unwrap();
+        let owner_lock =
+            crate::private_link::PrivateStateLock::acquire(&config.config_dir).unwrap();
+        let server = MockServer::new(Vec::new()).await;
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
+            &config,
+            &server.url,
+            "host",
+            "linux",
+            "test",
+            Arc::clone(&clock),
+        ));
+        client.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
+        let service = SyncService::start_with_epoch(
+            config.clone(),
+            client,
+            Arc::clone(&clock),
+            Some(ProcessEpoch::for_test(7)),
+        );
+
+        let sampled = service.sampler_handle().health();
+        let liveness =
+            crate::private_link::PrivateStateLock::try_probe(&config.config_dir).unwrap();
+        let persisted = load_facts_with_liveness(&config.state_dir(), liveness);
+        let reloaded = derive_health(&persisted, 1_800_000_000.0, 600.0);
+        assert_eq!(sampled.state, HealthState::TransportUnavailable);
+        assert_eq!(reloaded, sampled);
+        let model = crate::tray_model::build(
+            &crate::observer::StateSnapshot {
+                mode: crate::observer::Mode::Screencast,
+                paused: false,
+                segment_open: false,
+                captures_today: 0,
+                total_size_mb: 0,
+                pause_until: None,
+                segment_start_mono: None,
+                process_start_mono: 0.0,
+            },
+            300,
+            100.0,
+            &sampled,
+        );
+        assert_eq!(model.header, sampled.header_recording);
+        assert_eq!(model.tooltip, format!("on\n{}", sampled.tooltip));
+        assert_eq!(model.icon, sampled.icon);
+        assert_eq!(model.sni_status, sampled.sni_status);
+        assert_eq!(
+            sampled.cli,
+            "Sync: connection unavailable — saving locally; restart sol; if this continues, pair this device again"
+        );
+        assert_eq!(sampled.doctor_severity, "fail");
+        assert_eq!(
+            sampled.doctor_detail,
+            "sync health: connection unavailable; restart sol; if this continues, pair this device again"
+        );
+        assert_eq!(sampled.dbus, "transport-unavailable");
+        assert_eq!(
+            sampled.accessible_recording,
+            "sol — on, connection unavailable, saving locally"
+        );
+
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
+        drop(owner_lock);
     }
 
     // tests/test_sync_health_surfaces.py::test_404_query_cycle_drives_failing_state_on_all_surfaces
@@ -2032,14 +2152,17 @@ mod tests {
             worker.clock.wall_seconds(),
             600.0,
         );
-        assert_eq!(health.state, crate::sync_health::HealthState::UpdateNeeded);
+        assert_eq!(
+            health.state,
+            crate::sync_health::HealthState::UpdateRequired
+        );
         assert_eq!(health.pending_display, "pending unconfirmed");
-        assert_eq!(health.header_recording, "on — update needed");
+        assert_eq!(health.header_recording, "on — update required");
         assert_eq!(health.sni_status, "NeedsAttention");
-        assert_eq!(health.dbus, "update-needed");
+        assert_eq!(health.dbus, "update-required");
         assert_eq!(
             health.cli,
-            "Sync: update needed — update solstone-linux; pending unconfirmed"
+            "Sync: update required — update solstone-linux; pending unconfirmed"
         );
         assert_eq!(health.doctor_severity, "fail");
     }
@@ -2662,14 +2785,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let server = MockServer::new(vec![]).await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -2852,8 +2974,6 @@ mod tests {
         let legacy = MockServer::new(vec![]).await;
         let peer = PrivateLinkPeer::start().await;
         let config = Config {
-            server_url: legacy.url.clone(),
-            key: "K".into(),
             stream: "host".into(),
             cache_retention_days: 7,
             base_dir: temp.path().to_path_buf(),
@@ -2867,7 +2987,7 @@ mod tests {
             &session,
             &ObserverState {
                 credential_instance_id: peer.credential().instance_id,
-                key: "K".into(),
+                key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host".into(),
                 ingest_url: "/app/observer/ingest".into(),
@@ -2921,8 +3041,6 @@ mod tests {
             gate.clone(),
         );
         let config = Config {
-            server_url: legacy.url.clone(),
-            key: "K".into(),
             stream: "host".into(),
             cache_retention_days: 7,
             base_dir: temp.path().to_path_buf(),
@@ -2936,7 +3054,7 @@ mod tests {
             &session,
             &ObserverState {
                 credential_instance_id: peer.credential().instance_id,
-                key: "K".into(),
+                key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host".into(),
                 ingest_url: "/app/observer/ingest".into(),
@@ -3303,14 +3421,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let server = MockServer::new(vec![]).await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -3396,14 +3513,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let server = MockServer::new(vec![(200, json!({"items":[],"total":0}))]).await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -3432,14 +3548,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let server = MockServer::new(vec![(200, json!({"items":[],"total":0}))]).await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -3476,8 +3591,6 @@ mod tests {
         ];
         let server = MockServer::new(responses).await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             cache_retention_days: -1,
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
@@ -3486,6 +3599,7 @@ mod tests {
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -3538,14 +3652,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (server, gate) = MockServer::gated().await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -3586,14 +3699,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (server, _gate) = MockServer::gated().await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -3680,8 +3792,6 @@ mod tests {
         ])
         .await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".to_owned(),
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
@@ -3689,6 +3799,7 @@ mod tests {
         save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",
@@ -3729,7 +3840,6 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let (server, mut worker) = test_worker(&temp, vec![], -1).await;
-        worker.config.key.clear();
         let config = worker.config.clone();
         worker.client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
@@ -3781,8 +3891,6 @@ mod tests {
         ])
         .await;
         let config = Config {
-            server_url: server.url.clone(),
-            key: "K".into(),
             base_dir: temp.path().into(),
             config_dir: temp.path().join("config"),
             ..Config::default()
@@ -3798,6 +3906,7 @@ mod tests {
         .unwrap();
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
+            &server.url,
             "host",
             "linux",
             "test",

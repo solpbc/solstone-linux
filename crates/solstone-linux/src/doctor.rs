@@ -11,8 +11,9 @@ use crate::{
     audio::pulse,
     capture_stats::{compute_quarantine_stats, format_quarantine_line},
     config::{Config, ConfigPaths, load_config},
+    private_link::{PrivateStateLock, PrivateStateLockLiveness},
     session_env::{Output, Runner},
-    sync_health::{SyncHealth, derive_health, load_facts},
+    sync_health::{SyncHealth, derive_health, load_facts_with_liveness},
     video::{
         gstreamer::ensure_initialized,
         x11::{RandrOutputProvider, X11OutputProvider},
@@ -434,7 +435,9 @@ impl DoctorChecks for RealDoctor<'_> {
     }
     fn sync_health(&mut self) -> CheckResult {
         let config = self.config().clone();
-        let facts = load_facts(&config.state_dir());
+        let liveness = PrivateStateLock::try_probe(&config.config_dir)
+            .unwrap_or(PrivateStateLockLiveness::NoLiveOwner);
+        let facts = load_facts_with_liveness(&config.state_dir(), liveness);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

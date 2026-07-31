@@ -35,6 +35,7 @@ use crate::{
     recovery::{ClaxonMediaDurationProbe, recover_incomplete_segments},
     shell::{CommandSender, ConnectionRequester, ShellInputs, stashed},
     sync::{SyncService, SyncTrigger},
+    sync_health::ProcessEpoch,
     tray::TrayCommand,
     upload::UploadClient,
     video::{
@@ -141,7 +142,10 @@ pub(crate) fn tick_once(
 
 async fn shutdown_in_order<O, DF, SF, EF, LF>(
     mut observer: O,
-    observer_shutdown: impl FnOnce(&mut O) -> Result<(), ObserverError>,
+    shutdown_callbacks: (
+        impl FnOnce(&mut O) -> Result<(), ObserverError>,
+        impl FnOnce(),
+    ),
     desktop_shutdown: DF,
     sync_shutdown: SF,
     sender_stop: impl FnOnce() -> EF,
@@ -159,6 +163,9 @@ where
     EF: std::future::Future<Output = Result<(), ObserverError>>,
     LF: std::future::Future<Output = Result<(), ObserverError>>,
 {
+    let (observer_shutdown, disable_open_journal) = shutdown_callbacks;
+    trace("open_journal_disabled");
+    disable_open_journal();
     trace("desktop_shutdown");
     desktop_shutdown.await;
     trace("observer_shutdown");
@@ -287,20 +294,43 @@ fn run_capture(
         env!("CARGO_PKG_VERSION"),
         Arc::new(clock.clone()),
     ));
+    let open_journal = crate::private_link::OpenJournalAccess::default();
+    let process_epoch = match ProcessEpoch::generate() {
+        Ok(epoch) => Some(epoch),
+        Err(error) => {
+            tracing::error!(%error, "Failed to create process epoch; linked work disabled");
+            upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
+            None
+        }
+    };
     let linked_upload = Arc::clone(&upload);
     let linked_root = config.config_dir.clone();
     let linked_stream = config.stream.clone();
     let linked_state_lock = state_lock
         .try_clone()
         .map_err(|error| ObserverError::Io(format!("linked state lock clone failed: {error}")))?;
-    let linked_start = runtime.spawn(start_linked_owner(
-        linked_upload,
-        linked_root,
-        linked_stream,
-        linked_state_lock,
-        transport_enabled,
-    ));
-    let sync = SyncService::start(config.clone(), Arc::clone(&upload), Arc::new(clock.clone()));
+    let linked_start = if process_epoch.is_some() {
+        runtime.spawn(start_linked_owner(
+            linked_upload,
+            linked_root,
+            linked_stream,
+            linked_state_lock,
+            transport_enabled,
+            open_journal.clone(),
+        ))
+    } else {
+        runtime.spawn(async {
+            Err::<crate::private_link::PrivateLinkOwner, _>(
+                crate::private_link::PrivateStateError::BridgeUnavailable,
+            )
+        })
+    };
+    let sync = SyncService::start_with_epoch(
+        config.clone(),
+        Arc::clone(&upload),
+        Arc::new(clock.clone()),
+        process_epoch,
+    );
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
     sync.trigger();
@@ -356,6 +386,7 @@ fn run_capture(
             signal_receiver,
             sampler: sync_sampler,
             commands,
+            open_journal: open_journal.clone(),
         },
     );
     let mut next_tick = Instant::now() + TICK_INTERVAL;
@@ -373,15 +404,17 @@ fn run_capture(
                 run_result = dispatch_wake(
                     &mut observer,
                     LoopWake::Command(command),
-                    apply_command,
+                    |observer, command| apply_command(observer, command, &open_journal),
                     |observer| tick_once(notifier.as_ref(), || observer.tick()),
                 );
             }
             Err(RecvTimeoutError::Timeout) => {
-                run_result =
-                    dispatch_wake(&mut observer, LoopWake::Tick, apply_command, |observer| {
-                        tick_once(notifier.as_ref(), || observer.tick())
-                    });
+                run_result = dispatch_wake(
+                    &mut observer,
+                    LoopWake::Tick,
+                    |observer, command| apply_command(observer, command, &open_journal),
+                    |observer| tick_once(notifier.as_ref(), || observer.tick()),
+                );
                 next_tick = advance_tick_deadline(next_tick, Instant::now());
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -396,7 +429,7 @@ fn run_capture(
     let (shutdown, sync_shutdown, sender_shutdown, linked_shutdown) =
         runtime.block_on(shutdown_in_order(
             observer,
-            Observer::shutdown,
+            (Observer::shutdown, || open_journal.close_current()),
             desktop_shell.shutdown(SHUTDOWN_TIMEOUT),
             sync.shutdown(SHUTDOWN_TIMEOUT),
             || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
@@ -429,7 +462,9 @@ async fn start_linked_owner(
     stream: String,
     state_lock: PrivateStateLock,
     transport_enabled: bool,
+    open_journal: crate::private_link::OpenJournalAccess,
 ) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
+    upload.begin_owner_generation();
     if !transport_enabled {
         upload.publish_link_fact(crate::private_link::LinkFact::ConfigSanitationFailed);
         return Err(crate::private_link::PrivateStateError::BridgeUnavailable);
@@ -446,7 +481,7 @@ async fn start_linked_owner(
         }
     };
     let (hostname, platform, version) = upload.registration_metadata();
-    let owner = start_private_link_owner_with_lock(
+    let mut owner = start_private_link_owner_with_lock(
         state_lock,
         credential,
         &stream,
@@ -459,6 +494,7 @@ async fn start_linked_owner(
     .inspect_err(|_| {
         upload.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
     })?;
+    owner.install_open_journal_access(open_journal);
     upload.install_capability(owner.capability());
     Ok(owner)
 }
@@ -466,6 +502,7 @@ async fn start_linked_owner(
 fn apply_command<V, A, P, M, W, E, C, Q, N>(
     observer: &mut Observer<V, A, P, M, W, E, C, Q, N>,
     command: TrayCommand,
+    open_journal: &crate::private_link::OpenJournalAccess,
 ) where
     V: VideoCapture,
     A: crate::observer::AudioCapture,
@@ -481,11 +518,27 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
         ObserverAction::Pause(seconds) => observer.pause(seconds),
         ObserverAction::Resume => observer.resume(),
         ObserverAction::Desktop(command) => {
-            if let Err(error) =
-                crate::desktop_component::DesktopComponent::new(observer.config.clone())
-                    .perform_desktop_command(command)
+            if let Err(error) = crate::desktop_component::DesktopComponent::with_open_journal(
+                observer.config.clone(),
+                open_journal.clone(),
+            )
+            .perform_desktop_command(command)
             {
                 tracing::warn!(%error, "Failed to perform desktop command");
+                if matches!(command, TrayCommand::OpenJournal) {
+                    let message =
+                        "Could not open your journal. Wait for sol to reconnect, then try again.";
+                    if let Err(notification_error) = notify_rust::Notification::new()
+                        .summary("sol")
+                        .body(message)
+                        .show()
+                    {
+                        tracing::warn!(
+                            %notification_error,
+                            "Failed to show Open Journal notification"
+                        );
+                    }
+                }
             }
         }
     }
@@ -957,18 +1010,24 @@ mod tests {
     async fn shutdown_order_includes_linked_owner_last() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let observer_events = Arc::clone(&events);
+        let disable_events = Arc::clone(&events);
         let sender_events = Arc::clone(&events);
         let trace_events = Arc::clone(&events);
         let mut trace = move |event| trace_events.lock().unwrap().push(event);
         let results = shutdown_in_order(
             (),
-            move |_| {
-                observer_events
-                    .lock()
-                    .unwrap()
-                    .push("final_segment_trigger");
-                Ok(())
-            },
+            (
+                move |_| {
+                    observer_events
+                        .lock()
+                        .unwrap()
+                        .push("final_segment_trigger");
+                    Ok(())
+                },
+                move || {
+                    disable_events.lock().unwrap().push("capability_closed");
+                },
+            ),
             async {
                 events.lock().unwrap().push("desktop_stopped");
             },
@@ -985,6 +1044,8 @@ mod tests {
         assert_eq!(
             &*events.lock().unwrap(),
             &[
+                "open_journal_disabled",
+                "capability_closed",
                 "desktop_shutdown",
                 "desktop_stopped",
                 "observer_shutdown",
@@ -1003,7 +1064,7 @@ mod tests {
     async fn linked_shutdown_failure_preserves_prior_shutdown_results() {
         let results = shutdown_in_order(
             (),
-            |_| Err(ObserverError::Io("observer failed".into())),
+            (|_| Err(ObserverError::Io("observer failed".into())), || {}),
             async {},
             async {
                 Err(tokio::task::spawn(async { panic!("sync failed") })
@@ -1029,7 +1090,7 @@ mod tests {
         let linked_events = events.clone();
         let results = shutdown_in_order(
             (),
-            |_| Ok(()),
+            (|_| Ok(()), || {}),
             async {},
             async move {
                 tokio::task::yield_now().await;
@@ -1070,7 +1131,6 @@ mod tests {
         let config = Config {
             config_dir: temp.path().to_path_buf(),
             stream: "stream".to_owned(),
-            server_url: legacy_origin.url.clone(),
             ..Config::default()
         };
         let upload = Arc::new(UploadClient::new(
@@ -1088,6 +1148,7 @@ mod tests {
             "stream".to_owned(),
             lock,
             transport_enabled,
+            crate::private_link::OpenJournalAccess::default(),
         ));
         assert_real_observer_ticks_advance();
         let result = start.await.unwrap();
@@ -1297,9 +1358,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         enqueue_registration(&peer);
-        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+        let mut owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
+        let open_journal = crate::private_link::OpenJournalAccess::default();
+        owner.install_open_journal_access(open_journal.clone());
+        assert!(open_journal.available());
         assert!(matches!(
             PrivateStateLock::acquire(temp.path()),
             Err(PrivateStateError::LockContended)
@@ -1310,6 +1374,8 @@ mod tests {
             tokio::spawn(owner.shutdown_with_join_probe(joined.clone(), release.clone()));
         joined.notified().await;
         assert!(!shutdown.is_finished());
+        assert!(!open_journal.available());
+        assert!(open_journal.open().is_err());
         assert!(matches!(
             PrivateStateLock::acquire(temp.path()),
             Err(PrivateStateError::LockContended)
@@ -1561,5 +1627,408 @@ mod tests {
             1
         );
         assert_eq!(&*calls.borrow(), &["lock"]);
+    }
+
+    mod upgrade_composition {
+        use super::*;
+        use crate::{
+            cli::dispatch_setup_with_pairer_for_test,
+            config::{ConfigPaths, sanitize_link_authority_with_fault},
+            private_file::{DurableWriteFault, DurableWriteStage},
+            private_link::{Pairer, PrivateStateLock, load_credential},
+            sync::cleanup_synced_day_for_composition,
+        };
+        use sha2::{Digest, Sha256};
+        use std::{
+            fs,
+            future::Future,
+            io::Cursor,
+            os::unix::fs::PermissionsExt,
+            path::{Path, PathBuf},
+            pin::Pin,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+
+        struct CompositionPairer {
+            credential: spl_transport::credential::Credential,
+            calls: Arc<AtomicUsize>,
+            fail: bool,
+        }
+
+        impl Pairer for CompositionPairer {
+            fn pair<'a>(
+                &'a self,
+                _link: &'a str,
+                _device_label: &'a str,
+                _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+            ) -> Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                spl_transport::credential::Credential,
+                                PrivateStateError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    if self.fail {
+                        Err(PrivateStateError::PairingFailed)
+                    } else {
+                        Ok(self.credential.clone())
+                    }
+                })
+            }
+        }
+
+        struct FailStage(DurableWriteStage);
+
+        impl DurableWriteFault for FailStage {
+            fn before(&self, stage: DurableWriteStage) -> io::Result<()> {
+                if stage == self.0 {
+                    Err(io::Error::other("injected upgrade sanitation failure"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        fn old_config() -> serde_json::Value {
+            serde_json::json!({
+                "server_url": "https://legacy.invalid/private",
+                "key": "legacy-key-sentinel",
+                "chat_bridge_enabled": true,
+                "stream": "desktop",
+                "segment_interval": 173,
+                "sync_max_retries": 0,
+                "cache_retention_days": 0,
+                "capture_framerate": 7,
+                "draw_cursor": false,
+                "start_paused": false
+            })
+        }
+
+        fn write_old_config(paths: &ConfigPaths) {
+            let root = paths.config_dir.as_ref().unwrap();
+            fs::create_dir_all(root).unwrap();
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                root.join("config.json"),
+                serde_json::to_vec_pretty(&old_config()).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn create_pending(config: &Config, day: &str) -> Vec<(PathBuf, Vec<u8>)> {
+            ["120000_173", "120173_173", "120346_173"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    let path = config.captures_dir().join(day).join("archon").join(name);
+                    let body = format!("byte-distinct-upgrade-segment-{index}").into_bytes();
+                    fs::create_dir_all(&path).unwrap();
+                    fs::write(path.join("screen.webm"), &body).unwrap();
+                    (path, body)
+                })
+                .collect()
+        }
+
+        fn assert_pending_unchanged(pending: &[(PathBuf, Vec<u8>)], present: &[bool]) {
+            for ((path, bytes), expected) in pending.iter().zip(present) {
+                assert_eq!(path.exists(), *expected, "{}", path.display());
+                assert!(!path.with_extension("failed").exists());
+                if *expected {
+                    assert_eq!(fs::read(path.join("screen.webm")).unwrap(), *bytes);
+                }
+            }
+        }
+
+        fn custody_listing(path: &Path) -> serde_json::Value {
+            let bytes = fs::read(path.join("screen.webm")).unwrap();
+            let sha = format!("{:x}", Sha256::digest(bytes));
+            let key = path.file_name().unwrap().to_string_lossy();
+            serde_json::json!({
+                "items": [{
+                    "key": key,
+                    "files": [{
+                        "name": "screen.webm",
+                        "status": "present",
+                        "sha256": sha
+                    }]
+                }],
+                "total": 1
+            })
+        }
+
+        async fn start_owner(
+            config: &Config,
+            peer: &PrivateLinkPeer,
+            lock: PrivateStateLock,
+        ) -> (PrivateLinkOwner, Arc<UploadClient>) {
+            let upload = Arc::new(UploadClient::new(
+                config,
+                None::<PrivateLinkCapability>,
+                "upgrade-host",
+                "linux",
+                "test",
+                Arc::new(SystemClock::new()),
+            ));
+            let owner = start_linked_owner(
+                Arc::clone(&upload),
+                config.config_dir.clone(),
+                config.stream.clone(),
+                lock,
+                true,
+                crate::private_link::OpenJournalAccess::default(),
+            )
+            .await
+            .unwrap();
+            assert!(upload.is_registered());
+            assert_real_observer_ticks_advance();
+            assert!(peer.accepted_carriers() >= 1);
+            (owner, upload)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn old_config_unpaired_capture_pair_once_custody_and_restart() {
+            for stage in [
+                DurableWriteStage::Create,
+                DurableWriteStage::Write,
+                DurableWriteStage::Fsync,
+                DurableWriteStage::Rename,
+                DurableWriteStage::DirSync,
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let paths = ConfigPaths {
+                    base_dir: Some(temp.path().join("data")),
+                    config_dir: Some(temp.path().join("config")),
+                };
+                write_old_config(&paths);
+                let before =
+                    fs::read(paths.config_dir.as_ref().unwrap().join("config.json")).unwrap();
+                assert!(
+                    sanitize_link_authority_with_fault(&paths, &FailStage(stage)).is_err(),
+                    "{stage:?}"
+                );
+                if stage != DurableWriteStage::DirSync {
+                    assert_eq!(
+                        fs::read(paths.config_dir.as_ref().unwrap().join("config.json")).unwrap(),
+                        before
+                    );
+                }
+            }
+
+            let temp = tempfile::tempdir().unwrap();
+            let paths = ConfigPaths {
+                base_dir: Some(temp.path().join("data")),
+                config_dir: Some(temp.path().join("config")),
+            };
+            write_old_config(&paths);
+            let peer = PrivateLinkPeer::start().await;
+            let (lock, config, transport_enabled) =
+                crate::cli::prepare_run_config(paths.clone()).unwrap();
+            assert!(transport_enabled);
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&fs::read(config.config_path()).unwrap()).unwrap();
+            for legacy in ["server_url", "key", "chat_bridge_enabled"] {
+                assert!(persisted.get(legacy).is_none());
+            }
+            assert_eq!(config.segment_interval, 173);
+            assert_eq!(config.capture_framerate, 7);
+            assert!(!config.draw_cursor);
+            let day = "20260101";
+            let pending = create_pending(&config, day);
+            assert_pending_unchanged(&pending, &[true, true, true]);
+
+            let upload = Arc::new(UploadClient::new(
+                &config,
+                None::<PrivateLinkCapability>,
+                "upgrade-host",
+                "linux",
+                "test",
+                Arc::new(SystemClock::new()),
+            ));
+            let first_start = start_linked_owner(
+                Arc::clone(&upload),
+                config.config_dir.clone(),
+                config.stream.clone(),
+                lock,
+                true,
+                crate::private_link::OpenJournalAccess::default(),
+            )
+            .await;
+            assert!(first_start.is_err());
+            assert!(upload.link_fact_state().unwrap().pairing_required);
+            assert_real_observer_ticks_advance();
+            assert!(peer.requests().is_empty());
+            assert_eq!(peer.accepted_carriers(), 0);
+            assert_pending_unchanged(&pending, &[true, true, true]);
+            drop(upload);
+            let released = PrivateStateLock::acquire(&config.config_dir).unwrap();
+            drop(released);
+
+            let failed_calls = Arc::new(AtomicUsize::new(0));
+            let failed_pairer = CompositionPairer {
+                credential: peer.credential(),
+                calls: Arc::clone(&failed_calls),
+                fail: true,
+            };
+            let failure_root = temp.path().join("failed-pairing");
+            let mut failure_output = Vec::new();
+            let mut failure_errors = Vec::new();
+            assert_eq!(
+                dispatch_setup_with_pairer_for_test(
+                    &failed_pairer,
+                    &failure_root,
+                    "desktop",
+                    Cursor::new(b"pair link with whitespace\n"),
+                    &mut failure_output,
+                    &mut failure_errors,
+                )
+                .await,
+                1
+            );
+            assert_eq!(failed_calls.load(Ordering::SeqCst), 0);
+            failure_output.clear();
+            failure_errors.clear();
+            assert_eq!(
+                dispatch_setup_with_pairer_for_test(
+                    &failed_pairer,
+                    &failure_root,
+                    "desktop",
+                    Cursor::new(b"pair-link\n"),
+                    &mut failure_output,
+                    &mut failure_errors,
+                )
+                .await,
+                1
+            );
+            assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+            assert!(load_credential(&failure_root).unwrap().is_none());
+
+            let pair_calls = Arc::new(AtomicUsize::new(0));
+            let pairer = CompositionPairer {
+                credential: peer.credential(),
+                calls: Arc::clone(&pair_calls),
+                fail: false,
+            };
+            let mut output = Vec::new();
+            let mut errors = Vec::new();
+            assert_eq!(
+                dispatch_setup_with_pairer_for_test(
+                    &pairer,
+                    &config.config_dir,
+                    "desktop",
+                    Cursor::new(b"pair-link\n"),
+                    &mut output,
+                    &mut errors,
+                )
+                .await,
+                0
+            );
+            assert_eq!(pair_calls.load(Ordering::SeqCst), 1);
+            assert!(errors.is_empty());
+            assert!(load_credential(&config.config_dir).unwrap().is_some());
+
+            peer.enqueue_response(503, Vec::new());
+            let registration_failure_lock = PrivateStateLock::acquire(&config.config_dir).unwrap();
+            let failed_upload = Arc::new(UploadClient::new(
+                &config,
+                None::<PrivateLinkCapability>,
+                "upgrade-host",
+                "linux",
+                "test",
+                Arc::new(SystemClock::new()),
+            ));
+            let failed_owner = start_linked_owner(
+                Arc::clone(&failed_upload),
+                config.config_dir.clone(),
+                config.stream.clone(),
+                registration_failure_lock,
+                true,
+                crate::private_link::OpenJournalAccess::default(),
+            )
+            .await
+            .unwrap();
+            assert!(!failed_upload.is_registered());
+            assert_pending_unchanged(&pending, &[true, true, true]);
+            failed_owner.shutdown().await.unwrap();
+
+            peer.enqueue_response(
+                200,
+                serde_json::json!({
+                    "key":"UPGRADE-KEY", "name":"desktop", "prefix":"upgrade",
+                    "ingest_url":"/app/observer/ingest", "protocol_version":2
+                })
+                .to_string(),
+            );
+            let restart_lock = PrivateStateLock::acquire(&config.config_dir).unwrap();
+            let (owner, upload) = start_owner(&config, &peer, restart_lock).await;
+            assert_eq!(pair_calls.load(Ordering::SeqCst), 1);
+
+            peer.enqueue_response(503, Vec::new());
+            let transport_failure = upload
+                .upload_segment(
+                    day,
+                    pending[0].0.file_name().unwrap().to_str().unwrap(),
+                    &[pending[0].0.join("screen.webm")],
+                )
+                .await;
+            assert_eq!(
+                transport_failure.error_type,
+                Some(crate::sync_health::ErrorType::Transient)
+            );
+            assert_pending_unchanged(&pending, &[true, true, true]);
+
+            for response in [
+                (503, serde_json::json!({})),
+                (200, serde_json::json!({"items":[],"total":0})),
+                (200, serde_json::json!({"items":[],"total":3})),
+            ] {
+                peer.enqueue_response(response.0, response.1.to_string());
+                cleanup_synced_day_for_composition(
+                    config.clone(),
+                    Arc::clone(&upload),
+                    Arc::new(SystemClock::new()),
+                    day,
+                )
+                .await;
+                assert_pending_unchanged(&pending, &[true, true, true]);
+                assert_real_observer_ticks_advance();
+            }
+
+            for index in 0..pending.len() {
+                peer.enqueue_response(200, custody_listing(&pending[index].0).to_string());
+                cleanup_synced_day_for_composition(
+                    config.clone(),
+                    Arc::clone(&upload),
+                    Arc::new(SystemClock::new()),
+                    day,
+                )
+                .await;
+                let present = [false, index == 0, index <= 1];
+                assert_pending_unchanged(&pending, &present);
+            }
+            owner.shutdown().await.unwrap();
+            drop(upload);
+            let released = PrivateStateLock::acquire(&config.config_dir).unwrap();
+            drop(released);
+
+            let requests_before_final_restart = peer.requests().len();
+            let (final_lock, final_config, final_transport) =
+                crate::cli::prepare_run_config(paths).unwrap();
+            assert!(final_transport);
+            let (final_owner, final_upload) = start_owner(&final_config, &peer, final_lock).await;
+            assert_eq!(pair_calls.load(Ordering::SeqCst), 1);
+            assert!(final_upload.is_registered());
+            assert_eq!(peer.requests().len(), requests_before_final_restart);
+            assert_real_observer_ticks_advance();
+            final_owner.shutdown().await.unwrap();
+            drop(final_upload);
+            assert!(PrivateStateLock::acquire(&final_config.config_dir).is_ok());
+            peer.shutdown().await;
+        }
     }
 }

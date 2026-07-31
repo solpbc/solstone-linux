@@ -26,7 +26,6 @@
         <property name="PauseRemaining" type="i" access="read" />
         <property name="SegmentInterval" type="i" access="read" />
         <property name="SegmentTimer" type="i" access="read" />
-        <property name="ServerUrl" type="s" access="read" />
         <property name="Status" type="s" access="read" />
         <property name="Stream" type="s" access="read" />
         <property name="SyncProgress" type="s" access="read" />

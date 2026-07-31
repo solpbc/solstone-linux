@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use crate::policy_test_support::source_inventory::normalize_absolute;
 use crate::release_rail_tests::{command_path, workspace_root};
 use proc_macro2::{TokenStream, TokenTree};
 use std::ffi::OsString;
@@ -212,27 +213,6 @@ impl fmt::Display for ScanError {
 }
 
 impl std::error::Error for ScanError {}
-
-fn normalize_absolute(path: &Path) -> Option<PathBuf> {
-    if !path.is_absolute() {
-        return None;
-    }
-    let mut normalized = PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::CurDir => {}
-            Component::Normal(value) => normalized.push(value),
-            Component::ParentDir => {
-                if normalized == Path::new("/") {
-                    return None;
-                }
-                normalized.pop();
-            }
-            Component::Prefix(_) => return None,
-        }
-    }
-    Some(normalized)
-}
 
 fn normalize_scan_root(root: &Path) -> Result<PathBuf, ScanError> {
     normalize_absolute(root).ok_or_else(|| {

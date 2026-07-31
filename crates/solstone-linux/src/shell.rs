@@ -138,6 +138,7 @@ pub(crate) struct ShellInputs {
     pub signal_receiver: watch::Receiver<StateSnapshot>,
     pub sampler: SyncSampler,
     pub commands: CommandSender,
+    pub open_journal: crate::private_link::OpenJournalAccess,
 }
 
 pub(crate) struct DesktopShell {
@@ -186,7 +187,8 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
 }
 
 pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> DesktopShell {
-    let component = DesktopComponent::new(inputs.config.clone());
+    let component =
+        DesktopComponent::with_open_journal(inputs.config.clone(), inputs.open_journal.clone());
     let initial_snapshot = inputs
         .snapshot
         .lock()
@@ -262,11 +264,12 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         shutdown_rx.clone(),
     ));
 
-    let initial_model = tray_model::build(
+    let initial_model = tray_model::build_with_open_journal(
         &initial_snapshot,
         inputs.config.segment_interval,
         inputs.clock.monotonic_seconds(),
         &initial_health,
+        inputs.open_journal.available(),
     );
     let mut tray_handle = None;
     let registered = component.setup(
@@ -299,6 +302,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
             inputs.config.segment_interval,
             inputs.clock,
             tray_health,
+            inputs.open_journal,
         ));
         let apply_task = tokio::spawn(run_tray_applier(handle, model_receiver, shutdown_rx));
         (Some(render_task), Some(apply_task))
@@ -323,6 +327,7 @@ async fn run_tray_renderer(
     segment_interval: i64,
     clock: SystemClock,
     health: TrayHealth,
+    open_journal: crate::private_link::OpenJournalAccess,
 ) {
     component
         .watch_until_lost(receiver, move |snapshot| {
@@ -331,11 +336,12 @@ async fn run_tray_renderer(
                 .lock()
                 .map(|value| value.clone())
                 .unwrap_or_else(|error| error.into_inner().clone());
-            models.send_replace(tray_model::build(
+            models.send_replace(tray_model::build_with_open_journal(
                 snapshot,
                 segment_interval,
                 clock.monotonic_seconds(),
                 &health,
+                open_journal.available(),
             ));
             Ok(())
         })
@@ -530,12 +536,22 @@ mod tests {
     }
 
     fn sampler(facts: Arc<Mutex<SyncFacts>>) -> SyncSampler {
+        let link_facts = crate::private_link::LinkFacts::default();
+        if facts
+            .lock()
+            .unwrap()
+            .link
+            .as_ref()
+            .is_some_and(|state| state.observer_registered)
+        {
+            link_facts.publish(crate::private_link::LinkFact::ObserverRegistered);
+        }
         SyncSampler {
             facts,
             clock: Arc::new(TestClock(Arc::new(AtomicU64::new(0)))),
             stale_threshold: 600.0,
             poison_reports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            link_facts: crate::private_link::LinkFacts::default(),
+            link_facts,
         }
     }
 
@@ -610,6 +626,10 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         facts.lock().unwrap().in_progress = true;
         facts.lock().unwrap().progress = "2/4".into();
+        facts.lock().unwrap().link = Some(crate::private_link::LinkFactState {
+            observer_registered: true,
+            ..Default::default()
+        });
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(run_shell_state(
             receiver,

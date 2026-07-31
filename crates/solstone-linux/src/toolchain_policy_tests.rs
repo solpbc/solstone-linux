@@ -749,6 +749,32 @@ fn dependency_policy_pins_the_single_spl_git_source() {
 }
 
 #[test]
+fn app_reqwest_edge_has_no_direct_tls_feature() {
+    let manifest = read_toml(&workspace_root().join("crates/solstone-linux/Cargo.toml"));
+    let reqwest = &manifest["dependencies"]["reqwest"];
+    assert_eq!(reqwest["default-features"].as_bool(), Some(false));
+    assert_eq!(
+        reqwest["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|feature| feature.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["cookies", "json", "multipart", "stream"]
+    );
+
+    // This is deliberately an assertion about the application's direct reqwest
+    // edge. The pinned S/PL crates may retain TLS and crypto in their own
+    // dependency closure; this policy does not assert whole-lockfile absence.
+    for name in ["spl-core", "spl-transport"] {
+        assert_eq!(
+            manifest["dependencies"][name]["rev"].as_str(),
+            Some("742bc9dc789c5a75658844849a04d75033aeb6e3")
+        );
+    }
+}
+
+#[test]
 fn observer_contract_gate_is_locked_offline_and_named() {
     let makefile = fs::read_to_string(workspace_root().join("Makefile")).unwrap();
     let target = makefile

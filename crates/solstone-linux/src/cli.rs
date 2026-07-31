@@ -6,10 +6,12 @@ use crate::{
         compute_quarantine_stats, compute_status_capture_stats, format_quarantine_line,
     },
     config::{Config, ConfigPaths, load_config, sanitize_link_authority, save_config},
-    private_link::{PrivateStateError, PrivateStateLock, setup_with_stream},
+    private_link::{
+        PrivateStateError, PrivateStateLock, PrivateStateLockLiveness, setup_with_stream,
+    },
     session_env::{self, Output, Runner},
     streams::stream_name,
-    sync_health::{derive_health, load_facts},
+    sync_health::{derive_health, load_facts_with_liveness},
 };
 use clap::{Parser, Subcommand};
 use std::{
@@ -42,7 +44,7 @@ enum Commands {
         #[arg(long, help = "Segment duration in seconds (default: 300)")]
         interval: Option<i64>,
     },
-    #[command(about = "Interactive configuration")]
+    #[command(about = "Pair sol with your journal from standard input")]
     Setup {
         #[arg(long, help = "Stream name (defaults to hostname-derived)")]
         stream_name: Option<String>,
@@ -263,12 +265,24 @@ fn cmd_setup(
             return 1;
         }
     };
-    match runtime.block_on(setup_with_stream(
-        &config_root,
-        &host,
-        stream.as_deref(),
-        input,
-    )) {
+    render_setup_result(
+        runtime.block_on(setup_with_stream(
+            &config_root,
+            &host,
+            stream.as_deref(),
+            input,
+        )),
+        output,
+        errors,
+    )
+}
+
+fn render_setup_result(
+    result: Result<(), PrivateStateError>,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> i32 {
+    match result {
         Ok(()) => {
             let _ = write_line(output, "sol can now connect to your journal.");
             0
@@ -297,6 +311,34 @@ fn cmd_setup(
             1
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch_setup_with_pairer_for_test<R: Read>(
+    pairer: &dyn crate::private_link::Pairer,
+    config_root: &std::path::Path,
+    stream: &str,
+    input: R,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> i32 {
+    if write_line(
+        output,
+        "Paste the pair link from your journal, then press Enter:",
+    )
+    .is_err()
+    {
+        return 1;
+    }
+    let result = crate::private_link::setup_with_pairer_for_test(
+        pairer,
+        config_root,
+        "linux",
+        Some(stream),
+        input,
+    )
+    .await;
+    render_setup_result(result, output, errors)
 }
 
 trait PromptIo {
@@ -386,8 +428,6 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
         config.start_paused = prompt_bool(prompt, "Start paused", config.start_paused)?;
         config.segment_interval =
             prompt_positive_int(prompt, "Segment interval seconds", config.segment_interval)?;
-        config.chat_bridge_enabled =
-            prompt_bool(prompt, "Chat bridge enabled", config.chat_bridge_enabled)?;
         config.cache_retention_days = prompt_retention(prompt, config.cache_retention_days)?;
         save_config(&config)?;
         prompt.write_line(&format!(
@@ -454,7 +494,9 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
             0 => write_line(output, "Retain: delete synced segments after the day ends")?,
             value => write_line(output, format!("Retain: {value} day(s)"))?,
         }
-        let facts = load_facts(&config.state_dir());
+        let liveness = PrivateStateLock::try_probe(&config.config_dir)
+            .unwrap_or(PrivateStateLockLiveness::NoLiveOwner);
+        let facts = load_facts_with_liveness(&config.state_dir(), liveness);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -916,8 +958,6 @@ mod tests {
     }
     fn settings_config(t: &tempfile::TempDir) {
         let mut config = load_config(paths(t)).config;
-        config.server_url = "https://id".into();
-        config.key = "KKKK".into();
         config.stream = "strm".into();
         config.capture_framerate = 2;
         save_config(&config).unwrap();
@@ -933,26 +973,18 @@ mod tests {
     #[test]
     fn settings_enter_keeps_all() {
         let t = tempfile::tempdir().unwrap();
-        let (config, _) = run_settings(&t, &["", "", "", "", "", ""]);
+        let (config, _) = run_settings(&t, &["", "", "", "", ""]);
         assert_eq!(
             (
                 config.capture_framerate,
                 config.draw_cursor,
                 config.start_paused,
                 config.segment_interval,
-                config.chat_bridge_enabled,
                 config.cache_retention_days
             ),
-            (2, true, false, 300, true, 7)
+            (2, true, false, 300, 7)
         );
-        assert_eq!(
-            (
-                config.server_url.as_str(),
-                config.key.as_str(),
-                config.stream.as_str()
-            ),
-            ("", "", "strm")
-        );
+        assert_eq!(config.stream, "strm");
     }
 
     // tests/test_cli.py::test_cmd_settings_changes_framerate
@@ -960,9 +992,7 @@ mod tests {
     fn settings_changes_framerate() {
         let t = tempfile::tempdir().unwrap();
         assert_eq!(
-            run_settings(&t, &["5", "", "", "", "", ""])
-                .0
-                .capture_framerate,
+            run_settings(&t, &["5", "", "", "", ""]).0.capture_framerate,
             5
         );
     }
@@ -971,7 +1001,7 @@ mod tests {
     #[test]
     fn settings_framerate_clamped() {
         let t = tempfile::tempdir().unwrap();
-        let (config, output) = run_settings(&t, &["99", "", "", "", "", ""]);
+        let (config, output) = run_settings(&t, &["99", "", "", "", ""]);
         assert_eq!(config.capture_framerate, 10);
         assert!(output.contains("(clamped to 10)"));
     }
@@ -980,7 +1010,7 @@ mod tests {
     #[test]
     fn settings_framerate_reprompts() {
         let t = tempfile::tempdir().unwrap();
-        let (config, output) = run_settings(&t, &["abc", "3", "", "", "", "", ""]);
+        let (config, output) = run_settings(&t, &["abc", "3", "", "", "", ""]);
         assert_eq!(config.capture_framerate, 3);
         assert!(output.contains("Enter an integer."));
     }
@@ -989,7 +1019,7 @@ mod tests {
     #[test]
     fn settings_toggles_bool() {
         let t = tempfile::tempdir().unwrap();
-        assert!(!run_settings(&t, &["", "n", "", "", "", ""]).0.draw_cursor);
+        assert!(!run_settings(&t, &["", "n", "", "", ""]).0.draw_cursor);
     }
 
     // tests/test_cli.py::test_cmd_settings_retention_semantics
@@ -997,7 +1027,7 @@ mod tests {
     fn settings_retention_accepts_negative() {
         let t = tempfile::tempdir().unwrap();
         assert_eq!(
-            run_settings(&t, &["", "", "", "", "", "-1"])
+            run_settings(&t, &["", "", "", "", "-1"])
                 .0
                 .cache_retention_days,
             -1
@@ -1038,8 +1068,6 @@ mod tests {
 
     fn status_config(t: &tempfile::TempDir) -> Config {
         let mut config = load_config(paths(t)).config;
-        config.server_url = "https://test.example.com".into();
-        config.key = "K123456789".into();
         config.stream = "test-stream".into();
         save_config(&config).unwrap();
         config
@@ -1103,6 +1131,33 @@ mod tests {
                 .unwrap()
                 .contains("Journal link: managed privately")
         );
+    }
+
+    #[test]
+    fn status_never_surfaces_discarded_legacy_values() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir_all(t.path().join("config")).unwrap();
+        fs::write(
+            t.path().join("config/config.json"),
+            r#"{
+                "server_url":{"secret":"STATUS-URL-SENTINEL"},
+                "key":["STATUS-KEY-SENTINEL"],
+                "chat_bridge_enabled":{"secret":"STATUS-CHAT-SENTINEL"},
+                "stream":"desktop"
+            }"#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("Journal link: managed privately"));
+        for sentinel in [
+            "STATUS-URL-SENTINEL",
+            "STATUS-KEY-SENTINEL",
+            "STATUS-CHAT-SENTINEL",
+        ] {
+            assert!(!out.contains(sentinel));
+        }
     }
 
     // AC: key truncation counts characters rather than UTF-8 bytes.

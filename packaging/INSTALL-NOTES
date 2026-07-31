@@ -1,7 +1,7 @@
 solstone-linux Rust release install notes
 
-This package contains the standalone Linux observer binary and its canonical
-icons. It intentionally does not install a systemd unit: service ownership
+This package contains sol for Linux and its canonical icons. It intentionally
+does not install a systemd unit: service ownership
 belongs to the optional `solstone-linux install-service` command.
 
 Runtime requirements:
@@ -28,5 +28,22 @@ Typical package families:
 - Arch: libpulse, gstreamer, gst-plugins-base, gst-plugins-good,
   gst-plugin-pipewire, pipewire-pulse, xdg-desktop-portal, xdg-utils
 
-Run `solstone-linux install-service` to write and enable the systemd user unit
-and desktop autostart entry after installing the observer binary.
+Create a pair link for this device in your journal, save it as
+`pair-link.txt`, then pair and start sol:
+
+```bash
+solstone-linux install-service
+systemctl --user stop solstone-linux
+solstone-linux setup < pair-link.txt
+systemctl --user start solstone-linux
+```
+
+Pairing is the only setup path, including when your journal is on this machine.
+There is no URL, key, local installation of the journal or Python, or direct
+fallback to configure. Sol can capture while unpaired or offline and saves
+segments locally.
+
+Setup and runtime share one private-state lock. Stop sol before pairing. If sol
+is running, setup exits before consuming input and leaves capture, config, and
+private state unchanged. Use the same stop, setup, start sequence when an
+upgrade requires a new pair link.

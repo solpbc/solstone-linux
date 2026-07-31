@@ -2,20 +2,14 @@
 // Copyright (c) 2026 sol pbc
 
 use crate::{
-    chat_bridge::{
-        EVENT_SOL_CHAT_REQUEST, ack_contract_request, consume_contract_body, contract_poll_opt_in,
-        dispatch_contract_payload, parse_contract_sse,
-    },
     config::Config,
     private_link::{PrivateLinkOwner, start_registered_private_link_for_test},
     private_link_test_peer::{PeerRequest, PrivateLinkPeer},
     sync::{contract_segment_proven_held, contract_sha256_file},
     sync_health::ErrorType,
-    test_support::{Action, MockServer, wait_for_requests},
     upload::{ListingEntry, UploadClient, contract_parse_listing},
 };
-use reqwest::Client;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -24,7 +18,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
 
 const MANIFEST_SHA256: &str = "9ecf4bbfcd793a8aecc9e2257254e68c74c48cde22282ff07369101b90d97c33";
 const AUTHORITY_COMMIT: &str = "827d3761e2b515b9bd537ded28b245c8c6d86cc0";
@@ -73,9 +66,6 @@ const LINUX_FIXTURES: &[&str] = &[
     "declared.observer.ingestSegments.custody_unknown_rejected",
     "declared.observer.ingestSegments.envelope_total_mismatch",
     "declared.observer.ingestUpload.status_unknown_rejected",
-    "example.chat.openSolChatRequest.request.body.application-json.default",
-    "example.chat.openSolChatRequest.response.200.application-json.default",
-    "example.observer.callosumStream.response.200.text-event-stream.default",
     "example.observer.ingestEvent.request.body.application-json.default",
     "example.observer.ingestEvent.response.200.application-json.default",
     "example.observer.ingestSegments.response.200.application-json.legacy",
@@ -87,8 +77,6 @@ const LINUX_FIXTURES: &[&str] = &[
     "example.observer.register.response.200.application-json.default",
     "recorded.auth.bearer.segments",
     "recorded.auth.handle.segments",
-    "recorded.chat.openSolChatRequest.missing",
-    "recorded.chat.openSolChatRequest.ok",
     "recorded.ingestUpload.collision",
     "recorded.ingestUpload.conflict",
     "recorded.ingestUpload.duplicate",
@@ -99,9 +87,6 @@ const LINUX_FIXTURES: &[&str] = &[
     "recorded.segments.legacy.unparseable_header",
     "recorded.segments.submitted_name_omitted",
     "recorded.segments.v2.envelope",
-    "recorded.sse.observer.data",
-    "recorded.sse.observer.error",
-    "recorded.sse.observer.heartbeat",
 ];
 
 const FULL_VECTORS: &[&str] = &[
@@ -130,13 +115,8 @@ const FULL_VECTORS: &[&str] = &[
 ];
 
 const LINUX_VECTORS: &[&str] = &[
-    "chat.openSolChatRequest.missing_required_field",
-    "chat.openSolChatRequest.ok",
     "observer.auth.bearer",
     "observer.auth.handle",
-    "observer.callosumStream.sse.data",
-    "observer.callosumStream.sse.error",
-    "observer.callosumStream.sse.heartbeat",
     "observer.ingestSegments.custody_statuses",
     "observer.ingestSegments.custody_unknown_rejected",
     "observer.ingestSegments.envelope_total_mismatch",
@@ -861,6 +841,11 @@ async fn assert_event_and_register(
         (request.method.as_str(), request.path.as_str()),
         ("POST", "/app/observer/ingest/event")
     );
+    assert_eq!(header(request, "content-type"), Some("application/json"));
+    assert_eq!(
+        request.body,
+        br#"{"event":"status","state":"recording","tract":"observe"}"#
+    );
     assert_eq!(
         serde_json::from_slice::<Value>(&request.body).unwrap(),
         fixtures[event_id]["payload"]
@@ -905,228 +890,6 @@ async fn assert_event_and_register(
     record(executed, register_response, true);
     owner.shutdown().await.unwrap();
     peer.shutdown().await;
-}
-
-async fn assert_chat_contract(
-    fixtures: &BTreeMap<String, Value>,
-    vectors: &BTreeMap<String, Value>,
-    executed_fixtures: &mut BTreeSet<String>,
-    executed_vectors: &mut BTreeSet<String>,
-) {
-    let example_data = "example.observer.callosumStream.response.200.text-event-stream.default";
-    let wire = format!("data: {}\n\n", fixtures[example_data]["payload"]);
-    let frames = parse_contract_sse(wire.as_bytes());
-    assert_eq!(
-        frames.as_slice(),
-        &[(
-            "frame".to_owned(),
-            None,
-            fixtures[example_data]["payload"].to_string()
-        )]
-    );
-    record(executed_fixtures, example_data, true);
-
-    let data_id = "recorded.sse.observer.data";
-    let data_vector = "observer.callosumStream.sse.data";
-    let wire = format!("data: {}\n\n", fixtures[data_id]["payload"]);
-    let frames = parse_contract_sse(wire.as_bytes());
-    assert_eq!(frames[0].0, "frame");
-    assert_eq!(frames[0].2, fixtures[data_id]["payload"].to_string());
-    assert_eq!(vectors[data_vector]["fixture_id"], data_id);
-    assert_eq!(vectors[data_vector]["decision"]["frame_kind"], "data");
-    assert_eq!(
-        vectors[data_vector]["decision"]["action"],
-        "dispatch_callosum_event"
-    );
-    record(executed_fixtures, data_id, true);
-    record(executed_vectors, data_vector, true);
-
-    let error_id = "recorded.sse.observer.error";
-    let error_vector = "observer.callosumStream.sse.error";
-    let wire = format!("event: error\ndata: {}\n\n", fixtures[error_id]["payload"]);
-    let (terminal, pending, side_effects) = consume_contract_body(wire).await;
-    assert!(terminal);
-    assert_eq!(pending, 0);
-    assert_eq!(side_effects, 0);
-    let decision = &vectors[error_vector]["decision"];
-    assert_eq!(vectors[error_vector]["fixture_id"], error_id);
-    assert_eq!(decision["frame_kind"], "error");
-    assert_eq!(decision["action"], "surface_error_and_close");
-    assert_eq!(
-        decision["reason_code"],
-        fixtures[error_id]["payload"]["reason_code"]
-    );
-    record(executed_fixtures, error_id, true);
-    record(executed_vectors, error_vector, true);
-
-    let heartbeat_id = "recorded.sse.observer.heartbeat";
-    let heartbeat_vector = "observer.callosumStream.sse.heartbeat";
-    let raw = fixtures[heartbeat_id]["payload"]
-        .as_str()
-        .expect("heartbeat payload");
-    assert_eq!(parse_contract_sse(raw.as_bytes())[0].0, "heartbeat");
-    assert_eq!(vectors[heartbeat_vector]["fixture_id"], heartbeat_id);
-    assert_eq!(
-        vectors[heartbeat_vector]["decision"]["frame_kind"],
-        "heartbeat"
-    );
-    assert_eq!(
-        vectors[heartbeat_vector]["decision"]["action"],
-        "ignore_keepalive"
-    );
-    record(executed_fixtures, heartbeat_id, true);
-    record(executed_vectors, heartbeat_vector, true);
-
-    let valid_id = "example.chat.openSolChatRequest.request.body.application-json.default";
-    let ok_vector = "chat.openSolChatRequest.ok";
-    let original_request_id = fixtures[valid_id]["payload"]["request_id"]
-        .as_str()
-        .expect("request fixture id");
-    let mut valid = Map::new();
-    valid.insert("tract".into(), json!("chat"));
-    valid.insert("event".into(), json!(EVENT_SOL_CHAT_REQUEST));
-    valid.insert(
-        "request_id".into(),
-        fixtures[valid_id]["payload"]["request_id"].clone(),
-    );
-    let (created, preserved_id) = dispatch_contract_payload(valid).await;
-    assert!(created);
-    assert_eq!(preserved_id.as_deref(), Some(original_request_id));
-    assert!(
-        vectors[ok_vector]["decision"]["accepted"]
-            .as_bool()
-            .expect("authority chat accepted")
-    );
-    assert_eq!(
-        vectors[ok_vector]["decision"]["missing_field_behavior"],
-        "non_empty_trimmed_request_id_required"
-    );
-    record(executed_fixtures, valid_id, true);
-    record(executed_vectors, ok_vector, true);
-
-    let missing_vector = "chat.openSolChatRequest.missing_required_field";
-    let mut rejected = Vec::new();
-    for id in [
-        None,
-        Some(Value::Null),
-        Some(json!("")),
-        Some(json!("   ")),
-        Some(json!([])),
-    ] {
-        let mut payload = Map::new();
-        payload.insert("tract".into(), json!("chat"));
-        payload.insert("event".into(), json!(EVENT_SOL_CHAT_REQUEST));
-        if let Some(id) = id {
-            payload.insert("request_id".into(), id);
-        }
-        rejected.push(!dispatch_contract_payload(payload).await.0);
-    }
-    assert!(rejected.into_iter().all(|value| value));
-    assert!(
-        !vectors[missing_vector]["decision"]["accepted"]
-            .as_bool()
-            .expect("authority chat rejected")
-    );
-    assert_eq!(
-        vectors[missing_vector]["decision"]["missing_field_behavior"],
-        "absent_malformed_empty_or_blank_rejected"
-    );
-
-    for (response_id, vector_id) in [
-        (
-            "example.chat.openSolChatRequest.response.200.application-json.default",
-            None,
-        ),
-        ("recorded.chat.openSolChatRequest.ok", Some(ok_vector)),
-        (
-            "recorded.chat.openSolChatRequest.missing",
-            Some(missing_vector),
-        ),
-    ] {
-        let fixture = &fixtures[response_id];
-        let status = fixture["provenance"]["status"]
-            .as_u64()
-            .expect("chat response status") as u16;
-        let server = MockServer::new(vec![(status, fixture["payload"].clone())]).await;
-        ack_contract_request(Client::new(), &server.url, "K", original_request_id).await;
-        wait_for_requests(&server, 1).await;
-        let request = &server.requests()[0];
-        assert_eq!(
-            (request.method.as_str(), request.uri.as_str()),
-            ("POST", "/api/chat/sol_chat_request/open")
-        );
-        assert_eq!(
-            serde_json::from_slice::<Value>(&request.body).unwrap(),
-            json!({"request_id": original_request_id})
-        );
-        assert!(
-            request.headers["authorization"]
-                .to_str()
-                .unwrap()
-                .starts_with("Bearer ")
-        );
-        if let Some(vector_id) = vector_id {
-            assert_eq!(vectors[vector_id]["fixture_id"], response_id);
-            assert_eq!(
-                vectors[vector_id]["observed_status"].as_u64(),
-                Some(status as u64)
-            );
-            if vector_id == missing_vector {
-                assert_eq!(
-                    fixtures[response_id]["payload"]["reason_code"],
-                    vectors[vector_id]["decision"]["reason_code"]
-                );
-            }
-        }
-        record(executed_fixtures, response_id, true);
-    }
-    record(executed_vectors, missing_vector, true);
-}
-
-async fn assert_settings_contract() {
-    for (body, expected) in [
-        (json!({"system_notifications":{"linux":true}}), true),
-        (json!({"system_notifications":{"linux":false}}), false),
-        (json!({}), false),
-        (json!({"system_notifications":{}}), false),
-        (json!({"system_notifications":{"linux":null}}), false),
-        (json!({"system_notifications":{"linux":"true"}}), false),
-        (json!({"linux_notify_send":true}), false),
-    ] {
-        let server = MockServer::new(vec![(200, body)]).await;
-        assert_eq!(
-            contract_poll_opt_in(
-                &Client::new(),
-                &format!("{}/", server.url),
-                "K",
-                &CancellationToken::new()
-            )
-            .await,
-            expected
-        );
-        wait_for_requests(&server, 1).await;
-        let request = &server.requests()[0];
-        assert_eq!(request.uri, "/app/settings/api/sol_voice");
-        assert!(request.headers.contains_key("authorization"));
-    }
-    let malformed = MockServer::new_actions(vec![Action::Raw(200, "{")]).await;
-    assert!(
-        !contract_poll_opt_in(
-            &Client::new(),
-            &malformed.url,
-            "K",
-            &CancellationToken::new()
-        )
-        .await
-    );
-    let failure =
-        MockServer::new(vec![(500, json!({"system_notifications":{"linux":true}}))]).await;
-    assert!(
-        !contract_poll_opt_in(&Client::new(), &failure.url, "K", &CancellationToken::new()).await
-    );
-    let stop = CancellationToken::new();
-    stop.cancel();
-    assert!(!contract_poll_opt_in(&Client::new(), "http://127.0.0.1:9", "K", &stop).await);
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
@@ -1285,8 +1048,8 @@ async fn observer_contract_conformance() {
     let fixtures = load_index(&bundle.join("fixtures/wire-behavior.json"), "fixtures");
     let vectors = load_index(&bundle.join("vectors.json"), "vectors");
     assert_identities(&manifest, &fixtures, &vectors);
-    assert_eq!(set(LINUX_FIXTURES).len(), 32);
-    assert_eq!(set(LINUX_VECTORS).len(), 20);
+    assert_eq!(set(LINUX_FIXTURES).len(), 24);
+    assert_eq!(set(LINUX_VECTORS).len(), 15);
     let mut executed_fixtures = BTreeSet::new();
     let mut executed_vectors = BTreeSet::new();
     assert_upload_contract(
@@ -1304,14 +1067,6 @@ async fn observer_contract_conformance() {
     )
     .await;
     assert_event_and_register(&fixtures, &mut executed_fixtures).await;
-    assert_chat_contract(
-        &fixtures,
-        &vectors,
-        &mut executed_fixtures,
-        &mut executed_vectors,
-    )
-    .await;
-    assert_settings_contract().await;
     assert_mutations(
         &bundle,
         &root.join("contracts/observer-client-import.json"),

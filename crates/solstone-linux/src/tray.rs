@@ -120,7 +120,15 @@ impl Tray for KsniTray {
             .into(),
             MenuItem::Separator,
             status.into(),
-            action("open journal", TrayCommand::OpenJournal).into(),
+            StandardItem {
+                label: "open journal".into(),
+                enabled: self.model.open_journal_enabled,
+                activate: Box::new(|tray: &mut KsniTray| {
+                    let _ = tray.commands.send(TrayCommand::OpenJournal);
+                }),
+                ..Default::default()
+            }
+            .into(),
             SubMenu {
                 label: "settings".into(),
                 submenu: vec![action("open config.json", TrayCommand::OpenConfig).into()],
@@ -209,6 +217,7 @@ mod tests {
     #[test]
     fn menu_contains_reference_top_level_structure() {
         let mut tray = tray();
+        tray.model.open_journal_enabled = true;
         let menu = tray.menu();
         assert_eq!(menu.len(), 11);
         let labels: Vec<&str> = menu
@@ -274,6 +283,7 @@ mod tests {
             ]
         );
         if let MenuItem::Standard(value) = &menu[6] {
+            assert!(value.enabled);
             (value.activate)(&mut tray);
         }
         assert_eq!(receiver.try_recv(), Ok(TrayCommand::OpenJournal));
@@ -291,6 +301,19 @@ mod tests {
                 (value.activate)(&mut tray);
             }
             assert_eq!(receiver.try_recv(), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn open_journal_menu_enablement_follows_model_epoch() {
+        let mut tray = tray();
+        for expected in [false, true, false] {
+            tray.model.open_journal_enabled = expected;
+            let menu = tray.menu();
+            let MenuItem::Standard(open_journal) = &menu[6] else {
+                panic!("open journal item missing");
+            };
+            assert_eq!(open_journal.enabled, expected);
         }
     }
 }
@@ -336,4 +359,3 @@ mod tests {
 // test_update_shows_paused -> tray_model::tests::paused_and_idle_snapshots_select_typed_status.
 // test_config_paths_use_base_dir -> desktop_component::tests::component_uses_config.
 // test_agent_instructions_template_uses_config_values -> clipboard::tests::instructions_use_config_values.
-// test_open_journal_uses_public_site_when_server_url_empty -> desktop_component::tests::public_journal_fallback.
