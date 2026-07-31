@@ -191,6 +191,11 @@ impl UploadClient {
         self.inner.revoked.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
+    pub(crate) fn revoke_for_test(&self) {
+        self.inner.revoked.store(true, Ordering::Release);
+    }
+
     pub fn is_registered(&self) -> bool {
         if let Some(capability) = self.inner.capability() {
             return capability.is_registered();

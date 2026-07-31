@@ -79,6 +79,14 @@ pub(crate) struct PrivateLinkPeer {
 
 impl PrivateLinkPeer {
     pub(crate) async fn start() -> Self {
+        Self::start_with_tls_gate(None).await
+    }
+
+    pub(crate) async fn start_with_delayed_tls(gate: Arc<Notify>) -> Self {
+        Self::start_with_tls_gate(Some(gate)).await
+    }
+
+    async fn start_with_tls_gate(tls_gate: Option<Arc<Notify>>) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (credential, acceptor) = credential_and_acceptor(listener.local_addr().unwrap().port());
         let state = PeerState {
@@ -96,6 +104,9 @@ impl PrivateLinkPeer {
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 task_state.accepted.fetch_add(1, Ordering::SeqCst);
+                if let Some(gate) = &tls_gate {
+                    gate.notified().await;
+                }
                 let Ok(tls) = acceptor.accept(stream).await else {
                     continue;
                 };

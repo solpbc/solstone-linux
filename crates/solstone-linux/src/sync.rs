@@ -372,7 +372,12 @@ impl SyncWorker {
                 }
                 break;
             }
-            if !self.client.is_registered() {
+            // ensure_registered deliberately ignores revocation; this production call site
+            // stops the retry loop for a terminally revoked credential.
+            if !self.client.is_registered()
+                && (self.client.is_revoked()
+                    || !self.client.ensure_registered(&mut self.config).await)
+            {
                 if !self.registration_refused {
                     tracing::warn!("Sync refused: observer is not registered");
                     self.registration_refused = true;
@@ -4130,6 +4135,230 @@ mod tests {
         wait_for_requests(&server, 5).await;
         service.shutdown(Duration::from_secs(1)).await.unwrap();
         assert!(server.requests().len() >= 5);
+    }
+
+    // AC7: an unregistered worker retries once and falls through to sync on success.
+    #[tokio::test]
+    async fn unregistered_worker_retries_registration_and_syncs_on_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, registration("REGISTERED-KEY", "desktop").to_string());
+        peer.enqueue_response(200, json!({"items":[],"total":0}).to_string());
+        let config = Config {
+            stream: "desktop".to_owned(),
+            base_dir: temp.path().join("data"),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
+            .await
+            .unwrap();
+        let client = Arc::new(UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".to_owned()),
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 1_800_000_000.0,
+                mono: 100.0,
+            }),
+        ));
+        let notify = Arc::new(Notify::new());
+        let running = Arc::new(AtomicBool::new(true));
+        let mut worker = SyncWorker::new(
+            config,
+            client.clone(),
+            Arc::new(FixedClock {
+                wall: 1_800_000_000.0,
+                mono: 100.0,
+            }),
+            SyncControl {
+                notify: notify.clone(),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: running.clone(),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+        );
+        let task = tokio::spawn(async move { worker.run().await });
+        notify.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(1), peer.wait_for_requests(2)).await;
+        assert_eq!(
+            peer.requests().len(),
+            2,
+            "registration and same-tick sync requests: registered={}, paths={:?}",
+            client.is_registered(),
+            peer.requests()
+                .iter()
+                .map(|request| &request.path)
+                .collect::<Vec<_>>()
+        );
+        assert!(client.is_registered());
+        running.store(false, Ordering::Release);
+        notify.notify_one();
+        task.await.unwrap();
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn revoked_worker_never_attempts_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let config = Config {
+            stream: "desktop".to_owned(),
+            base_dir: temp.path().join("data"),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
+            .await
+            .unwrap();
+        let client = Arc::new(UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".to_owned()),
+            "host",
+            "linux",
+            "test",
+            Arc::new(FixedClock {
+                wall: 1_800_000_000.0,
+                mono: 0.0,
+            }),
+        ));
+        client.revoke_for_test();
+        let notify = Arc::new(Notify::new());
+        let running = Arc::new(AtomicBool::new(true));
+        let mut worker = SyncWorker::new(
+            config,
+            client,
+            Arc::new(FixedClock {
+                wall: 1_800_000_000.0,
+                mono: 0.0,
+            }),
+            SyncControl {
+                notify: notify.clone(),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: running.clone(),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let task = tokio::spawn(async move { worker.run().await }.with_subscriber(subscriber));
+        notify.notify_one();
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        running.store(false, Ordering::Release);
+        notify.notify_one();
+        task.await.unwrap();
+        assert_eq!(peer.requests().len(), 0, "revoked registration requests");
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(output.matches("Sync refused").count(), 1);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unregistered_worker_registration_retry_respects_cooldown() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(503, Vec::new());
+        peer.enqueue_response(200, registration("REGISTERED-KEY", "desktop").to_string());
+        peer.enqueue_response(200, json!({"items":[],"total":0}).to_string());
+        let config = Config {
+            stream: "desktop".to_owned(),
+            base_dir: temp.path().join("data"),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
+            .await
+            .unwrap();
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            session.capability("/app/observer/ingest".to_owned()),
+            "host",
+            "linux",
+            "test",
+            clock.clone(),
+        ));
+        let notify = Arc::new(Notify::new());
+        let running = Arc::new(AtomicBool::new(true));
+        let mut worker = SyncWorker::new(
+            config,
+            client,
+            clock.clone(),
+            SyncControl {
+                notify: notify.clone(),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: running.clone(),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+        );
+        let task = tokio::spawn(async move { worker.run().await });
+        notify.notify_one();
+        for _ in 0..10_000 {
+            if !peer.requests().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(peer.requests().len(), 1, "first registration request");
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        clock.set_mono(60.0);
+        for _ in 0..3 {
+            notify.notify_one();
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            1,
+            "registration requests during cooldown"
+        );
+
+        tokio::time::advance(Duration::from_secs(240)).await;
+        clock.set_mono(300.0);
+        notify.notify_one();
+        for _ in 0..10_000 {
+            if peer
+                .requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count()
+                >= 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/observer/register")
+                .count(),
+            2,
+            "registration requests after cooldown"
+        );
+        running.store(false, Ordering::Release);
+        notify.notify_one();
+        task.await.unwrap();
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     // AC: an unregistered worker logs refusal once, stays idle, and performs no HTTP.

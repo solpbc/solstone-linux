@@ -45,6 +45,7 @@ pub(crate) const PRIVATE_STATE_READY_LOCK_FILENAME: &str =
 const MAX_PAIR_LINK_BYTES: u64 = 4096;
 pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -953,7 +954,8 @@ struct AuthEpoch {
 }
 
 struct PrivateLinkOpener {
-    transport: Arc<TransportClient>,
+    lan_transport: Option<Arc<TransportClient>>,
+    relay_transport: Option<Arc<TransportClient>>,
     auth: RwLock<Arc<AuthEpoch>>,
     admission: tokio::sync::Mutex<()>,
     transport_unavailable: Arc<AtomicBool>,
@@ -962,12 +964,14 @@ struct PrivateLinkOpener {
 
 impl PrivateLinkOpener {
     fn new(
-        transport: TransportClient,
+        lan_transport: Option<TransportClient>,
+        relay_transport: Option<TransportClient>,
         transport_unavailable: Arc<AtomicBool>,
         facts: LinkFacts,
     ) -> Self {
         Self {
-            transport: Arc::new(transport),
+            lan_transport: lan_transport.map(Arc::new),
+            relay_transport: relay_transport.map(Arc::new),
             auth: RwLock::new(Arc::new(AuthEpoch {
                 generation: 0,
                 state: OpenerAuth::Unregistered,
@@ -1028,8 +1032,9 @@ impl PrivateLinkOpener {
                 "linked transport unavailable".into(),
             ));
         }
-        // Pinned client.rs:265 and :296 are the only refresh callers, both
-        // inside dial_carrier_over_relay reached by TransportClient::dial_carrier.
+        // The relay transport is the only client that holds a device token. Pinned
+        // client.rs:265 and :296 refresh only inside its dial_carrier relay path, so
+        // this guard keeps a refreshed carrier behind synchronous token persistence.
         // There is no timer, background, or live-stream refresh path.
         let _admission = self.admission.lock().await;
         if self.transport_unavailable.load(Ordering::Acquire) {
@@ -1064,7 +1069,40 @@ impl CarrierOpener for PrivateLinkOpener {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<DialedCarrier, TransportError>> + Send + '_>> {
         Box::pin(async move {
-            let carrier = self.admit_dial(self.transport.dial_carrier()).await?;
+            let carrier = self
+                .admit_dial(async {
+                    let mut lan_error = None;
+                    if let Some(lan) = &self.lan_transport {
+                        // Reserve time for the alternate relay leg only when it exists. A
+                        // LAN-only credential keeps the pinned client's behavior unchanged.
+                        let result = if self.relay_transport.is_some() {
+                            match tokio::time::timeout(LAN_CARRIER_TIMEOUT, lan.dial_carrier())
+                                .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => Err(TransportError::Io(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "LAN carrier dial timed out",
+                                ))),
+                            }
+                        } else {
+                            lan.dial_carrier().await
+                        };
+                        match result {
+                            Ok(carrier) => return Ok(carrier),
+                            Err(error) => lan_error = Some(error),
+                        }
+                    }
+                    if let Some(relay) = &self.relay_transport {
+                        match relay.dial_carrier().await {
+                            Ok(carrier) => return Ok(carrier),
+                            Err(error) if lan_error.is_none() => return Err(error),
+                            Err(_) => {}
+                        }
+                    }
+                    Err(lan_error.unwrap_or(TransportError::NoEndpoint))
+                })
+                .await?;
             self.facts.publish(LinkFact::CarrierProven);
             Ok(carrier)
         })
@@ -1999,14 +2037,41 @@ async fn start_private_link_session_inner(
         transport_unavailable.clone(),
         facts.clone(),
     );
-    let transport = if credential.endpoints.is_empty() {
-        TransportClient::new_relay_only(credential, Some(hook))
+    let lan_transport = if credential.endpoints.is_empty() {
+        None
     } else {
-        TransportClient::new(credential, Some(hook))
-    }
-    .map_err(|_| PrivateStateError::BridgeUnavailable)?;
+        let mut lan_credential = credential.clone();
+        lan_credential.relay_origin = None;
+        lan_credential.device_token = None;
+        lan_credential.device_token_expires_at = None;
+        Some(
+            TransportClient::new(lan_credential, None)
+                .map_err(|_| PrivateStateError::BridgeUnavailable)?,
+        )
+    };
+    let relay_transport = if lan_transport.is_none() {
+        Some(
+            TransportClient::new_relay_only(credential.clone(), Some(hook))
+                .map_err(|_| PrivateStateError::BridgeUnavailable)?,
+        )
+    } else if credential
+        .relay_origin
+        .as_deref()
+        .is_some_and(|origin| !origin.is_empty())
+        && credential
+            .device_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+    {
+        let mut relay_credential = credential.clone();
+        relay_credential.endpoints.clear();
+        TransportClient::new_relay_only(relay_credential, Some(hook)).ok()
+    } else {
+        None
+    };
     let opener = Arc::new(PrivateLinkOpener::new(
-        transport,
+        lan_transport,
+        relay_transport,
         transport_unavailable,
         facts.clone(),
     ));
@@ -2156,6 +2221,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
+        sync::Notify,
     };
 
     async fn raw_local_request(port: u16, request: String) -> Vec<u8> {
@@ -2287,7 +2353,8 @@ mod tests {
         persist_observer(temp.path(), &state).unwrap();
         let peer = PrivateLinkPeer::start().await;
         let opener = PrivateLinkOpener::new(
-            TransportClient::new(peer.credential(), None).unwrap(),
+            Some(TransportClient::new(peer.credential(), None).unwrap()),
+            None,
             Arc::new(AtomicBool::new(false)),
             LinkFacts::default(),
         );
@@ -2651,7 +2718,8 @@ mod tests {
         let transport_unavailable = Arc::new(AtomicBool::new(false));
         let facts = LinkFacts::default();
         let opener = Arc::new(PrivateLinkOpener::new(
-            TransportClient::new(peer.credential(), None).unwrap(),
+            Some(TransportClient::new(peer.credential(), None).unwrap()),
+            None,
             transport_unavailable.clone(),
             facts.clone(),
         ));
@@ -2715,7 +2783,8 @@ mod tests {
     async fn real_transport_dial_waits_for_admission_guard() {
         let peer = PrivateLinkPeer::start().await;
         let opener = Arc::new(PrivateLinkOpener::new(
-            TransportClient::new(peer.credential(), None).unwrap(),
+            Some(TransportClient::new(peer.credential(), None).unwrap()),
+            None,
             Arc::new(AtomicBool::new(false)),
             LinkFacts::default(),
         ));
@@ -2728,6 +2797,260 @@ mod tests {
         assert!(!dial.is_finished());
         drop(guard);
         assert!(dial.await.unwrap().is_ok());
+        peer.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_lan_tls_reaches_relay_within_registration_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let lan = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let lan_port = lan.local_addr().unwrap().port();
+        let lan_accepted = Arc::new(AtomicUsize::new(0));
+        let lan_count = lan_accepted.clone();
+        let stalled = tokio::spawn(async move {
+            let (_stream, _) = lan.accept().await.unwrap();
+            lan_count.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        });
+        let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let relay_origin = format!("http://{}", relay.local_addr().unwrap());
+        let relay_accepted = Arc::new(AtomicUsize::new(0));
+        let relay_count = relay_accepted.clone();
+        let relay_task = tokio::spawn(async move {
+            let (mut stream, _) = relay.accept().await.unwrap();
+            relay_count.fetch_add(1, Ordering::SeqCst);
+            let request = read_http_head(&mut stream).await;
+            assert!(request.starts_with(b"GET /session/dial?instance="));
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let mut credential = peer.credential();
+        credential.endpoints = vec![EndpointAddr {
+            host: "127.0.0.1".into(),
+            port: lan_port,
+        }];
+        credential.relay_origin = Some(relay_origin);
+        credential.device_token = Some(test_jwt(i64::MAX / 2));
+        let root = temp.path().to_path_buf();
+        let owner =
+            tokio::spawn(
+                async move { start_private_link_owner(&root, credential, "stream").await },
+            );
+        while lan_accepted.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(LAN_CARRIER_TIMEOUT).await;
+        for _ in 0..100 {
+            if relay_accepted.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            relay_accepted.load(Ordering::SeqCst),
+            1,
+            "relay connection count after stalled LAN deadline"
+        );
+        relay_task.await.unwrap();
+        let owner = owner.await.unwrap().unwrap();
+        assert_eq!(lan_accepted.load(Ordering::SeqCst), 1);
+        owner.shutdown().await.unwrap();
+        stalled.abort();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_lan_remains_preferred_over_relay() {
+        let temp = tempfile::tempdir().unwrap();
+        let tls_gate = Arc::new(Notify::new());
+        let peer = PrivateLinkPeer::start_with_delayed_tls(tls_gate.clone()).await;
+        peer.enqueue_response(
+            200,
+            serde_json::json!({
+                "key":"K", "name":"stream", "prefix":"prefix",
+                "ingest_url":"/app/observer/ingest", "protocol_version":2
+            })
+            .to_string(),
+        );
+        let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let relay_origin = format!("http://{}", relay.local_addr().unwrap());
+        let relay_accepted = Arc::new(AtomicUsize::new(0));
+        let relay_count = relay_accepted.clone();
+        let relay_task = tokio::spawn(async move {
+            if relay.accept().await.is_ok() {
+                relay_count.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let mut credential = peer.credential();
+        credential.relay_origin = Some(relay_origin);
+        credential.device_token = Some(test_jwt(i64::MAX / 2));
+        let root = temp.path().to_path_buf();
+        let owner =
+            tokio::spawn(
+                async move { start_private_link_owner(&root, credential, "stream").await },
+            );
+        while peer.accepted_carriers() == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tls_gate.notify_one();
+        let owner = owner.await.unwrap().unwrap();
+        assert_eq!(peer.accepted_carriers(), 1);
+        assert_eq!(relay_accepted.load(Ordering::SeqCst), 0);
+        owner.shutdown().await.unwrap();
+        relay_task.abort();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn no_relay_origin_credential_keeps_lan_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(
+            200,
+            serde_json::json!({
+                "key":"K", "name":"stream", "prefix":"prefix",
+                "ingest_url":"/app/observer/ingest", "protocol_version":2
+            })
+            .to_string(),
+        );
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        assert_eq!(peer.accepted_carriers(), 1);
+        owner.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owner_start_guard_refusal_is_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(
+            403,
+            serde_json::json!({"reason_code":"local_request_only"}).to_string(),
+        );
+        let result = start_private_link_owner(temp.path(), peer.credential(), "stream").await;
+        assert!(matches!(
+            result,
+            Err(PrivateStateError::RegistrationInvalid)
+        ));
+        assert_eq!(peer.requests().len(), 1);
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_origin_without_device_token_uses_lan_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(
+            200,
+            serde_json::json!({
+                "key":"K", "name":"stream", "prefix":"prefix",
+                "ingest_url":"/app/observer/ingest", "protocol_version":2
+            })
+            .to_string(),
+        );
+        let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let mut credential = peer.credential();
+        credential.relay_origin = Some(format!("http://{}", relay.local_addr().unwrap()));
+        credential.device_token = None;
+        let owner = start_private_link_owner(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+        assert_eq!(peer.accepted_carriers(), 1);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, relay.accept())
+                .await
+                .is_err()
+        );
+        owner.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_failure_preserves_lan_timeout_error() {
+        let peer = PrivateLinkPeer::start().await;
+        let lan = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let lan_port = lan.local_addr().unwrap().port();
+        let lan_accepted = Arc::new(AtomicUsize::new(0));
+        let lan_count = lan_accepted.clone();
+        let stalled = tokio::spawn(async move {
+            let (_stream, _) = lan.accept().await.unwrap();
+            lan_count.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        });
+        let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let relay_origin = format!("http://{}", relay.local_addr().unwrap());
+        let relay_accepted = Arc::new(AtomicUsize::new(0));
+        let relay_count = relay_accepted.clone();
+        let relay_task = tokio::spawn(async move {
+            let (mut stream, _) = relay.accept().await.unwrap();
+            relay_count.fetch_add(1, Ordering::SeqCst);
+            let _ = read_http_head(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let mut lan_credential = peer.credential();
+        lan_credential.endpoints = vec![EndpointAddr {
+            host: "127.0.0.1".into(),
+            port: lan_port,
+        }];
+        lan_credential.relay_origin = None;
+        lan_credential.device_token = None;
+        let mut relay_credential = peer.credential();
+        relay_credential.endpoints.clear();
+        relay_credential.relay_origin = Some(relay_origin);
+        relay_credential.device_token = Some(test_jwt(i64::MAX / 2));
+        let opener = Arc::new(PrivateLinkOpener::new(
+            Some(TransportClient::new(lan_credential, None).unwrap()),
+            Some(TransportClient::new_relay_only(relay_credential, None).unwrap()),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let dial = tokio::spawn({
+            let opener = opener.clone();
+            async move { opener.dial_carrier().await }
+        });
+        while lan_accepted.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(LAN_CARRIER_TIMEOUT).await;
+        relay_task.await.unwrap();
+        let error = match dial.await.unwrap() {
+            Ok(_) => panic!("both carrier legs unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        match error {
+            TransportError::Io(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                assert_eq!(error.to_string(), "LAN carrier dial timed out");
+            }
+            other => panic!("expected LAN timeout, got {other}"),
+        }
+        assert_eq!(relay_accepted.load(Ordering::SeqCst), 1);
+        stalled.abort();
         peer.shutdown().await;
     }
 
