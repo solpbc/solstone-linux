@@ -255,12 +255,6 @@ pub(crate) enum PrivateStateProbeError {
     LocksMalformed,
 }
 
-impl Drop for PrivateStateLock {
-    fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self._file, rustix::fs::FlockOperation::Unlock);
-    }
-}
-
 impl PrivateStateLock {
     pub(crate) fn try_probe(
         config_root: &Path,
@@ -310,48 +304,32 @@ impl PrivateStateLock {
         {
             return Err(PrivateStateProbeError::InvalidTarget);
         }
-        let readiness_descriptor = match rustix::fs::openat(
+        let readiness_stat = rustix::fs::openat(
             &root,
             PRIVATE_STATE_READY_LOCK_FILENAME,
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
             rustix::fs::Mode::empty(),
-        ) {
-            Ok(descriptor) => descriptor,
-            Err(_) => {
-                let locks = fs::read_to_string("/proc/locks")
-                    .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
-                return if probe_lock_table(&locks, stat.st_dev, stat.st_ino)? {
-                    Ok(PrivateStateLockLiveness::LiveOwnerNotReady)
-                } else {
-                    Ok(PrivateStateLockLiveness::NoLiveOwner)
-                };
-            }
-        };
-        let readiness_file = File::from(readiness_descriptor);
-        let readiness_stat = match rustix::fs::fstat(&readiness_file) {
-            Ok(stat) => stat,
-            Err(_) => {
-                let locks = fs::read_to_string("/proc/locks")
-                    .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
-                return if probe_lock_table(&locks, stat.st_dev, stat.st_ino)? {
-                    Ok(PrivateStateLockLiveness::LiveOwnerNotReady)
-                } else {
-                    Ok(PrivateStateLockLiveness::NoLiveOwner)
-                };
-            }
-        };
-        let readiness_valid = rustix::fs::FileType::from_raw_mode(readiness_stat.st_mode)
-            == rustix::fs::FileType::RegularFile
-            && rustix::fs::Mode::from_raw_mode(readiness_stat.st_mode) == expected_mode
-            && readiness_stat.st_uid == rustix::process::geteuid().as_raw();
+        )
+        .ok()
+        .and_then(|descriptor| rustix::fs::fstat(File::from(descriptor)).ok())
+        .filter(|readiness_stat| {
+            rustix::fs::FileType::from_raw_mode(readiness_stat.st_mode)
+                == rustix::fs::FileType::RegularFile
+                && rustix::fs::Mode::from_raw_mode(readiness_stat.st_mode) == expected_mode
+                && readiness_stat.st_uid == rustix::process::geteuid().as_raw()
+        });
         let locks = fs::read_to_string("/proc/locks")
             .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
         if !probe_lock_table(&locks, stat.st_dev, stat.st_ino)? {
             return Ok(PrivateStateLockLiveness::NoLiveOwner);
         }
-        if readiness_valid
-            && probe_lock_table(&locks, readiness_stat.st_dev, readiness_stat.st_ino)?
-        {
+        let readiness_live = match readiness_stat {
+            Some(readiness_stat) => {
+                probe_lock_table(&locks, readiness_stat.st_dev, readiness_stat.st_ino)?
+            }
+            None => false,
+        };
+        if readiness_live {
             Ok(PrivateStateLockLiveness::LiveOwner)
         } else {
             Ok(PrivateStateLockLiveness::LiveOwnerNotReady)
@@ -2924,6 +2902,31 @@ mod tests {
         );
         let reacquired = PrivateStateLock::acquire(temp.path()).unwrap();
         drop(reacquired);
+    }
+
+    #[test]
+    fn dropping_clone_keeps_ready_owner_locked_until_original_drops() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut original = PrivateStateLock::acquire(temp.path()).unwrap();
+        original.mark_ready().unwrap();
+        let cloned = original.try_clone().unwrap();
+
+        drop(cloned);
+        assert_eq!(
+            PrivateStateLock::try_probe(temp.path()).unwrap(),
+            PrivateStateLockLiveness::LiveOwner
+        );
+        assert!(matches!(
+            PrivateStateLock::acquire(temp.path()),
+            Err(PrivateStateError::LockContended)
+        ));
+
+        drop(original);
+        assert_eq!(
+            PrivateStateLock::try_probe(temp.path()).unwrap(),
+            PrivateStateLockLiveness::NoLiveOwner
+        );
+        assert!(PrivateStateLock::acquire(temp.path()).is_ok());
     }
 
     #[test]

@@ -583,7 +583,9 @@ fn run_preparation_error_guidance(error: &PrivateStateError) -> &'static str {
         PrivateStateError::HealthInitializationFailed => {
             "Startup could not continue because sol could not clear the sync status from the previous run. Make sure sol can write its local data, then try again."
         }
-        _ => "Startup could not continue because sol could not safely prepare its private state.",
+        _ => {
+            "Startup could not continue because sol could not safely prepare its local data. Make sure sol can write its local data, then try again."
+        }
     }
 }
 
@@ -982,12 +984,18 @@ mod tests {
         let contention = run_preparation_error_guidance(&PrivateStateError::LockContended);
         let initialization =
             run_preparation_error_guidance(&PrivateStateError::HealthInitializationFailed);
+        let generic = run_preparation_error_guidance(&PrivateStateError::BridgeUnavailable);
         assert_eq!(contention, "Linked private state is already in use");
         assert_eq!(
             initialization,
             "Startup could not continue because sol could not clear the sync status from the previous run. Make sure sol can write its local data, then try again."
         );
+        assert_eq!(
+            generic,
+            "Startup could not continue because sol could not safely prepare its local data. Make sure sol can write its local data, then try again."
+        );
         assert_ne!(contention, initialization);
+        assert_ne!(generic, initialization);
     }
 
     #[test]
