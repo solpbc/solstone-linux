@@ -132,7 +132,7 @@ assert_exact_files "$release_directory"
 [[ -z "$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all)" ]] ||
     die "candidate validation changed the source tree"
 
-stage_root="$(mktemp -d "${TMPDIR:-/tmp}/solstone-linux-publish.XXXXXX")"
+stage_root="$(mktemp -d "$repo_root/dist/.solstone-linux-publish.XXXXXX")"
 cleanup() {
     rm -rf -- "$stage_root"
 }

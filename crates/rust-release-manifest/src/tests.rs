@@ -2518,6 +2518,16 @@ fn clean_tree_policy_distinguishes_source_from_ignored_outputs() {
 }
 
 #[test]
+fn native_publisher_stages_inside_the_ignored_dist_boundary() {
+    let publisher = include_str!("../../../scripts/publish-release.sh");
+    let repo_local_stage =
+        r#"stage_root="$(mktemp -d "$repo_root/dist/.solstone-linux-publish.XXXXXX")""#;
+
+    assert_eq!(publisher.matches(repo_local_stage).count(), 1);
+    assert!(!publisher.contains("${TMPDIR:-/tmp}/solstone-linux-publish"));
+}
+
+#[test]
 fn regular_file_mode_helpers_distinguish_executables() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("file");
