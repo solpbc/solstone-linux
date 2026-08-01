@@ -286,7 +286,11 @@ fn git_status() -> Vec<u8> {
 }
 
 fn write_os_release(path: &Path) {
-    fs::write(path, "ID=ubuntu\nID_LIKE=debian\n").unwrap();
+    fs::write(
+        path,
+        "ID=ubuntu\nID_LIKE=debian\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\n",
+    )
+    .unwrap();
 }
 
 fn installer_command(archive: &Path, os_release: &Path) -> Command {
@@ -361,6 +365,8 @@ fn installer_dry_run_is_write_free() {
 
     assert!(output.status.success(), "{}", output_text(&output));
     let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&format!("solstone-linux {VERSION} install plan")));
+    assert!(!stdout.contains("solstone-linux 24.04.4 LTS (Noble Numbat) install plan"));
     assert!(stdout.contains("install binary:"));
     assert!(stdout.contains("install icons:"));
     assert!(stdout.contains("install docs:"));

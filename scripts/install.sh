@@ -75,8 +75,8 @@ if [[ ! "$ARCHIVE_NAME" =~ ^solstone-linux-([0-9][0-9A-Za-z.+-]*)-linux-x86_64\.
   echo "error: unexpected archive name '$ARCHIVE_NAME'" >&2
   exit 1
 fi
-VERSION=${BASH_REMATCH[1]}
-TOP="solstone-linux-${VERSION}-linux-x86_64"
+RELEASE_VERSION=${BASH_REMATCH[1]}
+TOP="solstone-linux-${RELEASE_VERSION}-linux-x86_64"
 
 OS_RELEASE=${SOLSTONE_INSTALL_OS_RELEASE:-/etc/os-release}
 if [[ ! -r "$OS_RELEASE" ]]; then
@@ -131,7 +131,7 @@ for REQUIRED in \
   fi
 done
 
-echo "solstone-linux $VERSION install plan ($DISTRO_FAMILY, x86_64):"
+echo "solstone-linux $RELEASE_VERSION install plan ($DISTRO_FAMILY, x86_64):"
 echo "  install binary: $PREFIX/bin/solstone-linux"
 echo "  install icons:  $PREFIX/share/icons/hicolor/"
 echo "  install docs:   $PREFIX/share/doc/solstone-linux/"
@@ -170,5 +170,5 @@ while IFS= read -r -d '' ICON; do
   install -D -m 0644 "$ICON" "$PREFIX/share/icons/hicolor/$RELATIVE_ICON"
 done < <(find "$SOURCE/share/icons/hicolor" -type f -print0)
 
-echo "installed solstone-linux $VERSION under $PREFIX"
+echo "installed solstone-linux $RELEASE_VERSION under $PREFIX"
 echo "optional after the Rust command is implemented: solstone-linux install-service"

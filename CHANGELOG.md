@@ -6,6 +6,11 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-01
+
+### Fixed
+- the portable installer now names the sol version it installed instead of showing the Linux distribution version in its success message.
+
 ## [1.0.1] - 2026-08-01
 
 ### Changed
