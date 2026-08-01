@@ -724,7 +724,10 @@ pub(crate) fn curl_stdin_config(access_key: &str, secret_key: &str) -> Vec<u8> {
 
 pub(crate) fn curl_command(args: &[OsString]) -> Command {
     let mut command = Command::new("curl");
-    command.args(args).stdin(Stdio::piped());
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
     command
 }
 

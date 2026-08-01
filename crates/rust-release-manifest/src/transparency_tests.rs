@@ -1164,6 +1164,17 @@ fn transparency_curl_credentials_are_stdin_only() {
 }
 
 #[test]
+fn transparency_curl_command_captures_status_stdout() {
+    let mut child = curl_command(&[OsString::from("--version")])
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.starts_with(b"curl "));
+}
+
+#[test]
 fn transparency_fake_records_destinations_and_ordered_calls() {
     let mut fake = DirectoryTransport::new();
     let s3 = s3_destination("releases/solstone-linux/latest.json");
