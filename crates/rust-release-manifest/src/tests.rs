@@ -72,15 +72,12 @@ pub(super) fn tools() -> BTreeMap<String, String> {
 pub(super) fn evidence() -> Evidence {
     let repo = crate::candidate_tests::fixture();
     let root = repo.root.path();
-    let version: toml::Value =
-        toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
     Evidence {
         schema_version: 1,
         product: PRODUCT.into(),
-        version: version["workspace"]["package"]["version"]
-            .as_str()
-            .unwrap()
-            .into(),
+        // Release-tool fixtures deliberately stay on one synthetic version so
+        // a product version bump cannot rewrite hundreds of unrelated cases.
+        version: "1.0.0".into(),
         source_commit: command(root, &["git", "rev-parse", "HEAD"]).unwrap(),
         source_dirty: false,
         cargo_lock_sha256: digest(&fs::read(root.join("Cargo.lock")).unwrap()),

@@ -23,8 +23,8 @@ unimplemented = "deny"
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
-spl-core = { version = "0.1.0", git = "https://github.com/solpbc/spl-rust", rev = "e86c6d0fa0518fcde1fdc1d0e6b9c1ba090a9dbe" }
-spl-transport = { version = "0.1.0", git = "https://github.com/solpbc/spl-rust", rev = "e86c6d0fa0518fcde1fdc1d0e6b9c1ba090a9dbe" }
+spl-core = { version = "0.1.0", git = "https://github.com/solpbc/spl-rust", rev = "755876568fb3bdd165abdee37c45c22f905247cc" }
+spl-transport = { version = "0.1.0", git = "https://github.com/solpbc/spl-rust", rev = "755876568fb3bdd165abdee37c45c22f905247cc" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"

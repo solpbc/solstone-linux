@@ -10,6 +10,91 @@ use std::sync::OnceLock;
 
 static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
 
+fn normalize_fixture_workspace_version(path: &Path) {
+    let manifest = fs::read_to_string(path).unwrap();
+    let mut section = "";
+    let mut replaced = false;
+    let mut normalized = String::new();
+    for line in manifest.lines() {
+        if line.starts_with('[') {
+            section = line;
+        }
+        let line = if section == "[workspace.package]" && line.starts_with("version = ") {
+            replaced = true;
+            "version = \"1.0.0\""
+        } else {
+            line
+        };
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+    assert!(replaced, "fixture workspace version authority");
+    fs::write(path, normalized).unwrap();
+}
+
+fn normalize_fixture_lock_versions(path: &Path) {
+    let lock = fs::read_to_string(path).unwrap();
+    let mut package = "";
+    let mut replaced = 0;
+    let mut normalized = String::new();
+    for line in lock.lines() {
+        if let Some(name) = line
+            .strip_prefix("name = \"")
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            package = name;
+        }
+        let line = if line.starts_with("version = ")
+            && matches!(package, "rust-release-manifest" | "solstone-linux")
+        {
+            replaced += 1;
+            "version = \"1.0.0\""
+        } else {
+            line
+        };
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+    assert_eq!(replaced, 2, "fixture workspace lock authorities");
+    fs::write(path, normalized).unwrap();
+}
+
+fn normalize_fixture_release_policy(path: &Path) {
+    let policy = fs::read_to_string(path).unwrap();
+    let mut section = "";
+    let mut replaced = 0;
+    let mut normalized = String::new();
+    for line in policy.lines() {
+        if line.starts_with('[') {
+            section = line;
+        }
+        let line = if line.starts_with("install_command = ") {
+            let normalized = match section {
+                "[debian-amd64]" => {
+                    "install_command = [\"dpkg\", \"--install\", \"/input/solstone-linux_1.0.0-1_amd64.deb\"]"
+                }
+                "[rpm-x86_64]" => {
+                    "install_command = [\"rpm\", \"--install\", \"/input/solstone-linux-1.0.0-1.x86_64.rpm\"]"
+                }
+                "[tar-x86_64]" => {
+                    "install_command = [\"/input/install.sh\", \"--prefix\", \"/proof-root\", \"/input/solstone-linux-1.0.0-linux-x86_64.tar.gz\"]"
+                }
+                _ => line,
+            };
+            if normalized != line {
+                replaced += 1;
+            }
+            normalized
+        } else {
+            line
+        };
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+    assert_eq!(replaced, 3, "fixture release proof path authorities");
+    fs::write(path, normalized).unwrap();
+}
+
 fn staged_baseline(staging: &StagingLayout) -> ExecutableIdentity {
     let member = package_member_evidence(
         &staging
@@ -60,10 +145,13 @@ pub(super) fn fixture() -> TestRepo {
     Archive::new(Cursor::new(archive))
         .unpack(temp.path())
         .unwrap();
+    normalize_fixture_workspace_version(&temp.path().join("Cargo.toml"));
+    normalize_fixture_lock_versions(&temp.path().join("Cargo.lock"));
     let image_policy = Path::new("packaging/release-policy.toml");
     if !temp.path().join(image_policy).exists() {
         fs::copy(source.join(image_policy), temp.path().join(image_policy)).unwrap();
     }
+    normalize_fixture_release_policy(&temp.path().join(image_policy));
     for args in [
         &["init", "-q"][..],
         &["config", "user.email", "release-fixture@invalid.example"][..],
@@ -115,10 +203,13 @@ pub(super) fn sha256_fixture() -> TestRepo {
     Archive::new(Cursor::new(archive))
         .unpack(temp.path())
         .unwrap();
+    normalize_fixture_workspace_version(&temp.path().join("Cargo.toml"));
+    normalize_fixture_lock_versions(&temp.path().join("Cargo.lock"));
     let image_policy = Path::new("packaging/release-policy.toml");
     if !temp.path().join(image_policy).exists() {
         fs::copy(source.join(image_policy), temp.path().join(image_policy)).unwrap();
     }
+    normalize_fixture_release_policy(&temp.path().join(image_policy));
     assert!(
         Command::new("git")
             .args(["init", "-q", "--object-format=sha256"])
