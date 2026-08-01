@@ -6,11 +6,17 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-01
+
+### Changed
+- pairing on Linux now starts from a pair link created in your journal. after upgrading, pair this machine again; the previous journal address and key are not carried over.
+- native tar, deb, and rpm packages are now the maintained Linux releases. older PyPI versions remain available for legacy installs but do not receive new releases.
+
 ### Fixed
-- sol now reaches your journal even when your home network is out of reach, and no longer waits on a local connection that will never answer. if the first connection at startup does not get through, sol keeps trying on its own instead of staying quiet until you restart it.
-- sol no longer shows sync status left behind by a previous run while a new run is still starting.
-- a single refusal from your journal no longer stops uploads for the rest of the session. one refused request used to close sending for as long as sol kept running, with nothing shown anywhere. a refusal sol can recover from now backs off and retries on the existing schedule, and a device you have removed from your journal still stops for good.
-- sol now recovers on its own when your journal no longer recognises this machine. sol used to keep running with nothing arriving and nothing said about it. it now renews its identity with your journal once, resumes where it left off, and writes down what it did so you can confirm afterwards that it was a recovery. a machine you have removed from your journal is never brought back this way.
+- on some Linux setups with USB audio, sound from the computer was missing from your journal. sol now uses the active output for system audio and keeps that sound in your journal.
+- sol now reaches your journal when your home network is out of reach instead of waiting on a local connection that will never answer. if the first connection at startup does not get through, it keeps trying without needing a restart.
+- a temporary refusal or an identity your journal no longer recognizes no longer leaves sol running with nothing arriving for the rest of the session. sol backs off and tries again, renewing its identity once when needed. a machine you removed from your journal stays removed.
+- status now reflects the current run. it no longer carries over an earlier connection or tells an unpaired owner to wait for a connection that cannot start.
 
 ## [0.4.5] - 2026-07-13
 
