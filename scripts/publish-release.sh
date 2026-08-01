@@ -211,12 +211,14 @@ inspect_remote_tag() {
 
 read_release() {
     local pages
-    pages="$(gh api --paginate --slurp "repos/$repo/releases?per_page=100")" ||
+    pages="$(
+        gh api --paginate "repos/$repo/releases?per_page=100" --jq '.[]'
+    )" ||
         die "could not inspect releases"
-    jq \
+    jq -s \
         --arg tag "$tag" \
         --arg title "$title" \
-        '[.[][] | select(.tag_name == $tag or .name == $title)]' \
+        '[.[] | select(.tag_name == $tag or .name == $title)]' \
         <<<"$pages"
 }
 

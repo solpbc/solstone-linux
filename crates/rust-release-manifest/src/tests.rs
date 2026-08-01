@@ -2528,6 +2528,17 @@ fn native_publisher_stages_inside_the_ignored_dist_boundary() {
 }
 
 #[test]
+fn native_publisher_uses_portable_release_pagination() {
+    let publisher = include_str!("../../../scripts/publish-release.sh");
+    let portable_release_listing =
+        r#"gh api --paginate "repos/$repo/releases?per_page=100" --jq '.[]'"#;
+
+    assert_eq!(publisher.matches(portable_release_listing).count(), 1);
+    assert_eq!(publisher.matches("    jq -s \\\n").count(), 1);
+    assert!(!publisher.contains("--slurp"));
+}
+
+#[test]
 fn regular_file_mode_helpers_distinguish_executables() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("file");
