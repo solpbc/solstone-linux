@@ -1,13 +1,13 @@
-build_ubuntu = "sha256:fe55b59a0bf91500400224561640a164f4bd28e184d26a0428dfa78e5749f5ac"
-build_fedora = "sha256:dcf22dc5a7e8c0b11308668c5069ed9c087f7536ae4a1281d1262221ffedda0e"
-proof_debian = "sha256:fc359c65b35dbd516df9afb53ce8c39c4e8289257ae61bd3d3fe8a4166a04863"
-proof_rpm = "sha256:8983d883f8b8201cad767f0d112171e7c9007d19877fb22366e5d62d9e84f9a4"
-proof_tar = "sha256:fc359c65b35dbd516df9afb53ce8c39c4e8289257ae61bd3d3fe8a4166a04863"
+build_ubuntu = "sha256:a35dea288463b6dcfdf4cc09cc3e54934a0febee7c7cd23a8ac27a1724470462"
+build_fedora = "sha256:65c9b3b3825ceb59d85da7bd24ef3d883b6568cb0451957158c1954ecff7cf07"
+proof_debian = "sha256:839e7fdc7ca1a3b2e46fd534c19f6d2fcdb1d9cf5b4ee846f129c3492b97b8ff"
+proof_rpm = "sha256:abd1c847cec58081952712108cedae273b510b90cf5953045a6fbb8961db0f0b"
+proof_tar = "sha256:839e7fdc7ca1a3b2e46fd534c19f6d2fcdb1d9cf5b4ee846f129c3492b97b8ff"
 
 # Operator-owned values: verify these inside the provisioned digest images and
 # commit any corrections before selecting EXPECTED_RELEASE_COMMIT.
 [debian-amd64]
-image_digest = "sha256:fc359c65b35dbd516df9afb53ce8c39c4e8289257ae61bd3d3fe8a4166a04863"
+image_digest = "sha256:839e7fdc7ca1a3b2e46fd534c19f6d2fcdb1d9cf5b4ee846f129c3492b97b8ff"
 os_release = "Ubuntu 22.04.5 LTS"
 package_manager_version = "Debian 'dpkg' package management program version 1.21.1 (amd64)."
 install_command = ["dpkg", "--install", "/input/solstone-linux_1.0.1-1_amd64.deb"]
@@ -16,7 +16,7 @@ executable_path = "/usr/bin/solstone-linux"
 executable_mode = 493
 
 [rpm-x86_64]
-image_digest = "sha256:8983d883f8b8201cad767f0d112171e7c9007d19877fb22366e5d62d9e84f9a4"
+image_digest = "sha256:abd1c847cec58081952712108cedae273b510b90cf5953045a6fbb8961db0f0b"
 os_release = "Fedora Linux 42 (Container Image)"
 package_manager_version = "RPM version 4.20.1"
 install_command = ["rpm", "--install", "/input/solstone-linux-1.0.1-1.x86_64.rpm"]
@@ -25,7 +25,7 @@ executable_path = "/usr/bin/solstone-linux"
 executable_mode = 493
 
 [tar-x86_64]
-image_digest = "sha256:fc359c65b35dbd516df9afb53ce8c39c4e8289257ae61bd3d3fe8a4166a04863"
+image_digest = "sha256:839e7fdc7ca1a3b2e46fd534c19f6d2fcdb1d9cf5b4ee846f129c3492b97b8ff"
 os_release = "Ubuntu 22.04.5 LTS"
 package_manager_version = "installer portable-tar"
 install_command = ["/input/install.sh", "--prefix", "/proof-root", "/input/solstone-linux-1.0.1-linux-x86_64.tar.gz"]
