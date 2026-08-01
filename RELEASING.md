@@ -1,8 +1,8 @@
 # Native Rust release candidate rail
 
-The native rail creates local release-candidate evidence. It does not tag, sign,
-upload, publish, or approve publication. Publication is unavailable in this rail.
-Only x86_64 is supported.
+The native candidate rail creates local release-candidate evidence. It does not
+tag, upload, publish, or approve publication. Delivery is a separate operator
+step that accepts only the exact retained candidate. Only x86_64 is supported.
 
 Four evidence activities remain deliberately separate:
 
@@ -216,6 +216,27 @@ why in the release evidence — do not skip the measurement.
 
 This live checkpoint is separate operator evidence. It does not modify the ledger,
 proofs, bundle digest, or candidate status.
+
+## Delivery
+
+After `candidate-proven`, retained-candidate recovery, the live FLAC checkpoint,
+and the product release gates pass, publish the exact five-file candidate:
+
+```bash
+make publish-release RELEASE_DIR=dist/rust
+```
+
+The publisher requires a clean checkout at the manifest's exact source commit,
+re-runs read-only candidate recovery, and binds the workspace version, changelog,
+annotated tag, release metadata, and all five public files to that commit. GitHub
+is only the download surface: it does not build, validate, approve, or define the
+release. There is no GitHub workflow or repository-setting gate.
+
+The publisher creates or resumes one draft, uploads only missing files, downloads
+every existing file to compare its SHA-256 with the retained candidate, and
+publishes only a complete exact set. An exact published release is an idempotent
+success. Any differing tag, metadata, or file is a hard stop. Never move, replace,
+delete, or retarget release state; byte changes require a new version.
 
 ## Host and advisory gates
 

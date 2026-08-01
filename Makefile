@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -21,7 +21,7 @@ CARGO_GENERATE_RPM_VERSION := 0.21.0
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
 UBUNTU_STOCK_BASE := sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890
 FEDORA_STOCK_BASE := sha256:8c219b734f781909b9384edc01eb52318330b57fa58e0410dfcf973b01d28fcd
-SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/install.sh
+SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/extract_changelog.sh scripts/install.sh scripts/publish-release.sh
 
 all: install
 
@@ -150,6 +150,10 @@ check-audit-signed-packet: rust-preflight check-cargo-deny
 publish-transparency: rust-preflight
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
+
+publish-release: rust-preflight
+	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-release RELEASE_DIR=dist/rust" >&2; exit 1; }
+	bash scripts/publish-release.sh "$(RELEASE_DIR)"
 
 resign-transparency-pointer: rust-preflight
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency resign-pointer

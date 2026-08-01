@@ -46,6 +46,7 @@ make release-candidate  # Create and locally prove one atomic candidate
 make release-images  # Build the local Ubuntu and Fedora release build/proof images
 make release-candidate-prove  # Resume only missing package proofs
 make release-candidate-recover  # Read-only retained-candidate validation
+make publish-release RELEASE_DIR=dist/rust  # Publish the exact retained candidate
 make ci             # Host evidence: Rust format, lint, tests, offline policy
 make audit          # Refresh RustSec data, then check advisories
 make update-deps    # Sole unlocked Cargo dependency-update path
@@ -66,8 +67,8 @@ The root Cargo workspace is workspace-only: `crates/solstone-linux/` contains th
 
 ## Releasing
 
-The native rail creates portable, Debian, and RPM candidate artifacts plus three
-package-bound local proofs. Publication is unavailable.
+The native candidate rail creates portable, Debian, and RPM artifacts plus three
+package-bound local proofs. Publication is a separate operator step.
 
 ```bash
 make release-candidate EXPECTED_RELEASE_COMMIT=<commit> ADVISORY_DESCRIPTOR=<descriptor>
@@ -79,7 +80,7 @@ distinct evidence activities. `candidate-proven` and
 `retained-candidate-valid` are local evidence, not publication approval. The
 individual `scripts/build-release.sh` lanes write only non-candidate drift evidence.
 Follow `RELEASING.md` for image and advisory preconditions, stale-lock recovery,
-proof resume, read-only recovery, and the separate FLAC checkpoint.
+proof resume, read-only recovery, the separate FLAC checkpoint, and publication.
 
 ## File Headers
 
