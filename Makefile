@@ -142,8 +142,9 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	$(MAKE) shellcheck
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 
-check-transparency-minisign: rust-preflight
+check-transparency-minisign:
 	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
+	@$(MAKE) rust-preflight
 	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest transparency_tests::real_minisign_sign_verify_and_reject_tamper -- --exact --ignored
 
@@ -151,8 +152,9 @@ check-audit-signed-packet: rust-preflight check-cargo-deny
 	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest audit_tests::real_signed_packet_local_audit -- --exact --ignored
 
-publish-transparency: rust-preflight
+publish-transparency:
 	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
+	@$(MAKE) rust-preflight
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
 
@@ -160,8 +162,9 @@ publish-release: rust-preflight
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-release RELEASE_DIR=dist/rust" >&2; exit 1; }
 	bash scripts/publish-release.sh "$(RELEASE_DIR)"
 
-resign-transparency-pointer: rust-preflight
+resign-transparency-pointer:
 	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
+	@$(MAKE) rust-preflight
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency resign-pointer
 
 audit: rust-preflight check-cargo-deny
