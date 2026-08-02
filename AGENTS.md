@@ -131,11 +131,8 @@ the tests hold.
 
 ## Brand canon
 
-- **solstone-linux is an observer, but "observer" is an engineering word.** Owner-facing: solstone is the platform, **sol** is the app that lives on your devices, and **the journal** is the memory it keeps. "Observer" and "keeper" are engineering-internal only — never use them in owner-facing prose, and never give sol a role-noun title. Say what sol does with verbs: *sol keeps your journal*. In engineering architecture, `observers + sol agent + journal` is the running software this repo's code talks to, and this repo implements one of those observers.
-- **The journal is "the journal" or "your journal."** Never "journal host," "journal service," or "a server" in owner-facing prose. Those are backstage words; the package name is not the owner-facing name.
 - **Use co-experience language in branded prose.** In README, INSTALL, onboarding text, settings copy, and error messages, describe solstone-linux as something that experiences screen and audio along with the owner. Never describe it as watching, recording, monitoring, or tracking the owner.
 - **Keep code language in code-only contexts.** Internal architecture terms such as `Capture loop`, the capture pipeline, module names, and data-path names are canon-permitted here and must not be renamed just to match branded prose.
-- **Edit with the surface in mind.** If the owner sees the string, follow the canon. If the text is naming code, pipelines, modules, or storage artifacts for engineers, the existing internal vocabulary stays.
 
 ## License
 
