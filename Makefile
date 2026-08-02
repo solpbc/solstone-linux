@@ -18,6 +18,9 @@ CARGO_LOCKED := --locked
 CARGO_DENY_VERSION := 0.20.2
 CARGO_DEB_VERSION := 3.7.0
 CARGO_GENERATE_RPM_VERSION := 0.21.0
+# Transparency is paused during the Rust conversion freeze. Restore only after
+# the post-conversion review by changing this checked-in activation switch to 1.
+TRANSPARENCY_ACTIVATED ?= 0
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
 UBUNTU_STOCK_BASE := sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890
 FEDORA_STOCK_BASE := sha256:8c219b734f781909b9384edc01eb52318330b57fa58e0410dfcf973b01d28fcd
@@ -121,7 +124,7 @@ check-rust-release-manifest: rust-preflight
 		[ "$$actual" -eq 1 ] || { echo "error: release manifest test inventory mismatch: expected 1, actual $$actual" >&2; exit 1; }; \
 		output=$$(mktemp); \
 		trap 'rm -f "$$output"' EXIT; \
-		CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest >"$$output" 2>&1 || { status=$$?; tail -50 "$$output"; exit $$status; }; \
+		CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest -- --skip transparency >"$$output" 2>&1 || { status=$$?; tail -50 "$$output"; exit $$status; }; \
 		tail -50 "$$output"; \
 		results=$$(grep '^test result:' "$$output" || true); \
 		[ -n "$$results" ] && ! printf '%s\n' "$$results" | grep -Ev '^test result: ok\..*0 failed' >/dev/null && ! grep -F 'FAILED' "$$output" >/dev/null || { echo "error: release manifest test suite did not pass" >&2; exit 1; }; \
@@ -130,7 +133,7 @@ check-rust-release-manifest: rust-preflight
 shellcheck:
 	shellcheck $(SHELLCHECK_SCRIPTS)
 
-ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet
+ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-audit-signed-packet
 	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check
@@ -140,6 +143,7 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 
 check-transparency-minisign: rust-preflight
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
 	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest transparency_tests::real_minisign_sign_verify_and_reject_tamper -- --exact --ignored
 
@@ -148,6 +152,7 @@ check-audit-signed-packet: rust-preflight check-cargo-deny
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest audit_tests::real_signed_packet_local_audit -- --exact --ignored
 
 publish-transparency: rust-preflight
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
 
@@ -156,6 +161,7 @@ publish-release: rust-preflight
 	bash scripts/publish-release.sh "$(RELEASE_DIR)"
 
 resign-transparency-pointer: rust-preflight
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency resign-pointer
 
 audit: rust-preflight check-cargo-deny
