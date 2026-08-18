@@ -431,7 +431,7 @@ impl LinkedHarness {
             peer.credential(),
             "desktop",
             "K",
-            "/app/observer/ingest",
+            "/app/devices/ingest",
         )
         .await;
         let client = client(&config(temp), owner.capability());
@@ -581,7 +581,7 @@ async fn assert_upload_contract(
     let request = &requests[0];
     let body = String::from_utf8_lossy(&request.body);
     assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/app/observer/ingest");
+    assert_eq!(request.path, "/app/devices/ingest");
     assert!(header(request, "authorization").is_some_and(|value| value.starts_with("Bearer ")));
     assert_eq!(body.matches("name=\"day\"").count(), 1);
     assert_eq!(body.matches("name=\"segment\"").count(), 1);
@@ -700,7 +700,7 @@ async fn assert_listing_contract(
         let requests = harness.peer.requests();
         let request = &requests[0];
         assert_eq!(request.method, "GET");
-        assert_eq!(request.path, "/app/observer/ingest/segments/20260618");
+        assert_eq!(request.path, "/app/devices/ingest/segments/20260618");
         assert_eq!(header(request, "x-solstone-protocol-version"), Some("2"));
         let authorization = header(request, "authorization");
         assert!(authorization.is_some_and(|value| value.starts_with("Bearer ")));
@@ -839,7 +839,7 @@ async fn assert_event_and_register(
     let request = &requests[0];
     assert_eq!(
         (request.method.as_str(), request.path.as_str()),
-        ("POST", "/app/observer/ingest/event")
+        ("POST", "/app/devices/ingest/event")
     );
     assert_eq!(header(request, "content-type"), Some("application/json"));
     assert_eq!(
@@ -868,7 +868,7 @@ async fn assert_event_and_register(
         peer.credential(),
         label,
         "K",
-        "/app/observer/ingest",
+        "/app/devices/ingest",
     )
     .await;
     assert!(matches!(
@@ -882,7 +882,7 @@ async fn assert_event_and_register(
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(
         (request.method.as_str(), request.path.as_str()),
-        ("POST", "/app/observer/register")
+        ("POST", "/app/devices/register")
     );
     assert_eq!(body, fixtures[register_request]["payload"]);
     assert!(header(request, "authorization").is_none());

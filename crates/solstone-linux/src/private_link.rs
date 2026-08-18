@@ -55,7 +55,9 @@ pub(crate) const OBSERVER_HEADER_NAME: &str = "x-solstone-observer";
 pub(crate) const PROTOCOL_VERSION_HEADER_NAME: &str = "x-solstone-protocol-version";
 const REGISTRATION_MARKER_HEADER_NAME: &str = "x-solstone-linux-registration-route";
 const REGISTRATION_MARKER_HEADER_VALUE: &str = "1";
-const EVENT_PATH: &str = "/app/observer/ingest/event";
+const EVENT_PATH: &str = "/app/devices/ingest/event";
+const REGISTER_PATH: &str = "/app/devices/register";
+const INGEST_PATH: &str = "/app/devices/ingest";
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -748,6 +750,7 @@ pub(crate) fn load_observer(
     credential_instance_id: &str,
     expected_name: &str,
     origin: &Url,
+    fault: &dyn DurableWriteFault,
 ) -> Result<Option<ObserverState>, PrivateStateError> {
     let Some(bytes) = read_private_file(
         &config_root.join(OBSERVER_FILENAME),
@@ -756,10 +759,14 @@ pub(crate) fn load_observer(
     else {
         return Ok(None);
     };
-    let observer = serde_json::from_slice::<ObserverState>(&bytes)
+    let mut observer = serde_json::from_slice::<ObserverState>(&bytes)
         .map_err(|_| PrivateStateError::MalformedObserver)?;
     if !observer_is_valid(&observer, credential_instance_id, expected_name, origin) {
         return Ok(None);
+    }
+    if observer.ingest_url == "/app/observer/ingest" {
+        observer.ingest_url = INGEST_PATH.to_owned();
+        let _ = write_observer_durably(config_root, &observer, fault);
     }
     Ok(Some(observer))
 }
@@ -1435,7 +1442,7 @@ impl RegistrationCoordinator {
             "stream_type": "desktop",
             "version": self.version,
         });
-        let Ok(url) = confine_path(&self.origin, "/app/observer/register") else {
+        let Ok(url) = confine_path(&self.origin, REGISTER_PATH) else {
             return RepairOutcome::InvalidRegistration;
         };
         let response = match self
@@ -1601,7 +1608,7 @@ impl PrivateLinkOwner {
 
     #[cfg(test)]
     async fn register(&self, body: &serde_json::Value) -> LinkOutcome {
-        let Ok(url) = confine_path(&self.capability.inner.origin, "/app/observer/register") else {
+        let Ok(url) = confine_path(&self.capability.inner.origin, REGISTER_PATH) else {
             return LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             };
@@ -1648,7 +1655,7 @@ pub(crate) async fn start_private_link_owner(
 async fn finish_owner_start(
     mut session: PrivateLinkSession,
 ) -> Result<PrivateLinkOwner, PrivateStateError> {
-    let capability = session.capability("/app/observer/ingest".to_owned());
+    let capability = session.capability(INGEST_PATH.to_owned());
     if session.opener.generation() == 0 {
         match capability.report_unauthorized(0).await {
             RepairOutcome::Repaired { .. } | RepairOutcome::AlreadySuperseded { .. } => {}
@@ -1748,7 +1755,7 @@ impl PrivateLinkSession {
 
     #[cfg(test)]
     pub(crate) async fn register_for_test(&self, body: &serde_json::Value) -> LinkOutcome {
-        let Ok(url) = confine_path(&self.origin, "/app/observer/register") else {
+        let Ok(url) = confine_path(&self.origin, REGISTER_PATH) else {
             return LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             };
@@ -2030,6 +2037,7 @@ async fn start_private_link_session_inner(
         .iter()
         .map(|endpoint| endpoint.host.clone())
         .collect();
+    let persistence_fault = Arc::clone(&options.persistence_fault);
     let (token_persistence, hook) = TokenPersistence::new(
         config_root.clone(),
         credential.clone(),
@@ -2153,6 +2161,7 @@ async fn start_private_link_session_inner(
         &credential_instance_id,
         &expected_name,
         &origin,
+        persistence_fault.as_ref(),
     ) {
         Ok(Some(observer)) => {
             opener.set_registered(&observer)?;
@@ -2363,6 +2372,7 @@ mod tests {
             "instance",
             "stream",
             &Url::parse("http://127.0.0.1:1").unwrap(),
+            &NoWriteFault,
         )
         .unwrap();
         if let Some(observer) = loaded {
@@ -3108,7 +3118,7 @@ mod tests {
         assert_eq!(load_credential(temp.path()).unwrap(), Some(credential()));
         let origin = Url::parse("http://127.0.0.1:1234").unwrap();
         assert!(
-            load_observer(temp.path(), "instance", "stream", &origin)
+            load_observer(temp.path(), "instance", "stream", &origin, &NoWriteFault)
                 .unwrap()
                 .is_some()
         );
@@ -3124,6 +3134,42 @@ mod tests {
     }
 
     #[test]
+    fn load_observer_rewrites_predecessor_ingest_url_exactly() {
+        let origin = Url::parse("http://127.0.0.1:1234").unwrap();
+
+        let predecessor = tempfile::tempdir().unwrap();
+        ensure_private_directory(predecessor.path()).unwrap();
+        persist_observer(predecessor.path(), &observer("/app/observer/ingest")).unwrap();
+        let rewritten = load_observer(
+            predecessor.path(),
+            "instance",
+            "stream",
+            &origin,
+            &NoWriteFault,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(rewritten.ingest_url, "/app/devices/ingest");
+        let persisted: ObserverState =
+            serde_json::from_slice(&fs::read(predecessor.path().join(OBSERVER_FILENAME)).unwrap())
+                .unwrap();
+        assert_eq!(persisted.ingest_url, "/app/devices/ingest");
+
+        let devices = tempfile::tempdir().unwrap();
+        ensure_private_directory(devices.path()).unwrap();
+        persist_observer(devices.path(), &observer("/app/devices/ingest")).unwrap();
+        let prior_bytes = fs::read(devices.path().join(OBSERVER_FILENAME)).unwrap();
+        let loaded = load_observer(devices.path(), "instance", "stream", &origin, &NoWriteFault)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.ingest_url, "/app/devices/ingest");
+        assert_eq!(
+            fs::read(devices.path().join(OBSERVER_FILENAME)).unwrap(),
+            prior_bytes
+        );
+    }
+
+    #[test]
     fn malformed_state_errors_are_distinct() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join(CREDENTIALS_FILENAME), b"{").unwrap();
@@ -3134,7 +3180,7 @@ mod tests {
         fs::write(temp.path().join(OBSERVER_FILENAME), b"{").unwrap();
         let origin = Url::parse("http://127.0.0.1:1").unwrap();
         assert!(matches!(
-            load_observer(temp.path(), "instance", "stream", &origin),
+            load_observer(temp.path(), "instance", "stream", &origin, &NoWriteFault),
             Err(PrivateStateError::MalformedObserver)
         ));
     }
@@ -3173,7 +3219,7 @@ mod tests {
             let bytes = serde_json::to_vec(&state).unwrap();
             fs::write(temp.path().join(OBSERVER_FILENAME), &bytes).unwrap();
             assert!(
-                load_observer(temp.path(), "instance", "stream", &origin)
+                load_observer(temp.path(), "instance", "stream", &origin, &NoWriteFault)
                     .unwrap()
                     .is_none()
             );
@@ -3204,7 +3250,7 @@ mod tests {
             let bytes = serde_json::to_vec(&observer(path)).unwrap();
             fs::write(temp.path().join(OBSERVER_FILENAME), &bytes).unwrap();
             assert!(
-                load_observer(temp.path(), "instance", "stream", &origin)
+                load_observer(temp.path(), "instance", "stream", &origin, &NoWriteFault)
                     .unwrap()
                     .is_none(),
                 "{path}"
@@ -3233,6 +3279,7 @@ mod tests {
                     "instance",
                     "stream",
                     &Url::parse("http://127.0.0.1:1").unwrap(),
+                    &NoWriteFault,
                 )
                 .map(|_| ())
             };
@@ -3525,7 +3572,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             session
-                .request(Method::POST, "/app/observer/register")
+                .request(Method::POST, "/app/devices/register")
                 .unwrap()
                 .header(
                     REGISTRATION_MARKER_HEADER_NAME,
@@ -3541,7 +3588,7 @@ mod tests {
             &session,
             &ObserverState {
                 credential_instance_id,
-                ..observer("/app/observer/ingest")
+                ..observer("/app/devices/ingest")
             },
         )
         .unwrap();
@@ -3559,7 +3606,7 @@ mod tests {
         let requests = peer.requests();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].method, "POST");
-        assert_eq!(requests[0].path, "/app/observer/register");
+        assert_eq!(requests[0].path, "/app/devices/register");
         assert!(requests[0].body.is_empty());
         assert_eq!(
             requests[0]
@@ -3579,13 +3626,13 @@ mod tests {
         assert!(requests[1].body.is_empty());
         assert_registered_auth(&requests[1], "observer-key");
         assert_eq!(peer.accepted_carriers(), 1);
-        let capability = session.capability("/app/observer/ingest".to_owned());
+        let capability = session.capability("/app/devices/ingest".to_owned());
         let second_generation = publish_observer_registration(
             &session,
             &ObserverState {
                 credential_instance_id: session.credential_instance_id.clone(),
                 key: "replacement-key".into(),
-                ..observer("/app/observer/ingest")
+                ..observer("/app/devices/ingest")
             },
         )
         .unwrap();
@@ -3690,7 +3737,7 @@ mod tests {
     async fn capability_rejects_admin_path_query_and_route_substitution() {
         let peer = PrivateLinkPeer::start().await;
         let (_temp, session) = start_peer_session(&peer).await;
-        let capability = session.capability("/app/observer/ingest".to_owned());
+        let capability = session.capability("/app/devices/ingest".to_owned());
         for day in ["", "2026010", "202601011", "202601?1", "../20260101"] {
             assert!(matches!(
                 capability.list_day(day).await,
@@ -4257,6 +4304,7 @@ mod tests {
                     &restarted.credential_instance_id,
                     "stream",
                     &restarted.origin,
+                    &NoWriteFault,
                 )
                 .unwrap();
                 assert_eq!(
@@ -4507,6 +4555,69 @@ mod tests {
     #[tokio::test]
     async fn token_fsync_failure_drops_carrier_and_latches() {
         assert_token_failure(DurableWriteStage::Fsync).await;
+    }
+
+    #[tokio::test]
+    async fn session_start_rewrites_predecessor_observer_best_effort() {
+        let peer = PrivateLinkPeer::start().await;
+        let predecessor = ObserverState {
+            credential_instance_id: peer.credential().instance_id,
+            ..observer("/app/observer/ingest")
+        };
+
+        let unfaulted = tempfile::tempdir().unwrap();
+        persist_observer(unfaulted.path(), &predecessor).unwrap();
+        let session = start_private_link_session(unfaulted.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        assert_eq!(session.opener.generation(), 1);
+        let persisted: ObserverState =
+            serde_json::from_slice(&fs::read(unfaulted.path().join(OBSERVER_FILENAME)).unwrap())
+                .unwrap();
+        assert_eq!(persisted.ingest_url, "/app/devices/ingest");
+        session.shutdown().await.unwrap();
+
+        let faulted = tempfile::tempdir().unwrap();
+        persist_observer(faulted.path(), &predecessor).unwrap();
+        let prior_bytes = fs::read(faulted.path().join(OBSERVER_FILENAME)).unwrap();
+        let session = start_private_link_session_inner(
+            faulted.path(),
+            peer.credential(),
+            "stream",
+            SessionStartOptions {
+                persistence_fault: Arc::new(RecordingFault {
+                    stages: Arc::new(Mutex::new(Vec::new())),
+                    fail: Some(DurableWriteStage::Write),
+                }),
+                ..SessionStartOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.opener.generation(), 1);
+        assert_eq!(
+            fs::read(faulted.path().join(OBSERVER_FILENAME)).unwrap(),
+            prior_bytes
+        );
+        let loaded = load_observer(
+            faulted.path(),
+            &session.credential_instance_id,
+            "stream",
+            &session.origin,
+            &RecordingFault {
+                stages: Arc::new(Mutex::new(Vec::new())),
+                fail: Some(DurableWriteStage::Write),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(loaded.ingest_url, "/app/devices/ingest");
+        assert_eq!(
+            fs::read(faulted.path().join(OBSERVER_FILENAME)).unwrap(),
+            prior_bytes
+        );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     #[tokio::test]

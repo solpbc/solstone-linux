@@ -178,7 +178,7 @@ impl LinkedMockServer {
                 key: "K".to_owned(),
                 prefix: "prefix".to_owned(),
                 name: "desktop".to_owned(),
-                ingest_url: "/app/observer/ingest".to_owned(),
+                ingest_url: "/app/devices/ingest".to_owned(),
                 protocol_version: 2,
             },
         )
@@ -187,7 +187,7 @@ impl LinkedMockServer {
     }
 
     pub(crate) fn capability(&self) -> PrivateLinkCapability {
-        self.session.capability("/app/observer/ingest".to_owned())
+        self.session.capability("/app/devices/ingest".to_owned())
     }
 
     pub(crate) fn requests(&self) -> Vec<Received> {
@@ -438,12 +438,12 @@ mod tests {
     #[tokio::test]
     async fn counts_requests_by_uri_substring() {
         let server = MockServer::new(vec![(200, json!({}))]).await;
-        reqwest::get(format!("{}/app/observer/segments?day=20260101", server.url))
+        reqwest::get(format!("{}/app/devices/segments?day=20260101", server.url))
             .await
             .unwrap();
         wait_for_requests(&server, 1).await;
-        assert_eq!(server.request_count("/app/observer/segments"), 1);
-        assert_eq!(server.request_count("/app/observer/ingest"), 0);
+        assert_eq!(server.request_count("/app/devices/segments"), 1);
+        assert_eq!(server.request_count("/app/devices/ingest"), 0);
     }
 
     // AC: shared HTTP harness can emit test-controlled streaming chunks.

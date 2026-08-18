@@ -1083,7 +1083,7 @@ mod tests {
         let source = include_str!("cli.rs");
         assert!(source.contains("setup_with_stream("));
         assert!(!source.contains(&["UploadClient", "::new("].concat()));
-        assert!(!source.contains(&["/app/observer", "/register"].concat()));
+        assert!(!source.contains(&["/app/devices", "/register"].concat()));
         assert!(!source.contains(&[".bearer_", "auth("].concat()));
     }
 

@@ -972,14 +972,14 @@ mod tests {
                 key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host-a".into(),
-                ingest_url: "/app/observer/ingest".into(),
+                ingest_url: "/app/devices/ingest".into(),
                 protocol_version: 2,
             },
         )
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".into()),
+            session.capability("/app/devices/ingest".into()),
             "host-a",
             "linux",
             "0.1.0",
@@ -1013,14 +1013,14 @@ mod tests {
                 key: "STALE-KEY".into(),
                 prefix: "prefix".into(),
                 name: "desktop".into(),
-                ingest_url: "/app/observer/ingest".into(),
+                ingest_url: "/app/devices/ingest".into(),
                 protocol_version: 2,
             },
         )
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".into()),
+            session.capability("/app/devices/ingest".into()),
             "host",
             "linux",
             "test",
@@ -1277,14 +1277,14 @@ mod tests {
                 key: "K123456789".into(),
                 prefix: "prefix".into(),
                 name: "host-a".into(),
-                ingest_url: "/app/observer/ingest".into(),
+                ingest_url: "/app/devices/ingest".into(),
                 protocol_version: 2,
             },
         )
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".into()),
+            session.capability("/app/devices/ingest".into()),
             "host-a",
             "linux",
             "0.1.0",
@@ -1321,7 +1321,7 @@ mod tests {
         assert_eq!(requests.len(), 5);
         assert_eq!(
             (requests[0].method.as_str(), requests[0].path.as_str()),
-            ("POST", "/app/observer/register")
+            ("POST", "/app/devices/register")
         );
         assert_eq!(
             requests[0]
@@ -1349,7 +1349,7 @@ mod tests {
         );
         assert_eq!(
             (requests[1].method.as_str(), requests[1].path.as_str()),
-            ("POST", "/app/observer/ingest")
+            ("POST", "/app/devices/ingest")
         );
         assert_eq!(
             requests[1]
@@ -1410,7 +1410,7 @@ mod tests {
         );
         assert_eq!(
             (requests[2].method.as_str(), requests[2].path.as_str()),
-            ("GET", "/app/observer/ingest/segments/20260101")
+            ("GET", "/app/devices/ingest/segments/20260101")
         );
         assert_eq!(
             requests[2]
@@ -1444,7 +1444,7 @@ mod tests {
         ] {
             assert_eq!(
                 (request.method.as_str(), request.path.as_str()),
-                ("POST", "/app/observer/ingest/event")
+                ("POST", "/app/devices/ingest/event")
             );
             assert_eq!(
                 serde_json::from_slice::<Value>(&request.body).unwrap(),
@@ -1501,8 +1501,8 @@ mod tests {
         assert!(!client.relay_event("observe", "status", Map::new()).await);
         let requests = peer.requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].path, "/app/observer/ingest/event");
-        assert_eq!(requests[1].path, "/app/observer/register");
+        assert_eq!(requests[0].path, "/app/devices/ingest/event");
+        assert_eq!(requests[1].path, "/app/devices/register");
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -1533,7 +1533,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1
         );
@@ -1577,7 +1577,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1
         );
@@ -1603,7 +1603,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1
         );
@@ -1612,7 +1612,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             2
         );
@@ -1754,7 +1754,7 @@ mod tests {
         );
         let request = &server.requests()[0];
         assert_eq!(request.method, "POST");
-        assert_eq!(request.uri, "/app/observer/ingest");
+        assert_eq!(request.uri, "/app/devices/ingest");
         assert_eq!(request.headers["authorization"], "Bearer K");
         assert_eq!(request.headers[OBSERVER_PROTOCOL_VERSION_HEADER], "2");
         let body = String::from_utf8_lossy(&request.body);
@@ -1984,7 +1984,7 @@ mod tests {
                 .await
         );
         let request = &server.requests()[0];
-        assert_eq!(request.uri, "/app/observer/ingest/event");
+        assert_eq!(request.uri, "/app/devices/ingest/event");
         assert_eq!(request.headers["authorization"], "Bearer K");
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(
@@ -2014,7 +2014,7 @@ mod tests {
         assert_eq!(result.segments, Some(vec![]));
         assert!(result.legacy);
         let request = &server.requests()[0];
-        assert_eq!(request.uri, "/app/observer/ingest/segments/20260101");
+        assert_eq!(request.uri, "/app/devices/ingest/segments/20260101");
         assert_eq!(request.headers["authorization"], "Bearer K");
         assert_eq!(request.headers[OBSERVER_PROTOCOL_VERSION_HEADER], "2");
     }
@@ -2130,7 +2130,7 @@ mod tests {
             .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".to_owned()),
+            session.capability("/app/devices/ingest".to_owned()),
             "host",
             "linux",
             "test",
@@ -2290,7 +2290,7 @@ mod tests {
         };
         let client = UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".to_owned()),
+            session.capability("/app/devices/ingest".to_owned()),
             "host",
             "linux",
             "1",
@@ -2368,14 +2368,14 @@ mod tests {
                 key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host-a".into(),
-                ingest_url: "/app/observer/ingest".into(),
+                ingest_url: "/app/devices/ingest".into(),
                 protocol_version: 2,
             },
         )
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".into()),
+            session.capability("/app/devices/ingest".into()),
             "host-a",
             "linux",
             "0.1.0",
@@ -2507,7 +2507,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1
         );
@@ -2525,7 +2525,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1
         );

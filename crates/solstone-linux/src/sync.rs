@@ -1275,14 +1275,14 @@ mod tests {
                 key: "STALE-KEY-FULL".to_owned(),
                 prefix: "prefix".to_owned(),
                 name: "desktop".to_owned(),
-                ingest_url: "/app/observer/ingest".to_owned(),
+                ingest_url: "/app/devices/ingest".to_owned(),
                 protocol_version: 2,
             },
         )
         .unwrap();
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".to_owned()),
+            session.capability("/app/devices/ingest".to_owned()),
             "host",
             "linux",
             "test",
@@ -1333,7 +1333,7 @@ mod tests {
         server
             .logged_requests()
             .iter()
-            .filter(|request| request.uri == "/app/observer/ingest")
+            .filter(|request| request.uri == "/app/devices/ingest")
             .count()
     }
 
@@ -2709,7 +2709,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1
         );
@@ -2756,7 +2756,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1
         );
@@ -3086,7 +3086,7 @@ mod tests {
         let capped_steps = (14_400.0 / CIRCUIT_COOLDOWN_MAX).ceil() as usize;
         let bound = CIRCUIT_THRESHOLD_TRANSIENT as usize + ramp_steps + capped_steps + 1;
         assert!(
-            server.request_count("/app/observer/ingest/segments/") <= bound,
+            server.request_count("/app/devices/ingest/segments/") <= bound,
             "listing retries exceeded conservative bound {bound}"
         );
         assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_MAX);
@@ -3303,7 +3303,7 @@ mod tests {
                 key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host".into(),
-                ingest_url: "/app/observer/ingest".into(),
+                ingest_url: "/app/devices/ingest".into(),
                 protocol_version: 2,
             },
         )
@@ -3314,7 +3314,7 @@ mod tests {
         });
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".into()),
+            session.capability("/app/devices/ingest".into()),
             "host",
             "linux",
             "test",
@@ -3370,7 +3370,7 @@ mod tests {
                 key: "K".to_owned(),
                 prefix: "prefix".into(),
                 name: "host".into(),
-                ingest_url: "/app/observer/ingest".into(),
+                ingest_url: "/app/devices/ingest".into(),
                 protocol_version: 2,
             },
         )
@@ -3381,7 +3381,7 @@ mod tests {
         });
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".into()),
+            session.capability("/app/devices/ingest".into()),
             "host",
             "linux",
             "test",
@@ -4155,7 +4155,7 @@ mod tests {
             .unwrap();
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".to_owned()),
+            session.capability("/app/devices/ingest".to_owned()),
             "host",
             "linux",
             "test",
@@ -4217,7 +4217,7 @@ mod tests {
             .unwrap();
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".to_owned()),
+            session.capability("/app/devices/ingest".to_owned()),
             "host",
             "linux",
             "test",
@@ -4285,7 +4285,7 @@ mod tests {
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".to_owned()),
+            session.capability("/app/devices/ingest".to_owned()),
             "host",
             "linux",
             "test",
@@ -4325,7 +4325,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             1,
             "registration requests during cooldown"
@@ -4338,7 +4338,7 @@ mod tests {
             if peer
                 .requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count()
                 >= 2
             {
@@ -4349,7 +4349,7 @@ mod tests {
         assert_eq!(
             peer.requests()
                 .iter()
-                .filter(|request| request.path == "/app/observer/register")
+                .filter(|request| request.path == "/app/devices/register")
                 .count(),
             2,
             "registration requests after cooldown"
@@ -4466,7 +4466,7 @@ mod tests {
         let upload = server
             .requests()
             .into_iter()
-            .find(|request| request.uri == "/app/observer/ingest")
+            .find(|request| request.uri == "/app/devices/ingest")
             .expect("final segment upload");
         assert!(String::from_utf8_lossy(&upload.body).contains("final screen"));
         let facts = load_facts(&config.state_dir());

@@ -1353,7 +1353,7 @@ mod tests {
         let session = start_private_link_session(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
-        let capability = session.capability("/app/observer/ingest".to_owned());
+        let capability = session.capability("/app/devices/ingest".to_owned());
         let config = Config {
             config_dir: temp.path().to_path_buf(),
             stream: "stream".to_owned(),
@@ -1380,7 +1380,7 @@ mod tests {
         assert!(
             peer.requests()
                 .iter()
-                .all(|request| request.path == "/app/observer/register")
+                .all(|request| request.path == "/app/devices/register")
         );
         response_gate.store(true, Ordering::Release);
         peer.notify_response_gates();
@@ -1585,7 +1585,7 @@ mod tests {
                 key: "K".to_owned(),
                 prefix: "prefix".to_owned(),
                 name: "stream".to_owned(),
-                ingest_url: "/app/observer/ingest".to_owned(),
+                ingest_url: "/app/devices/ingest".to_owned(),
                 protocol_version: 2,
             },
         )
@@ -1597,7 +1597,7 @@ mod tests {
         };
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/observer/ingest".to_owned()),
+            session.capability("/app/devices/ingest".to_owned()),
             "host",
             "linux",
             "1",
@@ -1640,7 +1640,7 @@ mod tests {
             reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(stream)),
         );
         let request = tokio::spawn({
-            let capability = session.capability("/app/observer/ingest".to_owned());
+            let capability = session.capability("/app/devices/ingest".to_owned());
             async move { capability.ingest(form).await }
         });
         assert_real_observer_ticks_advance();
