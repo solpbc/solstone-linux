@@ -641,4 +641,27 @@ mod tests {
         .unwrap();
         assert_eq!(read_segment_start(&extra), Some(1_700_000_000.0));
     }
+
+    #[test]
+    fn metadata_document_byte_shape() {
+        let t = tempfile::tempdir().unwrap();
+        write_segment_metadata(t.path(), 1234.5, SegmentProgress::default());
+        assert_eq!(
+            fs::read_to_string(t.path().join(METADATA_FILENAME)).unwrap(),
+            "{\"start_timestamp\":1234.5,\"has_durable_media\":false,\"durable_byte_count\":0}\n"
+        );
+        write_segment_metadata(
+            t.path(),
+            1234.5,
+            SegmentProgress {
+                has_durable_media: true,
+                durable_byte_count: 4,
+                last_durable_write_at: Some(5678.5),
+            },
+        );
+        assert_eq!(
+            fs::read_to_string(t.path().join(METADATA_FILENAME)).unwrap(),
+            "{\"start_timestamp\":1234.5,\"has_durable_media\":true,\"durable_byte_count\":4,\"last_durable_write_at\":5678.5}\n"
+        );
+    }
 }
