@@ -44,7 +44,7 @@ pub fn finalize_segment_dir(incomplete: &Path, key: &str) -> io::Result<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recovery::{read_segment_start, write_segment_metadata};
+    use crate::recovery::{SegmentProgress, read_segment_start, write_segment_metadata};
 
     // observer.py::_get_timestamp_parts shape contract.
     #[test]
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn metadata_round_trip() {
         let t = tempfile::tempdir().unwrap();
-        write_segment_metadata(t.path(), 1234.5);
+        write_segment_metadata(t.path(), 1234.5, SegmentProgress::default());
         assert_eq!(read_segment_start(t.path()), Some(1234.5));
     }
 }

@@ -8,7 +8,7 @@ use crate::{
     chunking::{DrainedChunk, HitGate},
     config::Config,
     encoding::{AudioOutputPlan, audio_output_plan},
-    recovery::write_segment_metadata,
+    recovery::{SegmentProgress, scan_segment_progress, write_segment_metadata},
     segment::{clamp_duration, finalize_segment_dir, segment_key, timestamp_parts},
     streams::is_healthy_file_size,
 };
@@ -144,6 +144,8 @@ pub struct Registration {
     pub health: HealthBeacon,
 }
 
+pub const EMPTY_WINDOW_REASON: &str = "empty_window";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamSilentEvent {
     pub connector: String,
@@ -154,6 +156,7 @@ pub struct StreamSilentEvent {
     pub duration_seconds: i64,
     pub host: String,
     pub platform: String,
+    pub reason: Option<&'static str>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentCompletedEvent {
@@ -235,6 +238,9 @@ pub struct ObserverState {
     pub cached_is_active: bool,
     pub cached_activity: ActivityState,
     pub current_streams: Vec<VideoStream>,
+    // Survives stop_video: the watchdog must not look like "video never started".
+    pub video_started: bool,
+    pub empty_window_signalled: bool,
     pub hit_gate: HitGate,
     pub frames: Vec<f32>,
     pub capture_stats: CaptureStats,
@@ -290,6 +296,8 @@ where
                 cached_is_active: false,
                 cached_activity: ActivityState::default(),
                 current_streams: vec![],
+                video_started: false,
+                empty_window_signalled: false,
                 hit_gate: HitGate::default(),
                 frames: vec![],
                 capture_stats: CaptureStats {
@@ -364,6 +372,20 @@ where
             self.publish();
             return Ok(());
         }
+        if let Some(dir) = self.state.segment_dir.as_ref() {
+            let (has_durable_media, durable_byte_count) = scan_segment_progress(dir);
+            let last_durable_write_at =
+                has_durable_media.then(|| self.backends.clock.wall_seconds());
+            write_segment_metadata(
+                dir,
+                self.state.segment_start_wall,
+                SegmentProgress {
+                    has_durable_media,
+                    durable_byte_count,
+                    last_durable_write_at,
+                },
+            );
+        }
         let target = self.probe_status().unwrap_or(self.state.mode);
         if self.state.mode == Mode::Screencast && !self.backends.video.is_healthy() {
             self.stop_video()?;
@@ -392,6 +414,27 @@ where
         self.write_gated_audio()?;
         self.state.frames.clear();
         self.state.hit_gate = HitGate::default();
+        // shutdown and finish_paused_segment deliberately do not signal empty_window.
+        if let Some(dir) = self.state.segment_dir.as_ref() {
+            let (has_media, _) = scan_segment_progress(dir);
+            if has_media {
+                self.state.empty_window_signalled = false;
+            } else if !self.state.video_started && !self.state.empty_window_signalled {
+                // !video_started keeps the watchdog path from double-counting: x11/portal
+                // unlink header-only webms inside stop() before emit_silent, so emptiness
+                // alone is not sufficient.
+                self.emit_silent(
+                    StoppedStream {
+                        node_id: 0,
+                        connector: String::new(),
+                        position: String::new(),
+                        file_bytes: 0,
+                    },
+                    Some(EMPTY_WINDOW_REASON),
+                );
+                self.state.empty_window_signalled = true;
+            }
+        }
         self.finalize_segment()?;
         self.state.segment_is_muted = self.state.cached_is_muted;
         self.state.mode = target;
@@ -451,6 +494,7 @@ where
                 return Err(ObserverError::VideoStart("no streams available".into()));
             }
             self.state.current_streams = streams;
+            self.state.video_started = true;
         }
         Ok(())
     }
@@ -464,10 +508,11 @@ where
             .join(&self.config.stream)
             .join(format!("{time}.incomplete"));
         fs::create_dir_all(&dir)?;
-        write_segment_metadata(&dir, wall);
+        write_segment_metadata(&dir, wall, SegmentProgress::default());
         self.state.segment_start_wall = wall;
         self.state.segment_start_mono = self.backends.clock.monotonic_seconds();
         self.state.segment_dir = Some(dir.clone());
+        self.state.video_started = false;
         Ok(dir)
     }
     fn finalize_segment(&mut self) -> Result<(), ObserverError> {
@@ -503,11 +548,11 @@ where
             .into_iter()
             .filter(|s| !is_healthy_file_size(Some(s.file_bytes)))
         {
-            self.emit_silent(s)
+            self.emit_silent(s, None)
         }
         Ok(())
     }
-    fn emit_silent(&mut self, s: StoppedStream) {
+    fn emit_silent(&mut self, s: StoppedStream, reason: Option<&'static str>) {
         let segment_dir = self
             .state
             .segment_dir
@@ -527,6 +572,7 @@ where
             duration_seconds,
             host: self.host.clone(),
             platform: self.platform.clone(),
+            reason,
         });
     }
     fn refresh_stats(&mut self) {
@@ -1491,12 +1537,15 @@ pub(crate) mod tests {
         let mut f = fixture(true);
         initialize(&mut f);
         f.wall.set(f.wall.get() - 10.0);
-        f.observer.emit_silent(StoppedStream {
-            node_id: 1,
-            connector: "x".into(),
-            position: "p".into(),
-            file_bytes: 1,
-        });
+        f.observer.emit_silent(
+            StoppedStream {
+                node_id: 1,
+                connector: "x".into(),
+                position: "p".into(),
+                file_bytes: 1,
+            },
+            None,
+        );
         let s = f.events.silent.borrow();
         assert_eq!(s[0].segment_dir, "");
         assert_eq!(s[0].duration_seconds, -10)
@@ -1695,5 +1744,217 @@ pub(crate) mod tests {
                 "{forbidden}"
             );
         }
+    }
+
+    fn sidecar(dir: &Path) -> Value {
+        serde_json::from_str(&fs::read_to_string(dir.join(".metadata")).unwrap()).unwrap()
+    }
+
+    // AC1: open sidecar is default progress with last_durable_write_at omitted.
+    #[test]
+    fn open_metadata_is_default_progress() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let meta = sidecar(f.observer.state.segment_dir.as_ref().unwrap());
+        assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
+        assert_eq!(meta["has_durable_media"], false);
+        assert_eq!(meta["durable_byte_count"], 0);
+        assert!(meta.get("last_durable_write_at").is_none());
+    }
+
+    // AC2: production tick refresh sees a test-planted file. Do not call the writer.
+    #[test]
+    fn tick_refresh_stamps_observer_wall() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let dir = f.observer.state.segment_dir.clone().unwrap();
+        fs::write(dir.join("planted.bin"), b"abcd").unwrap();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
+        let meta = sidecar(&dir);
+        assert_eq!(meta["has_durable_media"], true);
+        assert_eq!(meta["durable_byte_count"], 4);
+        assert_eq!(meta["last_durable_write_at"], 1_700_000_000.0);
+        assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
+    }
+
+    // AC3: a tick with no media omits last_durable_write_at.
+    #[test]
+    fn tick_refresh_without_media_omits_write_at() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let dir = f.observer.state.segment_dir.clone().unwrap();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
+        let meta = sidecar(&dir);
+        assert_eq!(meta["has_durable_media"], false);
+        assert_eq!(meta["durable_byte_count"], 0);
+        assert!(meta.get("last_durable_write_at").is_none());
+    }
+
+    // AC4: start_timestamp is write-once from state; last_durable_write_at is the refresh wall.
+    #[test]
+    fn tick_refresh_keeps_open_start_timestamp() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let dir = f.observer.state.segment_dir.clone().unwrap();
+        fs::write(dir.join("planted.bin"), b"x").unwrap();
+        f.wall.set(1_700_000_050.0);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
+        let meta = sidecar(&dir);
+        assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
+        assert_eq!(meta["last_durable_write_at"], 1_700_000_050.0);
+        assert_eq!(
+            crate::recovery::read_segment_start(&dir),
+            Some(1_700_000_000.0)
+        );
+    }
+
+    // AC6: empty-window latch across consecutive empty rotations and a media reset.
+    #[test]
+    fn empty_window_latch_across_rotations() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let first = f.observer.state.segment_dir.clone().unwrap();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.wall.set(1_700_000_001.0);
+        f.mono.set(300.0);
+        f.observer.tick().unwrap();
+        assert!(!first.exists());
+        {
+            let silent = f.events.silent.borrow();
+            assert_eq!(silent.len(), 1);
+            assert_eq!(silent[0].reason, Some(EMPTY_WINDOW_REASON));
+            assert_eq!(silent[0].connector, "");
+            assert_eq!(silent[0].position, "");
+            assert_eq!(silent[0].node_id, 0);
+            assert_eq!(silent[0].file_bytes, 0);
+            assert!(silent[0].segment_dir.ends_with(".incomplete"));
+            assert_eq!(silent[0].duration_seconds, 1);
+            assert_eq!(silent[0].host, "host");
+            assert_eq!(silent[0].platform, "linux");
+        }
+        assert!(f.events.completed.borrow().is_empty());
+
+        let second = f.observer.state.segment_dir.clone().unwrap();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.wall.set(1_700_000_002.0);
+        f.mono.set(600.0);
+        f.observer.tick().unwrap();
+        assert!(!second.exists());
+        assert_eq!(f.events.silent.borrow().len(), 1);
+        assert!(f.events.completed.borrow().is_empty());
+
+        let media = f.observer.state.segment_dir.clone().unwrap();
+        fs::write(media.join("kept.bin"), b"keep").unwrap();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.wall.set(1_700_000_003.0);
+        f.mono.set(900.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.events.silent.borrow().len(), 1);
+        assert_eq!(f.events.completed.borrow().len(), 1);
+        assert!(!f.observer.state.empty_window_signalled);
+
+        let fourth = f.observer.state.segment_dir.clone().unwrap();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.wall.set(1_700_000_004.0);
+        f.mono.set(1_200.0);
+        f.observer.tick().unwrap();
+        assert!(!fourth.exists());
+        assert_eq!(f.events.silent.borrow().len(), 2);
+        assert_eq!(
+            f.events.silent.borrow()[1].reason,
+            Some(EMPTY_WINDOW_REASON)
+        );
+        assert_eq!(f.events.completed.borrow().len(), 1);
+    }
+
+    // AC7: unhealthy silent is unchanged and is not joined by empty_window.
+    #[test]
+    fn unhealthy_silent_is_not_empty_window() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        f.observer.backends.video.stopped = vec![
+            StoppedStream {
+                node_id: 1,
+                connector: "x".into(),
+                position: "left".into(),
+                file_bytes: 2047,
+            },
+            StoppedStream {
+                node_id: 2,
+                connector: "y".into(),
+                position: "right".into(),
+                file_bytes: 2048,
+            },
+        ];
+        f.wall.set(f.wall.get() + 400.0);
+        f.observer.handle_boundary(Mode::Idle).unwrap();
+        let silent = f.events.silent.borrow();
+        assert_eq!(silent.len(), 1);
+        assert_eq!(silent[0].connector, "x");
+        assert_eq!(silent[0].position, "left");
+        assert_eq!(silent[0].node_id, 1);
+        assert_eq!(silent[0].file_bytes, 2047);
+        assert!(silent[0].reason.is_none());
+        assert!(
+            silent
+                .iter()
+                .all(|event| event.reason != Some(EMPTY_WINDOW_REASON))
+        );
+    }
+
+    // AC8: Idle→Idle boundary that keeps planted media completes and does not signal empty_window.
+    #[test]
+    fn idle_boundary_with_media_completes_without_empty_window() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        fs::write(
+            f.observer
+                .state
+                .segment_dir
+                .as_ref()
+                .unwrap()
+                .join("kept.bin"),
+            b"keep",
+        )
+        .unwrap();
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.mono.set(300.0);
+        f.observer.tick().unwrap();
+        assert!(f.events.silent.borrow().is_empty());
+        assert_eq!(f.events.completed.borrow().len(), 1);
+    }
+
+    // Watchdog already emitted (or would have) via stop_video; video_started blocks empty_window.
+    #[test]
+    fn watchdog_stop_does_not_also_emit_empty_window() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        fs::remove_file(
+            f.observer
+                .state
+                .segment_dir
+                .as_ref()
+                .unwrap()
+                .join("screen.webm"),
+        )
+        .unwrap();
+        f.observer.backends.video.healthy = false;
+        f.observer.tick().unwrap();
+        assert!(
+            f.events
+                .silent
+                .borrow()
+                .iter()
+                .all(|event| event.reason != Some(EMPTY_WINDOW_REASON))
+        );
     }
 }

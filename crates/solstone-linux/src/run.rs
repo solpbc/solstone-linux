@@ -665,6 +665,22 @@ impl SyncWake for SyncTrigger {
     }
 }
 
+fn stream_silent_fields(event: &StreamSilentEvent) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("connector".into(), json!(event.connector));
+    fields.insert("position".into(), json!(event.position));
+    fields.insert("node_id".into(), json!(event.node_id));
+    fields.insert("file_bytes".into(), json!(event.file_bytes));
+    fields.insert("segment_dir".into(), json!(event.segment_dir));
+    fields.insert("duration_seconds".into(), json!(event.duration_seconds));
+    fields.insert("host".into(), json!(event.host));
+    fields.insert("platform".into(), json!(event.platform));
+    if let Some(reason) = event.reason {
+        fields.insert("reason".into(), json!(reason));
+    }
+    fields
+}
+
 struct UploadEventSink<W = SyncTrigger> {
     client: Arc<UploadClient>,
     sync: W,
@@ -675,16 +691,9 @@ impl<W: SyncWake> EventSink for UploadEventSink<W> {
         self.client.enqueue_status(fields);
     }
     fn stream_silent(&mut self, event: StreamSilentEvent) {
-        let mut fields = Map::new();
-        fields.insert("connector".into(), json!(event.connector));
-        fields.insert("position".into(), json!(event.position));
-        fields.insert("node_id".into(), json!(event.node_id));
-        fields.insert("file_bytes".into(), json!(event.file_bytes));
-        fields.insert("segment_dir".into(), json!(event.segment_dir));
-        fields.insert("duration_seconds".into(), json!(event.duration_seconds));
-        fields.insert("host".into(), json!(event.host));
-        fields.insert("platform".into(), json!(event.platform));
-        let _ = self.client.enqueue_stream_silent(fields);
+        let _ = self
+            .client
+            .enqueue_stream_silent(stream_silent_fields(&event));
     }
     fn segment_completed(&mut self, event: SegmentCompletedEvent) {
         tracing::debug!(key = %event.key, "segment completed");
@@ -1000,6 +1009,7 @@ mod tests {
             duration_seconds: 1,
             host: "h".into(),
             platform: "linux".into(),
+            reason: None,
         });
         assert_eq!(count.load(Ordering::Acquire), 0);
         sink.segment_completed(SegmentCompletedEvent {
@@ -1009,6 +1019,45 @@ mod tests {
         drop(sink);
         let mut client = Arc::try_unwrap(client).ok().expect("sink released client");
         client.stop(Duration::from_secs(1)).await;
+    }
+
+    // AC9: reason is omitted when None and present only when Some.
+    #[test]
+    fn stream_silent_omits_reason_unless_some() {
+        let none = stream_silent_fields(&StreamSilentEvent {
+            connector: "c".into(),
+            position: "p".into(),
+            node_id: 1,
+            file_bytes: 0,
+            segment_dir: "s".into(),
+            duration_seconds: 1,
+            host: "h".into(),
+            platform: "linux".into(),
+            reason: None,
+        });
+        assert!(none.get("reason").is_none());
+        assert_eq!(none["connector"], json!("c"));
+        assert_eq!(none["position"], json!("p"));
+        assert_eq!(none["node_id"], json!(1));
+        assert_eq!(none["file_bytes"], json!(0));
+        assert_eq!(none["segment_dir"], json!("s"));
+        assert_eq!(none["duration_seconds"], json!(1));
+        assert_eq!(none["host"], json!("h"));
+        assert_eq!(none["platform"], json!("linux"));
+
+        let some = stream_silent_fields(&StreamSilentEvent {
+            connector: "c".into(),
+            position: "p".into(),
+            node_id: 1,
+            file_bytes: 0,
+            segment_dir: "s".into(),
+            duration_seconds: 1,
+            host: "h".into(),
+            platform: "linux".into(),
+            reason: Some(crate::observer::EMPTY_WINDOW_REASON),
+        });
+        assert_eq!(some["reason"], json!("empty_window"));
+        assert_eq!(some["connector"], json!("c"));
     }
 
     // AC: 8 — desktop tasks stop before final observer work, walker join, and sender stop.
