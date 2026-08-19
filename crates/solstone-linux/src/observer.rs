@@ -647,7 +647,7 @@ where
         m.insert("paused".into(), json!(self.state.paused));
         if self.registration.is_registered && !self.config.stream.is_empty() {
             m.insert("name".into(), json!(self.config.stream));
-            m.insert("stream_type".into(), json!("computer"));
+            m.insert("stream_type".into(), json!("desktop"));
             m.insert("version".into(), json!(self.registration.version));
             // Deliberate reference parity: uptime is segment elapsed, not process uptime.
             m.insert("uptime".into(), json!(elapsed));
@@ -1489,7 +1489,7 @@ pub(crate) mod tests {
         assert!(!keys.contains("health"));
         let status = s.last().unwrap();
         assert_eq!(status["name"], "desk");
-        assert_eq!(status["stream_type"], "computer");
+        assert_eq!(status["stream_type"], "desktop");
         assert_eq!(status["version"], "1");
         assert!(status["uptime"].is_i64());
         assert_eq!(status["screencast"]["recording"], true);
