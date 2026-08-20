@@ -385,7 +385,7 @@ mod tests {
         );
     }
     #[test]
-    fn update_needed_uses_live_error_icon_and_attention() {
+    fn update_needed_uses_live_attention_icon_and_attention() {
         let h = derive_health(
             &SyncFacts {
                 last_error_class: Some(crate::sync_health::ErrorType::Incompatible),

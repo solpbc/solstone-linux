@@ -557,7 +557,7 @@ mod tests {
 // test_update_sync_synced -> tray_model::tests::sync_labels_follow_resolved_health_surfaces.
 // test_update_sync_syncing -> tray_model::tests::sync_labels_follow_resolved_health_surfaces.
 // test_update_sync_offline -> tray_model::tests::sync_labels_follow_resolved_health_surfaces.
-// test_update_sync_update_needed_sets_attention -> tray_model::tests::update_needed_uses_live_error_icon_and_attention.
+// test_update_sync_update_needed_sets_attention -> tray_model::tests::update_needed_uses_live_attention_icon_and_attention.
 // test_update_live_stats_updates_labels -> tray_model::tests::live_stats_and_tooltip_are_rendered_from_snapshot_and_health.
 // test_update_live_stats_skips_unchanged_menu_updates: retired-by-dependency; ksni owns property diffing.
 // test_update_live_stats_signals_resume_countdown_change_only_once: retired-by-dependency; ksni owns property diffing.
