@@ -86,7 +86,7 @@ format: rust-preflight
 # The status names are this theme's, not the brand source's — the mapping below
 # is the contract crates/solstone-linux/build.rs embeds by constant.
 BRAND_ICON_DIR    = contrib/icons/hicolor
-BRAND_STATUS_SYNC = solstone-recording:mark solstone-paused:mark-paused solstone-syncing:mark-connecting solstone-error:mark-error
+BRAND_STATUS_SYNC = solstone-recording:mark solstone-paused:mark-paused solstone-syncing:mark-connecting solstone-error:mark-error solstone-attention:mark-attention solstone-offline:mark-offline
 BRAND_ICON_SIZES  = 16 24 32 48 64 128 256 512
 
 brand-sync:
