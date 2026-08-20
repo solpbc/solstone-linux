@@ -1250,7 +1250,7 @@ mod tests {
             0
         );
         let expected = format!(
-            "Config: {}\nJournal link: managed privately\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline — saving locally; will retry; pending unconfirmed\n\nService: active\n",
+            "Config: {}\nJournal link: managed privately\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline; held on this device; will retry\n\nService: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );

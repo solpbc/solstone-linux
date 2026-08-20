@@ -2085,10 +2085,10 @@ mod tests {
                     }),
                     ..SyncFacts::default()
                 },
-                "on — connected",
+                "on, connected",
                 "Active",
                 "connected",
-                "Sync: connected — up to date (0 pending)",
+                "Sync: connected; up to date",
                 "ok",
             ),
             (
@@ -2097,10 +2097,10 @@ mod tests {
                     last_error_code: Some(404),
                     ..SyncFacts::default()
                 },
-                "on — update required",
+                "on, update required",
                 "NeedsAttention",
                 "update-required",
-                "Sync: update required — update solstone-linux; pending unconfirmed",
+                "Sync: update required; update the solstone app",
                 "fail",
             ),
         ];
@@ -2175,17 +2175,17 @@ mod tests {
         assert_eq!(model.sni_status, sampled.sni_status);
         assert_eq!(
             sampled.cli,
-            "Sync: connection unavailable — saving locally; restart sol; if this continues, pair this device again"
+            "Sync: connection unavailable; held on this device; restart the solstone app; if this continues, pair this device again"
         );
         assert_eq!(sampled.doctor_severity, "fail");
         assert_eq!(
             sampled.doctor_detail,
-            "sync health: connection unavailable; restart sol; if this continues, pair this device again"
+            "sync health: connection unavailable; restart the solstone app; if this continues, pair this device again"
         );
         assert_eq!(sampled.dbus, "transport-unavailable");
         assert_eq!(
             sampled.accessible_recording,
-            "sol — on, connection unavailable, saving locally"
+            "on, connection unavailable, held on this device"
         );
 
         service.shutdown(Duration::from_secs(1)).await.unwrap();
@@ -2470,13 +2470,10 @@ mod tests {
             crate::sync_health::HealthState::UpdateRequired
         );
         assert_eq!(health.pending_display, "pending unconfirmed");
-        assert_eq!(health.header_recording, "on — update required");
+        assert_eq!(health.header_recording, "on, update required");
         assert_eq!(health.sni_status, "NeedsAttention");
         assert_eq!(health.dbus, "update-required");
-        assert_eq!(
-            health.cli,
-            "Sync: update required — update solstone-linux; pending unconfirmed"
-        );
+        assert_eq!(health.cli, "Sync: update required; update the solstone app");
         assert_eq!(health.doctor_severity, "fail");
     }
 

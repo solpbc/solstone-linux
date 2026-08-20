@@ -62,10 +62,13 @@ impl Tray for KsniTray {
     }
     fn icon_pixmap(&self) -> Vec<Icon> {
         let data = match self.model.icon.as_str() {
-            "error" | "stopped" => generated::ERROR,
-            "syncing" => generated::SYNCING,
-            "paused" | "idle" => generated::PAUSED,
-            _ => generated::RECORDING,
+            "healthy" => generated::HEALTHY,
+            "attention" => generated::ATTENTION,
+            "paused" => generated::PAUSED,
+            "offline" => generated::OFFLINE,
+            "error" => generated::ERROR,
+            "connecting" => generated::CONNECTING,
+            _ => generated::OFFLINE,
         };
         vec![Icon {
             width: 64,
@@ -186,8 +189,9 @@ mod tests {
     use super::*;
     use crate::{
         observer::{Mode, StateSnapshot},
-        sync_health::{SyncFacts, derive_health},
-        tray_model,
+        private_link::LinkFactState,
+        sync_health::{ErrorType, SyncFacts, SyncHealth, derive_health},
+        tray_model::{self, TrayStatus},
     };
     fn tray() -> KsniTray {
         let snapshot = StateSnapshot {
@@ -315,6 +319,228 @@ mod tests {
             };
             assert_eq!(open_journal.enabled, expected);
         }
+    }
+
+    fn pixmap_from_health(health: &SyncHealth, status: TrayStatus) -> Vec<u8> {
+        let mut tray = tray();
+        tray.model.icon = tray_model::icon_name(status, health);
+        tray.icon_pixmap()
+            .into_iter()
+            .next()
+            .expect("one pixmap")
+            .data
+    }
+
+    fn pixmap_for(facts: &SyncFacts, status: TrayStatus) -> Vec<u8> {
+        pixmap_from_health(&derive_health(facts, 1_000.0, 600.0), status)
+    }
+
+    #[test]
+    fn recording_health_states_select_embedded_mark_pixmaps() {
+        let cases = [
+            (
+                SyncFacts {
+                    link: Some(LinkFactState {
+                        private_state_invalid: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                generated::ATTENTION,
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Auth),
+                    ..Default::default()
+                },
+                generated::ATTENTION,
+            ),
+            (
+                SyncFacts {
+                    link: Some(LinkFactState {
+                        pairing_required: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                generated::ATTENTION,
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Incompatible),
+                    ..Default::default()
+                },
+                generated::ATTENTION,
+            ),
+            (
+                SyncFacts {
+                    link: Some(LinkFactState {
+                        token_persistence_failure: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                generated::ERROR,
+            ),
+            (
+                SyncFacts {
+                    link: Some(LinkFactState {
+                        transport_unavailable: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                generated::OFFLINE,
+            ),
+            (
+                SyncFacts {
+                    last_error_class: Some(ErrorType::Transient),
+                    ..Default::default()
+                },
+                generated::OFFLINE,
+            ),
+            (SyncFacts::default(), generated::OFFLINE),
+            (
+                SyncFacts {
+                    link: Some(LinkFactState {
+                        listener_ready: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                generated::CONNECTING,
+            ),
+            (
+                SyncFacts {
+                    link: Some(LinkFactState {
+                        carrier_proven: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                generated::CONNECTING,
+            ),
+            (
+                SyncFacts {
+                    in_progress: true,
+                    link: Some(LinkFactState {
+                        observer_registered: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                generated::HEALTHY,
+            ),
+            (
+                SyncFacts {
+                    pending_confirmed: Some(0),
+                    link: Some(LinkFactState {
+                        carrier_proven: true,
+                        observer_registered: true,
+                        ..LinkFactState::default()
+                    }),
+                    ..SyncFacts::default()
+                },
+                generated::HEALTHY,
+            ),
+        ];
+        for (facts, expected) in cases {
+            assert_eq!(
+                pixmap_for(&facts, TrayStatus::Recording).as_slice(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn capture_status_overlays_only_healthy_and_connecting() {
+        let connected = SyncFacts {
+            pending_confirmed: Some(0),
+            link: Some(LinkFactState {
+                carrier_proven: true,
+                observer_registered: true,
+                ..LinkFactState::default()
+            }),
+            ..SyncFacts::default()
+        };
+        let syncing = SyncFacts {
+            in_progress: true,
+            link: Some(LinkFactState {
+                observer_registered: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let connecting = SyncFacts {
+            link: Some(LinkFactState {
+                carrier_proven: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let update_required = SyncFacts {
+            last_error_class: Some(ErrorType::Incompatible),
+            ..Default::default()
+        };
+        let token_persistence_failed = SyncFacts {
+            link: Some(LinkFactState {
+                token_persistence_failure: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let offline = SyncFacts {
+            last_error_class: Some(ErrorType::Transient),
+            ..Default::default()
+        };
+        let cases = [
+            (TrayStatus::Idle, &connected, generated::HEALTHY),
+            (TrayStatus::Idle, &syncing, generated::HEALTHY),
+            (TrayStatus::Paused, &connected, generated::PAUSED),
+            (TrayStatus::Paused, &connecting, generated::PAUSED),
+            (TrayStatus::Paused, &update_required, generated::ATTENTION),
+            (
+                TrayStatus::Paused,
+                &token_persistence_failed,
+                generated::ERROR,
+            ),
+            (TrayStatus::Paused, &offline, generated::OFFLINE),
+            (TrayStatus::Stopped, &connected, generated::PAUSED),
+            (
+                TrayStatus::Stopped,
+                &token_persistence_failed,
+                generated::ERROR,
+            ),
+        ];
+        for (status, facts, expected) in cases {
+            assert_eq!(pixmap_for(facts, status).as_slice(), expected);
+        }
+    }
+
+    #[test]
+    fn embedded_pixmaps_are_pairwise_distinct() {
+        let marks = [
+            generated::HEALTHY,
+            generated::ATTENTION,
+            generated::PAUSED,
+            generated::OFFLINE,
+            generated::ERROR,
+            generated::CONNECTING,
+        ];
+        for (i, left) in marks.iter().enumerate() {
+            for right in &marks[i + 1..] {
+                assert_ne!(left, right);
+            }
+        }
+    }
+
+    #[test]
+    fn unrecognized_mark_name_draws_offline_not_healthy() {
+        let mut health = derive_health(&SyncFacts::default(), 1_000.0, 600.0);
+        health.icon = "recording".into();
+        let bytes = pixmap_from_health(&health, TrayStatus::Recording);
+        assert_eq!(bytes.as_slice(), generated::OFFLINE);
+        assert_ne!(bytes.as_slice(), generated::HEALTHY);
     }
 }
 

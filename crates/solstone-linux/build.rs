@@ -9,10 +9,12 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap_or_default()).join("tray_icons.rs");
     let mut generated = String::new();
     for (constant, file) in [
-        ("RECORDING", "solstone-recording.svg"),
+        ("HEALTHY", "solstone-recording.svg"),
+        ("ATTENTION", "solstone-attention.svg"),
         ("PAUSED", "solstone-paused.svg"),
-        ("SYNCING", "solstone-syncing.svg"),
+        ("OFFLINE", "solstone-offline.svg"),
         ("ERROR", "solstone-error.svg"),
+        ("CONNECTING", "solstone-syncing.svg"),
     ] {
         let path = root.join(file);
         println!("cargo:rerun-if-changed={}", path.display());

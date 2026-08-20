@@ -103,23 +103,20 @@ pub fn sni_status(status: TrayStatus, health: &SyncHealth) -> String {
 }
 
 pub fn icon_name(status: TrayStatus, health: &SyncHealth) -> String {
-    if health.icon == "error" {
-        "error"
-    } else if status == TrayStatus::Stopped {
-        "stopped"
-    } else if status == TrayStatus::Paused {
-        "paused"
-    } else if health.icon == "syncing" {
-        "syncing"
-    } else if status == TrayStatus::Idle
-        && health.state == crate::sync_health::HealthState::Connected
-    {
-        "idle"
-    } else {
-        match health.icon.as_str() {
-            "recording" | "paused" | "idle" | "stopped" | "syncing" | "error" => &health.icon,
-            _ => "recording",
-        }
+    match health.icon.as_str() {
+        "healthy" => match status {
+            TrayStatus::Paused | TrayStatus::Stopped => "paused",
+            TrayStatus::Recording | TrayStatus::Idle => "healthy",
+        },
+        "connecting" => match status {
+            TrayStatus::Paused | TrayStatus::Stopped => "paused",
+            TrayStatus::Recording | TrayStatus::Idle => "connecting",
+        },
+        "attention" => "attention",
+        "paused" => "paused",
+        "offline" => "offline",
+        "error" => "error",
+        _ => "offline",
     }
     .to_owned()
 }
@@ -224,27 +221,24 @@ mod tests {
         );
         assert_eq!(
             header_label(TrayStatus::Recording, &connected, 0),
-            "on — connected"
+            "on, connected"
         );
         assert_eq!(
             header_label(TrayStatus::Recording, &syncing, 0),
-            "on — syncing"
+            "on, syncing"
         );
         assert_eq!(
             header_label(TrayStatus::Recording, &offline, 0),
-            "on — offline (saving locally)"
+            "on, offline (held on this device)"
         );
         assert_eq!(
             header_label(TrayStatus::Idle, &connected, 0),
-            "idle — connected"
+            "idle, connected"
         );
-        assert_eq!(
-            header_label(TrayStatus::Idle, &syncing, 0),
-            "idle — syncing"
-        );
+        assert_eq!(header_label(TrayStatus::Idle, &syncing, 0), "idle, syncing");
         assert_eq!(
             header_label(TrayStatus::Idle, &offline, 0),
-            "idle — offline (saving locally)"
+            "idle, offline (held on this device)"
         );
         assert_eq!(header_label(TrayStatus::Paused, &connected, 0), "paused");
         assert_eq!(
@@ -401,7 +395,7 @@ mod tests {
             600.0,
         );
         let m = build(&snapshot(), 300, 100.0, &h);
-        assert_eq!(m.icon, "error");
+        assert_eq!(m.icon, "attention");
         assert_eq!(m.sni_status, "NeedsAttention");
     }
     #[test]
@@ -424,75 +418,6 @@ mod tests {
                 build(&snapshot(), 300, 100.0, &health).sync,
                 health.sync_line
             );
-        }
-    }
-    #[test]
-    fn icon_ladder_covers_four_statuses_by_seven_health_states() {
-        let cases = [
-            (
-                connected_facts(),
-                ["recording", "idle", "paused", "stopped"],
-            ),
-            (
-                SyncFacts {
-                    in_progress: true,
-                    link: Some(LinkFactState {
-                        observer_registered: true,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                ["syncing", "syncing", "paused", "stopped"],
-            ),
-            (
-                SyncFacts {
-                    last_error_class: Some(ErrorType::Transient),
-                    ..Default::default()
-                },
-                ["syncing", "syncing", "paused", "stopped"],
-            ),
-            (
-                SyncFacts {
-                    last_error_class: Some(ErrorType::Incompatible),
-                    ..Default::default()
-                },
-                ["error", "error", "error", "error"],
-            ),
-            (
-                SyncFacts {
-                    last_error_class: Some(ErrorType::Auth),
-                    ..Default::default()
-                },
-                ["error", "error", "error", "error"],
-            ),
-            (
-                SyncFacts {
-                    last_successful_contact: Some(0.0),
-                    ..Default::default()
-                },
-                ["syncing", "syncing", "paused", "stopped"],
-            ),
-            (
-                SyncFacts::default(),
-                ["syncing", "syncing", "paused", "stopped"],
-            ),
-        ];
-        let statuses = [
-            TrayStatus::Recording,
-            TrayStatus::Idle,
-            TrayStatus::Paused,
-            TrayStatus::Stopped,
-        ];
-        for (facts, expected) in cases {
-            let health = derive_health(&facts, 1_000.0, 600.0);
-            for (status, expected_icon) in statuses.into_iter().zip(expected) {
-                assert_eq!(
-                    icon_name(status, &health),
-                    expected_icon,
-                    "status={status:?}, health={:?}",
-                    health.state
-                );
-            }
         }
     }
 }
