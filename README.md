@@ -1,10 +1,9 @@
 # solstone-linux
 
-sol for Linux experiences your screen and audio along with you on a GNOME
-Wayland session, stores segments locally, and syncs them to your journal on
-[solstone](https://solpbc.org).
+The solstone app on linux takes in what you share with it on a GNOME Wayland
+session; all of it goes into your journal, which lives on a device you own.
 
-**Note:** Activity detection uses screen-lock and power-save signals to notice when you step away. Coverage varies by desktop: GNOME provides both signals; KDE (Wayland) provides screen lock only; any X11 session also provides DPMS power save; other Wayland desktops provide screen lock where the compositor exposes it. Where neither signal is available, solstone-linux still experiences your screen and audio, but activity-based segment boundaries won't trigger.
+**Note:** Activity detection uses screen-lock and power-save signals to notice when you step away. Coverage varies by desktop: GNOME provides both signals; KDE (Wayland) provides screen lock only; any X11 session also provides DPMS power save; other Wayland desktops provide screen lock where the compositor exposes it. Where neither signal is available, the solstone app on linux still takes in what you share and that material goes into your journal, but activity-based segment boundaries will not trigger.
 
 ## System dependencies
 
@@ -53,10 +52,10 @@ to a directory on `PATH` and `share/icons/hicolor` beneath the same prefix.
 The archive includes `packaging/INSTALL-NOTES`, the canonical runtime-dependency list. See `INSTALL.md` for package installation, tray notes, and troubleshooting.
 
 Pairing is the only setup path. The pair link comes from your journal. A journal
-on the same machine connects through the same private link as any other journal;
-there is no URL, key, local Python installation, or direct fallback to configure.
-Sol can continue capturing while unpaired or offline and will save segments
-locally.
+on the same machine connects through the same private network path as any other journal;
+There is no URL, key, local Python installation, or direct fallback to configure.
+The solstone app can continue taking in what you share while unpaired or offline.
+That material goes into your journal once the connection is available.
 
 ### Developers building from source
 
@@ -75,9 +74,9 @@ systemctl --user start solstone-linux
 solstone-linux setup < pair-link.txt
 ```
 
-Setup and runtime deliberately share one private-state lock. Stop sol before
-pairing. If sol is running, setup exits before consuming the pair link and leaves
-capture, config, and private state unchanged.
+Setup and runtime deliberately share one private-state lock. Stop the solstone app before
+pairing. If the solstone app is running, setup exits before consuming the pair link and leaves
+intake state, configuration, and private state unchanged.
 
 For an upgrade that needs a new pair link:
 
@@ -100,18 +99,14 @@ solstone-linux run
 solstone-linux status
 ```
 
-Paired devices also include a diagnostics-only status beacon in your journal:
-identity, version, uptime, and sync liveness counts only, with none of the
-screen or audio sol experiences with you.
+## Protocol contract
 
-## Observer contract
+The `observer-client` contract is owned by the journal and frozen here as a byte-exact, language-neutral bundle at `vendor/observer-client-contract/`. This app adopts bundle version 1.0.2 and verifies it offline with `make check-observer-contract`.
 
-The observer-client contract is owned by the solstone journal and frozen here as a byte-exact, language-neutral bundle at `vendor/observer-client-contract/`. This observer adopts bundle version 1.0.2 and verifies it offline with `make check-observer-contract`.
-
-The bundle version, the solstone-linux application release, and observer wire-protocol version 2 are independent versions. When the observer and authority disagree, resolve the incompatibility at the journal authority first; do not rewrite the vendored contract or weaken consumer conformance.
+The bundle version, the solstone-linux application release, and wire-protocol version 2 are independent versions. When the app and authority disagree, resolve the incompatibility at the journal authority first; do not rewrite the vendored contract or weaken consumer conformance.
 
 See `contracts/README.md` for the verified import ritual and public provenance record.
 
 ## License
 
-AGPL-3.0-only — Copyright (c) 2026 sol pbc
+AGPL-3.0-only. Copyright (c) 2026 sol pbc.
