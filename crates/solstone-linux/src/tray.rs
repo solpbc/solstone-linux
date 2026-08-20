@@ -51,7 +51,7 @@ impl Tray for KsniTray {
         Category::SystemServices
     }
     fn title(&self) -> String {
-        "sol".into()
+        "solstone".into()
     }
     fn status(&self) -> Status {
         if self.model.sni_status == "NeedsAttention" {
@@ -78,7 +78,7 @@ impl Tray for KsniTray {
     }
     fn tool_tip(&self) -> ToolTip {
         ToolTip {
-            title: "sol".into(),
+            title: "solstone".into(),
             description: self.model.tooltip.clone(),
             ..Default::default()
         }
@@ -218,6 +218,15 @@ mod tests {
             commands,
         }
     }
+    #[test]
+    fn title_and_tooltip_use_solstone_not_sol() {
+        let tray = tray();
+        assert_eq!(tray.title(), "solstone");
+        assert_eq!(tray.tool_tip().title, "solstone");
+        assert_ne!(tray.title(), "sol");
+        assert_ne!(tray.tool_tip().title, "sol");
+    }
+
     #[test]
     fn menu_contains_reference_top_level_structure() {
         let mut tray = tray();
