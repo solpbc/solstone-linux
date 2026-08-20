@@ -396,7 +396,7 @@ fn package_payload_authority_matches_both_manifest_dialects() {
         .collect::<Vec<_>>();
     assert_eq!(deb, rpm);
     assert_eq!(deb, expected);
-    assert_eq!(expected.len(), 16);
+    assert_eq!(expected.len(), 18);
 }
 
 fn audit_fixture_bytes(

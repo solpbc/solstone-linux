@@ -69,7 +69,7 @@ pub(crate) struct PayloadAuthority {
     pub(crate) role: PayloadRole,
 }
 
-pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 16] = [
+pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 18] = [
     PayloadAuthority {
         source: "target/release/solstone-linux",
         installed: "/usr/bin/solstone-linux",
@@ -139,6 +139,14 @@ pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 16] = [
     icon(
         "contrib/icons/hicolor/scalable/status/solstone-syncing.svg",
         "/usr/share/icons/hicolor/scalable/status/solstone-syncing.svg",
+    ),
+    icon(
+        "contrib/icons/hicolor/scalable/status/solstone-attention.svg",
+        "/usr/share/icons/hicolor/scalable/status/solstone-attention.svg",
+    ),
+    icon(
+        "contrib/icons/hicolor/scalable/status/solstone-offline.svg",
+        "/usr/share/icons/hicolor/scalable/status/solstone-offline.svg",
     ),
 ];
 

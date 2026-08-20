@@ -85,6 +85,8 @@ assets = [
     ["../../contrib/icons/hicolor/scalable/status/solstone-paused.svg", "usr/share/icons/hicolor/scalable/status/solstone-paused.svg", "644"],
     ["../../contrib/icons/hicolor/scalable/status/solstone-recording.svg", "usr/share/icons/hicolor/scalable/status/solstone-recording.svg", "644"],
     ["../../contrib/icons/hicolor/scalable/status/solstone-syncing.svg", "usr/share/icons/hicolor/scalable/status/solstone-syncing.svg", "644"],
+    ["../../contrib/icons/hicolor/scalable/status/solstone-attention.svg", "usr/share/icons/hicolor/scalable/status/solstone-attention.svg", "644"],
+    ["../../contrib/icons/hicolor/scalable/status/solstone-offline.svg", "usr/share/icons/hicolor/scalable/status/solstone-offline.svg", "644"],
 ]
 
 # cargo-generate-rpm resolves sources from build-release.sh's workspace-root CWD
@@ -109,4 +111,6 @@ assets = [
     { source = "contrib/icons/hicolor/scalable/status/solstone-paused.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-paused.svg", mode = "644" },
     { source = "contrib/icons/hicolor/scalable/status/solstone-recording.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-recording.svg", mode = "644" },
     { source = "contrib/icons/hicolor/scalable/status/solstone-syncing.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-syncing.svg", mode = "644" },
+    { source = "contrib/icons/hicolor/scalable/status/solstone-attention.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-attention.svg", mode = "644" },
+    { source = "contrib/icons/hicolor/scalable/status/solstone-offline.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-offline.svg", mode = "644" },
 ]

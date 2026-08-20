@@ -179,12 +179,12 @@ fn container_context_excludes_host_outputs() {
 fn package_assets_exist_and_match() {
     let (_, member) = metadata();
     let expected = committed_asset_set();
-    assert_eq!(expected.len(), 15, "LICENSE + INSTALL-NOTES + 13 icons");
+    assert_eq!(expected.len(), 17, "LICENSE + INSTALL-NOTES + 15 icons");
 
     let deb = deb_assets(&member);
     let rpm = rpm_assets(&member);
-    assert_eq!(deb.len(), 16);
-    assert_eq!(rpm.len(), 16);
+    assert_eq!(deb.len(), 18);
+    assert_eq!(rpm.len(), 18);
     assert_eq!(deb[0].0, "target/release/solstone-linux");
     assert_eq!(rpm[0].0, "target/release/solstone-linux");
     assert_eq!(deb[0].2, "755");
