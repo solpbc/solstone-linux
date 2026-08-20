@@ -19,16 +19,14 @@ use std::{
 };
 use tempfile::TempDir;
 
-const MANIFEST_SHA256: &str = "9ecf4bbfcd793a8aecc9e2257254e68c74c48cde22282ff07369101b90d97c33";
-const AUTHORITY_COMMIT: &str = "827d3761e2b515b9bd537ded28b245c8c6d86cc0";
+const MANIFEST_SHA256: &str = "9b3bcd6b7f8a83adb9007e32501af44403cb93cfb8d80f256b6a7b5b9f93057e";
+const AUTHORITY_COMMIT: &str = "766021cd44d4a0a7ce471d2affb461bf3ce0fc39";
 
 const FULL_FIXTURES: &[&str] = &[
     "declared.observer.ingestSegments.custody_unknown_rejected",
     "declared.observer.ingestSegments.envelope_total_mismatch",
     "declared.observer.ingestUpload.status_unknown_rejected",
     "example.callosum.rootEvents.response.200.text-event-stream.default",
-    "example.chat.openSolChatRequest.request.body.application-json.default",
-    "example.chat.openSolChatRequest.response.200.application-json.default",
     "example.link.pair.request.body.application-json.default",
     "example.link.pair.response.200.application-json.default",
     "example.observer.callosumStream.response.200.text-event-stream.default",
@@ -43,8 +41,6 @@ const FULL_FIXTURES: &[&str] = &[
     "example.observer.register.response.200.application-json.default",
     "recorded.auth.bearer.segments",
     "recorded.auth.handle.segments",
-    "recorded.chat.openSolChatRequest.missing",
-    "recorded.chat.openSolChatRequest.ok",
     "recorded.ingestUpload.collision",
     "recorded.ingestUpload.conflict",
     "recorded.ingestUpload.duplicate",
@@ -92,8 +88,6 @@ const LINUX_FIXTURES: &[&str] = &[
 const FULL_VECTORS: &[&str] = &[
     "callosum.rootEvents.sse.data_unknown_event",
     "callosum.rootEvents.sse.heartbeat",
-    "chat.openSolChatRequest.missing_required_field",
-    "chat.openSolChatRequest.ok",
     "observer.auth.bearer",
     "observer.auth.handle",
     "observer.callosumStream.sse.data",
@@ -315,7 +309,7 @@ fn assert_identities(
     fixtures: &BTreeMap<String, Value>,
     vectors: &BTreeMap<String, Value>,
 ) {
-    assert_eq!(manifest["bundle_semver"], "1.0.2");
+    assert_eq!(manifest["bundle_semver"], "8.0.0");
     assert_eq!(manifest["openapi_document_version"], "1.0.0");
     assert_eq!(
         manifest["generator_identity"],
@@ -357,7 +351,6 @@ fn assert_identities(
         manifest["operation_ids"],
         json!([
             "callosum.rootEvents",
-            "chat.openSolChatRequest",
             "link.pair",
             "observer.callosumStream",
             "observer.ingestEvent",
@@ -385,7 +378,7 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
     let expected = json!({
         "authority_repository":"https://github.com/solpbc/solstone-journal",
         "authority_commit":AUTHORITY_COMMIT,
-        "bundle_version":"1.0.2",
+        "bundle_version":"8.0.0",
         "manifest_path":"manifest.json",
         "manifest_sha256":MANIFEST_SHA256,
         "vendored_root":"vendor/observer-client-contract"
