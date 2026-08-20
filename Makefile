@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format brand-sync test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -72,6 +72,36 @@ bootstrap:
 
 format: rust-preflight
 	$(CARGO) fmt
+
+# Re-vendor brand assets from the canonical brand source. CI verifies the
+# committed output (it does not run brand-sync) — run this locally when the
+# brand spec updates, then commit the diff.
+#
+# The scalable sources are copies. The hicolor PNG ladder has no committed
+# raster in the brand source: each size is rendered straight from the vendored
+# app SVG at its exact pixel size (never downsampled from one raster), which
+# needs rsvg-convert (librsvg).
+#   apt: librsvg2-bin   dnf: librsvg2-tools
+#
+# The status names are this theme's, not the brand source's — the mapping below
+# is the contract crates/solstone-linux/build.rs embeds by constant.
+BRAND_ICON_DIR    = contrib/icons/hicolor
+BRAND_STATUS_SYNC = solstone-recording:sol-ring-icon solstone-paused:sol-ring-icon-paused solstone-syncing:sol-ring-icon-half solstone-error:sol-ring-icon-error
+BRAND_ICON_SIZES  = 16 24 32 48 64 128 256 512
+
+brand-sync:
+	@test -n "$(BRAND_DIR)" || { echo "brand: BRAND_DIR is required — point it at your brand asset directory (BRAND_DIR=/path/to/brand make brand-sync)"; exit 1; }
+	@test -d "$(BRAND_DIR)" || { echo "brand: BRAND_DIR=$(BRAND_DIR) not found"; exit 1; }
+	@command -v rsvg-convert >/dev/null 2>&1 || { echo "brand: rsvg-convert (librsvg) not found — apt install librsvg2-bin, or dnf install librsvg2-tools"; exit 1; }
+	@set -e; for pair in $(BRAND_STATUS_SYNC); do \
+	  cp "$(BRAND_DIR)/$${pair#*:}.svg" "$(BRAND_ICON_DIR)/scalable/status/$${pair%%:*}.svg"; \
+	done
+	cp "$(BRAND_DIR)/app-icon/sol-app-icon-transparent.svg" $(BRAND_ICON_DIR)/scalable/apps/solstone-observer.svg
+	@set -e; for size in $(BRAND_ICON_SIZES); do \
+	  rsvg-convert -w $$size -h $$size $(BRAND_ICON_DIR)/scalable/apps/solstone-observer.svg \
+	    -o $(BRAND_ICON_DIR)/$${size}x$${size}/apps/solstone-observer.png; \
+	done
+	@echo "brand: synced from $(BRAND_DIR)"
 
 test: rust-preflight
 	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux
