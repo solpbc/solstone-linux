@@ -86,7 +86,7 @@ format: rust-preflight
 # The status names are this theme's, not the brand source's — the mapping below
 # is the contract crates/solstone-linux/build.rs embeds by constant.
 BRAND_ICON_DIR    = contrib/icons/hicolor
-BRAND_STATUS_SYNC = solstone-recording:sol-ring-icon solstone-paused:sol-ring-icon-paused solstone-syncing:sol-ring-icon-half solstone-error:sol-ring-icon-error
+BRAND_STATUS_SYNC = solstone-recording:mark solstone-paused:mark-paused solstone-syncing:mark-connecting solstone-error:mark-error
 BRAND_ICON_SIZES  = 16 24 32 48 64 128 256 512
 
 brand-sync:
@@ -96,7 +96,7 @@ brand-sync:
 	@set -e; for pair in $(BRAND_STATUS_SYNC); do \
 	  cp "$(BRAND_DIR)/$${pair#*:}.svg" "$(BRAND_ICON_DIR)/scalable/status/$${pair%%:*}.svg"; \
 	done
-	cp "$(BRAND_DIR)/app-icon/sol-app-icon-transparent.svg" $(BRAND_ICON_DIR)/scalable/apps/solstone-observer.svg
+	cp "$(BRAND_DIR)/app-icon/app-icon-transparent.svg" $(BRAND_ICON_DIR)/scalable/apps/solstone-observer.svg
 	@set -e; for size in $(BRAND_ICON_SIZES); do \
 	  rsvg-convert -w $$size -h $$size $(BRAND_ICON_DIR)/scalable/apps/solstone-observer.svg \
 	    -o $(BRAND_ICON_DIR)/$${size}x$${size}/apps/solstone-observer.png; \
