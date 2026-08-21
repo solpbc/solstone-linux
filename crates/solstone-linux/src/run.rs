@@ -1402,7 +1402,7 @@ mod tests {
         let session = start_private_link_session(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
-        let capability = session.capability("/app/devices/ingest".to_owned());
+        let capability = session.capability();
         let config = Config {
             config_dir: temp.path().to_path_buf(),
             stream: "stream".to_owned(),
@@ -1646,7 +1646,7 @@ mod tests {
         };
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".to_owned()),
+            session.capability(),
             "host",
             "linux",
             "1",
@@ -1689,7 +1689,7 @@ mod tests {
             reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(stream)),
         );
         let request = tokio::spawn({
-            let capability = session.capability("/app/devices/ingest".to_owned());
+            let capability = session.capability();
             async move { capability.ingest(form).await }
         });
         assert_real_observer_ticks_advance();

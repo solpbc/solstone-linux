@@ -1037,7 +1037,10 @@ fn parse_segments_envelope(body: Value, status_code: u16) -> DayCustody {
     let Some(items) = object.get("items").and_then(Value::as_array) else {
         return custody_failure(ErrorType::Incompatible, Some(status_code));
     };
-    if protocol_version != 3 || total != items.len() as u64 {
+    if protocol_version != 3 {
+        return custody_failure(ErrorType::Incompatible, Some(status_code));
+    }
+    if total != items.len() as u64 {
         return DayCustody {
             day_present: true,
             items: Vec::new(),
@@ -1167,7 +1170,7 @@ mod tests {
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".into()),
+            session.capability(),
             "host-a",
             "linux",
             "0.1.0",
@@ -1208,7 +1211,7 @@ mod tests {
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".into()),
+            session.capability(),
             "host",
             "linux",
             "test",
@@ -1559,7 +1562,7 @@ mod tests {
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".into()),
+            session.capability(),
             "host-a",
             "linux",
             "0.1.0",
@@ -1993,7 +1996,8 @@ mod tests {
         );
     }
 
-    // tests/test_upload.py::test_upload_segment_uses_bearer_and_keyless_route
+    // Python ancestor: tests/test_upload.py::test_upload_segment_uses_bearer_and_keyless_route.
+    // V3 uses certificate-only identity; this test asserts those identity headers are absent.
     // tests/test_upload.py::test_upload_segment_declares_content_types
     // AC: multipart received bytes preserve fields, filenames, content types, and file content
     #[tokio::test]
@@ -2384,14 +2388,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v3_bad_segments_protocol_and_malformed_legs_are_incompatible() {
+    async fn v3_wrong_segments_protocol_and_malformed_legs_are_incompatible() {
         let protocol = fetch_custody_fixture(
             DayCustodyFixture::new("20260101", Vec::new()).with_segments_protocol_version(2),
         )
         .await;
-        assert!(protocol.day_present);
-        assert!(!protocol.proof_available);
-        assert!(protocol.error_type.is_none());
+        assert_eq!(protocol.error_type, Some(ErrorType::Incompatible));
 
         let malformed = fetch_custody_fixture(
             DayCustodyFixture::new("20260101", Vec::new())
@@ -2465,7 +2467,7 @@ mod tests {
             .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".to_owned()),
+            session.capability(),
             "host",
             "linux",
             "test",
@@ -2633,7 +2635,7 @@ mod tests {
         };
         let client = UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".to_owned()),
+            session.capability(),
             "host",
             "linux",
             "1",
@@ -2718,7 +2720,7 @@ mod tests {
         .unwrap();
         let client = UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".into()),
+            session.capability(),
             "host-a",
             "linux",
             "0.1.0",

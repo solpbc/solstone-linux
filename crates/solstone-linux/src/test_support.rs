@@ -119,11 +119,7 @@ impl DayCustodyFixture {
         self
     }
 
-    pub(crate) fn response_for(
-        &self,
-        leg: DayCustodyLeg,
-        requested_day: Option<&str>,
-    ) -> (u16, Vec<u8>) {
+    pub(crate) fn response_for(&self, leg: DayCustodyLeg) -> (u16, Vec<u8>) {
         if let Some((failed_leg, status, bytes)) = &self.failed
             && *failed_leg == leg
         {
@@ -138,20 +134,15 @@ impl DayCustodyFixture {
             DayCustodyLeg::Manifest => {
                 let mut days = serde_json::Map::new();
                 if !self.absent {
-                    // Sync tests exercise both their fixed "today" and retained capture day.
-                    // The peer fills the following legs from the request path, so this declares
-                    // both candidates without coupling ordered fixtures to call order.
-                    for day in [&self.day, "20260101", "20270115"] {
-                        days.insert(
-                            day.to_owned(),
-                            serde_json::json!({"segments": self.items.len()}),
-                        );
-                    }
+                    days.insert(
+                        self.day.clone(),
+                        serde_json::json!({"segments": self.items.len()}),
+                    );
                 }
                 serde_json::json!({"days": days})
             }
             DayCustodyLeg::DayManifest => serde_json::json!({
-                "day": self.day_manifest_day.as_deref().or(requested_day).unwrap_or(&self.day),
+                "day": self.day_manifest_day.as_deref().unwrap_or(&self.day),
                 "version": self.version,
                 "segments": {},
             }),
@@ -341,7 +332,7 @@ impl LinkedMockServer {
     }
 
     pub(crate) fn capability(&self) -> PrivateLinkCapability {
-        self.session.capability("/app/devices/ingest".to_owned())
+        self.session.capability()
     }
 
     pub(crate) fn enqueue_day_custody(&self, fixture: DayCustodyFixture) {

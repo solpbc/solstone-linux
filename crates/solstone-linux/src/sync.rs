@@ -595,7 +595,7 @@ impl SyncWorker {
             Ok(files) => files,
             Err(error) => {
                 tracing::warn!(%error, path = %segment_dir.display(), "Failed to enumerate segment files");
-                self.last_error_type = Some(ErrorType::Transient);
+                self.last_error_type = Some(ErrorType::Client);
                 self.last_error_code = None;
                 return false;
             }
@@ -887,11 +887,19 @@ fn segment_custody_proven(segment_dir: &Path, entry: &ListingEntry) -> bool {
         else {
             return false;
         };
-        matches!(remote.status.as_deref(), Some("present" | "processed"))
-            && remote
-                .size
-                .is_some_and(|size| local.metadata().is_ok_and(|meta| meta.len() == size))
-            && sha256_file(local).ok().as_deref() == remote.sha256.as_deref()
+        if !matches!(remote.status.as_deref(), Some("present" | "processed")) {
+            return false;
+        }
+        let Some(size) = remote.size else {
+            return false;
+        };
+        if !local.metadata().is_ok_and(|meta| meta.len() == size) {
+            return false;
+        }
+        let Some(remote_sha256) = remote.sha256.as_deref() else {
+            return false;
+        };
+        sha256_file(local).is_ok_and(|local_sha256| local_sha256 == remote_sha256)
     })
 }
 
@@ -1188,7 +1196,10 @@ mod tests {
         if let Some(status) = status {
             file["status"] = json!(status);
         }
-        custody(vec![json!({"key":key,"observed":true,"files":[file]})])
+        custody_for_day(
+            "20260101",
+            vec![json!({"key":key,"observed":true,"files":[file]})],
+        )
     }
 
     async fn test_worker(
@@ -1271,7 +1282,7 @@ mod tests {
         .unwrap();
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".to_owned()),
+            session.capability(),
             "host",
             "linux",
             "test",
@@ -1332,7 +1343,7 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
                 (200, remote.clone()),
                 (200, json!({"status":"ok","segment":"120000_300"})),
                 (200, remote),
@@ -1355,7 +1366,7 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
                 (200, remote.clone()),
                 (200, remote),
             ],
@@ -1477,6 +1488,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn present_status_with_absent_sha_uploads_and_cleanup_keeps() {
+        upload_then_cleanup_keeps(custody_for_day(
+            "20260101",
+            vec![json!({
+                "key": "120000_300",
+                "observed": true,
+                "files": [{
+                    "name": "screen.webm",
+                    "size": 6,
+                    "status": "present",
+                }],
+            })],
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn present_status_with_absent_sha_and_unreadable_file_quarantines() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        let file = segment.join("screen.webm");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(sha256_file(&file).is_err());
+        let remote = custody_for_day(
+            "20260101",
+            vec![json!({
+                "key": "120000_300",
+                "observed": true,
+                "files": [{
+                    "name": "screen.webm",
+                    "size": 6,
+                    "status": "present",
+                }],
+            })],
+        );
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![
+                (200, custody_for_day("20270115", Vec::new())),
+                (200, remote),
+            ],
+            7,
+        )
+        .await;
+
+        worker.sync_pass(true).await;
+
+        let failed = segment.with_file_name("120000_300.failed");
+        assert!(!segment.exists());
+        assert!(failed.exists());
+        assert!(!failed.join(SERVER_KEY_FILENAME).exists());
+        assert!(!worker.synced_days.contains("20260101"));
+        assert_eq!(upload_hits(&server), 0);
+        worker.cleanup_synced_segments().await;
+        assert!(failed.exists());
+    }
+
+    #[tokio::test]
     async fn processed_status_with_absent_size_uploads() {
         let sha = format!("{:x}", Sha256::digest(b"screen"));
         upload_then_cleanup_keeps(custody(vec![json!({
@@ -1547,6 +1618,13 @@ mod tests {
         upload_then_cleanup_keeps(listing("120000_300", "screen.webm", None, &sha)).await;
     }
 
+    #[tokio::test]
+    async fn missing_custody_status_uploads_and_cleanup_keeps() {
+        let sha = format!("{:x}", Sha256::digest(b"screen"));
+        upload_then_cleanup_keeps(listing("120000_300", "screen.webm", Some("missing"), &sha))
+            .await;
+    }
+
     // tests/test_sync.py::test_unknown_status_uploads_and_cleanup_keeps
     #[tokio::test]
     async fn unknown_status_uploads_and_cleanup_keeps() {
@@ -1569,14 +1647,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         fs::write(segment.join("audio.flac"), b"audio").unwrap();
-        let remote = custody(vec![json!({"key":"120000_300", "observed":true, "files":[
-            {"name":"screen.webm","size":6,"status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
-            {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
-        ]})]);
+        let remote = custody_for_day(
+            "20260101",
+            vec![json!({"key":"120000_300", "observed":true, "files":[
+                {"name":"screen.webm","size":6,"status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
+                {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
+            ]})],
+        );
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
                 (200, remote.clone()),
                 (200, remote),
             ],
@@ -1628,19 +1709,33 @@ mod tests {
         assert!(segment.exists());
     }
 
-    // AC: upload enumeration failures are transient and never send a partial request.
+    // AC: a file that cannot be statted is quarantined and never sends a partial request.
     #[tokio::test]
-    async fn unreadable_segment_directory_upload_is_retried() {
-        use std::os::unix::fs::PermissionsExt;
+    async fn unstatable_file_is_quarantined_without_upload() {
+        use std::os::unix::fs::symlink;
+
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        fs::set_permissions(&segment, fs::Permissions::from_mode(0o000)).unwrap();
+        let file = segment.join("screen.webm");
+        fs::remove_file(&file).unwrap();
+        symlink(segment.join("missing.webm"), &file).unwrap();
         assert!(eligible_files(&segment).is_err());
-        let (server, mut worker) = test_worker(&temp, vec![], -1).await;
-        assert!(!worker.upload_segment("20260101", &segment).await);
-        fs::set_permissions(&segment, fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(worker.last_error_type, Some(ErrorType::Transient));
-        assert!(server.requests().is_empty());
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![
+                (200, custody_for_day("20270115", Vec::new())),
+                (200, custody_for_day("20260101", Vec::new())),
+            ],
+            -1,
+        )
+        .await;
+
+        worker.sync_pass(true).await;
+
+        assert!(!segment.exists());
+        assert!(segment.with_file_name("120000_300.failed").exists());
+        assert_eq!(worker.last_error_type, Some(ErrorType::Client));
+        assert_eq!(upload_hits(&server), 0);
     }
 
     #[tokio::test]
@@ -1676,13 +1771,13 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
+                (200, custody_for_day("20260101", Vec::new())),
                 (
                     200,
                     json!({"status":"duplicate","existing_segment":"existing_300"}),
                 ),
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
                 (200, held),
             ],
             -1,
@@ -1704,16 +1799,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let held = custody(vec![
-            json!({"key":"120000_301","original_key":"120000_300","observed":true,"files":[{"name":"screen.webm","size":6,"status":"present","sha256":sha}]}),
-        ]);
+        let held = custody_for_day(
+            "20260101",
+            vec![
+                json!({"key":"120000_301","original_key":"120000_300","observed":true,"files":[{"name":"screen.webm","size":6,"status":"present","sha256":sha}]}),
+            ],
+        );
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
+                (200, custody_for_day("20260101", Vec::new())),
                 (200, json!({"status":"ok","segment":"120000_301"})),
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
                 (200, held),
             ],
             -1,
@@ -2028,18 +2126,21 @@ mod tests {
         let media = segment.join("screen.webm");
         fs::write(&media, b"screen").unwrap();
         let sha = sha256_file(&media).unwrap();
-        let held = custody(vec![json!({
-            "key": "120000_300",
-            "observed": true,
-            "files": [{
-                "name": "screen.webm",
-                "size": 6,
-                "status": "present",
-                "sha256": sha
-            }]
-        })]);
+        let held = custody_for_day(
+            "20260101",
+            vec![json!({
+                "key": "120000_300",
+                "observed": true,
+                "files": [{
+                    "name": "screen.webm",
+                    "size": 6,
+                    "status": "present",
+                    "sha256": sha
+                }]
+            })],
+        );
         let server = MockServer::new(vec![
-            (200, custody(Vec::new())),
+            (200, custody_for_day("20270115", Vec::new())),
             (200, held.clone()),
             (200, held),
         ])
@@ -3044,7 +3145,10 @@ mod tests {
     async fn query_failures_recover_to_connected() {
         let temp = tempfile::tempdir().unwrap();
         let mut responses = (0..5).map(|_| (500, json!({}))).collect::<Vec<_>>();
-        responses.extend([(200, json!({"days": {}})), (200, custody(Vec::new()))]);
+        responses.extend([
+            (200, json!({"days": {}})),
+            (200, custody_for_day("20270115", Vec::new())),
+        ]);
         let (server, mut worker) = test_worker(&temp, responses, -1).await;
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
         worker.clock = clock.clone();
@@ -3238,7 +3342,11 @@ mod tests {
         );
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![(200, custody(Vec::new())), (200, held.clone()), (200, held)],
+            vec![
+                (200, custody_for_day("20270115", Vec::new())),
+                (200, held.clone()),
+                (200, held),
+            ],
             7,
         )
         .await;
@@ -3340,7 +3448,7 @@ mod tests {
         });
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".into()),
+            session.capability(),
             "host",
             "linux",
             "test",
@@ -3407,7 +3515,7 @@ mod tests {
         });
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".into()),
+            session.capability(),
             "host",
             "linux",
             "test",
@@ -3844,7 +3952,7 @@ mod tests {
     #[tokio::test]
     async fn completion_trigger_starts_pass() {
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, custody(Vec::new()))]).await;
+        let server = MockServer::new(vec![(200, custody_for_day("20270115", Vec::new()))]).await;
         let config = Config {
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
@@ -3925,9 +4033,9 @@ mod tests {
             &sha256_file(&media).unwrap(),
         );
         let responses = vec![
-            (200, custody(Vec::new())),
+            (200, custody_for_day("20270115", Vec::new())),
             (200, held.clone()),
-            (200, custody(Vec::new())),
+            (200, custody_for_day("20270115", Vec::new())),
             (200, custody_for_day("20270116", Vec::new())),
             (200, held),
         ];
@@ -3975,8 +4083,8 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
+                (200, custody_for_day("20270115", Vec::new())),
+                (200, custody_for_day("20260101", Vec::new())),
                 (200, custody_for_day("20250101", Vec::new())),
             ],
             -1,
@@ -4183,7 +4291,7 @@ mod tests {
             .unwrap();
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".to_owned()),
+            session.capability(),
             "host",
             "linux",
             "test",
@@ -4245,7 +4353,7 @@ mod tests {
             .unwrap();
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".to_owned()),
+            session.capability(),
             "host",
             "linux",
             "test",
@@ -4315,7 +4423,7 @@ mod tests {
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
         let client = Arc::new(UploadClient::new(
             &config,
-            session.capability("/app/devices/ingest".to_owned()),
+            session.capability(),
             "host",
             "linux",
             "test",

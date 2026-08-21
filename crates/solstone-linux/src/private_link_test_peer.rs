@@ -457,8 +457,7 @@ fn next_response(
         return match queued {
             Some(QueuedResponse::Static(response)) => response,
             Some(QueuedResponse::DayCustody(fixture)) => {
-                let response =
-                    fixture.response_for(crate::test_support::DayCustodyLeg::Manifest, None);
+                let response = fixture.response_for(crate::test_support::DayCustodyLeg::Manifest);
                 if !fixture.stops_after(crate::test_support::DayCustodyLeg::Manifest) {
                     day_manifests.push_back(fixture);
                 }
@@ -467,11 +466,13 @@ fn next_response(
             None => plain_response(500, Vec::new()),
         };
     }
-    if let Some(day) = request.path.strip_prefix("/app/devices/ingest/manifest/")
+    if request
+        .path
+        .strip_prefix("/app/devices/ingest/manifest/")
+        .is_some()
         && let Some(fixture) = day_manifests.pop_front()
     {
-        let response =
-            fixture.response_for(crate::test_support::DayCustodyLeg::DayManifest, Some(day));
+        let response = fixture.response_for(crate::test_support::DayCustodyLeg::DayManifest);
         if !fixture.stops_after(crate::test_support::DayCustodyLeg::DayManifest) {
             segment_lists.push_back(fixture);
         }
@@ -483,7 +484,7 @@ fn next_response(
         .is_some()
         && let Some(fixture) = segment_lists.pop_front()
     {
-        let response = fixture.response_for(crate::test_support::DayCustodyLeg::Segments, None);
+        let response = fixture.response_for(crate::test_support::DayCustodyLeg::Segments);
         return plain_response(response.0, response.1);
     }
     pop_static_response(state)

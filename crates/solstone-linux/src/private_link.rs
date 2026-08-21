@@ -1695,7 +1695,7 @@ pub(crate) async fn start_private_link_owner(
 async fn finish_owner_start(
     mut session: PrivateLinkSession,
 ) -> Result<PrivateLinkOwner, PrivateStateError> {
-    let capability = session.capability(INGEST_PATH.to_owned());
+    let capability = session.capability();
     if session.opener.generation() == 0 {
         match capability.report_unauthorized(0).await {
             RepairOutcome::Repaired { .. } | RepairOutcome::AlreadySuperseded { .. } => {}
@@ -1781,7 +1781,7 @@ pub(crate) async fn start_registered_private_link_for_test(
 }
 
 impl PrivateLinkSession {
-    pub(crate) fn capability(&self, _ingest_path: String) -> PrivateLinkCapability {
+    pub(crate) fn capability(&self) -> PrivateLinkCapability {
         PrivateLinkCapability {
             inner: Arc::new(PrivateLinkCapabilityInner {
                 client: self.client.clone(),
@@ -3658,7 +3658,7 @@ mod tests {
         assert!(requests[1].body.is_empty());
         assert_registered_auth(&requests[1], "observer-key");
         assert_eq!(peer.accepted_carriers(), 1);
-        let capability = session.capability("/app/devices/ingest".to_owned());
+        let capability = session.capability();
         let second_generation = publish_observer_registration(
             &session,
             &ObserverState {
@@ -3792,7 +3792,7 @@ mod tests {
         let session = start_private_link_session(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
-        let capability = session.capability("/ignored-v2-ingest-path".to_owned());
+        let capability = session.capability();
         assert!(matches!(
             capability
                 .ingest(multipart::Form::new().text("envelope", "{}"))
@@ -3843,7 +3843,7 @@ mod tests {
     async fn capability_rejects_admin_path_query_and_route_substitution() {
         let peer = PrivateLinkPeer::start().await;
         let (_temp, session) = start_peer_session(&peer).await;
-        let capability = session.capability("/app/devices/ingest".to_owned());
+        let capability = session.capability();
         for day in ["", "2026010", "202601011", "202601?1", "../20260101"] {
             assert!(matches!(
                 capability.segments_day(day).await,
@@ -3861,7 +3861,7 @@ mod tests {
     async fn typed_unauthorized_report_is_only_recovery_surface() {
         let peer = PrivateLinkPeer::start().await;
         let (_temp, session) = start_peer_session(&peer).await;
-        let capability = session.capability("/ingest".to_owned());
+        let capability = session.capability();
         assert!(matches!(
             capability.report_unauthorized(0).await,
             RepairOutcome::AlreadySuperseded { generation: 1 }
@@ -3970,7 +3970,7 @@ mod tests {
         let form = reqwest::multipart::Form::new()
             .part("files", reqwest::multipart::Part::bytes(body.clone()));
         let upload = tokio::spawn({
-            let capability = session.capability("/ingest".to_owned());
+            let capability = session.capability();
             async move { capability.ingest(form).await }
         });
         peer.wait_for_request_staged_at_least(spl_core::mux::INITIAL_WINDOW)
@@ -4011,10 +4011,7 @@ mod tests {
         .await;
         assert!(response.starts_with(b"HTTP/1.1 400"));
         assert!(matches!(
-            session
-                .capability("/ingest".to_owned())
-                .segments_day("20260101")
-                .await,
+            session.capability().segments_day("20260101").await,
             LinkOutcome::Success { .. }
         ));
         assert_eq!(peer.requests().len(), 1);
@@ -4275,10 +4272,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            session
-                .capability("/ingest".to_owned())
-                .segments_day("20260101")
-                .await,
+            session.capability().segments_day("20260101").await,
             LinkOutcome::Success { .. }
         ));
         assert_eq!(peer.accepted_carriers(), 1);
