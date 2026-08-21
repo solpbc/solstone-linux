@@ -2058,7 +2058,10 @@ mod tests {
                     &failed_pairer,
                     &failure_root,
                     "desktop",
-                    Cursor::new(b"pair-link\n"),
+                    Cursor::new(format!(
+                        "{}\n",
+                        crate::private_link::DIRECT_PAIR_LINK_FOR_TEST
+                    )),
                     &mut failure_output,
                     &mut failure_errors,
                 )
@@ -2081,7 +2084,10 @@ mod tests {
                     &pairer,
                     &config.config_dir,
                     "desktop",
-                    Cursor::new(b"pair-link\n"),
+                    Cursor::new(format!(
+                        "{}\n",
+                        crate::private_link::DIRECT_PAIR_LINK_FOR_TEST
+                    )),
                     &mut output,
                     &mut errors,
                 )
