@@ -101,9 +101,9 @@ solstone-linux status
 
 ## Protocol contract
 
-The `observer-client` contract is owned by the journal and frozen here as a byte-exact, language-neutral bundle at `vendor/observer-client-contract/`. This app adopts bundle version 8.0.0 and verifies it offline with `make check-observer-contract`.
+The `observer-client` contract is owned by the journal and frozen here as a byte-exact, language-neutral bundle at `vendor/observer-client-contract/`. This app adopts bundle version 9.0.0 and verifies it offline with `make check-observer-contract`.
 
-The bundle version, the solstone-linux application release, and wire-protocol version 2 are independent versions. When the app and authority disagree, resolve the incompatibility at the journal authority first; do not rewrite the vendored contract or weaken consumer conformance.
+The bundle version, the solstone-linux application release, and wire-protocol version 3 are independent versions. When the app and authority disagree, resolve the incompatibility at the journal authority first; do not rewrite the vendored contract or weaken consumer conformance.
 
 See `contracts/README.md` for the verified import ritual and public provenance record.
 

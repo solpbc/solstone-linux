@@ -6,6 +6,9 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+- this observer now speaks your journal's version-3 linked-device ingest contract. its device certificate identifies it for that co-experience, and it releases local capture data only after your journal proves it holds the same bytes.
+
 ## [1.0.2] - 2026-08-01
 
 ### Fixed

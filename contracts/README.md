@@ -1,6 +1,6 @@
 # Observer-client contract import
 
-The solstone journal owns the observer-client contract. solstone-linux keeps a frozen, byte-exact copy of bundle version 8.0.0 in `vendor/observer-client-contract/` so this observer can verify the agreement fully offline while experiencing the desktop along with its owner.
+The solstone journal owns the observer-client contract. solstone-linux keeps a frozen, byte-exact copy of bundle version 9.0.0 in `vendor/observer-client-contract/` so this observer can verify the agreement fully offline while experiencing the desktop along with its owner.
 
 To adopt an authority revision:
 
