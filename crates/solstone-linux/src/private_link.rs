@@ -20,6 +20,7 @@ use reqwest::Method;
 use reqwest::{RequestBuilder, StatusCode, Url, multipart};
 use serde::{Deserialize, Serialize};
 use spl_core::bridge::{BridgeNames, RequestHeaderPolicy};
+use spl_core::pairlink::{self, ParsedPairLink};
 use spl_transport::credential::Credential;
 use spl_transport::{
     TransportError,
@@ -654,9 +655,26 @@ async fn setup_with_pairer_and_stream<R: Read>(
             .map_err(config_persist_error)?;
     }
     let link = read_pair_link(input)?;
-    let credential = pairer
+    // Carrier selection is governed by the shared pair-link parser, before
+    // pairing returns any credential fields. A pairer performs the ceremony;
+    // it cannot reclassify the link or infer carrier selection from its result.
+    let relay_pair_link =
+        match pairlink::parse(&link).map_err(|_| PrivateStateError::PairInputInvalid)? {
+            ParsedPairLink::Relay(relay_link) => Some(relay_link),
+            ParsedPairLink::Direct(_) => None,
+        };
+    let mut credential = pairer
         .pair(&link, device_label, &serde_json::Map::new())
         .await?;
+    if let Some(relay_link) = relay_pair_link {
+        if credential.relay_origin.as_deref() != Some(relay_link.relay_origin.as_str()) {
+            return Err(PrivateStateError::PairingFailed);
+        }
+        credential.endpoints.clear();
+        credential.local_endpoints = None;
+        TransportClient::new_relay_only(credential.clone(), None)
+            .map_err(|_| PrivateStateError::PairingFailed)?;
+    }
     persist_credential(state_lock.root(), &credential)
 }
 
@@ -2108,6 +2126,7 @@ async fn start_private_link_session_inner(
     {
         let mut relay_credential = credential.clone();
         relay_credential.endpoints.clear();
+        relay_credential.local_endpoints = None;
         TransportClient::new_relay_only(relay_credential, Some(hook)).ok()
     } else {
         None
@@ -2316,6 +2335,24 @@ mod tests {
             base64url_no_pad(b"{}"),
             base64url_no_pad(claims.as_bytes())
         )
+    }
+
+    // These are accepted SPL fixtures, intentionally fed to the same setup
+    // boundary that production uses. The v04 form is a loopback LAN-direct
+    // link; the v06 form is the published relay conformance link.
+    const DIRECT_PAIR_LINK: &str =
+        "0G0QY00004EYJ001081G81860W40J2GB1G6GW3X0M6HA7955MTKTHADANEPAVBNF";
+    const RELAY_PAIR_LINK: &str = "0R0J6HB7H6NWVVR1VTPVXVYAZTXBW0938NKRKAYDXW00";
+
+    fn relay_pair_link_for(origin: &str) -> String {
+        assert!(u8::try_from(origin.len()).is_ok());
+        let mut blob = vec![0x06];
+        blob.extend_from_slice(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        blob.push(0x01);
+        blob.extend_from_slice(&[0xde; 16]);
+        blob.push(origin.len() as u8);
+        blob.extend_from_slice(origin.as_bytes());
+        spl_core::crockford::encode(&blob)
     }
 
     async fn read_http_head(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -3112,6 +3149,257 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_pairlink_parser_classifies_direct_and_relay_setup_forms() {
+        assert!(matches!(
+            pairlink::parse(DIRECT_PAIR_LINK),
+            Ok(ParsedPairLink::Direct(_))
+        ));
+        assert!(matches!(
+            pairlink::parse(RELAY_PAIR_LINK),
+            Ok(ParsedPairLink::Relay(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn pair_link_form_controls_persisted_carrier_candidates() {
+        let direct_temp = tempfile::tempdir().unwrap();
+        let relay_temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let mut source = peer.credential();
+        source.local_endpoints = Some(serde_json::json!([{"ip":"127.0.0.1","port":7657}]));
+        source.relay_origin = Some("https://link.solstone.app".to_owned());
+        source.device_token = Some(test_jwt(i64::MAX / 2));
+        assert!(!source.endpoints.is_empty());
+        assert!(source.local_endpoints.is_some());
+
+        setup_with_pairer(
+            &FakePairer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Some(source.clone()),
+            },
+            direct_temp.path(),
+            "device",
+            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+        )
+        .await
+        .unwrap();
+        let direct = load_credential(direct_temp.path()).unwrap().unwrap();
+        assert_eq!(direct, source);
+        peer.enqueue_response(
+            200,
+            serde_json::json!({
+                "key": "K",
+                "name": "stream",
+                "prefix": "prefix",
+                "ingest_url": "/app/observer/ingest",
+                "protocol_version": 2,
+            })
+            .to_string(),
+        );
+        let direct_owner = start_private_link_owner(direct_temp.path(), direct, "stream")
+            .await
+            .unwrap();
+        assert_eq!(
+            peer.accepted_carriers(),
+            1,
+            "a direct-form pairing reloads with its LAN transport intact"
+        );
+        direct_owner.shutdown().await.unwrap();
+
+        setup_with_pairer(
+            &FakePairer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Some(source.clone()),
+            },
+            relay_temp.path(),
+            "device",
+            Cursor::new(RELAY_PAIR_LINK.as_bytes()),
+        )
+        .await
+        .unwrap();
+        let relay = load_credential(relay_temp.path()).unwrap().unwrap();
+        let mut expected_relay = source;
+        expected_relay.endpoints.clear();
+        expected_relay.local_endpoints = None;
+        assert_eq!(relay, expected_relay);
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_pairing_refuses_to_persist_when_relay_transport_cannot_be_constructed() {
+        let temp = tempfile::tempdir().unwrap();
+        let direct = credential();
+        persist_credential(temp.path(), &direct).unwrap();
+        let before = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
+        let mut malformed_relay_credential = credential();
+        malformed_relay_credential.relay_origin = Some("https://link.solstone.app".to_owned());
+        malformed_relay_credential.device_token = None;
+        let error = setup_with_pairer(
+            &FakePairer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Some(malformed_relay_credential),
+            },
+            temp.path(),
+            "device",
+            Cursor::new(RELAY_PAIR_LINK.as_bytes()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PrivateStateError::PairingFailed));
+        assert_eq!(
+            fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+            before
+        );
+        assert_eq!(load_credential(temp.path()).unwrap(), Some(direct));
+    }
+
+    #[tokio::test]
+    async fn relay_pairing_rejects_a_ceremony_result_bound_to_another_relay() {
+        let temp = tempfile::tempdir().unwrap();
+        let direct = credential();
+        persist_credential(temp.path(), &direct).unwrap();
+        let before = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
+        let mut mismatched = credential();
+        mismatched.relay_origin = Some("https://other-relay.invalid".to_owned());
+        mismatched.device_token = Some(test_jwt(i64::MAX / 2));
+        let error = setup_with_pairer(
+            &FakePairer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Some(mismatched),
+            },
+            temp.path(),
+            "device",
+            Cursor::new(RELAY_PAIR_LINK.as_bytes()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PrivateStateError::PairingFailed));
+        assert_eq!(
+            fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+            before
+        );
+        assert_eq!(load_credential(temp.path()).unwrap(), Some(direct));
+    }
+
+    #[tokio::test]
+    async fn failed_relay_pairing_preserves_an_existing_direct_credential() {
+        let temp = tempfile::tempdir().unwrap();
+        let direct = credential();
+        persist_credential(temp.path(), &direct).unwrap();
+        let before = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
+        let error = setup_with_pairer(
+            &FakePairer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: None,
+            },
+            temp.path(),
+            "device",
+            Cursor::new(RELAY_PAIR_LINK.as_bytes()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PrivateStateError::PairingFailed));
+        assert_eq!(
+            fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+            before
+        );
+        assert_eq!(load_credential(temp.path()).unwrap(), Some(direct));
+    }
+
+    #[tokio::test]
+    async fn relay_pairing_reloads_without_dialing_its_retired_lan_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let lan_decoy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let mut paired = peer.credential();
+        paired.endpoints = vec![EndpointAddr {
+            host: "127.0.0.1".into(),
+            port: lan_decoy.local_addr().unwrap().port(),
+        }];
+        paired.local_endpoints = Some(serde_json::json!([{
+            "ip": "127.0.0.1",
+            "port": lan_decoy.local_addr().unwrap().port(),
+        }]));
+        let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let relay_origin = format!("http://{}", relay.local_addr().unwrap());
+        let relay_pair_link = relay_pair_link_for(&relay_origin);
+        paired.relay_origin = Some(relay_origin);
+        paired.device_token = Some(test_jwt(i64::MAX / 2));
+        paired.device_token_expires_at = Some(i64::MAX / 2);
+        setup_with_pairer(
+            &FakePairer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Some(paired),
+            },
+            temp.path(),
+            "device",
+            Cursor::new(relay_pair_link.as_bytes()),
+        )
+        .await
+        .unwrap();
+        let reloaded = load_credential(temp.path()).unwrap().unwrap();
+        assert!(reloaded.endpoints.is_empty());
+        assert!(reloaded.local_endpoints.is_none());
+
+        let relay_reply = tokio::spawn(async move {
+            let (mut stream, _) = relay.accept().await.unwrap();
+            let request = read_http_head(&mut stream).await;
+            assert!(request.starts_with(b"GET /session/dial?instance="));
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let owner = start_private_link_owner(temp.path(), reloaded, "stream")
+            .await
+            .unwrap();
+        relay_reply.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), lan_decoy.accept())
+                .await
+                .is_err(),
+            "a reloaded relay pairing must not dial retained LAN candidates"
+        );
+        owner.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn setup_rejects_an_unparseable_pair_link_before_the_pairing_ceremony() {
+        let temp = tempfile::tempdir().unwrap();
+        let direct = credential();
+        persist_credential(temp.path(), &direct).unwrap();
+        let before = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let error = setup_with_pairer(
+            &FakePairer {
+                calls: calls.clone(),
+                result: Some(credential()),
+            },
+            temp.path(),
+            "device",
+            Cursor::new(b"not-a-pair-link"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PrivateStateError::PairInputInvalid));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let credential_path = temp.path().join(CREDENTIALS_FILENAME);
+        assert_eq!(fs::read(&credential_path).unwrap(), before);
+        assert_eq!(load_credential(temp.path()).unwrap(), Some(direct));
+        assert_eq!(
+            fs::metadata(credential_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     #[tokio::test]
     async fn injected_pairer_persists_only_success() {
         let temp = tempfile::tempdir().unwrap();
@@ -3120,7 +3408,13 @@ mod tests {
             calls: calls.clone(),
             result: None,
         };
-        let failed = setup_with_pairer(&pairer, temp.path(), "device", Cursor::new(b"pair")).await;
+        let failed = setup_with_pairer(
+            &pairer,
+            temp.path(),
+            "device",
+            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+        )
+        .await;
         assert!(failed.is_err());
         drop(failed);
         assert!(!temp.path().join(CREDENTIALS_FILENAME).exists());
@@ -3128,9 +3422,14 @@ mod tests {
             calls: calls.clone(),
             result: Some(credential()),
         };
-        setup_with_pairer(&pairer, temp.path(), "device", Cursor::new(b"pair"))
-            .await
-            .unwrap();
+        setup_with_pairer(
+            &pairer,
+            temp.path(),
+            "device",
+            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+        )
+        .await
+        .unwrap();
         assert_eq!(load_credential(temp.path()).unwrap(), Some(credential()));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -4243,9 +4542,14 @@ mod tests {
             calls: calls.clone(),
             result: peer.credential(),
         };
-        setup_with_pairer(&pairer, temp.path(), "device", Cursor::new(b"pair"))
-            .await
-            .unwrap();
+        setup_with_pairer(
+            &pairer,
+            temp.path(),
+            "device",
+            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+        )
+        .await
+        .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         let config_path = temp.path().join("config.json");
@@ -5077,23 +5381,42 @@ mod tests {
             .await
             .unwrap();
         });
-        let mut credential = peer.credential();
-        credential.endpoints.clear();
-        credential.relay_origin = Some(relay_origin);
-        credential.device_token = Some(test_jwt(1));
-        credential.device_token_expires_at = Some(1);
+        let relay_pair_link = relay_pair_link_for(&relay_origin);
+        let mut paired = peer.credential();
+        paired.local_endpoints = Some(serde_json::json!([{"ip":"127.0.0.1","port":7657}]));
+        paired.relay_origin = Some(relay_origin);
+        paired.device_token = Some(test_jwt(1));
+        paired.device_token_expires_at = Some(1);
+        setup_with_pairer(
+            &FakePairer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Some(paired),
+            },
+            temp.path(),
+            "device",
+            Cursor::new(relay_pair_link.as_bytes()),
+        )
+        .await
+        .unwrap();
+        let credential = load_credential(temp.path()).unwrap().unwrap();
+        assert!(credential.endpoints.is_empty());
+        assert!(credential.local_endpoints.is_none());
         let owner = start_private_link_owner(temp.path(), credential, "stream")
             .await
             .unwrap();
         relay.await.unwrap();
         let persisted = load_credential(temp.path()).unwrap().unwrap();
         assert_eq!(persisted.device_token.as_deref(), Some(refreshed.as_str()));
+        assert!(persisted.endpoints.is_empty());
+        assert!(persisted.local_endpoints.is_none());
         owner.shutdown().await.unwrap();
         let persisted_after_shutdown = load_credential(temp.path()).unwrap().unwrap();
         assert_eq!(
             persisted_after_shutdown.device_token.as_deref(),
             Some(refreshed.as_str())
         );
+        assert!(persisted_after_shutdown.endpoints.is_empty());
+        assert!(persisted_after_shutdown.local_endpoints.is_none());
         peer.shutdown().await;
     }
 
