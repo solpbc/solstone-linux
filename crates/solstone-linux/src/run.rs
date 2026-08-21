@@ -2058,9 +2058,10 @@ mod tests {
                     &failed_pairer,
                     &failure_root,
                     "desktop",
-                    Cursor::new(
-                        b"0G0QY00004EYJ001081G81860W40J2GB1G6GW3X0M6HA7955MTKTHADANEPAVBNF\n",
-                    ),
+                    Cursor::new(format!(
+                        "{}\n",
+                        crate::private_link::DIRECT_PAIR_LINK_FOR_TEST
+                    )),
                     &mut failure_output,
                     &mut failure_errors,
                 )
@@ -2083,9 +2084,10 @@ mod tests {
                     &pairer,
                     &config.config_dir,
                     "desktop",
-                    Cursor::new(
-                        b"0G0QY00004EYJ001081G81860W40J2GB1G6GW3X0M6HA7955MTKTHADANEPAVBNF\n",
-                    ),
+                    Cursor::new(format!(
+                        "{}\n",
+                        crate::private_link::DIRECT_PAIR_LINK_FOR_TEST
+                    )),
                     &mut output,
                     &mut errors,
                 )

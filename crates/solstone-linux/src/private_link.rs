@@ -44,6 +44,9 @@ const PRIVATE_STATE_LOCK_FILENAME: &str = ".solstone-linux.private-state.lock";
 pub(crate) const PRIVATE_STATE_READY_LOCK_FILENAME: &str =
     ".solstone-linux.private-state.ready.lock";
 const MAX_PAIR_LINK_BYTES: u64 = 4096;
+#[cfg(test)]
+pub(crate) const DIRECT_PAIR_LINK_FOR_TEST: &str =
+    "0G0QY00004EYJ001081G81860W40J2GB1G6GW3X0M6HA7955MTKTHADANEPAVBNF";
 pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 128 * 1024 * 1024;
 const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -647,6 +650,18 @@ async fn setup_with_pairer_and_stream<R: Read>(
     stream: Option<&str>,
     input: R,
 ) -> Result<(), PrivateStateError> {
+    setup_with_pairer_and_stream_with_fault(pairer, config_root, device_label, stream, input, None)
+        .await
+}
+
+async fn setup_with_pairer_and_stream_with_fault<R: Read>(
+    pairer: &dyn Pairer,
+    config_root: &Path,
+    device_label: &str,
+    stream: Option<&str>,
+    input: R,
+    credential_fault: Option<&dyn DurableWriteFault>,
+) -> Result<(), PrivateStateError> {
     let state_lock = PrivateStateLock::acquire(config_root)?;
     sanitize_link_authority(&private_config_paths(state_lock.root()))
         .map_err(config_persist_error)?;
@@ -675,7 +690,10 @@ async fn setup_with_pairer_and_stream<R: Read>(
         TransportClient::new_relay_only(credential.clone(), None)
             .map_err(|_| PrivateStateError::PairingFailed)?;
     }
-    persist_credential(state_lock.root(), &credential)
+    match credential_fault {
+        Some(fault) => persist_credential_with_fault(state_lock.root(), &credential, fault),
+        None => persist_credential(state_lock.root(), &credential),
+    }
 }
 
 #[cfg(test)]
@@ -762,6 +780,24 @@ pub(crate) fn persist_credential(
             PrivateIoOperation::Persist,
         )
     })
+}
+
+fn persist_credential_with_fault(
+    config_root: &Path,
+    credential: &Credential,
+    fault: &dyn DurableWriteFault,
+) -> Result<(), PrivateStateError> {
+    let bytes =
+        serde_json::to_vec(credential).map_err(|_| PrivateStateError::MalformedCredential)?;
+    atomic_write_bytes_with_fault(&config_root.join(CREDENTIALS_FILENAME), &bytes, fault).map_err(
+        |error| {
+            map_private_file(
+                error,
+                PrivateTargetKind::Credential,
+                PrivateIoOperation::Persist,
+            )
+        },
+    )
 }
 
 pub(crate) fn load_observer(
@@ -2340,8 +2376,6 @@ mod tests {
     // These are accepted SPL fixtures, intentionally fed to the same setup
     // boundary that production uses. The v04 form is a loopback LAN-direct
     // link; the v06 form is the published relay conformance link.
-    const DIRECT_PAIR_LINK: &str =
-        "0G0QY00004EYJ001081G81860W40J2GB1G6GW3X0M6HA7955MTKTHADANEPAVBNF";
     const RELAY_PAIR_LINK: &str = "0R0J6HB7H6NWVVR1VTPVXVYAZTXBW0938NKRKAYDXW00";
 
     fn relay_pair_link_for(origin: &str) -> String {
@@ -3152,7 +3186,7 @@ mod tests {
     #[test]
     fn shared_pairlink_parser_classifies_direct_and_relay_setup_forms() {
         assert!(matches!(
-            pairlink::parse(DIRECT_PAIR_LINK),
+            pairlink::parse(DIRECT_PAIR_LINK_FOR_TEST),
             Ok(ParsedPairLink::Direct(_))
         ));
         assert!(matches!(
@@ -3180,7 +3214,7 @@ mod tests {
             },
             direct_temp.path(),
             "device",
-            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+            Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await
         .unwrap();
@@ -3229,29 +3263,76 @@ mod tests {
     #[tokio::test]
     async fn relay_pairing_refuses_to_persist_when_relay_transport_cannot_be_constructed() {
         let temp = tempfile::tempdir().unwrap();
-        let direct = credential();
+        let peer = PrivateLinkPeer::start().await;
+        let direct = peer.credential();
         persist_credential(temp.path(), &direct).unwrap();
-        let before = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
-        let mut malformed_relay_credential = credential();
-        malformed_relay_credential.relay_origin = Some("https://link.solstone.app".to_owned());
-        malformed_relay_credential.device_token = None;
-        let error = setup_with_pairer(
-            &FakePairer {
-                calls: Arc::new(AtomicUsize::new(0)),
-                result: Some(malformed_relay_credential),
+        let credential_path = temp.path().join(CREDENTIALS_FILENAME);
+        let before = fs::read(&credential_path).unwrap();
+        let before_mode = fs::metadata(&credential_path).unwrap().permissions().mode() & 0o777;
+        let mut valid_relay = peer.credential();
+        valid_relay.local_endpoints = Some(serde_json::json!([{"ip":"127.0.0.1","port":7657}]));
+        valid_relay.relay_origin = Some("https://link.solstone.app".to_owned());
+        valid_relay.device_token = Some(test_jwt(i64::MAX / 2));
+
+        for invalid in [
+            {
+                let mut value = valid_relay.clone();
+                value.relay_origin = None;
+                value
             },
-            temp.path(),
-            "device",
-            Cursor::new(RELAY_PAIR_LINK.as_bytes()),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(error, PrivateStateError::PairingFailed));
-        assert_eq!(
-            fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
-            before
-        );
+            {
+                let mut value = valid_relay.clone();
+                value.relay_origin = Some(String::new());
+                value
+            },
+            {
+                let mut value = valid_relay.clone();
+                value.relay_origin = Some("https://other-relay.invalid".to_owned());
+                value
+            },
+            {
+                let mut value = valid_relay.clone();
+                value.device_token = None;
+                value
+            },
+            {
+                let mut value = valid_relay.clone();
+                value.device_token = Some(String::new());
+                value
+            },
+            {
+                let mut value = valid_relay.clone();
+                value.client_key_pem = "not a private key".to_owned();
+                value
+            },
+        ] {
+            let error = setup_with_pairer(
+                &FakePairer {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    result: Some(invalid),
+                },
+                temp.path(),
+                "device",
+                Cursor::new(RELAY_PAIR_LINK.as_bytes()),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, PrivateStateError::PairingFailed));
+            assert_eq!(fs::read(&credential_path).unwrap(), before);
+            assert_eq!(
+                fs::metadata(&credential_path).unwrap().permissions().mode() & 0o777,
+                before_mode
+            );
+            assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            }));
+        }
         assert_eq!(load_credential(temp.path()).unwrap(), Some(direct));
+        peer.shutdown().await;
     }
 
     #[tokio::test]
@@ -3401,6 +3482,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_credential_persistence_failures_never_leave_torn_state() {
+        let peer = PrivateLinkPeer::start().await;
+        let prior = peer.credential();
+        let mut hybrid = peer.credential();
+        hybrid.local_endpoints = Some(serde_json::json!([{"ip":"127.0.0.1","port":7657}]));
+        hybrid.relay_origin = Some("https://link.solstone.app".to_owned());
+        hybrid.device_token = Some(test_jwt(i64::MAX / 2));
+        let mut projected = hybrid.clone();
+        projected.endpoints.clear();
+        projected.local_endpoints = None;
+        let projected_bytes = serde_json::to_vec(&projected).unwrap();
+
+        for stage in [
+            DurableWriteStage::Create,
+            DurableWriteStage::Write,
+            DurableWriteStage::Fsync,
+            DurableWriteStage::Rename,
+            DurableWriteStage::DirSync,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            persist_credential(temp.path(), &prior).unwrap();
+            let credential_path = temp.path().join(CREDENTIALS_FILENAME);
+            let prior_bytes = fs::read(&credential_path).unwrap();
+            let error = setup_with_pairer_and_stream_with_fault(
+                &FakePairer {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    result: Some(hybrid.clone()),
+                },
+                temp.path(),
+                "device",
+                None,
+                Cursor::new(RELAY_PAIR_LINK.as_bytes()),
+                Some(&FailStage(stage)),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                PrivateStateError::Io {
+                    operation: PrivateIoOperation::Persist,
+                    ..
+                }
+            ));
+
+            let current = fs::read(&credential_path).unwrap();
+            if stage == DurableWriteStage::DirSync {
+                assert!(current == prior_bytes || current == projected_bytes);
+            } else {
+                assert_eq!(current, prior_bytes);
+            }
+            let loaded: Credential = serde_json::from_slice(&current).unwrap();
+            assert!(loaded == prior || loaded == projected);
+            assert_eq!(
+                fs::metadata(&credential_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            }));
+        }
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn injected_pairer_persists_only_success() {
         let temp = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -3412,7 +3561,7 @@ mod tests {
             &pairer,
             temp.path(),
             "device",
-            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+            Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await;
         assert!(failed.is_err());
@@ -3426,7 +3575,7 @@ mod tests {
             &pairer,
             temp.path(),
             "device",
-            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+            Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await
         .unwrap();
@@ -4546,7 +4695,7 @@ mod tests {
             &pairer,
             temp.path(),
             "device",
-            Cursor::new(DIRECT_PAIR_LINK.as_bytes()),
+            Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await
         .unwrap();
