@@ -107,8 +107,8 @@ test: rust-preflight
 	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux
 
 check-observer-contract: rust-preflight
-	@echo "Observer contract bundle: 8.0.0"
-	@echo "Observer contract manifest SHA-256: 9b3bcd6b7f8a83adb9007e32501af44403cb93cfb8d80f256b6a7b5b9f93057e"
+	@echo "Observer contract bundle: 9.0.0"
+	@echo "Observer contract manifest SHA-256: 93b2a5a1604f1ba6fad30624c00cac98ea3d04a80cb1718886cf665c16f58834"
 	@inventory=$$(CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p solstone-linux observer_contract_tests:: -- --list); \
 	printf '%s\n' "$$inventory"; \
 	printf '%s\n' "$$inventory" | grep -Fx 'observer_contract_tests::observer_contract_conformance: test' >/dev/null || { echo "error: observer contract test inventory mismatch" >&2; exit 1; }; \

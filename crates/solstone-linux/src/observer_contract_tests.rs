@@ -4,10 +4,8 @@
 use crate::{
     config::Config,
     private_link::{PrivateLinkOwner, start_registered_private_link_for_test},
-    private_link_test_peer::{PeerRequest, PrivateLinkPeer},
-    sync::{contract_segment_proven_held, contract_sha256_file},
-    sync_health::ErrorType,
-    upload::{ListingEntry, UploadClient, contract_parse_listing},
+    private_link_test_peer::PrivateLinkPeer,
+    upload::UploadClient,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -19,111 +17,23 @@ use std::{
 };
 use tempfile::TempDir;
 
-const MANIFEST_SHA256: &str = "9b3bcd6b7f8a83adb9007e32501af44403cb93cfb8d80f256b6a7b5b9f93057e";
-const AUTHORITY_COMMIT: &str = "766021cd44d4a0a7ce471d2affb461bf3ce0fc39";
-
-const FULL_FIXTURES: &[&str] = &[
-    "declared.observer.ingestSegments.custody_unknown_rejected",
-    "declared.observer.ingestSegments.envelope_total_mismatch",
-    "declared.observer.ingestUpload.status_unknown_rejected",
-    "example.callosum.rootEvents.response.200.text-event-stream.default",
-    "example.link.pair.request.body.application-json.default",
-    "example.link.pair.response.200.application-json.default",
-    "example.observer.callosumStream.response.200.text-event-stream.default",
-    "example.observer.ingestEvent.request.body.application-json.default",
-    "example.observer.ingestEvent.response.200.application-json.default",
-    "example.observer.ingestSegments.response.200.application-json.legacy",
-    "example.observer.ingestSegments.response.200.application-json.v2",
-    "example.observer.ingestUpload.request.body.multipart-form-data.default",
-    "example.observer.ingestUpload.response.200.application-json.duplicate",
-    "example.observer.ingestUpload.response.200.application-json.normal",
-    "example.observer.register.request.body.application-json.default",
-    "example.observer.register.response.200.application-json.default",
-    "recorded.auth.bearer.segments",
-    "recorded.auth.handle.segments",
-    "recorded.ingestUpload.collision",
-    "recorded.ingestUpload.conflict",
-    "recorded.ingestUpload.duplicate",
-    "recorded.ingestUpload.failed",
-    "recorded.ingestUpload.ok",
-    "recorded.segments.custody_statuses",
-    "recorded.segments.legacy.absent_header",
-    "recorded.segments.legacy.unparseable_header",
-    "recorded.segments.submitted_name_omitted",
-    "recorded.segments.v2.envelope",
-    "recorded.sse.observer.data",
-    "recorded.sse.observer.error",
-    "recorded.sse.observer.heartbeat",
-    "recorded.sse.root.data_unknown_event",
-    "recorded.sse.root.heartbeat",
-];
+const MANIFEST_SHA256: &str = "93b2a5a1604f1ba6fad30624c00cac98ea3d04a80cb1718886cf665c16f58834";
+const AUTHORITY_COMMIT: &str = "b819bd840765a77322f4fc69f92e593e8c59b8ca";
 
 const LINUX_FIXTURES: &[&str] = &[
-    "declared.observer.ingestSegments.custody_unknown_rejected",
-    "declared.observer.ingestSegments.envelope_total_mismatch",
-    "declared.observer.ingestUpload.status_unknown_rejected",
-    "example.observer.ingestEvent.request.body.application-json.default",
-    "example.observer.ingestEvent.response.200.application-json.default",
-    "example.observer.ingestSegments.response.200.application-json.legacy",
-    "example.observer.ingestSegments.response.200.application-json.v2",
-    "example.observer.ingestUpload.request.body.multipart-form-data.default",
-    "example.observer.ingestUpload.response.200.application-json.duplicate",
-    "example.observer.ingestUpload.response.200.application-json.normal",
-    "example.observer.register.request.body.application-json.default",
-    "example.observer.register.response.200.application-json.default",
-    "recorded.auth.bearer.segments",
-    "recorded.auth.handle.segments",
-    "recorded.ingestUpload.collision",
-    "recorded.ingestUpload.conflict",
-    "recorded.ingestUpload.duplicate",
-    "recorded.ingestUpload.failed",
-    "recorded.ingestUpload.ok",
-    "recorded.segments.custody_statuses",
-    "recorded.segments.legacy.absent_header",
-    "recorded.segments.legacy.unparseable_header",
-    "recorded.segments.submitted_name_omitted",
-    "recorded.segments.v2.envelope",
-];
-
-const FULL_VECTORS: &[&str] = &[
-    "callosum.rootEvents.sse.data_unknown_event",
-    "callosum.rootEvents.sse.heartbeat",
-    "observer.auth.bearer",
-    "observer.auth.handle",
-    "observer.callosumStream.sse.data",
-    "observer.callosumStream.sse.error",
-    "observer.callosumStream.sse.heartbeat",
-    "observer.ingestSegments.custody_statuses",
-    "observer.ingestSegments.custody_unknown_rejected",
-    "observer.ingestSegments.envelope_total_mismatch",
-    "observer.ingestSegments.legacy_array.absent_header",
-    "observer.ingestSegments.legacy_array.unparseable_header",
-    "observer.ingestSegments.submitted_name_fallback",
-    "observer.ingestSegments.v2_envelope",
-    "observer.ingestUpload.status.collision",
-    "observer.ingestUpload.status.conflict",
-    "observer.ingestUpload.status.duplicate",
-    "observer.ingestUpload.status.failed",
-    "observer.ingestUpload.status.ok",
-    "observer.ingestUpload.status_unknown_rejected",
+    "declared.observer.ingestUpload.status.collision",
+    "declared.observer.ingestUpload.status.conflict",
+    "declared.observer.ingestUpload.status.duplicate",
+    "declared.observer.ingestUpload.status.failed",
+    "declared.observer.ingestUpload.status.ok",
 ];
 
 const LINUX_VECTORS: &[&str] = &[
-    "observer.auth.bearer",
-    "observer.auth.handle",
-    "observer.ingestSegments.custody_statuses",
-    "observer.ingestSegments.custody_unknown_rejected",
-    "observer.ingestSegments.envelope_total_mismatch",
-    "observer.ingestSegments.legacy_array.absent_header",
-    "observer.ingestSegments.legacy_array.unparseable_header",
-    "observer.ingestSegments.submitted_name_fallback",
-    "observer.ingestSegments.v2_envelope",
     "observer.ingestUpload.status.collision",
     "observer.ingestUpload.status.conflict",
     "observer.ingestUpload.status.duplicate",
     "observer.ingestUpload.status.failed",
     "observer.ingestUpload.status.ok",
-    "observer.ingestUpload.status_unknown_rejected",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -279,8 +189,11 @@ fn verify_bundle(root: &Path, expected_manifest_digest: &str) -> Result<Value, S
     Ok(manifest)
 }
 
-fn load_index(path: &Path, key: &str) -> BTreeMap<String, Value> {
-    let body: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+fn load_document(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+fn load_index(body: &Value, key: &str) -> BTreeMap<String, Value> {
     let mut indexed = BTreeMap::new();
     for item in body[key].as_array().unwrap() {
         let id = item["id"].as_str().unwrap().to_owned();
@@ -296,24 +209,37 @@ fn set(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
 
-fn record(executed: &mut BTreeSet<String>, id: &str, passed: bool) {
-    assert!(passed, "production-path assertion failed for {id}");
+fn record(executed: &mut BTreeSet<String>, id: &str) {
     assert!(
         executed.insert(id.to_owned()),
         "duplicate coverage for {id}"
     );
 }
 
+fn vocabulary<'a>(manifest: &'a Value, id: &str) -> &'a Value {
+    manifest["vocabularies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|vocabulary| vocabulary["id"] == id)
+        .unwrap_or_else(|| panic!("missing vocabulary {id}"))
+}
+
 fn assert_identities(
     manifest: &Value,
     fixtures: &BTreeMap<String, Value>,
     vectors: &BTreeMap<String, Value>,
+    fixture_document: &Value,
+    vector_document: &Value,
+    consumer_audit: &Value,
 ) {
-    assert_eq!(manifest["bundle_semver"], "8.0.0");
+    assert_eq!(manifest["bundle_semver"], "9.0.0");
     assert_eq!(manifest["openapi_document_version"], "1.0.0");
+    assert_eq!(manifest["observer_protocol_version"], 3);
+    assert_eq!(manifest["supported_response_variants"], json!([3]));
     assert_eq!(
         manifest["generator_identity"],
-        "solstone.convey.contract.observer_bundle.v1"
+        "solstone.repository_contracts.observer_client_contract_bundle.v1"
     );
     assert_eq!(
         manifest["schema_dialect_uri"],
@@ -323,53 +249,109 @@ fn assert_identities(
         manifest["bundle_schema_identity"],
         "solstone.observer-client-contract-bundle.schema.v1"
     );
-    assert_eq!(manifest["observer_protocol_version"], 2);
-    assert_eq!(manifest["supported_response_variants"], json!([1, 2]));
-    assert_eq!(
-        manifest["consumer_identifiers"],
-        json!([
-            "solstone-android",
-            "solstone-browser",
-            "solstone-linux",
-            "solstone-macos",
-            "solstone-swift",
-            "solstone-tmux",
-            "solstone-windows"
-        ])
-    );
-    let targets: BTreeSet<_> = manifest["windows_linux_rollout_targets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["consumer_identifier"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        targets,
-        BTreeSet::from(["solstone-linux", "solstone-windows"])
-    );
     assert_eq!(
         manifest["operation_ids"],
         json!([
-            "callosum.rootEvents",
-            "link.pair",
-            "observer.callosumStream",
-            "observer.ingestEvent",
-            "observer.ingestSegments",
             "observer.ingestUpload",
-            "observer.register"
+            "observer.ingestManifest",
+            "observer.ingestManifestDay",
+            "observer.ingestSegments"
         ])
     );
     assert_eq!(
+        manifest["consumer_identifiers"],
+        json!(["solstone-browser", "solstone-linux", "solstone-windows"])
+    );
+    assert_eq!(
+        manifest["component_closure"],
+        json!(["Error", "SegmentFile", "SegmentItem", "SegmentsEnvelope"])
+    );
+    assert_eq!(
+        fixture_document["schema"],
+        "solstone.observer-client-contract-fixtures.v2"
+    );
+    assert_eq!(
+        vector_document["schema"],
+        "solstone.observer-client-contract-vectors.v2"
+    );
+    assert_eq!(
+        consumer_audit["schema"],
+        "solstone.observer-client-contract-consumer-audit.v2"
+    );
+
+    assert_eq!(
+        vocabulary(manifest, "SegmentFile.status"),
+        &json!({
+            "classification":"closed",
+            "id":"SegmentFile.status",
+            "source_pointer":"/components/schemas/SegmentFile/properties/status",
+            "unknown_value_behavior":"reject",
+            "values":["present","missing","processed"]
+        })
+    );
+    assert_eq!(
+        vocabulary(manifest, "observer.ingestUpload.status"),
+        &json!({
+            "classification":"closed",
+            "id":"observer.ingestUpload.status",
+            "source_pointers":[
+                "/paths/~1app~1devices~1ingest/post/responses/200/content/application~1json/schema/properties/status",
+                "/paths/~1app~1devices~1ingest/post/responses/409"
+            ],
+            "unknown_value_behavior":"reject",
+            "values":["ok","duplicate","collision","conflict","failed"]
+        })
+    );
+
+    let linux_target = manifest["windows_linux_rollout_targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|target| target["consumer_identifier"] == "solstone-linux")
+        .unwrap();
+    assert_eq!(
+        linux_target["adoption_blocker_ids"],
+        json!(["solstone-linux-legacy-v2-unmigrated"])
+    );
+    let linux_revision = manifest["audited_consumer_revisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|revision| revision["consumer_identifier"] == "solstone-linux")
+        .unwrap();
+    assert_eq!(
+        linux_revision["revision"],
+        "1c679db1ce6f9a65db70c5aae0ca2fad677416ef"
+    );
+    let linux_audit = consumer_audit["audited_commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|commit| commit["consumer"] == "solstone-linux")
+        .unwrap();
+    assert_eq!(
+        linux_audit["commit"],
+        "1c679db1ce6f9a65db70c5aae0ca2fad677416ef"
+    );
+
+    assert_eq!(
         fixtures.keys().cloned().collect::<BTreeSet<_>>(),
-        set(FULL_FIXTURES)
+        set(LINUX_FIXTURES)
     );
     assert_eq!(
         vectors.keys().cloned().collect::<BTreeSet<_>>(),
-        set(FULL_VECTORS)
+        set(LINUX_VECTORS)
     );
     for vector in vectors.values() {
         assert!(fixtures.contains_key(vector["fixture_id"].as_str().unwrap()));
     }
+    assert_eq!(
+        fixtures["declared.observer.ingestUpload.status.failed"]["schema_validation"],
+        json!({
+            "note":"vocabulary-only status value; the full Error payload requires error, reason_code, and detail, and the authority enumerates no HTTP 500 reason code",
+            "valid":false
+        })
+    );
 }
 
 fn verify_provenance(root: &Path) -> Result<(), String> {
@@ -378,7 +360,7 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
     let expected = json!({
         "authority_repository":"https://github.com/solpbc/solstone-journal",
         "authority_commit":AUTHORITY_COMMIT,
-        "bundle_version":"8.0.0",
+        "bundle_version":"9.0.0",
         "manifest_path":"manifest.json",
         "manifest_sha256":MANIFEST_SHA256,
         "vendored_root":"vendor/observer-client-contract"
@@ -387,6 +369,107 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
         return Err("provenance mismatch".to_owned());
     }
     Ok(())
+}
+
+fn assert_protocol_three_parameter(operation: &Value) {
+    let parameter = operation["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parameter| parameter["name"] == "X-Solstone-Protocol-Version")
+        .expect("required protocol parameter");
+    assert_eq!(parameter["in"], "header");
+    assert_eq!(parameter["required"], true);
+    assert_eq!(parameter["schema"], json!({"const":3,"type":"integer"}));
+    assert!(
+        parameter["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains(
+                    "Identity is the linked-device mTLS certificate, not a request header.",
+                )
+            })
+    );
+}
+
+fn assert_read_projection(projection: &Value) {
+    let paths = &projection["paths"];
+    let manifest = &paths["/app/devices/ingest/manifest"]["get"];
+    let day_manifest = &paths["/app/devices/ingest/manifest/{day}"]["get"];
+    let segments = &paths["/app/devices/ingest/segments/{day}"]["get"];
+    for (route, operation, id) in [
+        (
+            "/app/devices/ingest/manifest",
+            manifest,
+            "observer.ingestManifest",
+        ),
+        (
+            "/app/devices/ingest/manifest/{day}",
+            day_manifest,
+            "observer.ingestManifestDay",
+        ),
+        (
+            "/app/devices/ingest/segments/{day}",
+            segments,
+            "observer.ingestSegments",
+        ),
+    ] {
+        let methods: Vec<_> = paths[route]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(methods, ["get"]);
+        assert_eq!(operation["operationId"], id);
+        assert_protocol_three_parameter(operation);
+    }
+    assert_eq!(
+        manifest["responses"]["200"]["content"]["application/json"]["schema"]["required"],
+        json!(["days"])
+    );
+    let day_schema = &day_manifest["responses"]["200"]["content"]["application/json"]["schema"];
+    assert_eq!(
+        day_schema["required"],
+        json!(["version", "day", "segments"])
+    );
+    assert_eq!(day_schema["properties"]["version"]["type"], "integer");
+    assert!(day_schema["properties"]["version"].get("const").is_none());
+    assert!(day_schema["properties"]["version"].get("enum").is_none());
+    assert_eq!(
+        segments["responses"]["200"]["content"]["application/json"]["schema"],
+        json!({"$ref":"#/components/schemas/SegmentsEnvelope"})
+    );
+
+    let schemas = &projection["components"]["schemas"];
+    assert_eq!(
+        schemas["SegmentsEnvelope"]["required"],
+        json!(["items", "total", "protocol_version"])
+    );
+    assert_eq!(
+        schemas["SegmentsEnvelope"]["properties"]["items"]["items"],
+        json!({"$ref":"#/components/schemas/SegmentItem"})
+    );
+    assert_eq!(
+        schemas["SegmentItem"]["required"],
+        json!(["key", "observed", "files"])
+    );
+    assert_eq!(
+        schemas["SegmentItem"]["properties"]["files"]["items"],
+        json!({"$ref":"#/components/schemas/SegmentFile"})
+    );
+    assert_eq!(
+        schemas["SegmentFile"]["required"],
+        json!(["name", "size", "sha256", "status"])
+    );
+    assert_eq!(
+        schemas["SegmentFile"]["properties"]["size"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        schemas["SegmentFile"]["properties"]["status"]["enum"],
+        json!(["present", "missing", "processed"])
+    );
 }
 
 fn config(temp: &TempDir) -> Config {
@@ -441,12 +524,26 @@ impl LinkedHarness {
     }
 }
 
-fn header<'a>(request: &'a PeerRequest, name: &str) -> Option<&'a str> {
-    request
-        .headers
-        .iter()
-        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
+async fn upload_fixture_result(fixture: &Value) -> crate::upload::UploadResult {
+    let status = fixture["provenance"]["http_status"]
+        .as_u64()
+        .expect("fixture HTTP status") as u16;
+    let payload = fixture["payload"].to_string();
+    let temp = tempfile::tempdir().unwrap();
+    let media = temp.path().join("audio.flac");
+    fs::write(&media, b"audio").unwrap();
+    let harness = LinkedHarness::start(&temp).await;
+    harness.peer.enqueue_response(status, payload);
+    let result = harness
+        .client
+        .upload_segment("20260618", "143022_300", &[media])
+        .await;
+    harness.finish().await;
+    result
+}
+
+fn assert_upload_success_matches_decision(success: bool, decision: &Value) {
+    assert_eq!(success, decision["accepted"].as_bool().unwrap());
 }
 
 async fn assert_upload_contract(
@@ -455,434 +552,35 @@ async fn assert_upload_contract(
     executed_fixtures: &mut BTreeSet<String>,
     executed_vectors: &mut BTreeSet<String>,
 ) {
-    let cases = [
-        (
-            "recorded.ingestUpload.ok",
-            "observer.ingestUpload.status.ok",
-        ),
-        (
-            "recorded.ingestUpload.collision",
-            "observer.ingestUpload.status.collision",
-        ),
-        (
-            "recorded.ingestUpload.duplicate",
-            "observer.ingestUpload.status.duplicate",
-        ),
-        (
-            "recorded.ingestUpload.conflict",
-            "observer.ingestUpload.status.conflict",
-        ),
-        (
-            "recorded.ingestUpload.failed",
-            "observer.ingestUpload.status.failed",
-        ),
-        (
-            "declared.observer.ingestUpload.status_unknown_rejected",
-            "observer.ingestUpload.status_unknown_rejected",
-        ),
-    ];
-    for (fixture_id, vector_id) in cases {
-        let fixture = &fixtures[fixture_id];
-        let vector = &vectors[vector_id];
-        assert_eq!(vector["fixture_id"], fixture_id);
-        let status = vector["observed_status"]
-            .as_u64()
-            .or_else(|| fixture["provenance"]["status"].as_u64())
-            .expect("authority observed HTTP status") as u16;
-        let temp = tempfile::tempdir().unwrap();
-        let media = temp.path().join("audio.flac");
-        fs::write(&media, b"audio").unwrap();
-        let harness = LinkedHarness::start(&temp).await;
-        harness
-            .peer
-            .enqueue_response(status, fixture["payload"].to_string());
-        let result = harness
-            .client
-            .upload_segment("20260618", "143022_300", &[media])
-            .await;
-        let accepted = vector["decision"]["accepted"].as_bool().unwrap_or_else(|| {
-            assert_eq!(vector["decision"]["unknown_value_behavior"], "reject");
-            false
-        });
-        assert_eq!(result.success, accepted);
-        if accepted {
-            let duplicate = vector["decision"]["stored_key_source"] == "existing_segment";
-            assert_eq!(result.duplicate, duplicate);
-            let source = vector["decision"]["stored_key_source"].as_str().unwrap();
-            assert_eq!(
-                result.stored_key.as_deref(),
-                fixture["payload"][source].as_str()
-            );
-        } else if status == 200 {
-            assert_eq!(result.error_type, Some(ErrorType::Incompatible));
-            assert_eq!(harness.peer.requests().len(), 1);
-        } else {
-            assert!(!result.success && result.stored_key.is_none());
-        }
-        record(executed_fixtures, fixture_id, true);
-        record(executed_vectors, vector_id, true);
-        harness.finish().await;
-    }
-    for fixture_id in [
-        "example.observer.ingestUpload.response.200.application-json.normal",
-        "example.observer.ingestUpload.response.200.application-json.duplicate",
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let media = temp.path().join("audio.flac");
-        fs::write(&media, b"audio").unwrap();
-        let harness = LinkedHarness::start(&temp).await;
-        harness
-            .peer
-            .enqueue_response(200, fixtures[fixture_id]["payload"].to_string());
-        assert!(
-            harness
-                .client
-                .upload_segment("20260618", "143022_300", &[media])
-                .await
-                .success
-        );
-        record(executed_fixtures, fixture_id, true);
-        harness.finish().await;
-    }
-    let fixture_id = "example.observer.ingestUpload.request.body.multipart-form-data.default";
-    let temp = tempfile::tempdir().unwrap();
-    let fixture_files = fixtures[fixture_id]["payload"]["files"]
-        .as_array()
-        .expect("multipart fixture files");
-    let media: Vec<_> = fixture_files
-        .iter()
-        .map(|name| {
-            let path = temp.path().join(name.as_str().expect("fixture filename"));
-            fs::write(&path, format!("fixture bytes for {}", path.display())).unwrap();
-            path
-        })
-        .collect();
-    let harness = LinkedHarness::start(&temp).await;
-    harness.peer.enqueue_response(
-        200,
-        json!({"status":"ok","segment":"143022_300"}).to_string(),
-    );
-    harness
-        .client
-        .upload_segment(
-            fixtures[fixture_id]["payload"]["day"].as_str().unwrap(),
-            fixtures[fixture_id]["payload"]["segment"].as_str().unwrap(),
-            &media,
-        )
-        .await;
-    let requests = harness.peer.requests();
-    let request = &requests[0];
-    let body = String::from_utf8_lossy(&request.body);
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/app/devices/ingest");
-    assert!(header(request, "authorization").is_some_and(|value| value.starts_with("Bearer ")));
-    assert_eq!(body.matches("name=\"day\"").count(), 1);
-    assert_eq!(body.matches("name=\"segment\"").count(), 1);
-    assert_eq!(body.matches("name=\"files\"").count(), fixture_files.len());
-    assert!(body.contains("\r\n\r\n20260618\r\n"));
-    assert!(body.contains("\r\n\r\n143022_300\r\n"));
-    for name in fixture_files {
-        let name = name.as_str().unwrap();
-        assert!(body.contains(&format!("name=\"files\"; filename=\"{name}\"")));
-        let content_type = if name.ends_with(".flac") {
-            "audio/flac"
-        } else {
-            "application/octet-stream"
-        };
-        assert!(body.contains(&format!(
-            "filename=\"{name}\"\r\nContent-Type: {content_type}"
-        )));
-    }
-    for forbidden in ["name=\"host\"", "name=\"meta\"", "name=\"platform\""] {
-        assert!(!body.contains(forbidden));
-    }
-    record(executed_fixtures, fixture_id, true);
-    harness.finish().await;
-}
-
-async fn assert_listing_contract(
-    fixtures: &BTreeMap<String, Value>,
-    vectors: &BTreeMap<String, Value>,
-    executed_fixtures: &mut BTreeSet<String>,
-    executed_vectors: &mut BTreeSet<String>,
-) {
-    let cases = [
-        (
-            "example.observer.ingestSegments.response.200.application-json.legacy",
-            None,
-        ),
-        (
-            "example.observer.ingestSegments.response.200.application-json.v2",
-            None,
-        ),
-        (
-            "recorded.segments.legacy.absent_header",
-            Some("observer.ingestSegments.legacy_array.absent_header"),
-        ),
-        (
-            "recorded.segments.legacy.unparseable_header",
-            Some("observer.ingestSegments.legacy_array.unparseable_header"),
-        ),
-        (
-            "recorded.segments.v2.envelope",
-            Some("observer.ingestSegments.v2_envelope"),
-        ),
-        (
-            "declared.observer.ingestSegments.envelope_total_mismatch",
-            Some("observer.ingestSegments.envelope_total_mismatch"),
-        ),
-        (
-            "recorded.auth.bearer.segments",
-            Some("observer.auth.bearer"),
-        ),
-        (
-            "recorded.auth.handle.segments",
-            Some("observer.auth.handle"),
-        ),
-    ];
-    for (fixture_id, vector_id) in cases {
-        let payload = &fixtures[fixture_id]["payload"];
-        let (legacy, truncated) = if let Some(vector_id) = vector_id {
-            let vector = &vectors[vector_id];
-            assert_eq!(vector["fixture_id"], fixture_id);
-            let decision = &vector["decision"];
-            let legacy = decision["response_variant"]
-                .as_str()
-                .map_or_else(|| payload.is_array(), |variant| variant == "legacy_array");
-            let truncated = decision["valid"].as_bool().map_or_else(
-                || {
-                    payload["total"].as_u64().is_some_and(|total| {
-                        total != payload["items"].as_array().expect("listing items").len() as u64
-                    })
-                },
-                |valid| !valid,
-            );
-            (legacy, truncated)
-        } else {
-            (
-                payload.is_array(),
-                payload["total"].as_u64().is_some_and(|total| {
-                    total != payload["items"].as_array().expect("listing items").len() as u64
-                }),
-            )
-        };
-        let temp = tempfile::tempdir().unwrap();
-        let harness = LinkedHarness::start(&temp).await;
-        let response_headers = vector_id
-            .and_then(|id| vectors[id]["decision"]["header"].as_str())
-            .map_or_else(
-                || vec![("x-solstone-protocol-version".to_owned(), "2".to_owned())],
-                |header| match header {
-                    "absent" => Vec::new(),
-                    "unparseable" => vec![(
-                        "x-solstone-protocol-version".to_owned(),
-                        "unparseable".to_owned(),
-                    )],
-                    value => vec![("x-solstone-protocol-version".to_owned(), value.to_owned())],
-                },
-            );
-        harness
-            .peer
-            .enqueue_response_with_headers(200, response_headers, payload.to_string());
-        let result = harness.client.get_server_segments("20260618").await;
-        assert_eq!(
-            (result.legacy, result.truncated),
-            (legacy, truncated),
-            "{fixture_id}"
-        );
-        let requests = harness.peer.requests();
-        let request = &requests[0];
-        assert_eq!(request.method, "GET");
-        assert_eq!(request.path, "/app/devices/ingest/segments/20260618");
-        assert_eq!(header(request, "x-solstone-protocol-version"), Some("2"));
-        let authorization = header(request, "authorization");
-        assert!(authorization.is_some_and(|value| value.starts_with("Bearer ")));
-        record(executed_fixtures, fixture_id, true);
-        if let Some(vector_id) = vector_id {
-            let decision = &vectors[vector_id]["decision"];
-            if vector_id.starts_with("observer.auth.") {
-                assert!(
-                    decision["accepted"]
-                        .as_bool()
-                        .expect("authority auth accepted")
-                );
-                let form = decision["auth_form"].as_str().expect("authority auth form");
-                assert!(matches!(
-                    form,
-                    "authorization_bearer" | "x_solstone_observer"
-                ));
-                assert!(
-                    vectors["observer.auth.bearer"]["decision"]["accepted"]
-                        .as_bool()
-                        .expect("authority bearer accepted")
-                );
-                assert_eq!(
-                    vectors["observer.auth.bearer"]["decision"]["auth_form"],
-                    "authorization_bearer"
-                );
-            }
-            record(executed_vectors, vector_id, true);
-        }
-        harness.finish().await;
-    }
-
-    let custody_cases = [
-        (
-            "recorded.segments.custody_statuses",
-            "observer.ingestSegments.custody_statuses",
-        ),
-        (
-            "declared.observer.ingestSegments.custody_unknown_rejected",
-            "observer.ingestSegments.custody_unknown_rejected",
-        ),
-        (
-            "recorded.segments.submitted_name_omitted",
-            "observer.ingestSegments.submitted_name_fallback",
-        ),
-    ];
-    for (fixture_id, vector_id) in custody_cases {
-        let query = contract_parse_listing(fixtures[fixture_id]["payload"].clone(), 200);
-        let entries = query.segments.expect("fixture listing entries");
-        let vector = &vectors[vector_id];
-        assert_eq!(vector["fixture_id"], fixture_id);
+    for fixture_id in LINUX_FIXTURES {
+        let fixture = &fixtures[*fixture_id];
+        let status = fixture["payload"]["status"].as_str().unwrap();
+        let vector_id = format!("observer.ingestUpload.status.{status}");
+        let vector = &vectors[&vector_id];
         let decision = &vector["decision"];
-        let temp = tempfile::tempdir().unwrap();
-        let mut asserted = false;
-        for entry in entries {
-            for (index, remote) in entry
-                .files
-                .expect("fixture listing files")
-                .into_iter()
-                .enumerate()
-            {
-                let segment = temp.path().join(format!("segment-{index}"));
-                fs::create_dir(&segment).unwrap();
-                let filename = remote.name.as_deref().expect("fixture remote name");
-                let local = segment.join(filename);
-                fs::write(&local, format!("fixture custody bytes {filename}")).unwrap();
-                let mut matching = remote.clone();
-                matching.sha256 = Some(contract_sha256_file(&local).unwrap());
-                let candidate = ListingEntry {
-                    key: entry.key.clone(),
-                    original_key: entry.original_key.clone(),
-                    files: Some(vec![matching.clone()]),
-                };
-                let status = matching.status.as_deref().expect("fixture custody status");
-                let expected = if decision["fallback"] == "name" {
-                    true
-                } else if let Some(holding) = decision["holding_by_status"][status].as_str() {
-                    holding == "held"
-                } else {
-                    assert_eq!(decision["unknown_status"], "reject");
-                    false
-                };
-                assert_eq!(contract_segment_proven_held(&segment, &candidate), expected);
-                asserted = true;
-
-                if decision["fallback"] == "name" {
-                    assert!(
-                        !decision["submitted_name_present"]
-                            .as_bool()
-                            .expect("authority submitted_name_present")
-                    );
-                    assert!(contract_segment_proven_held(&segment, &candidate));
-                    matching.submitted_name = Some("different.flac".to_owned());
-                    let precedence = ListingEntry {
-                        files: Some(vec![matching.clone()]),
-                        ..candidate.clone()
-                    };
-                    assert!(!contract_segment_proven_held(&segment, &precedence));
-                    matching.submitted_name = matching.name.clone();
-                    let precedence = ListingEntry {
-                        files: Some(vec![matching]),
-                        ..candidate
-                    };
-                    assert!(contract_segment_proven_held(&segment, &precedence));
-                }
-            }
+        assert_eq!(vector["fixture_id"], *fixture_id);
+        assert_eq!(fixture["kind"], "declared");
+        assert_eq!(
+            fixture["provenance"]["vocabulary"],
+            "observer.ingestUpload.status"
+        );
+        assert_eq!(
+            fixture["provenance"]["http_status"],
+            decision["http_status"]
+        );
+        assert_eq!(decision["kind"], "ingest_status");
+        assert_eq!(decision["status"], status);
+        assert_eq!(vector["pointers"], json!(["/status"]));
+        let result = upload_fixture_result(fixture).await;
+        assert_upload_success_matches_decision(result.success, decision);
+        if decision["accepted"] == true {
+            assert_eq!(result.duplicate, status == "duplicate");
+        } else {
+            assert!(!result.success);
         }
-        record(executed_fixtures, fixture_id, asserted);
-        record(executed_vectors, vector_id, asserted);
+        record(executed_fixtures, fixture_id);
+        record(executed_vectors, &vector_id);
     }
-}
-
-async fn assert_event_and_register(
-    fixtures: &BTreeMap<String, Value>,
-    executed: &mut BTreeSet<String>,
-) {
-    let temp = tempfile::tempdir().unwrap();
-    let event_id = "example.observer.ingestEvent.request.body.application-json.default";
-    let harness = LinkedHarness::start(&temp).await;
-    harness.peer.enqueue_response(
-        200,
-        fixtures["example.observer.ingestEvent.response.200.application-json.default"]["payload"]
-            .to_string(),
-    );
-    let payload = fixtures[event_id]["payload"].as_object().unwrap();
-    let mut fields = payload.clone();
-    let tract = fields.remove("tract").unwrap();
-    let event = fields.remove("event").unwrap();
-    assert!(
-        harness
-            .client
-            .relay_event(tract.as_str().unwrap(), event.as_str().unwrap(), fields)
-            .await
-    );
-    let requests = harness.peer.requests();
-    let request = &requests[0];
-    assert_eq!(
-        (request.method.as_str(), request.path.as_str()),
-        ("POST", "/app/devices/ingest/event")
-    );
-    assert_eq!(header(request, "content-type"), Some("application/json"));
-    assert_eq!(
-        request.body,
-        br#"{"event":"status","state":"recording","tract":"observe"}"#
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&request.body).unwrap(),
-        fixtures[event_id]["payload"]
-    );
-    record(executed, event_id, true);
-    record(
-        executed,
-        "example.observer.ingestEvent.response.200.application-json.default",
-        true,
-    );
-    harness.finish().await;
-    let register_request = "example.observer.register.request.body.application-json.default";
-    let register_response = "example.observer.register.response.200.application-json.default";
-    let peer = PrivateLinkPeer::start().await;
-    peer.enqueue_response(200, fixtures[register_response]["payload"].to_string());
-    let label = fixtures[register_request]["payload"]["label"]
-        .as_str()
-        .unwrap();
-    let (_state, owner) = start_registered_private_link_for_test(
-        peer.credential(),
-        label,
-        "K",
-        "/app/devices/ingest",
-    )
-    .await;
-    assert!(matches!(
-        owner
-            .register_for_test(&fixtures[register_request]["payload"])
-            .await,
-        crate::private_link::LinkOutcome::Success { .. }
-    ));
-    let requests = peer.requests();
-    let request = &requests[0];
-    let body: Value = serde_json::from_slice(&request.body).unwrap();
-    assert_eq!(
-        (request.method.as_str(), request.path.as_str()),
-        ("POST", "/app/devices/register")
-    );
-    assert_eq!(body, fixtures[register_request]["payload"]);
-    assert!(header(request, "authorization").is_none());
-    record(executed, register_request, true);
-    record(executed, register_response, true);
-    owner.shutdown().await.unwrap();
-    peer.shutdown().await;
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
@@ -898,12 +596,16 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_mutations(
     bundle: &Path,
     provenance: &Path,
     manifest: &Value,
     fixtures: &BTreeMap<String, Value>,
     vectors: &BTreeMap<String, Value>,
+    fixture_document: &Value,
+    vector_document: &Value,
+    consumer_audit: &Value,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let copy = temp.path().join("bundle");
@@ -974,30 +676,67 @@ fn assert_mutations(
         .unwrap()
         .pop();
     assert!(
-        std::panic::catch_unwind(|| assert_identities(&missing_operation, fixtures, vectors))
-            .is_err()
+        std::panic::catch_unwind(|| {
+            assert_identities(
+                &missing_operation,
+                fixtures,
+                vectors,
+                fixture_document,
+                vector_document,
+                consumer_audit,
+            )
+        })
+        .is_err()
     );
     for (field, value) in [
         ("bundle_semver", json!("9.9.9")),
-        ("observer_protocol_version", json!(1)),
+        ("observer_protocol_version", json!(2)),
     ] {
         let mut mutated = manifest.clone();
         mutated[field] = value;
         assert!(
-            std::panic::catch_unwind(|| assert_identities(&mutated, fixtures, vectors)).is_err()
+            std::panic::catch_unwind(|| {
+                assert_identities(
+                    &mutated,
+                    fixtures,
+                    vectors,
+                    fixture_document,
+                    vector_document,
+                    consumer_audit,
+                )
+            })
+            .is_err()
         );
     }
     let mut missing_fixture = fixtures.clone();
     missing_fixture.pop_first();
     assert!(
-        std::panic::catch_unwind(|| assert_identities(manifest, &missing_fixture, vectors))
-            .is_err()
+        std::panic::catch_unwind(|| {
+            assert_identities(
+                manifest,
+                &missing_fixture,
+                vectors,
+                fixture_document,
+                vector_document,
+                consumer_audit,
+            )
+        })
+        .is_err()
     );
     let mut missing_vector = vectors.clone();
     missing_vector.pop_first();
     assert!(
-        std::panic::catch_unwind(|| assert_identities(manifest, fixtures, &missing_vector))
-            .is_err()
+        std::panic::catch_unwind(|| {
+            assert_identities(
+                manifest,
+                fixtures,
+                &missing_vector,
+                fixture_document,
+                vector_document,
+                consumer_audit,
+            )
+        })
+        .is_err()
     );
 }
 
@@ -1005,31 +744,16 @@ async fn assert_production_contradiction_mutation(
     fixtures: &BTreeMap<String, Value>,
     vectors: &BTreeMap<String, Value>,
 ) {
-    let fixture_id = "recorded.ingestUpload.ok";
-    let vector_id = "observer.ingestUpload.status.ok";
-    let mut payload = fixtures[fixture_id]["payload"].clone();
-    payload["status"] = json!("duplicate");
-    payload["existing_segment"] = json!("mutated-existing-segment");
-    let status = vectors[vector_id]["observed_status"]
-        .as_u64()
-        .expect("authority observed status") as u16;
-    let temp = tempfile::tempdir().unwrap();
-    let media = temp.path().join("audio.flac");
-    fs::write(&media, b"audio").unwrap();
-    let harness = LinkedHarness::start(&temp).await;
-    harness.peer.enqueue_response(status, payload.to_string());
-    let result = harness
-        .client
-        .upload_segment("20260618", "143022_300", &[media])
-        .await;
-    let decision = &vectors[vector_id]["decision"];
-    let expected_duplicate = decision["stored_key_source"] == "existing_segment";
-    let expected_key = fixtures[fixture_id]["payload"][decision["stored_key_source"]
-        .as_str()
-        .expect("stored key source")]
-    .as_str();
-    assert!(result.duplicate != expected_duplicate || result.stored_key.as_deref() != expected_key);
-    harness.finish().await;
+    let fixture = &fixtures["declared.observer.ingestUpload.status.ok"];
+    let mut mutated_vector = vectors["observer.ingestUpload.status.ok"].clone();
+    mutated_vector["decision"]["accepted"] = json!(false);
+    let result = upload_fixture_result(fixture).await;
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_upload_success_matches_decision(result.success, &mutated_vector["decision"])
+        })
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1038,11 +762,23 @@ async fn observer_contract_conformance() {
     let bundle = root.join("vendor/observer-client-contract");
     let manifest = verify_bundle(&bundle, MANIFEST_SHA256).unwrap();
     verify_provenance(&root.join("contracts/observer-client-import.json")).unwrap();
-    let fixtures = load_index(&bundle.join("fixtures/wire-behavior.json"), "fixtures");
-    let vectors = load_index(&bundle.join("vectors.json"), "vectors");
-    assert_identities(&manifest, &fixtures, &vectors);
-    assert_eq!(set(LINUX_FIXTURES).len(), 24);
-    assert_eq!(set(LINUX_VECTORS).len(), 15);
+    let projection = load_document(&bundle.join("projection.openapi.json"));
+    let fixture_document = load_document(&bundle.join("fixtures/wire-behavior.json"));
+    let vector_document = load_document(&bundle.join("vectors.json"));
+    let consumer_audit = load_document(&bundle.join("consumer-audit.json"));
+    let fixtures = load_index(&fixture_document, "fixtures");
+    let vectors = load_index(&vector_document, "vectors");
+    assert_identities(
+        &manifest,
+        &fixtures,
+        &vectors,
+        &fixture_document,
+        &vector_document,
+        &consumer_audit,
+    );
+    assert_read_projection(&projection);
+    assert_eq!(set(LINUX_FIXTURES).len(), 5);
+    assert_eq!(set(LINUX_VECTORS).len(), 5);
     let mut executed_fixtures = BTreeSet::new();
     let mut executed_vectors = BTreeSet::new();
     assert_upload_contract(
@@ -1052,20 +788,15 @@ async fn observer_contract_conformance() {
         &mut executed_vectors,
     )
     .await;
-    assert_listing_contract(
-        &fixtures,
-        &vectors,
-        &mut executed_fixtures,
-        &mut executed_vectors,
-    )
-    .await;
-    assert_event_and_register(&fixtures, &mut executed_fixtures).await;
     assert_mutations(
         &bundle,
         &root.join("contracts/observer-client-import.json"),
         &manifest,
         &fixtures,
         &vectors,
+        &fixture_document,
+        &vector_document,
+        &consumer_audit,
     );
     assert_production_contradiction_mutation(&fixtures, &vectors).await;
     assert_eq!(executed_fixtures, set(LINUX_FIXTURES));
