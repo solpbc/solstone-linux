@@ -423,10 +423,14 @@ fn atomic_write_with_mode_and_post_rename(
         file.sync_all().map_err(display_error)?;
         fs::rename(&temp, path).map_err(display_error)
     })();
-    drop(file);
+    // Keep the published inode open through failure cleanup. A post-rename
+    // callback can remove the path and install a foreign replacement; closing
+    // the owned descriptor first permits immediate inode reuse and can make a
+    // dev/inode identity check mistake that replacement for our publication.
     finish_atomic_publish(&temp, publish)?;
     reclaim_after_publish_failure(path, owned, post_rename(path, owned))?;
     reclaim_after_publish_failure(path, owned, parent_sync(parent))?;
+    drop(file);
     Ok(owned)
 }
 
