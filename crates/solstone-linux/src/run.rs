@@ -741,7 +741,7 @@ mod tests {
         sync_health::{
             ProcessEpoch, SyncFacts, derive_health, load_facts_with_liveness, save_facts,
         },
-        test_support::{MockServer, OpportunisticDefaultListenerTrap},
+        test_support::{DayCustodyFixture, MockServer, OpportunisticDefaultListenerTrap},
     };
     use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicUsize};
 
@@ -1904,21 +1904,22 @@ mod tests {
             }
         }
 
-        fn custody_listing(path: &Path) -> serde_json::Value {
+        fn custody_listing(day: &str, path: &Path) -> DayCustodyFixture {
             let bytes = fs::read(path.join("screen.webm")).unwrap();
-            let sha = format!("{:x}", Sha256::digest(bytes));
+            let sha = format!("{:x}", Sha256::digest(&bytes));
             let key = path.file_name().unwrap().to_string_lossy();
-            serde_json::json!({
-                "items": [{
+            DayCustodyFixture::new(
+                day,
+                vec![serde_json::json!({
                     "key": key,
                     "files": [{
                         "name": "screen.webm",
                         "status": "present",
-                        "sha256": sha
+                        "sha256": sha,
+                        "size": bytes.len(),
                     }]
-                }],
-                "total": 1
-            })
+                })],
+            )
         }
 
         async fn start_owner(
@@ -2141,12 +2142,22 @@ mod tests {
             );
             assert_pending_unchanged(&pending, &[true, true, true]);
 
-            for response in [
-                (503, serde_json::json!({})),
-                (200, serde_json::json!({"items":[],"total":0})),
-                (200, serde_json::json!({"items":[],"total":3})),
+            peer.enqueue_response(503, Vec::new());
+            cleanup_synced_day_for_composition(
+                config.clone(),
+                Arc::clone(&upload),
+                Arc::new(SystemClock::new()),
+                day,
+            )
+            .await;
+            assert_pending_unchanged(&pending, &[true, true, true]);
+            assert_real_observer_ticks_advance();
+
+            for fixture in [
+                DayCustodyFixture::new(day, Vec::new()),
+                DayCustodyFixture::new(day, Vec::new()).with_segments_total(3),
             ] {
-                peer.enqueue_response(response.0, response.1.to_string());
+                peer.enqueue_day_custody(fixture);
                 cleanup_synced_day_for_composition(
                     config.clone(),
                     Arc::clone(&upload),
@@ -2159,7 +2170,7 @@ mod tests {
             }
 
             for index in 0..pending.len() {
-                peer.enqueue_response(200, custody_listing(&pending[index].0).to_string());
+                peer.enqueue_day_custody(custody_listing(day, &pending[index].0));
                 cleanup_synced_day_for_composition(
                     config.clone(),
                     Arc::clone(&upload),

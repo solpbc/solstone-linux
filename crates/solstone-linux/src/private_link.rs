@@ -43,7 +43,7 @@ const PRIVATE_STATE_LOCK_FILENAME: &str = ".solstone-linux.private-state.lock";
 pub(crate) const PRIVATE_STATE_READY_LOCK_FILENAME: &str =
     ".solstone-linux.private-state.ready.lock";
 const MAX_PAIR_LINK_BYTES: u64 = 4096;
-pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 128 * 1024 * 1024;
 const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -53,8 +53,9 @@ const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const OBSERVER_HEADER_NAME: &str = "x-solstone-observer";
 pub(crate) const PROTOCOL_VERSION_HEADER_NAME: &str = "x-solstone-protocol-version";
-const REGISTRATION_MARKER_HEADER_NAME: &str = "x-solstone-linux-registration-route";
-const REGISTRATION_MARKER_HEADER_VALUE: &str = "1";
+const ROUTE_CLASS_MARKER_HEADER_NAME: &str = "x-solstone-linux-route-class";
+const REGISTRATION_ROUTE_CLASS: &str = "registration";
+const INGEST_V3_ROUTE_CLASS: &str = "ingest-v3";
 const EVENT_PATH: &str = "/app/devices/ingest/event";
 const REGISTER_PATH: &str = "/app/devices/register";
 const INGEST_PATH: &str = "/app/devices/ingest";
@@ -779,6 +780,8 @@ fn observer_is_valid(
 ) -> bool {
     observer.credential_instance_id == credential_instance_id
         && observer.name == expected_name
+        // The durable observer record belongs to the retained keyed event/register route.
+        // V3 ingest uses its own unkeyed route class and never derives a request from this pin.
         && observer.protocol_version == 2
         && !observer.key.is_empty()
         && !observer.prefix.is_empty()
@@ -1122,36 +1125,46 @@ fn proxy_headers_for_epoch(
 ) -> Result<Vec<(String, String)>, TransportError> {
     let markers = upstream_headers
         .iter()
-        .filter(|(name, _)| name == REGISTRATION_MARKER_HEADER_NAME)
+        .filter(|(name, _)| name == ROUTE_CLASS_MARKER_HEADER_NAME)
         .collect::<Vec<_>>();
-    let registration = match markers.as_slice() {
-        [] => false,
-        [(_, value)] if value == REGISTRATION_MARKER_HEADER_VALUE => true,
+    enum RouteClass {
+        Registered,
+        IngestV3,
+        Keyed,
+    }
+    let route_class = match markers.as_slice() {
+        [] => RouteClass::Keyed,
+        [(_, value)] if value == REGISTRATION_ROUTE_CLASS => RouteClass::Registered,
+        [(_, value)] if value == INGEST_V3_ROUTE_CLASS => RouteClass::IngestV3,
         _ => {
-            return Err(TransportError::Pairing(
-                "invalid registration route marker".into(),
-            ));
+            return Err(TransportError::Pairing("invalid route class marker".into()));
         }
     };
     let mut headers = upstream_headers
         .iter()
-        .filter(|(name, _)| name != REGISTRATION_MARKER_HEADER_NAME)
+        .filter(|(name, _)| name != ROUTE_CLASS_MARKER_HEADER_NAME)
         .cloned()
         .collect::<Vec<_>>();
-    if registration {
-        headers.push((PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned()));
-        return Ok(headers);
-    }
-    match &epoch.state {
-        OpenerAuth::Unregistered => Err(TransportError::Pairing(
-            "observer registration unavailable".into(),
-        )),
-        OpenerAuth::Registered { key } => {
-            headers.push((OBSERVER_HEADER_NAME.to_owned(), key.clone()));
-            headers.push(("authorization".to_owned(), format!("Bearer {key}")));
+    match route_class {
+        RouteClass::Registered => {
             headers.push((PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned()));
             Ok(headers)
         }
+        RouteClass::IngestV3 => {
+            headers.push((PROTOCOL_VERSION_HEADER_NAME.to_owned(), "3".to_owned()));
+            Ok(headers)
+        }
+        RouteClass::Keyed => match &epoch.state {
+            OpenerAuth::Unregistered => Err(TransportError::Pairing(
+                "observer registration unavailable".into(),
+            )),
+            OpenerAuth::Registered { key } => {
+                headers.push((OBSERVER_HEADER_NAME.to_owned(), key.clone()));
+                headers.push(("authorization".to_owned(), format!("Bearer {key}")));
+                headers.push((PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned()));
+                Ok(headers)
+            }
+        },
     }
 }
 
@@ -1310,7 +1323,6 @@ pub(crate) struct EventBody {
 struct PrivateLinkCapabilityInner {
     client: reqwest::Client,
     origin: Url,
-    ingest_path: String,
     opener: Arc<PrivateLinkOpener>,
     registration: Arc<RegistrationCoordinator>,
 }
@@ -1355,32 +1367,91 @@ impl PrivateLinkCapability {
         }
     }
 
+    fn ingest_v3_url(&self, suffix: &str) -> Result<Url, LinkOutcome> {
+        confine_path(&self.inner.origin, &format!("{INGEST_PATH}{suffix}")).map_err(|_| {
+            LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            }
+        })
+    }
+
+    fn validate_day(day: &str) -> bool {
+        day.len() == 8 && day.bytes().all(|byte| byte.is_ascii_digit())
+    }
+
     pub(crate) async fn ingest(&self, form: multipart::Form) -> LinkOutcome {
-        let Ok(url) = confine_path(&self.inner.origin, &self.inner.ingest_path) else {
+        let Ok(url) = self.ingest_v3_url("") else {
             return LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             };
         };
-        self.send(self.inner.client.post(url).multipart(form), INGEST_TIMEOUT)
-            .await
+        self.send(
+            self.inner
+                .client
+                .post(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS)
+                .multipart(form),
+            INGEST_TIMEOUT,
+        )
+        .await
     }
 
-    pub(crate) async fn list_day(&self, day: &str) -> LinkOutcome {
-        if day.len() != 8 || !day.bytes().all(|byte| byte.is_ascii_digit()) {
+    pub(crate) async fn probe_manifest(&self) -> LinkOutcome {
+        let Ok(url) = self.ingest_v3_url("/manifest") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(
+            self.inner
+                .client
+                .get(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS),
+            LISTING_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn manifest_day(&self, day: &str) -> LinkOutcome {
+        if !Self::validate_day(day) {
             return LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             };
         }
-        let path = format!(
-            "{}/segments/{day}",
-            self.inner.ingest_path.trim_end_matches('/')
-        );
-        let Ok(url) = confine_path(&self.inner.origin, &path) else {
+        let Ok(url) = self.ingest_v3_url(&format!("/manifest/{day}")) else {
             return LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             };
         };
-        self.send(self.inner.client.get(url), LISTING_TIMEOUT).await
+        self.send(
+            self.inner
+                .client
+                .get(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS),
+            LISTING_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn segments_day(&self, day: &str) -> LinkOutcome {
+        if !Self::validate_day(day) {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        }
+        let Ok(url) = self.ingest_v3_url(&format!("/segments/{day}")) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(
+            self.inner
+                .client
+                .get(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS),
+            LISTING_TIMEOUT,
+        )
+        .await
     }
 
     pub(crate) async fn send_event(&self, body: EventBody) -> LinkOutcome {
@@ -1448,10 +1519,7 @@ impl RegistrationCoordinator {
         let response = match self
             .client
             .post(url)
-            .header(
-                REGISTRATION_MARKER_HEADER_NAME,
-                REGISTRATION_MARKER_HEADER_VALUE,
-            )
+            .header(ROUTE_CLASS_MARKER_HEADER_NAME, REGISTRATION_ROUTE_CLASS)
             .json(&body)
             .timeout(REGISTRATION_TIMEOUT)
             .send()
@@ -1605,34 +1673,6 @@ impl PrivateLinkOwner {
         .parse()
         .unwrap()
     }
-
-    #[cfg(test)]
-    async fn register(&self, body: &serde_json::Value) -> LinkOutcome {
-        let Ok(url) = confine_path(&self.capability.inner.origin, REGISTER_PATH) else {
-            return LinkOutcome::LocalRejected {
-                status: StatusCode::BAD_REQUEST,
-            };
-        };
-        self.capability
-            .send(
-                self.capability
-                    .inner
-                    .client
-                    .post(url)
-                    .header(
-                        REGISTRATION_MARKER_HEADER_NAME,
-                        REGISTRATION_MARKER_HEADER_VALUE,
-                    )
-                    .json(body),
-                REGISTRATION_TIMEOUT,
-            )
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn register_for_test(&self, body: &serde_json::Value) -> LinkOutcome {
-        self.register(body).await
-    }
 }
 
 impl Drop for PrivateLinkOwner {
@@ -1741,12 +1781,11 @@ pub(crate) async fn start_registered_private_link_for_test(
 }
 
 impl PrivateLinkSession {
-    pub(crate) fn capability(&self, ingest_path: String) -> PrivateLinkCapability {
+    pub(crate) fn capability(&self, _ingest_path: String) -> PrivateLinkCapability {
         PrivateLinkCapability {
             inner: Arc::new(PrivateLinkCapabilityInner {
                 client: self.client.clone(),
                 origin: self.origin.clone(),
-                ingest_path,
                 opener: self.opener.clone(),
                 registration: self.registration.clone(),
             }),
@@ -1764,7 +1803,6 @@ impl PrivateLinkSession {
             inner: Arc::new(PrivateLinkCapabilityInner {
                 client: self.client.clone(),
                 origin: self.origin.clone(),
-                ingest_path: String::new(),
                 opener: self.opener.clone(),
                 registration: self.registration.clone(),
             }),
@@ -1772,10 +1810,7 @@ impl PrivateLinkSession {
         .send(
             self.client
                 .post(url)
-                .header(
-                    REGISTRATION_MARKER_HEADER_NAME,
-                    REGISTRATION_MARKER_HEADER_VALUE,
-                )
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, REGISTRATION_ROUTE_CLASS)
                 .json(body),
             REGISTRATION_TIMEOUT,
         )
@@ -2105,7 +2140,7 @@ async fn start_private_link_session_inner(
                 "if-modified-since",
                 "range",
                 "user-agent",
-                REGISTRATION_MARKER_HEADER_NAME,
+                ROUTE_CLASS_MARKER_HEADER_NAME,
             ]
             .into_iter()
             .map(str::to_owned)
@@ -3574,10 +3609,7 @@ mod tests {
             session
                 .request(Method::POST, "/app/devices/register")
                 .unwrap()
-                .header(
-                    REGISTRATION_MARKER_HEADER_NAME,
-                    REGISTRATION_MARKER_HEADER_VALUE,
-                )
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, REGISTRATION_ROUTE_CLASS,)
                 .send()
                 .await
                 .unwrap()
@@ -3617,7 +3649,7 @@ mod tests {
             Some("2")
         );
         assert!(!requests[0].headers.iter().any(|(name, _)| {
-            name.eq_ignore_ascii_case(REGISTRATION_MARKER_HEADER_NAME)
+            name.eq_ignore_ascii_case(ROUTE_CLASS_MARKER_HEADER_NAME)
                 || name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
                 || name.eq_ignore_ascii_case("authorization")
         }));
@@ -3669,24 +3701,24 @@ mod tests {
     }
 
     #[test]
-    fn registration_marker_malformed_and_duplicate_forms_are_rejected_locally() {
+    fn route_class_marker_malformed_and_duplicate_forms_are_rejected_locally() {
         let epoch = AuthEpoch {
             generation: 0,
             state: OpenerAuth::Unregistered,
         };
         for headers in [
-            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), String::new())],
-            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), " 1".to_owned())],
-            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), "1 ".to_owned())],
-            vec![(REGISTRATION_MARKER_HEADER_NAME.to_owned(), "2".to_owned())],
+            vec![(ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(), String::new())],
+            vec![(ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(), " 1".to_owned())],
+            vec![(ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(), "1 ".to_owned())],
+            vec![(ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(), "2".to_owned())],
             vec![
                 (
-                    REGISTRATION_MARKER_HEADER_NAME.to_owned(),
-                    REGISTRATION_MARKER_HEADER_VALUE.to_owned(),
+                    ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(),
+                    REGISTRATION_ROUTE_CLASS.to_owned(),
                 ),
                 (
-                    REGISTRATION_MARKER_HEADER_NAME.to_owned(),
-                    REGISTRATION_MARKER_HEADER_VALUE.to_owned(),
+                    ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(),
+                    REGISTRATION_ROUTE_CLASS.to_owned(),
                 ),
             ],
         ] {
@@ -3695,15 +3727,15 @@ mod tests {
     }
 
     #[test]
-    fn registration_marker_is_stripped_before_forwarding() {
+    fn route_class_marker_is_stripped_before_forwarding() {
         let epoch = AuthEpoch {
             generation: 0,
             state: OpenerAuth::Unregistered,
         };
         let headers = proxy_headers_for_epoch(
             &[(
-                REGISTRATION_MARKER_HEADER_NAME.to_owned(),
-                REGISTRATION_MARKER_HEADER_VALUE.to_owned(),
+                ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(),
+                REGISTRATION_ROUTE_CLASS.to_owned(),
             )],
             &epoch,
         )
@@ -3711,6 +3743,18 @@ mod tests {
         assert_eq!(
             headers,
             vec![(PROTOCOL_VERSION_HEADER_NAME.to_owned(), "2".to_owned())]
+        );
+        let ingest = proxy_headers_for_epoch(
+            &[(
+                ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(),
+                INGEST_V3_ROUTE_CLASS.to_owned(),
+            )],
+            &epoch,
+        )
+        .unwrap();
+        assert_eq!(
+            ingest,
+            vec![(PROTOCOL_VERSION_HEADER_NAME.to_owned(), "3".to_owned())]
         );
     }
 
@@ -3734,13 +3778,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v3_capability_operations_are_mtls_only() {
+        let peer = PrivateLinkPeer::start().await;
+        for body in [
+            br#"{"status":"ok","segment":"120000_1"}"#.as_slice(),
+            br#"{"days":{"20260101":{"segments":1}}}"#.as_slice(),
+            br#"{"version":1,"day":"20260101","segments":{}}"#.as_slice(),
+            br#"{"protocol_version":3,"total":0,"items":[]}"#.as_slice(),
+        ] {
+            peer.enqueue_response(200, body);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let capability = session.capability("/ignored-v2-ingest-path".to_owned());
+        assert!(matches!(
+            capability
+                .ingest(multipart::Form::new().text("envelope", "{}"))
+                .await,
+            LinkOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            capability.probe_manifest().await,
+            LinkOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            capability.manifest_day("20260101").await,
+            LinkOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            capability.segments_day("20260101").await,
+            LinkOutcome::Success { .. }
+        ));
+        peer.wait_for_requests(4).await;
+        for (request, (method, path)) in peer.requests().into_iter().zip([
+            ("POST", "/app/devices/ingest"),
+            ("GET", "/app/devices/ingest/manifest"),
+            ("GET", "/app/devices/ingest/manifest/20260101"),
+            ("GET", "/app/devices/ingest/segments/20260101"),
+        ]) {
+            assert_eq!(
+                (request.method.as_str(), request.path.as_str()),
+                (method, path)
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(PROTOCOL_VERSION_HEADER_NAME))
+                    .map(|(_, value)| value.as_str()),
+                Some("3")
+            );
+            assert!(!request.headers.iter().any(|(name, _)| {
+                name.eq_ignore_ascii_case("authorization")
+                    || name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
+            }));
+        }
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn capability_rejects_admin_path_query_and_route_substitution() {
         let peer = PrivateLinkPeer::start().await;
         let (_temp, session) = start_peer_session(&peer).await;
         let capability = session.capability("/app/devices/ingest".to_owned());
         for day in ["", "2026010", "202601011", "202601?1", "../20260101"] {
             assert!(matches!(
-                capability.list_day(day).await,
+                capability.segments_day(day).await,
                 LinkOutcome::LocalRejected {
                     status: StatusCode::BAD_REQUEST
                 }
@@ -3851,7 +3957,7 @@ mod tests {
     #[test]
     fn ingest_uses_300_second_policy() {
         assert_eq!(INGEST_TIMEOUT, Duration::from_secs(300));
-        assert_eq!(MAX_REQUEST_BODY_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_REQUEST_BODY_BYTES, 128 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -3907,7 +4013,7 @@ mod tests {
         assert!(matches!(
             session
                 .capability("/ingest".to_owned())
-                .list_day("20260101")
+                .segments_day("20260101")
                 .await,
             LinkOutcome::Success { .. }
         ));
@@ -4171,7 +4277,7 @@ mod tests {
         assert!(matches!(
             session
                 .capability("/ingest".to_owned())
-                .list_day("20260101")
+                .segments_day("20260101")
                 .await,
             LinkOutcome::Success { .. }
         ));
@@ -4919,7 +5025,7 @@ mod tests {
             .unwrap();
         let request = tokio::spawn({
             let capability = owner.capability();
-            async move { capability.list_day("20260101").await }
+            async move { capability.segments_day("20260101").await }
         });
         peer.wait_for_requests(2).await;
         assert!(!request.is_finished());

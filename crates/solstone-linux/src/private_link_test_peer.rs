@@ -52,6 +52,11 @@ struct PeerResponse {
     nonblocking_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+enum QueuedResponse {
+    Static(PeerResponse),
+    DayCustody(crate::test_support::DayCustodyFixture),
+}
+
 struct OutboundResponse {
     bytes: Vec<u8>,
     offset: usize,
@@ -60,7 +65,7 @@ struct OutboundResponse {
 
 #[derive(Clone)]
 struct PeerState {
-    responses: Arc<Mutex<VecDeque<PeerResponse>>>,
+    responses: Arc<Mutex<VecDeque<QueuedResponse>>>,
     requests: Arc<Mutex<Vec<PeerRequest>>>,
     request_arrived: Arc<Notify>,
     accepted: Arc<AtomicUsize>,
@@ -128,31 +133,25 @@ impl PrivateLinkPeer {
             .responses
             .lock()
             .unwrap()
-            .push_back(PeerResponse {
+            .push_back(QueuedResponse::Static(PeerResponse {
                 status,
                 headers: Vec::new(),
                 body: body.into(),
                 gate: None,
                 nonblocking_gate: None,
-            });
+            }));
     }
-    pub(crate) fn enqueue_response_with_headers(
-        &self,
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: impl Into<Vec<u8>>,
-    ) {
+
+    pub(crate) fn enqueue_day_custody(&self, fixture: crate::test_support::DayCustodyFixture) {
         self.state
             .responses
             .lock()
             .unwrap()
-            .push_back(PeerResponse {
-                status,
-                headers,
-                body: body.into(),
-                gate: None,
-                nonblocking_gate: None,
-            });
+            .push_back(QueuedResponse::DayCustody(fixture));
+    }
+
+    pub(crate) fn enqueue_manifest_probe(&self, status: u16, body: impl Into<Vec<u8>>) {
+        self.enqueue_response(status, body);
     }
     pub(crate) fn enqueue_gated_response(
         &self,
@@ -164,13 +163,13 @@ impl PrivateLinkPeer {
             .responses
             .lock()
             .unwrap()
-            .push_back(PeerResponse {
+            .push_back(QueuedResponse::Static(PeerResponse {
                 status,
                 headers: Vec::new(),
                 body: body.into(),
                 gate: Some(gate),
                 nonblocking_gate: None,
-            });
+            }));
     }
     pub(crate) fn gate_next_response_nonblocking(&self, gate: Arc<std::sync::atomic::AtomicBool>) {
         self.state
@@ -178,7 +177,11 @@ impl PrivateLinkPeer {
             .lock()
             .unwrap()
             .front_mut()
-            .expect("response to gate")
+            .and_then(|response| match response {
+                QueuedResponse::Static(response) => Some(response),
+                QueuedResponse::DayCustody(_) => None,
+            })
+            .expect("static response to gate")
             .nonblocking_gate = Some(gate);
     }
     pub(crate) fn gate_queued_responses_nonblocking(
@@ -187,7 +190,9 @@ impl PrivateLinkPeer {
         gate: Arc<std::sync::atomic::AtomicBool>,
     ) {
         for response in self.state.responses.lock().unwrap().iter_mut().take(count) {
-            response.nonblocking_gate = Some(gate.clone());
+            if let QueuedResponse::Static(response) = response {
+                response.nonblocking_gate = Some(gate.clone());
+            }
         }
     }
     pub(crate) fn gate_queued_response_nonblocking(
@@ -200,7 +205,11 @@ impl PrivateLinkPeer {
             .lock()
             .unwrap()
             .get_mut(index)
-            .expect("response to gate")
+            .and_then(|response| match response {
+                QueuedResponse::Static(response) => Some(response),
+                QueuedResponse::DayCustody(_) => None,
+            })
+            .expect("static response to gate")
             .nonblocking_gate = Some(gate);
     }
     pub(crate) fn notify_response_gates(&self) {
@@ -319,6 +328,8 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
     let mut outbound: HashMap<u32, OutboundResponse> = HashMap::new();
     let mut gated: HashMap<u32, PeerResponse> = HashMap::new();
     let mut pending_request_credit: HashMap<u32, usize> = HashMap::new();
+    let mut day_manifests = VecDeque::new();
+    let mut segment_lists = VecDeque::new();
     let mut buffer = [0; 16 * 1024];
     loop {
         let count = tokio::select! {
@@ -387,23 +398,17 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
             }
             if frame.flags & FLAG_CLOSE != 0 {
                 let raw = requests.remove(&frame.stream_id).unwrap_or_default();
-                if let Some(request) = parse_request(&raw) {
-                    state.requests.lock().unwrap().push(request);
+                let request = parse_request(&raw);
+                if let Some(request) = &request {
+                    state.requests.lock().unwrap().push(request.clone());
                     state.request_arrived.notify_waiters();
                 }
-                let response =
-                    state
-                        .responses
-                        .lock()
-                        .unwrap()
-                        .pop_front()
-                        .unwrap_or(PeerResponse {
-                            status: 500,
-                            headers: Vec::new(),
-                            body: Vec::new(),
-                            gate: None,
-                            nonblocking_gate: None,
-                        });
+                let response = next_response(
+                    state,
+                    request.as_ref(),
+                    &mut day_manifests,
+                    &mut segment_lists,
+                );
                 if let Some(gate) = &response.gate {
                     gate.notified().await;
                 }
@@ -435,6 +440,69 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                 }
             }
         }
+    }
+}
+
+fn next_response(
+    state: &PeerState,
+    request: Option<&PeerRequest>,
+    day_manifests: &mut VecDeque<crate::test_support::DayCustodyFixture>,
+    segment_lists: &mut VecDeque<crate::test_support::DayCustodyFixture>,
+) -> PeerResponse {
+    let Some(request) = request else {
+        return pop_static_response(state);
+    };
+    if request.path == "/app/devices/ingest/manifest" {
+        let queued = state.responses.lock().unwrap().pop_front();
+        return match queued {
+            Some(QueuedResponse::Static(response)) => response,
+            Some(QueuedResponse::DayCustody(fixture)) => {
+                let response =
+                    fixture.response_for(crate::test_support::DayCustodyLeg::Manifest, None);
+                if !fixture.stops_after(crate::test_support::DayCustodyLeg::Manifest) {
+                    day_manifests.push_back(fixture);
+                }
+                plain_response(response.0, response.1)
+            }
+            None => plain_response(500, Vec::new()),
+        };
+    }
+    if let Some(day) = request.path.strip_prefix("/app/devices/ingest/manifest/")
+        && let Some(fixture) = day_manifests.pop_front()
+    {
+        let response =
+            fixture.response_for(crate::test_support::DayCustodyLeg::DayManifest, Some(day));
+        if !fixture.stops_after(crate::test_support::DayCustodyLeg::DayManifest) {
+            segment_lists.push_back(fixture);
+        }
+        return plain_response(response.0, response.1);
+    }
+    if request
+        .path
+        .strip_prefix("/app/devices/ingest/segments/")
+        .is_some()
+        && let Some(fixture) = segment_lists.pop_front()
+    {
+        let response = fixture.response_for(crate::test_support::DayCustodyLeg::Segments, None);
+        return plain_response(response.0, response.1);
+    }
+    pop_static_response(state)
+}
+
+fn pop_static_response(state: &PeerState) -> PeerResponse {
+    match state.responses.lock().unwrap().pop_front() {
+        Some(QueuedResponse::Static(response)) => response,
+        Some(QueuedResponse::DayCustody(_)) | None => plain_response(500, Vec::new()),
+    }
+}
+
+fn plain_response(status: u16, body: Vec<u8>) -> PeerResponse {
+    PeerResponse {
+        status,
+        headers: Vec::new(),
+        body,
+        gate: None,
+        nonblocking_gate: None,
     }
 }
 

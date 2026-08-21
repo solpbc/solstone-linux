@@ -310,7 +310,6 @@ struct SyncWorker {
     circuit_cooldown: f64,
     last_full_sync: f64,
     last_contact_flush: f64,
-    registration_refused: bool,
     draining_shutdown: bool,
     last_recovery_generation: u64,
     #[cfg(test)]
@@ -349,7 +348,6 @@ impl SyncWorker {
             circuit_cooldown: CIRCUIT_COOLDOWN_INITIAL,
             last_full_sync: 0.0,
             last_contact_flush: 0.0,
-            registration_refused: false,
             draining_shutdown: false,
             last_recovery_generation,
             #[cfg(test)]
@@ -364,27 +362,29 @@ impl SyncWorker {
             let completion_pending = self.pending_trigger.swap(false, Ordering::AcqRel);
             if !self.is_running() {
                 // A completion can race shutdown. Give the final local segment one bounded
-                // reconciliation pass before the walker exits; keyless observers stay idle.
-                if completion_pending && self.client.is_registered() {
+                // reconciliation pass before the walker exits. A paired keyless observer uses
+                // v3 ingest normally; an unpaired worker still has no transport to drain.
+                if completion_pending && self.client.has_capability() {
                     self.draining_shutdown = true;
                     let _ = self.execute_pass(false).await;
                     self.draining_shutdown = false;
                 }
                 break;
             }
-            // ensure_registered deliberately ignores revocation; this production call site
-            // stops the retry loop for a terminally revoked credential.
-            if !self.client.is_registered()
-                && (self.client.is_revoked()
-                    || !self.client.ensure_registered(&mut self.config).await)
-            {
-                if !self.registration_refused {
-                    tracing::warn!("Sync refused: observer is not registered");
-                    self.registration_refused = true;
-                }
+            // Registration still establishes the retained keyed event route and stream name,
+            // but v3 ingest is certificate-authenticated and must not wait for it.
+            if self.client.is_revoked() {
+                tracing::warn!("Sync refused: observer credential is revoked");
                 continue;
             }
-            self.registration_refused = false;
+            // Pairing, unlike registration, is a hard transport prerequisite. Do not turn an
+            // unpaired notification into a repeated transient-error log or retry loop.
+            if !self.client.has_capability() {
+                continue;
+            }
+            if !self.client.is_registered() {
+                let _ = self.client.ensure_registered(&mut self.config).await;
+            }
             if self.circuit_open && !self.try_probe().await {
                 continue;
             }
@@ -437,8 +437,7 @@ impl SyncWorker {
         }
         self.set_progress("probing journal...".to_owned(), true);
         // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
-        let today = timestamp_parts(self.clock.wall_seconds()).0;
-        let result = self.client.get_server_segments(&today).await;
+        let result = self.client.probe_manifest().await;
         // Consume a recovery that completed inside this probe so it cannot skip a future breaker.
         self.last_recovery_generation = self.client.recovery_generation();
         if result.error_type.is_none() {
@@ -491,7 +490,6 @@ impl SyncWorker {
         let mut pass_success = true;
         let mut pass_error_type = None;
         let mut pass_error_code = None;
-        let mut legacy_logged = false;
 
         for day in days {
             if !self.is_active() || self.circuit_open {
@@ -502,48 +500,26 @@ impl SyncWorker {
                 continue;
             }
             self.set_progress(format!("checking {day}..."), true);
-            let query = self.client.get_server_segments(&day).await;
-            let Some(items) = query.segments.as_ref() else {
+            let custody = self.client.fetch_day_custody(&day).await;
+            if custody.error_type.is_some() {
                 pass_success = false;
-                pass_error_type = query.error_type;
-                pass_error_code = query.status_code.map(i64::from);
-                self.record_failure(query.error_type, pass_error_code);
-                if self.circuit_open {
-                    break;
-                }
-                continue;
-            };
-            if query.error_type.is_some() {
-                pass_success = false;
-                pass_error_type = query.error_type;
-                pass_error_code = query.status_code.map(i64::from);
-                self.record_failure(query.error_type, pass_error_code);
+                pass_error_type = custody.error_type;
+                pass_error_code = custody.status_code.map(i64::from);
+                self.record_failure(custody.error_type, pass_error_code);
                 continue;
             }
             self.record_contact(false);
-            let indexed = index_entries(items);
-            let key_set: HashSet<&str> = indexed.keys().map(String::as_str).collect();
-            if query.legacy && !legacy_logged {
-                tracing::warn!("Journal listing is pre-v2 bare array; cleanup will not delete");
-                legacy_logged = true;
-            }
+            let indexed = index_entries(&custody.items);
             let mut any_needed_upload = false;
             for segment_dir in segments_by_day.get(&day).into_iter().flatten() {
                 if !self.is_active() || self.circuit_open {
                     break;
                 }
                 let segment_key = segment_dir.file_name().unwrap().to_string_lossy();
-                let held = if query.legacy {
-                    key_set.contains(segment_key.as_ref())
-                        || read_server_key(segment_dir)
-                            .as_deref()
-                            .is_some_and(|key| key_set.contains(key))
-                } else if query.truncated {
-                    false
-                } else {
-                    lookup_entry(&indexed, segment_dir)
-                        .is_some_and(|entry| segment_proven_held(segment_dir, entry))
-                };
+                let held = custody.proof_available
+                    && custody.day_present
+                    && lookup_entry(&indexed, segment_dir)
+                        .is_some_and(|entry| segment_custody_proven(segment_dir, entry));
                 if held {
                     continue;
                 }
@@ -624,9 +600,6 @@ impl SyncWorker {
                 return false;
             }
         };
-        if files.is_empty() {
-            return true;
-        }
         let key = segment_dir.file_name().unwrap().to_string_lossy();
         let result = self.client.upload_segment(day, &key, &files).await;
         if result.success {
@@ -672,18 +645,14 @@ impl SyncWorker {
             {
                 continue;
             }
-            let query = self.client.get_server_segments(&day).await;
-            if query.error_type.is_some() || query.segments.is_none() {
-                self.record_failure(query.error_type, query.status_code.map(i64::from));
+            let custody = self.client.fetch_day_custody(&day).await;
+            if custody.error_type.is_some() {
+                self.record_failure(custody.error_type, custody.status_code.map(i64::from));
                 continue;
             }
             self.record_contact(false);
-            let proof_available = !query.legacy && !query.truncated;
-            let indexed = query
-                .segments
-                .as_deref()
-                .map(index_entries)
-                .unwrap_or_default();
+            let proof_available = custody.proof_available && custody.day_present;
+            let indexed = index_entries(&custody.items);
             if let Ok(streams) = sorted_dirs(&day_dir) {
                 for stream in streams {
                     if let Ok(segments) = sorted_dirs(&stream) {
@@ -694,7 +663,7 @@ impl SyncWorker {
                             }
                             if proof_available
                                 && lookup_entry(&indexed, &segment)
-                                    .is_some_and(|entry| segment_proven_held(&segment, entry))
+                                    .is_some_and(|entry| segment_custody_proven(&segment, entry))
                                 && let Err(error) = fs::remove_dir_all(&segment)
                             {
                                 tracing::error!(%error, path = %segment.display(), "Cleanup failed");
@@ -895,7 +864,7 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn segment_proven_held(segment_dir: &Path, entry: &ListingEntry) -> bool {
+fn segment_custody_proven(segment_dir: &Path, entry: &ListingEntry) -> bool {
     let Ok(files) = eligible_files(segment_dir) else {
         return false;
     };
@@ -912,29 +881,18 @@ fn segment_proven_held(segment_dir: &Path, entry: &ListingEntry) -> bool {
             .unwrap_or_default()
             .iter()
             .find(|remote| {
-                remote
-                    .submitted_name
-                    .as_deref()
-                    .filter(|name| !name.is_empty())
-                    .or(remote.name.as_deref())
-                    == Some(local_name)
+                remote.submitted_name.as_deref() == Some(local_name)
+                    || remote.name.as_deref() == Some(local_name)
             })
         else {
             return false;
         };
         matches!(remote.status.as_deref(), Some("present" | "processed"))
+            && remote
+                .size
+                .is_some_and(|size| local.metadata().is_ok_and(|meta| meta.len() == size))
             && sha256_file(local).ok().as_deref() == remote.sha256.as_deref()
     })
-}
-
-#[cfg(test)]
-pub(crate) fn contract_sha256_file(path: &Path) -> io::Result<String> {
-    sha256_file(path)
-}
-
-#[cfg(test)]
-pub(crate) fn contract_segment_proven_held(segment_dir: &Path, entry: &ListingEntry) -> bool {
-    segment_proven_held(segment_dir, entry)
 }
 
 fn index_entries(items: &[ListingEntry]) -> HashMap<String, &ListingEntry> {
@@ -1117,7 +1075,10 @@ mod tests {
         },
         private_link_test_peer::PrivateLinkPeer,
         sync_health::{HealthState, load_facts_with_liveness},
-        test_support::{LinkedMockServer, MockServer, MutableClock, wait_for_requests},
+        test_support::{
+            DayCustodyFixture, LinkedMockServer, MockServer, MutableClock, day_custody_fixture,
+            wait_for_requests,
+        },
         upload::ListingFile,
     };
     use serde_json::{Value, json};
@@ -1191,6 +1152,7 @@ mod tests {
                 name: Some(name.to_owned()),
                 status: Some(status.to_owned()),
                 sha256: Some(sha.to_owned()),
+                size: Some(6),
             }]),
         }
     }
@@ -1202,12 +1164,31 @@ mod tests {
         segment
     }
 
+    fn custody(items: Vec<Value>) -> Value {
+        json!({"day_custody_items": items})
+    }
+
+    fn custody_for_day(day: &str, items: Vec<Value>) -> Value {
+        json!({"day_custody_day": day, "day_custody_items": items})
+    }
+
     fn listing(key: &str, file_name: &str, status: Option<&str>, sha: &str) -> Value {
+        listing_with_size(key, file_name, status, sha, 6)
+    }
+
+    fn listing_with_size(
+        key: &str,
+        file_name: &str,
+        status: Option<&str>,
+        sha: &str,
+        size: u64,
+    ) -> Value {
         let mut file = json!({"name": file_name, "sha256": sha});
+        file["size"] = json!(size);
         if let Some(status) = status {
             file["status"] = json!(status);
         }
-        json!({"items":[{"key":key,"files":[file]}],"total":1})
+        custody(vec![json!({"key":key,"observed":true,"files":[file]})])
     }
 
     async fn test_worker(
@@ -1215,7 +1196,15 @@ mod tests {
         responses: Vec<(u16, Value)>,
         retention: i64,
     ) -> (LinkedMockServer, SyncWorker) {
-        let server = LinkedMockServer::new(responses).await;
+        let server = LinkedMockServer::new(Vec::new()).await;
+        for (status, body) in responses {
+            if let Some(fixture) = day_custody_fixture(&body) {
+                assert_eq!(status, 200, "custody fixtures are reachable responses");
+                server.enqueue_day_custody(fixture);
+            } else {
+                server.enqueue_response(status, body.to_string());
+            }
+        }
         let config = Config {
             stream: "desktop".to_owned(),
             sync_retry_delays: vec![0],
@@ -1343,7 +1332,7 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
                 (200, remote.clone()),
                 (200, json!({"status":"ok","segment":"120000_300"})),
                 (200, remote),
@@ -1352,6 +1341,8 @@ mod tests {
         )
         .await;
         worker.sync_pass(true).await;
+        assert!(!worker.synced_days.contains("20260101"));
+        assert!(!segment.join(SERVER_KEY_FILENAME).exists());
         worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         assert_eq!(upload_hits(&server), 1);
@@ -1364,7 +1355,7 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
                 (200, remote.clone()),
                 (200, remote),
             ],
@@ -1393,10 +1384,25 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("screen.webm");
         fs::write(&file, b"screen").unwrap();
-        assert!(!segment_proven_held(
+        assert!(!segment_custody_proven(
             temp.path(),
             &entry("screen.webm", "present", "bad")
         ));
+    }
+
+    #[test]
+    fn missing_or_mismatched_file_size_is_not_custody_proof() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("screen.webm");
+        fs::write(&file, b"screen").unwrap();
+        let sha = sha256_file(&file).unwrap();
+        let mut missing = entry("screen.webm", "present", &sha);
+        missing.files.as_mut().unwrap()[0].size = None;
+        assert!(!segment_custody_proven(temp.path(), &missing));
+
+        let mut mismatch = entry("screen.webm", "present", &sha);
+        mismatch.files.as_mut().unwrap()[0].size = Some(7);
+        assert!(!segment_custody_proven(temp.path(), &mismatch));
     }
 
     // tests/test_sync.py::test_swapped_sha_by_filename_is_not_proof
@@ -1416,16 +1422,18 @@ mod tests {
                     name: Some("screen.webm".to_owned()),
                     status: Some("present".to_owned()),
                     sha256: Some(sha256_file(&audio).unwrap()),
+                    size: Some(fs::metadata(&audio).unwrap().len()),
                 },
                 ListingFile {
                     submitted_name: None,
                     name: Some("audio.flac".to_owned()),
                     status: Some("present".to_owned()),
                     sha256: Some(sha256_file(&screen).unwrap()),
+                    size: Some(fs::metadata(&screen).unwrap().len()),
                 },
             ]),
         };
-        assert!(!segment_proven_held(temp.path(), &item));
+        assert!(!segment_custody_proven(temp.path(), &item));
     }
 
     // tests/test_sync.py::test_submitted_name_matches_local_filename
@@ -1442,9 +1450,10 @@ mod tests {
                 name: Some("stored.webm".to_owned()),
                 status: Some("present".to_owned()),
                 sha256: Some(sha256_file(&file).unwrap()),
+                size: Some(fs::metadata(&file).unwrap().len()),
             }]),
         };
-        assert!(segment_proven_held(temp.path(), &item));
+        assert!(segment_custody_proven(temp.path(), &item));
     }
 
     // tests/test_sync.py::test_present_status_with_mismatched_sha_uploads
@@ -1452,6 +1461,34 @@ mod tests {
     async fn present_status_with_mismatched_sha_uploads() {
         upload_then_cleanup_keeps(listing("120000_300", "screen.webm", Some("present"), "bad"))
             .await;
+    }
+
+    #[tokio::test]
+    async fn present_status_with_mismatched_size_uploads() {
+        let sha = format!("{:x}", Sha256::digest(b"screen"));
+        upload_then_cleanup_keeps(listing_with_size(
+            "120000_300",
+            "screen.webm",
+            Some("present"),
+            &sha,
+            7,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn processed_status_with_absent_size_uploads() {
+        let sha = format!("{:x}", Sha256::digest(b"screen"));
+        upload_then_cleanup_keeps(custody(vec![json!({
+            "key": "120000_300",
+            "observed": true,
+            "files": [{
+                "name": "screen.webm",
+                "status": "processed",
+                "sha256": sha,
+            }],
+        })]))
+        .await;
     }
 
     // tests/test_sync.py::test_relocated_status_uploads_and_cleanup_keeps
@@ -1532,14 +1569,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         fs::write(segment.join("audio.flac"), b"audio").unwrap();
-        let remote = json!({"items":[{"key":"120000_300","files":[
-            {"name":"screen.webm","status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
-            {"name":"audio.flac","status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
-        ]}],"total":1});
+        let remote = custody(vec![json!({"key":"120000_300", "observed":true, "files":[
+            {"name":"screen.webm","size":6,"status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
+            {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
+        ]})]);
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
                 (200, remote.clone()),
                 (200, remote),
             ],
@@ -1606,39 +1643,27 @@ mod tests {
         assert!(server.requests().is_empty());
     }
 
-    // tests/test_sync.py::test_truncated_envelope_uploads_and_cleanup_keeps
     #[tokio::test]
-    async fn truncated_envelope_uploads_and_cleanup_keeps() {
-        let sha = format!("{:x}", Sha256::digest(b"screen"));
-        let remote = json!({"items":[{"key":"120000_300","files":[{"name":"screen.webm","status":"present","sha256":sha}]}],"total":2});
-        upload_then_cleanup_keeps(remote).await;
-    }
-
-    // tests/test_sync.py::test_legacy_listing_logs_once_and_cleanup_keeps
-    #[tokio::test]
-    async fn legacy_listing_logs_once_and_cleanup_keeps() {
+    async fn total_mismatch_uploads_and_does_not_mark_day_synced() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let legacy = json!([{"key":"120000_300"}]);
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![(200, json!([])), (200, legacy.clone()), (200, legacy)],
-            7,
-        )
-        .await;
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let writer = Buffer(Arc::clone(&output));
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        worker.sync_pass(true).with_subscriber(subscriber).await;
-        assert_eq!(upload_hits(&server), 0);
-        assert_eq!(server.request_count("/segments/20260101"), 2);
+        let (server, mut worker) = test_worker(&temp, vec![], 7).await;
+        server.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
+        server.enqueue_day_custody(
+            DayCustodyFixture::new(
+                "20260101",
+                vec![json!({"key":"120000_300", "observed":true, "files":[]})],
+            )
+            .with_segments_total(2),
+        );
+        server.enqueue_response(
+            200,
+            json!({"status":"ok","segment":"120000_300"}).to_string(),
+        );
+        worker.sync_pass(true).await;
+        assert_eq!(upload_hits(&server), 1);
         assert!(segment.exists());
-        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert_eq!(output.matches("pre-v2 bare array").count(), 1);
+        assert!(!worker.synced_days.contains("20260101"));
     }
 
     // tests/test_sync.py::test_duplicate_marker_stops_reupload
@@ -1651,13 +1676,13 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (
                     200,
                     json!({"status":"duplicate","existing_segment":"existing_300"}),
                 ),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
                 (200, held),
             ],
             -1,
@@ -1679,14 +1704,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let held = json!({"items":[{"key":"120000_301","original_key":"120000_300","files":[{"name":"screen.webm","status":"present","sha256":sha}]}],"total":1});
+        let held = custody(vec![
+            json!({"key":"120000_301","original_key":"120000_300","observed":true,"files":[{"name":"screen.webm","size":6,"status":"present","sha256":sha}]}),
+        ]);
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (200, json!({"status":"ok","segment":"120000_301"})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
                 (200, held),
             ],
             -1,
@@ -1709,10 +1736,7 @@ mod tests {
         let segment = create_segment(&temp, "120000_300", b"");
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
-            ],
+            vec![(200, custody(Vec::new())), (200, custody(Vec::new()))],
             -1,
         )
         .await;
@@ -1728,10 +1752,7 @@ mod tests {
         create_segment(&temp, "120000_300", b"");
         let (server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
-            ],
+            vec![(200, custody(Vec::new())), (200, custody(Vec::new()))],
             -1,
         )
         .await;
@@ -1748,8 +1769,8 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
             -1,
@@ -1768,10 +1789,7 @@ mod tests {
         create_segment(&temp, "120000_300", b"");
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
-            ],
+            vec![(200, custody(Vec::new())), (200, custody(Vec::new()))],
             -1,
         )
         .await;
@@ -1788,8 +1806,8 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (400, json!({})),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
@@ -1832,8 +1850,8 @@ mod tests {
         let (_server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (400, json!({})),
             ],
             -1,
@@ -1851,10 +1869,7 @@ mod tests {
         for index in 0..5 {
             create_segment(&temp, &format!("12000{index}_300"), b"bad");
         }
-        let mut responses = vec![
-            (200, json!({"items":[],"total":0})),
-            (200, json!({"items":[],"total":0})),
-        ];
+        let mut responses = vec![(200, custody(Vec::new())), (200, custody(Vec::new()))];
         responses.extend((0..10).map(|_| (500, json!({}))));
         let (_server, mut worker) = test_worker(&temp, responses, -1).await;
         worker.sync_pass(true).await;
@@ -1869,7 +1884,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("screen.webm");
         fs::write(&file, b"screen").unwrap();
-        assert!(!segment_proven_held(
+        assert!(!segment_custody_proven(
             temp.path(),
             &entry("screen.webm", "uploading", &sha256_file(&file).unwrap())
         ));
@@ -1881,7 +1896,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("screen.webm");
         fs::write(&file, b"screen").unwrap();
-        assert!(segment_proven_held(
+        assert!(segment_custody_proven(
             temp.path(),
             &entry("screen.webm", "processed", &sha256_file(&file).unwrap())
         ));
@@ -1896,7 +1911,7 @@ mod tests {
         fs::write(&file, b"screen").unwrap();
         let sha = sha256_file(&file).unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o0)).unwrap();
-        assert!(!segment_proven_held(
+        assert!(!segment_custody_proven(
             temp.path(),
             &entry("screen.webm", "present", &sha)
         ));
@@ -1906,7 +1921,7 @@ mod tests {
     #[test]
     fn empty_segment_is_not_proven_held() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(!segment_proven_held(
+        assert!(!segment_custody_proven(
             temp.path(),
             &entry("x", "present", "x")
         ));
@@ -2013,19 +2028,18 @@ mod tests {
         let media = segment.join("screen.webm");
         fs::write(&media, b"screen").unwrap();
         let sha = sha256_file(&media).unwrap();
-        let held = json!({
-            "items": [{
-                "key": "120000_300",
-                "files": [{
-                    "name": "screen.webm",
-                    "status": "present",
-                    "sha256": sha
-                }]
-            }],
-            "total": 1
-        });
+        let held = custody(vec![json!({
+            "key": "120000_300",
+            "observed": true,
+            "files": [{
+                "name": "screen.webm",
+                "size": 6,
+                "status": "present",
+                "sha256": sha
+            }]
+        })]);
         let server = MockServer::new(vec![
-            (200, json!({"items":[],"total":0})),
+            (200, custody(Vec::new())),
             (200, held.clone()),
             (200, held),
         ])
@@ -2056,7 +2070,7 @@ mod tests {
             }),
         );
         service.trigger();
-        wait_for_requests(&server, 3).await;
+        wait_for_requests(&server, 9).await;
         for _ in 0..100 {
             if !segment.exists() {
                 break;
@@ -2064,7 +2078,16 @@ mod tests {
             tokio::task::yield_now().await;
         }
         service.shutdown(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(server.request_count("/segments/20260101"), 2);
+        assert_eq!(
+            server.request_count("/segments/20260101"),
+            2,
+            "requests: {:?}",
+            server
+                .requests()
+                .iter()
+                .map(|request| &request.uri)
+                .collect::<Vec<_>>()
+        );
         assert!(!segment.exists());
     }
 
@@ -2565,7 +2588,7 @@ mod tests {
         let second = create_segment(&temp, "130000_300", b"two");
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![(200, json!({"items":[],"total":0})), (400, json!({}))],
+            vec![(200, custody(Vec::new())), (400, json!({}))],
             -1,
         )
         .await;
@@ -2590,9 +2613,10 @@ mod tests {
             &temp,
             vec![
                 (401, json!({})),
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, registration("RECOVERED-KEY", "desktop")),
+                (200, json!({"days": {}})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
             -1,
@@ -2606,7 +2630,15 @@ mod tests {
         clock.set_mono(131.0);
         assert!(worker.try_probe().await);
         worker.sync_pass(true).await;
-        assert!(upload_hits(&server) >= 1);
+        assert!(
+            upload_hits(&server) >= 1,
+            "requests: {:?}",
+            server
+                .requests()
+                .iter()
+                .map(|request| &request.uri)
+                .collect::<Vec<_>>()
+        );
     }
 
     // AC 4/16: listing alone repairs a distinct key and skips the still-active breaker wait once.
@@ -2616,7 +2648,7 @@ mod tests {
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(401, Vec::new());
         peer.enqueue_response(200, registration("NEW-KEY", "desktop-new").to_string());
-        peer.enqueue_response(200, json!({"items":[],"total":0}).to_string());
+        peer.enqueue_day_custody(DayCustodyFixture::new("20260101", Vec::new()));
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
         let (session, mut worker) = linked_worker(&temp, &peer, clock.clone(), -1).await;
 
@@ -2696,7 +2728,7 @@ mod tests {
         tokio::spawn(
             async move {
                 for _ in 0..20 {
-                    let _ = client.get_server_segments("20260101").await;
+                    let _ = client.fetch_day_custody("20260101").await;
                 }
             }
             .with_subscriber(subscriber),
@@ -2744,7 +2776,7 @@ mod tests {
             .finish();
         tokio::spawn(
             async move {
-                let _ = client.get_server_segments("20260101").await;
+                let _ = client.fetch_day_custody("20260101").await;
             }
             .with_subscriber(subscriber),
         )
@@ -2798,12 +2830,13 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (401, json!({})),
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, registration("RECOVERED-KEY", "desktop")),
+                (200, json!({"days": {}})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
             -1,
@@ -2829,8 +2862,8 @@ mod tests {
         let (_server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (403, json!({})),
             ],
             -1,
@@ -2849,8 +2882,8 @@ mod tests {
         let (_server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (401, json!({})),
             ],
             -1,
@@ -2892,7 +2925,10 @@ mod tests {
         temp: &tempfile::TempDir,
         responses: Vec<(u16, Value)>,
     ) -> (LinkedMockServer, SyncWorker) {
-        let (server, mut worker) = test_worker(temp, responses, -1).await;
+        let (server, mut worker) = test_worker(temp, Vec::new(), -1).await;
+        for (status, body) in responses {
+            server.enqueue_manifest_probe(status, body.to_string());
+        }
         worker.circuit_open = true;
         worker.circuit_open_since = 0.0;
         worker.circuit_cooldown = 30.0;
@@ -2907,7 +2943,7 @@ mod tests {
     async fn transient_circuit_recovers_after_cooldown() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) =
-            open_probe_worker(&temp, vec![(200, json!({"items":[],"total":0}))]).await;
+            open_probe_worker(&temp, vec![(200, custody(Vec::new()))]).await;
         assert!(worker.try_probe().await);
         assert!(!worker.circuit_open);
         assert_eq!(worker.consecutive_failures, 0);
@@ -2964,7 +3000,7 @@ mod tests {
     async fn full_reset_after_successful_probe() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) =
-            open_probe_worker(&temp, vec![(200, json!({"items":[],"total":0}))]).await;
+            open_probe_worker(&temp, vec![(200, custody(Vec::new()))]).await;
         worker.circuit_cooldown = 120.0;
         worker.clock = Arc::new(FixedClock {
             wall: 1_800_000_000.0,
@@ -3008,10 +3044,7 @@ mod tests {
     async fn query_failures_recover_to_connected() {
         let temp = tempfile::tempdir().unwrap();
         let mut responses = (0..5).map(|_| (500, json!({}))).collect::<Vec<_>>();
-        responses.extend([
-            (200, json!({"items":[],"total":0})),
-            (200, json!({"items":[],"total":0})),
-        ]);
+        responses.extend([(200, json!({"days": {}})), (200, custody(Vec::new()))]);
         let (server, mut worker) = test_worker(&temp, responses, -1).await;
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
         worker.clock = clock.clone();
@@ -3044,7 +3077,7 @@ mod tests {
         running.store(false, Ordering::Release);
         notify.notify_one();
         task.await.unwrap();
-        assert_eq!(server.requests().len(), 7);
+        assert_eq!(server.requests().len(), 9);
         assert_eq!(
             derive_health(&facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
             crate::sync_health::HealthState::Connected
@@ -3171,7 +3204,7 @@ mod tests {
         create_segment(&temp, "120000_300", b"x");
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![(200, json!({"items":[],"total":0})), (404, json!({}))],
+            vec![(200, custody(Vec::new())), (404, json!({}))],
             -1,
         )
         .await;
@@ -3205,11 +3238,7 @@ mod tests {
         );
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, json!({"items":[],"total":0})),
-                (200, held.clone()),
-                (200, held),
-            ],
+            vec![(200, custody(Vec::new())), (200, held.clone()), (200, held)],
             7,
         )
         .await;
@@ -3247,7 +3276,7 @@ mod tests {
         let (_server, mut worker, segment) = cleanup_worker_with_segment(
             &temp,
             "120000_300",
-            vec![(200, json!({"items":[],"total":0}))],
+            vec![(200, custody(Vec::new()))],
             7,
             true,
         )
@@ -3347,7 +3376,7 @@ mod tests {
         let gate = Arc::new(Notify::new());
         peer.enqueue_gated_response(
             200,
-            serde_json::to_vec(&json!({"items":[],"total":0})).unwrap(),
+            serde_json::to_vec(&custody(Vec::new())).unwrap(),
             gate.clone(),
         );
         let config = Config {
@@ -3424,10 +3453,10 @@ mod tests {
         let complete = create_segment(&temp, "140000_300", b"complete");
         let incomplete_sha = sha256_file(&segment.join("screen.webm")).unwrap();
         let complete_sha = sha256_file(&complete.join("screen.webm")).unwrap();
-        let remote = json!({"items":[
-            {"key":"120000.incomplete","files":[{"name":"screen.webm","status":"present","sha256":incomplete_sha}]},
-            {"key":"140000_300","files":[{"name":"screen.webm","status":"present","sha256":complete_sha}]}
-        ],"total":2});
+        let remote = custody(vec![
+            json!({"key":"120000.incomplete","observed":true,"files":[{"name":"screen.webm","size":fs::metadata(segment.join("screen.webm")).unwrap().len(),"status":"present","sha256":incomplete_sha}]}),
+            json!({"key":"140000_300","observed":true,"files":[{"name":"screen.webm","size":fs::metadata(complete.join("screen.webm")).unwrap().len(),"status":"present","sha256":complete_sha}]}),
+        ]);
         let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
         worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
@@ -3506,7 +3535,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let remote = json!({"items":[{"key":"renamed","original_key":"120000_300","files":[{"name":"screen.webm","status":"present","sha256":sha}]}],"total":1});
+        let remote = custody(vec![
+            json!({"key":"renamed","original_key":"120000_300","observed":true,"files":[{"name":"screen.webm","size":6,"status":"present","sha256":sha}]}),
+        ]);
         let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
         worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
@@ -3549,7 +3580,7 @@ mod tests {
         let (_server, mut worker, segment) = cleanup_worker_with_segment(
             &temp,
             "120000.incomplete",
-            vec![(200, json!({"items":[],"total":0}))],
+            vec![(200, custody(Vec::new()))],
             7,
             true,
         )
@@ -3584,12 +3615,11 @@ mod tests {
     #[tokio::test]
     async fn listing_success_then_fifth_failure_opens() {
         let temp = tempfile::tempdir().unwrap();
-        let (_server, mut worker) =
-            test_worker(&temp, vec![(200, json!({"items":[],"total":0}))], -1).await;
+        let (_server, mut worker) = test_worker(&temp, vec![(200, custody(Vec::new()))], -1).await;
         for _ in 0..4 {
             worker.record_failure(Some(ErrorType::Transient), None);
         }
-        let result = worker.client.get_server_segments("20260101").await;
+        let result = worker.client.fetch_day_custody("20260101").await;
         assert!(result.error_type.is_none());
         worker.record_contact(false);
         worker.record_failure(Some(ErrorType::Transient), None);
@@ -3610,28 +3640,19 @@ mod tests {
         assert_eq!(worker.last_error_type, None);
     }
 
-    // AC: legacy cleanup listings never authorize deletion.
+    // AC: an unproven v3 envelope never authorizes deletion.
     #[tokio::test]
-    async fn cleanup_legacy_envelope_disables_deletion() {
+    async fn cleanup_total_mismatch_disables_deletion() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let legacy = json!([{"key":"120000_300","files":[{"name":"screen.webm","status":"present","sha256":sha}]}]);
-        let (server, mut worker) = test_worker(&temp, vec![(200, legacy)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
-        worker.cleanup_synced_segments().await;
-        assert!(segment.exists());
-        assert_eq!(server.request_count("/segments/20260101"), 1);
-    }
-
-    // AC: truncated cleanup listings never authorize deletion.
-    #[tokio::test]
-    async fn cleanup_truncated_envelope_disables_deletion() {
-        let temp = tempfile::tempdir().unwrap();
-        let segment = create_segment(&temp, "120000_300", b"screen");
-        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let remote = json!({"items":[{"key":"120000_300","files":[{"name":"screen.webm","status":"present","sha256":sha}]}],"total":2});
-        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
+        let (server, mut worker) = test_worker(&temp, vec![], 7).await;
+        server.enqueue_day_custody(
+            DayCustodyFixture::new(
+                "20260101",
+                vec![json!({"key":"120000_300", "observed":true, "files":[]})],
+            )
+            .with_segments_total(2),
+        );
         worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
@@ -3657,11 +3678,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let proven = create_segment(&temp, "120000_300", b"one");
         let unproven = create_segment(&temp, "130000_300", b"two");
-        let remote = listing(
+        let remote = listing_with_size(
             "120000_300",
             "screen.webm",
             Some("present"),
             &sha256_file(&proven.join("screen.webm")).unwrap(),
+            3,
         );
         let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
         worker.synced_days.insert("20260101".to_owned());
@@ -3696,8 +3718,8 @@ mod tests {
         let (_server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
             -1,
@@ -3713,11 +3735,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let old = create_segment(&temp, "120000_300", b"old");
         set_mtime(old.parent().unwrap().parent().unwrap(), 1_800_000_000.0);
-        let held = listing(
+        let held = listing_with_size(
             "120000_300",
             "screen.webm",
             Some("present"),
             &sha256_file(&old.join("screen.webm")).unwrap(),
+            3,
         );
         let (_server, mut worker) = test_worker(&temp, vec![(200, held)], 7).await;
         worker.synced_days.insert("20260101".to_owned());
@@ -3821,7 +3844,7 @@ mod tests {
     #[tokio::test]
     async fn completion_trigger_starts_pass() {
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, json!({"items":[],"total":0}))]).await;
+        let server = MockServer::new(vec![(200, custody(Vec::new()))]).await;
         let config = Config {
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
@@ -3849,14 +3872,14 @@ mod tests {
         service.trigger();
         wait_for_requests(&server, 1).await;
         service.shutdown(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests().len(), 3);
     }
 
     // AC: the periodic timeout starts a pass without a completion trigger.
     #[tokio::test(start_paused = true)]
     async fn periodic_sixty_seconds_starts_pass() {
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, json!({"items":[],"total":0}))]).await;
+        let server = MockServer::new(vec![(200, custody(Vec::new()))]).await;
         let config = Config {
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
@@ -3891,13 +3914,22 @@ mod tests {
     #[tokio::test]
     async fn daily_full_pass_rechecks_synced_day() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path().join("captures/20260101/archon/120000_300")).unwrap();
+        let segment = temp.path().join("captures/20260101/archon/120000_300");
+        fs::create_dir_all(&segment).unwrap();
+        let media = segment.join("screen.webm");
+        fs::write(&media, b"screen").unwrap();
+        let held = listing(
+            "120000_300",
+            "screen.webm",
+            Some("present"),
+            &sha256_file(&media).unwrap(),
+        );
         let responses = vec![
-            (200, json!({"items":[],"total":0})),
-            (200, json!({"items":[],"total":0})),
-            (200, json!({"items":[],"total":0})),
-            (200, json!({"items":[],"total":0})),
-            (200, json!({"items":[],"total":0})),
+            (200, custody(Vec::new())),
+            (200, held.clone()),
+            (200, custody(Vec::new())),
+            (200, custody_for_day("20270116", Vec::new())),
+            (200, held),
         ];
         let server = MockServer::new(responses).await;
         let config = Config {
@@ -3921,13 +3953,13 @@ mod tests {
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
         let service = SyncService::start(config, client, clock.clone());
         service.trigger();
-        wait_for_requests(&server, 2).await;
+        wait_for_requests(&server, 6).await;
         service.trigger();
-        wait_for_requests(&server, 3).await;
+        wait_for_requests(&server, 9).await;
         assert_eq!(server.request_count("/segments/20260101"), 1);
         clock.set_wall(1_800_086_401.0);
         service.trigger();
-        wait_for_requests(&server, 5).await;
+        wait_for_requests(&server, 15).await;
         assert_eq!(server.request_count("/segments/20260101"), 2);
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
@@ -3943,17 +3975,17 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
-                (200, json!({"items":[],"total":0})),
+                (200, custody(Vec::new())),
+                (200, custody(Vec::new())),
+                (200, custody_for_day("20250101", Vec::new())),
             ],
             -1,
         )
         .await;
         worker.sync_pass(true).await;
         let uris: Vec<_> = server.requests().into_iter().map(|r| r.uri).collect();
-        assert!(uris[1].ends_with("/20260101"));
-        assert!(uris[2].ends_with("/20250101"));
+        assert!(uris[4].ends_with("/20260101"), "{uris:?}");
+        assert!(uris[7].ends_with("/20250101"), "{uris:?}");
     }
 
     // AC: triggers during an active request coalesce into one non-overlapping follow-up.
@@ -4055,8 +4087,7 @@ mod tests {
             }
         }
         let temp = tempfile::tempdir().unwrap();
-        let (server, mut worker) =
-            test_worker(&temp, vec![(200, json!({"items":[],"total":0}))], -1).await;
+        let (server, mut worker) = test_worker(&temp, vec![(200, custody(Vec::new()))], -1).await;
         worker.fail_next_pass = true;
         let notify = Arc::clone(&worker.notify);
         let running = Arc::clone(&worker.running);
@@ -4094,10 +4125,10 @@ mod tests {
             &sha256_file(&segment.join("screen.webm")).unwrap(),
         );
         let server = MockServer::new(vec![
-            (200, json!({"items":[],"total":0})),
+            (200, custody(Vec::new())),
             (200, held.clone()),
             (500, json!({})),
-            (200, json!({"items":[],"total":0})),
+            (200, custody(Vec::new())),
             (200, held),
         ])
         .await;
@@ -4140,7 +4171,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, registration("REGISTERED-KEY", "desktop").to_string());
-        peer.enqueue_response(200, json!({"items":[],"total":0}).to_string());
+        peer.enqueue_day_custody(DayCustodyFixture::new("20260101", Vec::new()));
         let config = Config {
             stream: "desktop".to_owned(),
             base_dir: temp.path().join("data"),
@@ -4263,13 +4294,15 @@ mod tests {
         peer.shutdown().await;
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn unregistered_worker_registration_retry_respects_cooldown() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(503, Vec::new());
+        peer.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
+        peer.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
         peer.enqueue_response(200, registration("REGISTERED-KEY", "desktop").to_string());
-        peer.enqueue_response(200, json!({"items":[],"total":0}).to_string());
+        peer.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
         let config = Config {
             stream: "desktop".to_owned(),
             base_dir: temp.path().join("data"),
@@ -4288,6 +4321,7 @@ mod tests {
             "test",
             clock.clone(),
         ));
+        let client_for_test = Arc::clone(&client);
         let notify = Arc::new(Notify::new());
         let running = Arc::new(AtomicBool::new(true));
         let mut worker = SyncWorker::new(
@@ -4304,21 +4338,20 @@ mod tests {
         );
         let task = tokio::spawn(async move { worker.run().await });
         notify.notify_one();
-        for _ in 0..10_000 {
-            if !peer.requests().is_empty() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(peer.requests().len(), 1, "first registration request");
-        tokio::time::advance(Duration::from_millis(1)).await;
+        peer.wait_for_requests(4).await;
+        assert_eq!(
+            peer.requests()
+                .iter()
+                .filter(|request| request.path == "/app/devices/register")
+                .count(),
+            1,
+            "first registration request"
+        );
+        assert_eq!(client_for_test.last_recovery_attempt_for_test(), Some(0.0));
 
         clock.set_mono(60.0);
-        for _ in 0..3 {
-            notify.notify_one();
-            tokio::task::yield_now().await;
-        }
-        tokio::time::advance(Duration::from_secs(60)).await;
+        notify.notify_one();
+        peer.wait_for_requests(7).await;
         assert_eq!(
             peer.requests()
                 .iter()
@@ -4327,22 +4360,11 @@ mod tests {
             1,
             "registration requests during cooldown"
         );
+        assert_eq!(client_for_test.last_recovery_attempt_for_test(), Some(0.0));
 
-        tokio::time::advance(Duration::from_secs(240)).await;
         clock.set_mono(300.0);
         notify.notify_one();
-        for _ in 0..10_000 {
-            if peer
-                .requests()
-                .iter()
-                .filter(|request| request.path == "/app/devices/register")
-                .count()
-                >= 2
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        peer.wait_for_requests(8).await;
         assert_eq!(
             peer.requests()
                 .iter()
@@ -4358,9 +4380,9 @@ mod tests {
         peer.shutdown().await;
     }
 
-    // AC: an unregistered worker logs refusal once, stays idle, and performs no HTTP.
+    // AC: an unpaired worker has no transport, performs no HTTP, and only runs when notified.
     #[tokio::test]
-    async fn unregistered_worker_refuses_once_without_http() {
+    async fn unpaired_worker_does_not_busy_loop_or_emit_refusal_noise() {
         #[derive(Clone)]
         struct Buffer(Arc<Mutex<Vec<u8>>>);
         impl std::io::Write for Buffer {
@@ -4387,7 +4409,6 @@ mod tests {
         ));
         let notify = Arc::clone(&worker.notify);
         let running = Arc::clone(&worker.running);
-        let facts = worker.facts.lock().unwrap().clone();
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&output));
         let subscriber = tracing_subscriber::fmt()
@@ -4408,9 +4429,9 @@ mod tests {
         notify.notify_one();
         task.await.unwrap();
         assert!(server.requests().is_empty());
-        assert_eq!(load_facts(&config.state_dir()), facts);
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert_eq!(output.matches("Sync refused").count(), 1);
+        assert!(!output.contains("Sync refused"), "{output}");
+        assert!(!output.contains("Sync error"), "{output}");
     }
 
     // AC: a completion racing shutdown drains one walker pass before join completes.
@@ -4419,8 +4440,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"final screen");
         let server = MockServer::new(vec![
-            (200, json!({"items": [], "total": 0})),
-            (200, json!({"items": [], "total": 0})),
+            (200, custody(Vec::new())),
+            (200, custody(Vec::new())),
             (200, json!({"status": "ok", "segment": "120000_300"})),
         ])
         .await;

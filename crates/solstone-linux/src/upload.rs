@@ -11,7 +11,7 @@ use crate::{
     sync_health::ErrorType,
 };
 use reqwest::{StatusCode, multipart};
-use serde::{Deserialize, Deserializer, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::{Map, Value};
@@ -33,6 +33,7 @@ const RECOVERY_COOLDOWN: Duration = Duration::from_secs(300);
 const TELLING_WINDOW: Duration = Duration::from_secs(300);
 const TELLING_BURST_LIMIT: usize = 12;
 pub(crate) const KEY_PREFIX_CHARS: usize = 8;
+pub(crate) const MAX_MULTIPART_PART_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadResult {
@@ -66,6 +67,8 @@ pub struct ListingFile {
     pub status: Option<String>,
     #[serde(default, deserialize_with = "deserialize_lenient_option")]
     pub sha256: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
+    pub size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -79,12 +82,18 @@ pub struct ListingEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QueryResult {
-    pub segments: Option<Vec<ListingEntry>>,
+pub struct DayCustody {
+    pub day_present: bool,
+    pub items: Vec<ListingEntry>,
+    pub proof_available: bool,
     pub error_type: Option<ErrorType>,
     pub status_code: Option<u16>,
-    pub legacy: bool,
-    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestProbe {
+    pub error_type: Option<ErrorType>,
+    pub status_code: Option<u16>,
 }
 
 pub(crate) struct Inner {
@@ -203,6 +212,10 @@ impl UploadClient {
         false
     }
 
+    pub(crate) fn has_capability(&self) -> bool {
+        self.inner.capability().is_some()
+    }
+
     pub(crate) fn recovery_generation(&self) -> u64 {
         self.inner.recovery_generation.load(Ordering::Acquire)
     }
@@ -261,6 +274,11 @@ impl UploadClient {
     #[cfg(test)]
     pub(crate) fn stop_requested(&self) -> bool {
         self.inner.cancellation.is_cancelled()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_recovery_attempt_for_test(&self) -> Option<f64> {
+        *self.inner.last_recovery_attempt.lock().unwrap()
     }
 
     pub async fn ensure_registered(&self, config: &mut Config) -> bool {
@@ -322,26 +340,23 @@ impl UploadClient {
         if self.is_revoked() {
             return UploadResult::failure(Some(ErrorType::Auth), None);
         }
-        if self
-            .inner
-            .capability()
-            .is_some_and(|capability| !capability.is_registered())
-        {
-            return UploadResult::failure(Some(ErrorType::Client), None);
-        }
-        if !files.iter().any(|path| path.exists()) {
-            return UploadResult::failure(None, None);
-        }
         let mut last_error = None;
         let mut last_status = None;
         for attempt in 0..self.inner.immediate_attempts {
-            let Some((form, framed_length)) = build_multipart_form(day, segment, files).await
-            else {
-                return UploadResult::failure(None, None);
+            let (form, framed_length) = match build_multipart_form(day, segment, files).await {
+                Ok(form) => form,
+                Err(MultipartBuildError::NoFiles) => {
+                    return UploadResult::failure(Some(ErrorType::Client), None);
+                }
+                Err(MultipartBuildError::File { path, error }) => {
+                    tracing::warn!(path = %path.display(), %error, "Unable to prepare upload file");
+                    return UploadResult::failure(Some(ErrorType::Client), None);
+                }
+                Err(MultipartBuildError::PartTooLarge | MultipartBuildError::RequestTooLarge) => {
+                    return UploadResult::failure(Some(ErrorType::Client), Some(413));
+                }
             };
-            if framed_length > MAX_REQUEST_BODY_BYTES {
-                return UploadResult::failure(Some(ErrorType::Client), Some(413));
-            }
+            debug_assert!(framed_length <= MAX_REQUEST_BODY_BYTES);
 
             if let Some(capability) = self.inner.capability() {
                 match capability.ingest(form).await {
@@ -407,43 +422,96 @@ impl UploadClient {
         UploadResult::failure(last_error, last_status)
     }
 
-    pub async fn get_server_segments(&self, day: &str) -> QueryResult {
+    pub async fn probe_manifest(&self) -> ManifestProbe {
         if self.is_revoked() {
-            return query_failure(ErrorType::Auth, None);
+            return probe_failure(ErrorType::Auth, None);
         }
-        if let Some(capability) = self.inner.capability() {
-            return match capability.list_day(day).await {
-                LinkOutcome::Success { status, body } if status == StatusCode::OK => {
-                    match serde_json::from_slice::<Value>(&body) {
-                        Ok(body) => parse_listing(body, status.as_u16()),
-                        Err(error) => {
-                            tracing::debug!(%error, "Segments query returned malformed JSON");
-                            query_failure(ErrorType::Transient, None)
-                        }
-                    }
-                }
-                LinkOutcome::Success { status, .. } | LinkOutcome::LocalRejected { status } => {
-                    query_failure(
-                        Self::classify_error(Some(status.as_u16()), false),
-                        Some(status.as_u16()),
-                    )
-                }
-                LinkOutcome::Unauthorized { generation } => {
-                    self.inner
-                        .recover_linked_after_401("listing", false, generation)
-                        .await;
-                    query_failure(ErrorType::Auth, Some(StatusCode::UNAUTHORIZED.as_u16()))
-                }
-                LinkOutcome::Forbidden => {
-                    self.inner.revoked.store(true, Ordering::Release);
-                    self.inner
-                        .publish_link_fact(crate::private_link::LinkFact::TerminalRevocation);
-                    query_failure(ErrorType::Auth, Some(StatusCode::FORBIDDEN.as_u16()))
-                }
-                LinkOutcome::TransportUnavailable => query_failure(ErrorType::Transient, None),
+        let Some(capability) = self.inner.capability() else {
+            return probe_failure(ErrorType::Transient, None);
+        };
+        match capability.probe_manifest().await {
+            LinkOutcome::Success { status, .. } if status == StatusCode::OK => ManifestProbe {
+                error_type: None,
+                status_code: Some(status.as_u16()),
+            },
+            outcome => {
+                let failure = self.read_failure(outcome, "manifest probe").await;
+                probe_failure(
+                    failure.error_type.expect("failure has an error type"),
+                    failure.status_code,
+                )
+            }
+        }
+    }
+
+    pub async fn fetch_day_custody(&self, day: &str) -> DayCustody {
+        if self.is_revoked() {
+            return custody_failure(ErrorType::Auth, None);
+        }
+        let Some(capability) = self.inner.capability() else {
+            return custody_failure(ErrorType::Transient, None);
+        };
+
+        let (manifest, _) = match self
+            .read_json(capability.probe_manifest().await, "manifest")
+            .await
+        {
+            Ok(value) => value,
+            Err(failure) => return failure,
+        };
+        let Some(days) = manifest.get("days").and_then(Value::as_object) else {
+            return custody_failure(ErrorType::Incompatible, Some(StatusCode::OK.as_u16()));
+        };
+        if !days.contains_key(day) {
+            // The manifest is authoritative for day existence. Absence is a reachable,
+            // unproven state rather than a failed read, so the segment remains upload-eligible.
+            return DayCustody {
+                day_present: false,
+                items: Vec::new(),
+                proof_available: false,
+                error_type: None,
+                status_code: Some(StatusCode::OK.as_u16()),
             };
         }
-        query_failure(ErrorType::Transient, None)
+
+        let (day_manifest, _) = match self
+            .read_json(capability.manifest_day(day).await, "day manifest")
+            .await
+        {
+            Ok(value) => value,
+            Err(failure) => return failure,
+        };
+        let manifest_day = day_manifest.get("day").and_then(Value::as_str);
+        let manifest_version = day_manifest.get("version").and_then(Value::as_u64);
+        if manifest_day.is_none()
+            || manifest_version.is_none()
+            || day_manifest
+                .get("segments")
+                .and_then(Value::as_object)
+                .is_none()
+        {
+            return custody_failure(ErrorType::Incompatible, Some(StatusCode::OK.as_u16()));
+        }
+        if manifest_day != Some(day) || manifest_version != Some(1) {
+            // Repo-pinned policy: the authority only exemplifies version 1, so any other
+            // version is deliberately unproven instead of being silently accepted.
+            return DayCustody {
+                day_present: true,
+                items: Vec::new(),
+                proof_available: false,
+                error_type: None,
+                status_code: Some(StatusCode::OK.as_u16()),
+            };
+        }
+
+        let (segments, status_code) = match self
+            .read_json(capability.segments_day(day).await, "segments")
+            .await
+        {
+            Ok(value) => value,
+            Err(failure) => return failure,
+        };
+        parse_segments_envelope(segments, status_code)
     }
 
     pub async fn relay_event(&self, tract: &str, event: &str, fields: Map<String, Value>) -> bool {
@@ -469,9 +537,55 @@ impl UploadClient {
         }
         match status_code {
             Some(401 | 403) => ErrorType::Auth,
-            Some(400 | 413) => ErrorType::Client,
-            Some(404) => ErrorType::Incompatible,
+            // An unavailable ingest route is a client/server contract mismatch, not a
+            // request the v3 client can make succeed by retrying.
+            Some(404 | 426) => ErrorType::Incompatible,
+            Some(400..=425) => ErrorType::Client,
             _ => ErrorType::Transient,
+        }
+    }
+
+    async fn read_json(
+        &self,
+        outcome: LinkOutcome,
+        route: &str,
+    ) -> Result<(Value, u16), DayCustody> {
+        match outcome {
+            LinkOutcome::Success { status, body } if status == StatusCode::OK => {
+                serde_json::from_slice(&body)
+                    .map(|body| (body, status.as_u16()))
+                    .map_err(|error| {
+                        tracing::debug!(%error, %route, "V3 custody read returned malformed JSON");
+                        custody_failure(ErrorType::Incompatible, Some(status.as_u16()))
+                    })
+            }
+            outcome => Err(self.read_failure(outcome, route).await),
+        }
+    }
+
+    async fn read_failure(&self, outcome: LinkOutcome, route: &str) -> DayCustody {
+        match outcome {
+            LinkOutcome::Success { status, .. } | LinkOutcome::LocalRejected { status } => {
+                custody_failure(
+                    Self::classify_error(Some(status.as_u16()), false),
+                    Some(status.as_u16()),
+                )
+            }
+            LinkOutcome::Unauthorized { generation } => {
+                self.inner
+                    .recover_linked_after_401(route, false, generation)
+                    .await;
+                custody_failure(ErrorType::Auth, Some(StatusCode::UNAUTHORIZED.as_u16()))
+            }
+            LinkOutcome::Forbidden => {
+                // The v3 authority's linked_device_required refusal is an auth latch, not a
+                // retryable transport failure.
+                self.inner.revoked.store(true, Ordering::Release);
+                self.inner
+                    .publish_link_fact(crate::private_link::LinkFact::TerminalRevocation);
+                custody_failure(ErrorType::Auth, Some(StatusCode::FORBIDDEN.as_u16()))
+            }
+            LinkOutcome::TransportUnavailable => custody_failure(ErrorType::Transient, None),
         }
     }
 }
@@ -730,6 +844,9 @@ fn parse_upload_body(body: Value) -> UploadResult {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         },
+        Some("failed") => {
+            UploadResult::failure(Some(ErrorType::Client), Some(StatusCode::OK.as_u16()))
+        }
         _ => UploadResult::failure(Some(ErrorType::Incompatible), Some(StatusCode::OK.as_u16())),
     }
 }
@@ -761,6 +878,29 @@ async fn multipart_part(
         .mime_str(content_type)
         .map_err(std::io::Error::other)?;
     Ok((part, length, file_name, content_type))
+}
+
+#[derive(Debug)]
+enum MultipartBuildError {
+    NoFiles,
+    File {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+    PartTooLarge,
+    RequestTooLarge,
+}
+
+#[derive(Serialize)]
+struct UploadEnvelope<'a> {
+    day: &'a str,
+    segment: &'a str,
+    files: Vec<SubmittedFile>,
+}
+
+#[derive(Serialize)]
+struct SubmittedFile {
+    submitted: String,
 }
 
 fn multipart_field_length(
@@ -796,54 +936,82 @@ async fn build_multipart_form(
     day: &str,
     segment: &str,
     files: &[PathBuf],
-) -> Option<(multipart::Form, u64)> {
-    let mut form = multipart::Form::new();
+) -> Result<(multipart::Form, u64), MultipartBuildError> {
+    let form = multipart::Form::new();
     let boundary = form.boundary().to_owned();
-    let mut length =
-        multipart_field_length(&boundary, "day", day.len() as u64, None, None)?.checked_add(
-            multipart_field_length(&boundary, "segment", segment.len() as u64, None, None)?,
-        )?;
-    form = form
-        .text("day", day.to_owned())
-        .text("segment", segment.to_owned());
-    let mut file_count = 0_u64;
-    for path in files.iter().filter(|path| path.exists()) {
-        // Named deviation: Python propagates file-open errors; Rust skips unreadable
-        // files so one bad capture does not crash the observer.
-        match multipart_part(path).await {
-            Ok((part, file_length, filename, content_type)) => {
-                length = length.checked_add(multipart_field_length(
-                    &boundary,
-                    "files",
-                    file_length,
-                    Some(&filename),
-                    Some(content_type),
-                )?)?;
-                form = form.part("files", part);
-                file_count += 1;
-            }
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "File not found, skipping")
-            }
+    let mut prepared = Vec::with_capacity(files.len());
+    let mut submitted = Vec::with_capacity(files.len());
+    for path in files {
+        let (part, file_length, filename, content_type) =
+            multipart_part(path)
+                .await
+                .map_err(|error| MultipartBuildError::File {
+                    path: path.clone(),
+                    error,
+                })?;
+        if file_length > MAX_MULTIPART_PART_BYTES {
+            return Err(MultipartBuildError::PartTooLarge);
         }
+        prepared.push((part, file_length, filename.clone(), content_type));
+        submitted.push(SubmittedFile {
+            submitted: filename,
+        });
     }
-    if file_count == 0 {
-        return None;
+    if prepared.is_empty() {
+        return Err(MultipartBuildError::NoFiles);
+    }
+    let envelope = serde_json::to_string(&UploadEnvelope {
+        day,
+        segment,
+        files: submitted,
+    })
+    .expect("upload envelope is serializable");
+    if envelope.len() as u64 > MAX_MULTIPART_PART_BYTES {
+        return Err(MultipartBuildError::PartTooLarge);
+    }
+    let mut length =
+        multipart_field_length(&boundary, "envelope", envelope.len() as u64, None, None)
+            .ok_or(MultipartBuildError::RequestTooLarge)?;
+    let mut form = form.text("envelope", envelope);
+    for (part, file_length, filename, content_type) in prepared {
+        let field_length = multipart_field_length(
+            &boundary,
+            "files",
+            file_length,
+            Some(&filename),
+            Some(content_type),
+        )
+        .ok_or(MultipartBuildError::RequestTooLarge)?;
+        length = length
+            .checked_add(field_length)
+            .ok_or(MultipartBuildError::RequestTooLarge)?;
+        form = form.part("files", part);
     }
     length = length
-        .checked_add(2)?
-        .checked_add(boundary.len() as u64)?
-        .checked_add(4)?;
-    Some((form, length))
+        .checked_add(2)
+        .and_then(|length| length.checked_add(boundary.len() as u64))
+        .and_then(|length| length.checked_add(4))
+        .ok_or(MultipartBuildError::RequestTooLarge)?;
+    if length > MAX_REQUEST_BODY_BYTES {
+        return Err(MultipartBuildError::RequestTooLarge);
+    }
+    Ok((form, length))
 }
 
-fn query_failure(error_type: ErrorType, status_code: Option<u16>) -> QueryResult {
-    QueryResult {
-        segments: None,
+fn custody_failure(error_type: ErrorType, status_code: Option<u16>) -> DayCustody {
+    DayCustody {
+        day_present: false,
+        items: Vec::new(),
+        proof_available: false,
         error_type: Some(error_type),
         status_code,
-        legacy: false,
-        truncated: false,
+    }
+}
+
+fn probe_failure(error_type: ErrorType, status_code: Option<u16>) -> ManifestProbe {
+    ManifestProbe {
+        error_type: Some(error_type),
+        status_code,
     }
 }
 
@@ -856,24 +1024,31 @@ where
     Ok(serde_json::from_value(value).ok())
 }
 
-fn parse_listing(body: Value, status_code: u16) -> QueryResult {
-    let (items, legacy, truncated) = match body {
-        Value::Array(items) => (items, true, false),
-        Value::Object(mut body) => {
-            // Named deviation: Python can fail while taking len() of malformed
-            // `items`; Rust treats non-array items as an empty listing.
-            let items = body
-                .remove("items")
-                .and_then(|value| value.as_array().cloned())
-                .unwrap_or_default();
-            let total = body.remove("total").and_then(|value| value.as_i64());
-            let truncated = total.is_some_and(|total| total != items.len() as i64);
-            (items, false, truncated)
-        }
-        _ => (Vec::new(), false, false),
+fn parse_segments_envelope(body: Value, status_code: u16) -> DayCustody {
+    let Some(object) = body.as_object() else {
+        return custody_failure(ErrorType::Incompatible, Some(status_code));
     };
-    let segments = items
-        .into_iter()
+    let Some(protocol_version) = object.get("protocol_version").and_then(Value::as_u64) else {
+        return custody_failure(ErrorType::Incompatible, Some(status_code));
+    };
+    let Some(total) = object.get("total").and_then(Value::as_u64) else {
+        return custody_failure(ErrorType::Incompatible, Some(status_code));
+    };
+    let Some(items) = object.get("items").and_then(Value::as_array) else {
+        return custody_failure(ErrorType::Incompatible, Some(status_code));
+    };
+    if protocol_version != 3 || total != items.len() as u64 {
+        return DayCustody {
+            day_present: true,
+            items: Vec::new(),
+            proof_available: false,
+            error_type: None,
+            status_code: Some(status_code),
+        };
+    }
+    let items = items
+        .iter()
+        .cloned()
         .map(|item| {
             serde_json::from_value(item).unwrap_or(ListingEntry {
                 key: None,
@@ -882,18 +1057,13 @@ fn parse_listing(body: Value, status_code: u16) -> QueryResult {
             })
         })
         .collect();
-    QueryResult {
-        segments: Some(segments),
+    DayCustody {
+        day_present: true,
+        items,
+        proof_available: true,
         error_type: None,
         status_code: Some(status_code),
-        legacy,
-        truncated,
     }
-}
-
-#[cfg(test)]
-pub(crate) fn contract_parse_listing(body: Value, status_code: u16) -> QueryResult {
-    parse_listing(body, status_code)
 }
 
 #[cfg(test)]
@@ -905,7 +1075,8 @@ mod tests {
         },
         private_link_test_peer::PrivateLinkPeer,
         test_support::{
-            Action, MockServer, MutableClock, OpportunisticDefaultListenerTrap, wait_for_requests,
+            Action, DayCustodyFixture, MockServer, MutableClock, OpportunisticDefaultListenerTrap,
+            wait_for_requests,
         },
     };
     use tempfile::TempDir;
@@ -954,8 +1125,25 @@ mod tests {
         crate::private_link::PrivateLinkSession,
         UploadClient,
     ) {
+        linked_client_with_prefixed_custody(status, body, None).await
+    }
+
+    async fn linked_client_with_prefixed_custody(
+        status: u16,
+        body: Value,
+        custody: Option<DayCustodyFixture>,
+    ) -> (
+        TempDir,
+        MockServer,
+        PrivateLinkPeer,
+        crate::private_link::PrivateLinkSession,
+        UploadClient,
+    ) {
         let legacy = MockServer::new(vec![]).await;
         let peer = PrivateLinkPeer::start().await;
+        if let Some(custody) = custody {
+            peer.enqueue_day_custody(custody);
+        }
         peer.enqueue_response(status, serde_json::to_vec(&body).unwrap());
         let temp = TempDir::new().unwrap();
         let config = Config {
@@ -1056,6 +1244,15 @@ mod tests {
         path
     }
 
+    async fn fetch_custody_fixture(fixture: DayCustodyFixture) -> DayCustody {
+        let server = MockServer::new(vec![]).await;
+        let temp = TempDir::new().unwrap();
+        server.enqueue_day_custody(fixture);
+        client(&config(&server, &temp), &server.url)
+            .fetch_day_custody("20260101")
+            .await
+    }
+
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
             .windows(needle.len())
@@ -1128,6 +1325,55 @@ mod tests {
             .strip_prefix("multipart/form-data; boundary=")
             .unwrap();
         let parts = parse_multipart(&request.body, boundary);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|(headers, _)| {
+                    headers
+                        .iter()
+                        .any(|(_, value)| *value == "form-data; name=\"envelope\"")
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|(headers, _)| {
+                    headers
+                        .iter()
+                        .any(|(_, value)| value.starts_with("form-data; name=\"files\""))
+                })
+                .count(),
+            2
+        );
+        let envelope = parts
+            .iter()
+            .find(|(headers, _)| {
+                headers
+                    .iter()
+                    .any(|(_, value)| *value == "form-data; name=\"envelope\"")
+            })
+            .expect("one envelope part");
+        assert!(
+            envelope
+                .0
+                .iter()
+                .all(|(_, value)| !value.contains("filename="))
+        );
+        let envelope: Value = serde_json::from_slice(envelope.1).unwrap();
+        assert_eq!(envelope["day"], "20260101");
+        assert_eq!(envelope["segment"], "large");
+        assert_eq!(
+            envelope["files"],
+            json!([{"submitted":"audio.flac"}, {"submitted":"screen.webm"}])
+        );
+        assert!(envelope.get("stream").is_none());
+        assert!(envelope.get("observer").is_none());
+        assert!(envelope.get("host").is_none());
+        assert!(envelope.get("platform").is_none());
+        assert!(envelope.get("meta").is_none());
         for (name, mime, expected) in [
             ("audio.flac", "audio/flac", flac.as_slice()),
             ("screen.webm", "video/webm", webm.as_slice()),
@@ -1152,16 +1398,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn large_backpressured_upload_allows_small_concurrent_request() {
-        let (temp, legacy, peer, session, client) = linked_client(
+        let (temp, legacy, peer, session, client) = linked_client_with_prefixed_custody(
             200,
-            json!({"status":"ok","segment":"large","items":[],"total":0}),
+            json!({"status":"ok","segment":"large"}),
+            Some(DayCustodyFixture::new("20260101", Vec::new())),
         )
         .await;
         peer.hold_request_credit();
-        peer.enqueue_response(
-            200,
-            json!({"status":"ok","segment":"large","items":[],"total":0}).to_string(),
-        );
         let media = write_file(&temp, "screen.webm", &vec![0x57; 17 * 1024 * 1024]);
         let client = Arc::new(client);
         let upload_client = Arc::clone(&client);
@@ -1176,14 +1419,14 @@ mod tests {
         assert!(!upload.is_finished());
         let listing_client = Arc::clone(&client);
         let listing =
-            tokio::spawn(async move { listing_client.get_server_segments("20260101").await });
+            tokio::spawn(async move { listing_client.fetch_day_custody("20260101").await });
         peer.wait_for_requests(1).await;
-        assert!(listing.await.unwrap().segments.is_some());
+        assert!(listing.await.unwrap().error_type.is_none());
         assert!(!upload.is_finished());
         peer.release_request_credit();
         assert!(upload.await.unwrap().success);
-        peer.wait_for_requests(2).await;
-        assert_eq!(peer.requests().len(), 2);
+        peer.wait_for_requests(4).await;
+        assert_eq!(peer.requests().len(), 4);
         assert!(legacy.requests().is_empty());
         drop(client);
         session.shutdown().await.unwrap();
@@ -1211,23 +1454,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multipart_overhead_crossing_64mib_is_local_413() {
+    async fn multipart_part_at_64mib_is_admitted_pre_request() {
+        let temp = TempDir::new().unwrap();
+        let media = temp.path().join("limit.webm");
+        let file = std::fs::File::create(&media).unwrap();
+        file.set_len(MAX_MULTIPART_PART_BYTES).unwrap();
+        drop(file);
+        assert!(
+            build_multipart_form("20260101", "boundary", &[media])
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn encoded_body_within_128mib_is_admitted_pre_request() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("first.webm");
+        let second = temp.path().join("second.webm");
+        for path in [&first, &second] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_len(MAX_MULTIPART_PART_BYTES - 4096).unwrap();
+        }
+        let (_, encoded_length) = build_multipart_form("20260101", "boundary", &[first, second])
+            .await
+            .unwrap();
+        assert!(encoded_length <= MAX_REQUEST_BODY_BYTES);
+    }
+
+    #[tokio::test]
+    async fn multipart_overhead_crossing_128mib_is_local_413() {
         let (temp, legacy, peer, session, client) =
             linked_client(200, json!({"status":"ok"})).await;
         let media = temp.path().join("boundary.webm");
         let file = std::fs::File::create(&media).unwrap();
-        file.set_len(MAX_REQUEST_BODY_BYTES - 1).unwrap();
+        file.set_len(MAX_MULTIPART_PART_BYTES).unwrap();
         drop(file);
-        let (_, framed_length) =
-            build_multipart_form("20260101", "boundary", std::slice::from_ref(&media))
-                .await
-                .unwrap();
-        assert!(framed_length > MAX_REQUEST_BODY_BYTES);
+        let second = temp.path().join("boundary-two.webm");
+        let second_file = std::fs::File::create(&second).unwrap();
+        second_file.set_len(MAX_MULTIPART_PART_BYTES).unwrap();
+        drop(second_file);
+        assert!(matches!(
+            build_multipart_form("20260101", "boundary", &[media.clone(), second.clone()]).await,
+            Err(MultipartBuildError::RequestTooLarge)
+        ));
         let result = client
-            .upload_segment("20260101", "boundary", std::slice::from_ref(&media))
+            .upload_segment("20260101", "boundary", &[media.clone(), second.clone()])
             .await;
         assert_eq!(result.status_code, Some(413));
-        assert!(media.exists());
+        assert!(media.exists() && second.exists());
         assert!(peer.requests().is_empty());
         assert!(legacy.requests().is_empty());
         session.shutdown().await.unwrap();
@@ -1247,7 +1522,7 @@ mod tests {
             200,
             serde_json::to_vec(&json!({"status":"ok", "key":"stored"})).unwrap(),
         );
-        peer.enqueue_response(200, serde_json::to_vec(&json!({"segments":[]})).unwrap());
+        peer.enqueue_day_custody(DayCustodyFixture::new("20260101", Vec::new()));
         peer.enqueue_response(200, b"{}".to_vec());
         peer.enqueue_response(200, b"{}".to_vec());
         let temp = TempDir::new().unwrap();
@@ -1299,10 +1574,10 @@ mod tests {
         );
         assert!(
             client
-                .get_server_segments("20260101")
+                .fetch_day_custody("20260101")
                 .await
-                .segments
-                .is_some()
+                .error_type
+                .is_none()
         );
         assert!(
             client
@@ -1311,14 +1586,14 @@ mod tests {
         );
         client.enqueue_status(Map::from_iter([("mode".into(), json!("idle"))]));
         for _ in 0..100 {
-            if peer.requests().len() == 5 {
+            if peer.requests().len() == 7 {
                 break;
             }
             tokio::task::yield_now().await;
         }
 
         let requests = peer.requests();
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 7);
         assert_eq!(
             (requests[0].method.as_str(), requests[0].path.as_str()),
             ("POST", "/app/devices/register")
@@ -1351,14 +1626,11 @@ mod tests {
             (requests[1].method.as_str(), requests[1].path.as_str()),
             ("POST", "/app/devices/ingest")
         );
+        assert_eq!(peer_header(&requests[1], "authorization"), None);
+        assert_eq!(peer_header(&requests[1], "x-solstone-observer"), None);
         assert_eq!(
-            requests[1]
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-                .map(|(_, value)| value.as_str())
-                .unwrap(),
-            "Bearer K123456789"
+            peer_header(&requests[1], OBSERVER_PROTOCOL_VERSION_HEADER),
+            Some("3")
         );
         let content_type = requests[1]
             .headers
@@ -1380,23 +1652,16 @@ mod tests {
             format!("multipart/form-data; boundary={boundary}")
         );
         let parts = parse_multipart(&requests[1].body, boundary);
-        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.len(), 2);
         assert_eq!(
             parts[0],
             (
-                vec![("Content-Disposition", "form-data; name=\"day\"")],
-                b"20260101".as_slice()
+                vec![("Content-Disposition", "form-data; name=\"envelope\"")],
+                b"{\"day\":\"20260101\",\"segment\":\"120000\",\"files\":[{\"submitted\":\"capture.jsonl\"}]}".as_slice()
             )
         );
         assert_eq!(
             parts[1],
-            (
-                vec![("Content-Disposition", "form-data; name=\"segment\"")],
-                b"120000".as_slice()
-            )
-        );
-        assert_eq!(
-            parts[2],
             (
                 vec![
                     (
@@ -1408,37 +1673,32 @@ mod tests {
                 b"{\"event\":1}\n".as_slice()
             )
         );
-        assert_eq!(
-            (requests[2].method.as_str(), requests[2].path.as_str()),
-            ("GET", "/app/devices/ingest/segments/20260101")
-        );
-        assert_eq!(
-            requests[2]
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(OBSERVER_PROTOCOL_VERSION_HEADER))
-                .map(|(_, value)| value.as_str()),
-            Some("2")
-        );
-        assert_eq!(
-            requests[2]
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-                .map(|(_, value)| value.as_str())
-                .unwrap(),
-            "Bearer K123456789"
-        );
+        for (request, path) in [
+            (&requests[2], "/app/devices/ingest/manifest"),
+            (&requests[3], "/app/devices/ingest/manifest/20260101"),
+            (&requests[4], "/app/devices/ingest/segments/20260101"),
+        ] {
+            assert_eq!(
+                (request.method.as_str(), request.path.as_str()),
+                ("GET", path)
+            );
+            assert_eq!(
+                peer_header(request, OBSERVER_PROTOCOL_VERSION_HEADER),
+                Some("3")
+            );
+            assert_eq!(peer_header(request, "authorization"), None);
+            assert_eq!(peer_header(request, "x-solstone-observer"), None);
+        }
         assert!(server.requests().is_empty());
         default_trap.assert_zero_connections();
         assert_eq!(peer.accepted_carriers(), 1);
         for (request, expected) in [
             (
-                &requests[3],
+                &requests[5],
                 json!({"tract":"observe","event":"stream_silent"}),
             ),
             (
-                &requests[4],
+                &requests[6],
                 json!({"tract":"observe","event":"status","mode":"idle"}),
             ),
         ] {
@@ -1560,7 +1820,7 @@ mod tests {
         let client = Arc::new(client);
         let listing = {
             let client = Arc::clone(&client);
-            tokio::spawn(async move { client.get_server_segments("20260101").await })
+            tokio::spawn(async move { client.fetch_day_custody("20260101").await })
         };
         let event = {
             let client = Arc::clone(&client);
@@ -1572,7 +1832,7 @@ mod tests {
         let (listing, event) = tokio::join!(listing, event);
         let listing = listing.unwrap();
         let event = event.unwrap();
-        assert!(listing.segments.is_none());
+        assert!(listing.error_type.is_some());
         assert!(!event);
         assert_eq!(
             peer.requests()
@@ -1755,14 +2015,13 @@ mod tests {
         let request = &server.requests()[0];
         assert_eq!(request.method, "POST");
         assert_eq!(request.uri, "/app/devices/ingest");
-        assert_eq!(request.headers["authorization"], "Bearer K");
-        assert_eq!(request.headers[OBSERVER_PROTOCOL_VERSION_HEADER], "2");
+        assert!(!request.headers.contains_key("authorization"));
+        assert!(!request.headers.contains_key("x-solstone-observer"));
+        assert_eq!(request.headers[OBSERVER_PROTOCOL_VERSION_HEADER], "3");
         let body = String::from_utf8_lossy(&request.body);
         for expected in [
-            "name=\"day\"",
-            "20260101",
-            "name=\"segment\"",
-            "120000_005",
+            "name=\"envelope\"",
+            "{\"day\":\"20260101\",\"segment\":\"120000_005\",\"files\":[{\"submitted\":\"audio.flac\"},{\"submitted\":\"screen.webm\"},{\"submitted\":\"notes.bin\"}]}",
             "name=\"files\"",
             "filename=\"audio.flac\"",
             "audio/flac",
@@ -1775,6 +2034,9 @@ mod tests {
             "binary-content",
         ] {
             assert!(body.contains(expected), "missing {expected:?} in {body}");
+        }
+        for forbidden in ["stream", "observer", "host", "platform", "meta"] {
+            assert!(!body.contains(&format!("\"{forbidden}\":")));
         }
         assert_eq!(body.matches("name=\"files\"").count(), 3);
     }
@@ -1812,6 +2074,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn upload_statuses_keep_authoritative_and_informational_keys_distinct() {
+        let collision = parse_upload_body(json!({
+            "status": "collision",
+            "segment": "server-key",
+            "segment_original": "client-key",
+        }));
+        assert!(collision.success);
+        assert_eq!(collision.stored_key.as_deref(), Some("server-key"));
+
+        let failed = parse_upload_body(json!({"status": "failed"}));
+        assert!(!failed.success);
+        assert_eq!(failed.error_type, Some(ErrorType::Client));
+        assert!(failed.stored_key.is_none());
+
+        let unknown = parse_upload_body(json!({"status": "future"}));
+        assert!(!unknown.success);
+        assert_eq!(unknown.error_type, Some(ErrorType::Incompatible));
+        assert!(unknown.stored_key.is_none());
+    }
+
+    #[test]
+    fn listing_file_size_is_leniently_parsed_but_never_defaulted() {
+        for value in [json!({}), json!({"size": -1}), json!({"size": 1.5})] {
+            assert!(
+                serde_json::from_value::<ListingFile>(value)
+                    .unwrap()
+                    .size
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<ListingFile>(json!({"size": 6}))
+                .unwrap()
+                .size,
+            Some(6)
+        );
+    }
+
     async fn attempts_for(max_retries: i64) -> (usize, UploadResult) {
         let server = MockServer::new(vec![(500, json!({})), (500, json!({}))]).await;
         let temp = TempDir::new().unwrap();
@@ -1843,10 +2144,15 @@ mod tests {
         }
     }
 
-    // AC: Client and Incompatible upload responses are not retried
+    // AC: terminal client/protocol upload responses are not retried.
     #[tokio::test]
-    async fn upload_400_and_404_make_one_request() {
-        for (status, expected) in [(400, ErrorType::Client), (404, ErrorType::Incompatible)] {
+    async fn upload_terminal_statuses_make_one_request() {
+        for (status, expected) in [
+            (400, ErrorType::Client),
+            (409, ErrorType::Client),
+            (413, ErrorType::Client),
+            (426, ErrorType::Incompatible),
+        ] {
             let server = MockServer::new(vec![(status, json!({})), (200, json!({}))]).await;
             let temp = TempDir::new().unwrap();
             let mut config = config(&server, &temp);
@@ -2003,107 +2309,135 @@ mod tests {
         assert!(!client.is_revoked());
     }
 
-    // tests/test_upload.py::test_get_server_segments_uses_bearer_and_keyless_route
     #[tokio::test]
-    async fn listing_uses_bearer_protocol_and_keyless_route() {
-        let server = MockServer::new(vec![(200, json!([]))]).await;
+    async fn v3_custody_requires_the_complete_triad() {
+        let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
+        server.enqueue_day_custody(DayCustodyFixture::new(
+            "20260101",
+            vec![json!({"key":"new", "observed":true, "files":[{
+                "name":"a.flac", "size":1, "status":"present", "sha256":"a"
+            }]})],
+        ));
         let result = client(&config(&server, &temp), &server.url)
-            .get_server_segments("20260101")
+            .fetch_day_custody("20260101")
             .await;
-        assert_eq!(result.segments, Some(vec![]));
-        assert!(result.legacy);
-        let request = &server.requests()[0];
-        assert_eq!(request.uri, "/app/devices/ingest/segments/20260101");
-        assert_eq!(request.headers["authorization"], "Bearer K");
-        assert_eq!(request.headers[OBSERVER_PROTOCOL_VERSION_HEADER], "2");
+        assert!(result.day_present && result.proof_available);
+        assert_eq!(result.items[0].key.as_deref(), Some("new"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert_eq!(request.headers[OBSERVER_PROTOCOL_VERSION_HEADER], "3");
+            assert!(!request.headers.contains_key("authorization"));
+            assert!(!request.headers.contains_key("x-solstone-observer"));
+        }
     }
 
-    // tests/test_upload.py::test_get_server_segments_parses_envelope
-    // AC: absent total defaults to item count and absent file strings stay None
     #[tokio::test]
-    async fn listing_parses_envelope_verbatim_with_absent_total() {
-        let body =
-            json!({"items":[{"key":"new", "original_key":"old", "files":[{"name":"a.flac"}]}]});
-        let server = MockServer::new(vec![(200, body)]).await;
+    async fn v3_total_mismatch_is_reachable_but_unproven() {
+        let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
+        server.enqueue_day_custody(
+            DayCustodyFixture::new("20260101", vec![json!({"key":"a"})]).with_segments_total(2),
+        );
         let result = client(&config(&server, &temp), &server.url)
-            .get_server_segments("20260101")
+            .fetch_day_custody("20260101")
             .await;
-        assert!(!result.legacy && !result.truncated);
-        let entry = &result.segments.unwrap()[0];
-        assert_eq!(entry.key.as_deref(), Some("new"));
-        assert_eq!(entry.original_key.as_deref(), Some("old"));
-        let file = &entry.files.as_ref().unwrap()[0];
-        assert_eq!(file.name.as_deref(), Some("a.flac"));
-        assert_eq!(file.submitted_name, None);
-        assert_eq!(file.status, None);
-        assert_eq!(file.sha256, None);
+        assert!(result.day_present);
+        assert!(!result.proof_available);
+        assert!(result.error_type.is_none());
     }
 
-    // AC: malformed listing fields become None without dropping entries
     #[tokio::test]
-    async fn listing_lenient_fields_preserve_every_entry() {
-        let server = MockServer::new(vec![(
-            200,
-            json!({"items":[
-                {"key":"kept", "original_key":7, "files":[{"name":false}]},
-                "unexpected-entry"
-            ], "total":-1}),
-        )])
+    async fn v3_day_manifest_mismatch_and_version_are_unproven() {
+        for fixture in [
+            DayCustodyFixture::new("20260101", Vec::new()).with_day_manifest_day("20260102"),
+            DayCustodyFixture::new("20260101", Vec::new()).with_version(2),
+        ] {
+            let result = fetch_custody_fixture(fixture).await;
+            assert!(result.day_present);
+            assert!(!result.proof_available);
+            assert!(result.error_type.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn v3_absent_manifest_day_is_reachable_without_proof() {
+        let result = fetch_custody_fixture(DayCustodyFixture::absent("20260101")).await;
+        assert!(!result.day_present);
+        assert!(!result.proof_available);
+        assert!(result.error_type.is_none());
+        assert_eq!(result.status_code, Some(200));
+    }
+
+    #[tokio::test]
+    async fn manifest_probe_is_one_reachability_request() {
+        let server = MockServer::new(vec![]).await;
+        let temp = TempDir::new().unwrap();
+        server.enqueue_manifest_probe(200, b"not-a-manifest");
+        let result = client(&config(&server, &temp), &server.url)
+            .probe_manifest()
+            .await;
+        assert!(result.error_type.is_none());
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests()[0].uri, "/app/devices/ingest/manifest");
+    }
+
+    #[tokio::test]
+    async fn v3_bad_segments_protocol_and_malformed_legs_are_incompatible() {
+        let protocol = fetch_custody_fixture(
+            DayCustodyFixture::new("20260101", Vec::new()).with_segments_protocol_version(2),
+        )
         .await;
-        let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp), &server.url)
-            .get_server_segments("20260101")
-            .await;
-        let entries = result.segments.unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].key.as_deref(), Some("kept"));
-        assert_eq!(entries[0].original_key, None);
-        assert_eq!(entries[0].files.as_ref().unwrap()[0].name, None);
-        assert_eq!(entries[1].key, None);
-        assert!(result.truncated);
+        assert!(protocol.day_present);
+        assert!(!protocol.proof_available);
+        assert!(protocol.error_type.is_none());
+
+        let malformed = fetch_custody_fixture(
+            DayCustodyFixture::new("20260101", Vec::new())
+                .with_malformed_leg(crate::test_support::DayCustodyLeg::Segments, b"not-json"),
+        )
+        .await;
+        assert_eq!(malformed.error_type, Some(ErrorType::Incompatible));
+
+        let failed = fetch_custody_fixture(
+            DayCustodyFixture::new("20260101", Vec::new()).with_http_failure(
+                crate::test_support::DayCustodyLeg::DayManifest,
+                500,
+                b"{}",
+            ),
+        )
+        .await;
+        assert_eq!(failed.error_type, Some(ErrorType::Transient));
     }
 
-    // AC: malformed listing JSON is Transient rather than empty success
     #[tokio::test]
-    async fn malformed_listing_json_is_transient() {
-        let server = MockServer::new_actions(vec![Action::Raw(200, "not-json")]).await;
+    async fn v2_shaped_segments_body_is_incompatible_without_a_legacy_request() {
+        let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
+        server.enqueue_day_custody(
+            DayCustodyFixture::new("20260101", Vec::new())
+                .with_malformed_leg(crate::test_support::DayCustodyLeg::Segments, br#"[]"#),
+        );
         let result = client(&config(&server, &temp), &server.url)
-            .get_server_segments("20260101")
+            .fetch_day_custody("20260101")
             .await;
-        assert_eq!(result.segments, None);
-        assert_eq!(result.error_type, Some(ErrorType::Transient));
-        assert_eq!(result.status_code, None);
-    }
-
-    // tests/test_upload.py::test_get_server_segments_marks_truncated_envelope
-    #[tokio::test]
-    async fn listing_marks_truncated_envelope() {
-        let server = MockServer::new(vec![(200, json!({"items":[{"key":"a"}], "total":2}))]).await;
-        let temp = TempDir::new().unwrap();
-        assert!(
-            client(&config(&server, &temp), &server.url)
-                .get_server_segments("20260101")
-                .await
-                .truncated
+        assert_eq!(result.error_type, Some(ErrorType::Incompatible));
+        assert_eq!(
+            server
+                .requests()
+                .iter()
+                .map(|request| request.uri.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/app/devices/ingest/manifest",
+                "/app/devices/ingest/manifest/20260101",
+                "/app/devices/ingest/segments/20260101",
+            ]
         );
     }
 
-    // tests/test_upload.py::test_get_server_segments_classifies_404_as_incompatible
-    #[tokio::test]
-    async fn listing_classifies_404_as_incompatible() {
-        let server = MockServer::new(vec![(404, json!({}))]).await;
-        let temp = TempDir::new().unwrap();
-        let result = client(&config(&server, &temp), &server.url)
-            .get_server_segments("20260101")
-            .await;
-        assert_eq!(result.error_type, Some(ErrorType::Incompatible));
-        assert_eq!(result.status_code, Some(404));
-    }
-
-    // AC: all missing files fail without an error class or request
+    // AC: all missing files are a local client failure and issue no request.
     #[tokio::test]
     async fn all_missing_files_make_no_request() {
         let server = MockServer::new(vec![]).await;
@@ -2111,15 +2445,16 @@ mod tests {
         let result = client(&config(&server, &temp), &server.url)
             .upload_segment("d", "s", &[temp.path().join("missing")])
             .await;
-        assert_eq!(result.error_type, None);
+        assert_eq!(result.error_type, Some(ErrorType::Client));
         assert!(!result.success);
         assert!(server.requests().is_empty());
     }
 
-    // AC: unregistered upload is Client, not Auth, and makes no request
+    // AC: a paired but unregistered observer can use the v3 mTLS ingest route.
     #[tokio::test]
-    async fn unregistered_upload_is_client_without_request() {
+    async fn unregistered_upload_uses_v3_route() {
         let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, json!({"status":"ok", "segment":"s"}).to_string());
         let temp = TempDir::new().unwrap();
         let config = Config {
             config_dir: temp.path().join("config"),
@@ -2138,8 +2473,16 @@ mod tests {
         );
         let media = write_file(&temp, "a.flac", b"a");
         let result = client.upload_segment("d", "s", &[media]).await;
-        assert_eq!(result.error_type, Some(ErrorType::Client));
-        assert!(peer.requests().is_empty());
+        assert!(result.success);
+        peer.wait_for_requests(1).await;
+        let request = &peer.requests()[0];
+        assert_eq!(request.path, "/app/devices/ingest");
+        assert_eq!(
+            peer_header(request, OBSERVER_PROTOCOL_VERSION_HEADER),
+            Some("3")
+        );
+        assert_eq!(peer_header(request, "authorization"), None);
+        assert_eq!(peer_header(request, "x-solstone-observer"), None);
         drop(client);
         session.shutdown().await.unwrap();
         peer.shutdown().await;
@@ -2253,10 +2596,10 @@ mod tests {
             "listing" => {
                 assert!(
                     client
-                        .get_server_segments("20260101")
+                        .fetch_day_custody("20260101")
                         .await
-                        .segments
-                        .is_none()
+                        .error_type
+                        .is_some()
                 );
                 assert!(client.is_revoked());
             }
@@ -2384,10 +2727,10 @@ mod tests {
         peer.shutdown().await;
         assert!(
             client
-                .get_server_segments("20260101")
+                .fetch_day_custody("20260101")
                 .await
-                .segments
-                .is_none()
+                .error_type
+                .is_some()
         );
         assert!(!client.is_revoked());
         assert!(legacy.requests().is_empty());
@@ -2412,7 +2755,7 @@ mod tests {
             Some(ErrorType::Auth)
         );
         assert_eq!(
-            client.get_server_segments("d").await.error_type,
+            client.fetch_day_custody("d").await.error_type,
             Some(ErrorType::Auth)
         );
         assert!(!client.relay_event("observe", "status", Map::new()).await);

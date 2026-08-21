@@ -38,6 +38,160 @@ use tokio::{
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DayCustodyLeg {
+    Manifest,
+    DayManifest,
+    Segments,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DayCustodyFixture {
+    day: String,
+    items: Vec<Value>,
+    absent: bool,
+    day_manifest_day: Option<String>,
+    version: u64,
+    protocol_version: u64,
+    total: Option<u64>,
+    malformed: Option<(DayCustodyLeg, Vec<u8>)>,
+    failed: Option<(DayCustodyLeg, u16, Vec<u8>)>,
+}
+
+impl DayCustodyFixture {
+    pub(crate) fn new(day: impl Into<String>, items: Vec<Value>) -> Self {
+        let day = day.into();
+        Self {
+            day,
+            items,
+            absent: false,
+            day_manifest_day: None,
+            version: 1,
+            protocol_version: 3,
+            total: None,
+            malformed: None,
+            failed: None,
+        }
+    }
+
+    pub(crate) fn absent(day: impl Into<String>) -> Self {
+        let mut fixture = Self::new(day, Vec::new());
+        fixture.absent = true;
+        fixture
+    }
+
+    pub(crate) fn with_day_manifest_day(mut self, day: impl Into<String>) -> Self {
+        self.day_manifest_day = Some(day.into());
+        self
+    }
+
+    pub(crate) fn with_version(mut self, version: u64) -> Self {
+        self.version = version;
+        self
+    }
+
+    pub(crate) fn with_segments_protocol_version(mut self, version: u64) -> Self {
+        self.protocol_version = version;
+        self
+    }
+
+    pub(crate) fn with_segments_total(mut self, total: u64) -> Self {
+        self.total = Some(total);
+        self
+    }
+
+    pub(crate) fn with_malformed_leg(
+        mut self,
+        leg: DayCustodyLeg,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.malformed = Some((leg, body.into()));
+        self
+    }
+
+    pub(crate) fn with_http_failure(
+        mut self,
+        leg: DayCustodyLeg,
+        status: u16,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.failed = Some((leg, status, body.into()));
+        self
+    }
+
+    pub(crate) fn response_for(
+        &self,
+        leg: DayCustodyLeg,
+        requested_day: Option<&str>,
+    ) -> (u16, Vec<u8>) {
+        if let Some((failed_leg, status, bytes)) = &self.failed
+            && *failed_leg == leg
+        {
+            return (*status, bytes.clone());
+        }
+        if let Some((malformed_leg, bytes)) = &self.malformed
+            && *malformed_leg == leg
+        {
+            return (200, bytes.clone());
+        }
+        let body = match leg {
+            DayCustodyLeg::Manifest => {
+                let mut days = serde_json::Map::new();
+                if !self.absent {
+                    // Sync tests exercise both their fixed "today" and retained capture day.
+                    // The peer fills the following legs from the request path, so this declares
+                    // both candidates without coupling ordered fixtures to call order.
+                    for day in [&self.day, "20260101", "20270115"] {
+                        days.insert(
+                            day.to_owned(),
+                            serde_json::json!({"segments": self.items.len()}),
+                        );
+                    }
+                }
+                serde_json::json!({"days": days})
+            }
+            DayCustodyLeg::DayManifest => serde_json::json!({
+                "day": self.day_manifest_day.as_deref().or(requested_day).unwrap_or(&self.day),
+                "version": self.version,
+                "segments": {},
+            }),
+            DayCustodyLeg::Segments => serde_json::json!({
+                "protocol_version": self.protocol_version,
+                "total": self.total.unwrap_or(self.items.len() as u64),
+                "items": self.items,
+            }),
+        };
+        (200, body.to_string().into_bytes())
+    }
+
+    pub(crate) fn stops_after(&self, leg: DayCustodyLeg) -> bool {
+        (self.absent && leg == DayCustodyLeg::Manifest)
+            || self
+                .failed
+                .as_ref()
+                .is_some_and(|(failed_leg, _, _)| *failed_leg == leg)
+            || self
+                .malformed
+                .as_ref()
+                .is_some_and(|(malformed_leg, _)| *malformed_leg == leg)
+    }
+}
+
+pub(crate) fn day_custody_fixture(value: &Value) -> Option<DayCustodyFixture> {
+    if let Some(items) = value.get("day_custody_items").and_then(Value::as_array) {
+        let day = value
+            .get("day_custody_day")
+            .and_then(Value::as_str)
+            .unwrap_or("20260101");
+        return Some(DayCustodyFixture::new(day, items.clone()));
+    }
+    value
+        .get("day_custody_absent")
+        .and_then(Value::as_bool)
+        .filter(|absent| *absent)
+        .map(|_| DayCustodyFixture::absent("20260101"))
+}
+
 pub(crate) struct OpportunisticDefaultListenerTrap(Option<StdTcpListener>);
 
 impl OpportunisticDefaultListenerTrap {
@@ -190,6 +344,18 @@ impl LinkedMockServer {
         self.session.capability("/app/devices/ingest".to_owned())
     }
 
+    pub(crate) fn enqueue_day_custody(&self, fixture: DayCustodyFixture) {
+        self.peer.enqueue_day_custody(fixture);
+    }
+
+    pub(crate) fn enqueue_response(&self, status: u16, body: impl Into<Vec<u8>>) {
+        self.peer.enqueue_response(status, body);
+    }
+
+    pub(crate) fn enqueue_manifest_probe(&self, status: u16, body: impl Into<Vec<u8>>) {
+        self.peer.enqueue_manifest_probe(status, body);
+    }
+
     pub(crate) fn requests(&self) -> Vec<Received> {
         self.peer
             .requests()
@@ -228,7 +394,7 @@ impl LinkedMockServer {
     pub(crate) fn gate_responses(&self, count: usize, gate: Arc<Notify>) {
         for _ in 0..count {
             self.peer
-                .enqueue_gated_response(200, b"{}".to_vec(), gate.clone());
+                .enqueue_gated_response(200, br#"{"days":{}}"#.to_vec(), gate.clone());
         }
     }
 }
@@ -251,15 +417,23 @@ impl MockServer {
     }
 
     pub(crate) async fn new_actions(responses: Vec<Action>) -> Self {
-        let linked_responses = responses
-            .iter()
-            .map(|action| match action {
-                Action::Response(status, body) => (*status, body.to_string().into_bytes()),
-                Action::Raw(status, body) => (*status, body.as_bytes().to_vec()),
-                Action::Stream(status, _) => (*status, Vec::new()),
-            })
-            .collect();
-        let linked = LinkedMockServer::new_raw(linked_responses).await;
+        let linked = LinkedMockServer::new_raw(Vec::new()).await;
+        for action in &responses {
+            match action {
+                Action::Response(status, body) if *status == 200 => {
+                    if let Some(fixture) = day_custody_fixture(body) {
+                        linked.enqueue_day_custody(fixture);
+                    } else {
+                        linked.enqueue_response(*status, body.to_string());
+                    }
+                }
+                Action::Response(status, body) => {
+                    linked.enqueue_response(*status, body.to_string())
+                }
+                Action::Raw(status, body) => linked.enqueue_response(*status, *body),
+                Action::Stream(status, _) => linked.enqueue_response(*status, Vec::new()),
+            }
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         LINKED_FIXTURES
@@ -347,6 +521,14 @@ impl MockServer {
         }
     }
 
+    pub(crate) fn enqueue_day_custody(&self, fixture: DayCustodyFixture) {
+        self.linked.enqueue_day_custody(fixture);
+    }
+
+    pub(crate) fn enqueue_manifest_probe(&self, status: u16, body: impl Into<Vec<u8>>) {
+        self.linked.enqueue_manifest_probe(status, body);
+    }
+
     pub(crate) fn request_count(&self, uri_substring: &str) -> usize {
         self.requests()
             .iter()
@@ -420,13 +602,17 @@ impl Drop for MockServer {
 }
 
 pub(crate) async fn wait_for_requests(server: &MockServer, count: usize) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while server.requests().len() < count {
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        result.is_ok(),
+        "timed out waiting for {count} requests; saw {}",
+        server.requests().len()
+    );
 }
 
 #[cfg(test)]
