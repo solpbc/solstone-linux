@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     convert::Infallible,
+    future::Future,
     io,
     net::TcpListener as StdTcpListener,
     pin::Pin,
@@ -29,6 +30,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
+    time::Duration,
 };
 use tokio::{
     net::TcpListener,
@@ -37,6 +39,16 @@ use tokio::{
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+pub(crate) const PROGRESS_BOUND: Duration = Duration::from_secs(30);
+
+struct RestorePausedClock;
+
+impl Drop for RestorePausedClock {
+    fn drop(&mut self) {
+        tokio::time::pause();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DayCustodyLeg {
@@ -606,6 +618,38 @@ pub(crate) async fn wait_for_requests(server: &MockServer, count: usize) {
     );
 }
 
+/// Waits for a real loopback progress point under a host-clock bound.
+///
+/// `PROGRESS_BOUND` is a liveness bound, not a latency budget: local
+/// TCP/TLS/HTTP work normally settles in milliseconds, so a healthy run never
+/// consumes it. It is deliberately not tied to `LAN_CARRIER_TIMEOUT`.
+/// `tokio::time::timeout` polls its inner future before checking its deadline,
+/// so a completed LAN dial still wins even if the product budget has nominally
+/// elapsed. Here the wait runs in real milliseconds rather than tens of virtual
+/// seconds; if LAN acceptance ever loses that race, the test fails with a
+/// bounded diagnostic instead of hanging.
+///
+/// Call only from `#[tokio::test(start_paused = true)]` and only for real-I/O
+/// waits: this helper resumes Tokio time, applies a real `timeout`, then restores
+/// paused time. Tokio `pause` and `resume` panic in another time mode. A timeout
+/// while time remains paused is not a real bound because Tokio may auto-advance
+/// its virtual clock while idle. The passed work must not call `pause` or
+/// `resume` itself.
+pub(crate) async fn bounded_progress<F>(
+    bound: Duration,
+    progress_point: &str,
+    work: F,
+) -> Result<F::Output, String>
+where
+    F: Future,
+{
+    tokio::time::resume();
+    let restore = RestorePausedClock;
+    let result = tokio::time::timeout(bound, work).await;
+    drop(restore);
+    result.map_err(|_| format!("{progress_point} not reached within {bound:?} of real time"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,5 +678,52 @@ mod tests {
         drop(sender);
         let body = request.await.unwrap().unwrap().bytes().await.unwrap();
         assert_eq!(body, Bytes::from_static(b"onetwo"));
+    }
+
+    // AC: real-I/O progress waits restore deterministic paused time after their signal arrives.
+    #[tokio::test(start_paused = true)]
+    async fn bounded_progress_waits_for_test_owned_signal() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let changed = Arc::new(Notify::new());
+        let worker = tokio::spawn({
+            let ready = ready.clone();
+            let changed = changed.clone();
+            async move {
+                tokio::task::yield_now().await;
+                ready.store(true, Ordering::Release);
+                changed.notify_one();
+            }
+        });
+        bounded_progress(PROGRESS_BOUND, "test-owned progress", async {
+            loop {
+                let notified = changed.notified();
+                if ready.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap();
+        worker.await.unwrap();
+        let start = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
+
+    // AC: unreachable real-I/O progress reports its named host-clock bound.
+    #[tokio::test(start_paused = true)]
+    async fn bounded_progress_reports_unreachable_progress() {
+        let error = bounded_progress(
+            Duration::from_millis(250),
+            "unreachable test progress",
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "unreachable test progress not reached within 250ms of real time"
+        );
     }
 }

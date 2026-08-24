@@ -69,6 +69,7 @@ struct PeerState {
     requests: Arc<Mutex<Vec<PeerRequest>>>,
     request_arrived: Arc<Notify>,
     accepted: Arc<AtomicUsize>,
+    accept_changed: Arc<Notify>,
     response_gate_changed: Arc<Notify>,
     hold_request_credit: Arc<std::sync::atomic::AtomicBool>,
     request_credit_changed: Arc<Notify>,
@@ -99,6 +100,7 @@ impl PrivateLinkPeer {
             requests: Arc::new(Mutex::new(Vec::new())),
             request_arrived: Arc::new(Notify::new()),
             accepted: Arc::new(AtomicUsize::new(0)),
+            accept_changed: Arc::new(Notify::new()),
             response_gate_changed: Arc::new(Notify::new()),
             hold_request_credit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             request_credit_changed: Arc::new(Notify::new()),
@@ -109,6 +111,7 @@ impl PrivateLinkPeer {
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 task_state.accepted.fetch_add(1, Ordering::SeqCst);
+                task_state.accept_changed.notify_one();
                 if let Some(gate) = &tls_gate {
                     gate.notified().await;
                 }
@@ -243,6 +246,15 @@ impl PrivateLinkPeer {
     }
     pub(crate) fn accepted_carriers(&self) -> usize {
         self.state.accepted.load(Ordering::SeqCst)
+    }
+    pub(crate) async fn wait_for_accepted_carriers(&self, count: usize) {
+        loop {
+            let notified = self.state.accept_changed.notified();
+            if self.accepted_carriers() >= count {
+                return;
+            }
+            notified.await;
+        }
     }
     pub(crate) async fn wait_for_requests(&self, count: usize) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {

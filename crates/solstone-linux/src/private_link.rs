@@ -2306,6 +2306,7 @@ mod tests {
     use crate::private_file::DurableWriteStage;
     use crate::private_link_test_peer::PrivateLinkPeer;
     use crate::sync_health::{ProcessEpoch, SyncFacts, load_facts_with_liveness, save_facts};
+    use crate::test_support::{PROGRESS_BOUND, bounded_progress};
     use spl_transport::credential::EndpointAddr;
     use std::{
         io::Cursor,
@@ -2313,7 +2314,7 @@ mod tests {
         os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         process::Command,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -2321,7 +2322,119 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
         sync::Notify,
+        task::JoinHandle,
     };
+
+    type CleanupLog = Vec<&'static str>;
+
+    #[derive(Clone, Copy)]
+    enum ProgressMode {
+        Reach,
+        NeverReach,
+    }
+
+    #[derive(Debug)]
+    struct StalledLanFlowObserved {
+        relay_accepted: usize,
+        lan_accepted: usize,
+    }
+
+    #[derive(Debug)]
+    struct DelayedLanFlowObserved {
+        accepted_carriers: usize,
+        relay_accepted: usize,
+    }
+
+    async fn stop_and_await<T>(
+        handle: &mut Option<JoinHandle<T>>,
+        label: &'static str,
+        log: &mut CleanupLog,
+    ) {
+        let Some(handle) = handle.take() else {
+            return;
+        };
+        handle.abort();
+        let _ = handle.await;
+        log.push(label);
+    }
+
+    // Mirror terminal output because polling a completed JoinHandle consumes it,
+    // preventing the cleanup epilogue from awaiting the task.
+    struct OwnerStartupProbe {
+        outcome: Arc<Mutex<Option<String>>>,
+        changed: Arc<Notify>,
+    }
+
+    impl OwnerStartupProbe {
+        fn spawn(
+            root: PathBuf,
+            credential: Credential,
+        ) -> (
+            JoinHandle<Result<PrivateLinkOwner, PrivateStateError>>,
+            Self,
+        ) {
+            let probe = Self {
+                outcome: Arc::new(Mutex::new(None)),
+                changed: Arc::new(Notify::new()),
+            };
+            let outcome = probe.outcome.clone();
+            let changed = probe.changed.clone();
+            let task = tokio::spawn(async move {
+                let result = start_private_link_owner(&root, credential, "stream").await;
+                let message = match &result {
+                    Ok(_) => "owner startup succeeded".to_owned(),
+                    Err(error) => error.to_string(),
+                };
+                *outcome.lock().unwrap() = Some(message);
+                changed.notify_one();
+                result
+            });
+            (task, probe)
+        }
+
+        async fn wait(&self) -> String {
+            loop {
+                let notified = self.changed.notified();
+                if let Some(outcome) = self.outcome.lock().unwrap().clone() {
+                    return outcome;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    async fn shutdown_owner(owner: PrivateLinkOwner, log: &mut CleanupLog) -> Result<(), String> {
+        let mut shutdown = Some(tokio::spawn(async move {
+            owner
+                .shutdown()
+                .await
+                .map_err(|error| format!("private-link owner shutdown failed: {error}"))
+        }));
+        let result = {
+            let shutdown = shutdown.as_mut().expect("owner shutdown task present");
+            bounded_progress(PROGRESS_BOUND, "private-link owner shutdown", shutdown).await
+        };
+        match result {
+            Ok(joined) => {
+                shutdown.take();
+                log.push("owner shutdown");
+                let shutdown_result =
+                    joined.map_err(|error| format!("owner shutdown task failed: {error}"))?;
+                shutdown_result?;
+            }
+            Err(error) => {
+                stop_and_await(&mut shutdown, "owner shutdown", log).await;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn owner_startup_returned_first(progress_point: &str, outcome: &str) -> String {
+        format!(
+            "{progress_point} not reached: private-link owner startup returned first: {outcome}"
+        )
+    }
 
     async fn raw_local_request(port: u16, request: String) -> Vec<u8> {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -2916,28 +3029,36 @@ mod tests {
         peer.shutdown().await;
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn stalled_lan_tls_reaches_relay_within_registration_budget() {
+    async fn run_stalled_lan_tls_flow(
+        mode: ProgressMode,
+        bound: Duration,
+        lan_accepted: Arc<AtomicUsize>,
+    ) -> (CleanupLog, Result<StalledLanFlowObserved, String>) {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         let lan = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let lan_port = lan.local_addr().unwrap().port();
-        let lan_accepted = Arc::new(AtomicUsize::new(0));
         let lan_count = lan_accepted.clone();
-        let stalled = tokio::spawn(async move {
-            let (_stream, _) = lan.accept().await.unwrap();
-            lan_count.fetch_add(1, Ordering::SeqCst);
+        let lan_accept_changed = Arc::new(Notify::new());
+        let stalled_changed = lan_accept_changed.clone();
+        let mut stalled = Some(tokio::spawn(async move {
+            let listener = lan;
+            if matches!(mode, ProgressMode::Reach) {
+                let (_stream, _) = listener.accept().await.unwrap();
+                lan_count.fetch_add(1, Ordering::SeqCst);
+                stalled_changed.notify_one();
+            }
             std::future::pending::<()>().await;
-        });
+        }));
         let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let relay_origin = format!("http://{}", relay.local_addr().unwrap());
         let relay_accepted = Arc::new(AtomicUsize::new(0));
         let relay_count = relay_accepted.clone();
-        let relay_task = tokio::spawn(async move {
+        let mut relay_task = Some(tokio::spawn(async move {
             let (mut stream, _) = relay.accept().await.unwrap();
             relay_count.fetch_add(1, Ordering::SeqCst);
             let request = read_http_head(&mut stream).await;
@@ -2948,7 +3069,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-        });
+        }));
         let mut credential = peer.credential();
         credential.endpoints = vec![EndpointAddr {
             host: "127.0.0.1".into(),
@@ -2957,35 +3078,84 @@ mod tests {
         credential.relay_origin = Some(relay_origin);
         credential.device_token = Some(test_jwt(i64::MAX / 2));
         let root = temp.path().to_path_buf();
-        let owner =
-            tokio::spawn(
-                async move { start_private_link_owner(&root, credential, "stream").await },
-            );
-        while lan_accepted.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
+        let (owner_task, owner_startup) = OwnerStartupProbe::spawn(root, credential);
+        let mut owner_task = Some(owner_task);
+        let mut owner = None;
+        let mut log = CleanupLog::new();
+        let body = async {
+            bounded_progress(bound, "stalled LAN TCP accept", async {
+                let wait_for_accept = async {
+                    loop {
+                        let notified = lan_accept_changed.notified();
+                        if lan_accepted.load(Ordering::SeqCst) != 0 {
+                            return;
+                        }
+                        notified.await;
+                    }
+                };
+                if matches!(mode, ProgressMode::Reach) {
+                    tokio::select! {
+                        () = wait_for_accept => Ok(()),
+                        outcome = owner_startup.wait() => Err(owner_startup_returned_first("stalled LAN TCP accept", &outcome)),
+                    }
+                } else {
+                    wait_for_accept.await;
+                    Ok(())
+                }
+            })
+            .await??;
+            tokio::time::advance(LAN_CARRIER_TIMEOUT).await;
+            let relay_result = {
+                let relay_task = relay_task.as_mut().ok_or("relay task missing")?;
+                bounded_progress(PROGRESS_BOUND, "relay HTTP dial exchange", relay_task).await?
+            };
+            relay_task.take();
+            log.push("relay task");
+            relay_result.map_err(|error| format!("relay task failed: {error}"))?;
+            let owner_result = {
+                let owner_task = owner_task.as_mut().ok_or("owner startup task missing")?;
+                bounded_progress(PROGRESS_BOUND, "private-link owner startup", owner_task).await?
+            };
+            owner_task.take();
+            log.push("owner startup task");
+            let started_owner = owner_result
+                .map_err(|error| format!("owner startup task failed: {error}"))?
+                .map_err(|error| format!("owner start failed: {error}"))?;
+            owner = Some(started_owner);
+            Ok(StalledLanFlowObserved {
+                relay_accepted: relay_accepted.load(Ordering::SeqCst),
+                lan_accepted: lan_accepted.load(Ordering::SeqCst),
+            })
         }
-        tokio::time::advance(LAN_CARRIER_TIMEOUT).await;
-        for _ in 0..100 {
-            if relay_accepted.load(Ordering::SeqCst) != 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
+        .await;
+
+        stop_and_await(&mut owner_task, "owner startup task", &mut log).await;
+        let mut cleanup_error = None;
+        if let Some(owner) = owner.take()
+            && let Err(error) = shutdown_owner(owner, &mut log).await
+        {
+            cleanup_error = Some(error);
         }
-        assert_eq!(
-            relay_accepted.load(Ordering::SeqCst),
-            1,
-            "relay connection count after stalled LAN deadline"
-        );
-        relay_task.await.unwrap();
-        let owner = owner.await.unwrap().unwrap();
-        assert_eq!(lan_accepted.load(Ordering::SeqCst), 1);
-        owner.shutdown().await.unwrap();
-        stalled.abort();
+        stop_and_await(&mut relay_task, "relay task", &mut log).await;
+        stop_and_await(&mut stalled, "stalled LAN task", &mut log).await;
         peer.shutdown().await;
+        log.push("peer shutdown");
+
+        let result = match body {
+            Err(error) => Err(error),
+            Ok(observed) => match cleanup_error {
+                Some(error) => Err(error),
+                None => Ok(observed),
+            },
+        };
+        (log, result)
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn delayed_lan_remains_preferred_over_relay() {
+    async fn run_delayed_lan_flow(
+        mode: ProgressMode,
+        bound: Duration,
+        reported_accepted: Arc<AtomicUsize>,
+    ) -> (CleanupLog, Result<DelayedLanFlowObserved, String>) {
         let temp = tempfile::tempdir().unwrap();
         let tls_gate = Arc::new(Notify::new());
         let peer = PrivateLinkPeer::start_with_delayed_tls(tls_gate.clone()).await;
@@ -2997,36 +3167,187 @@ mod tests {
             })
             .to_string(),
         );
+        let blocked_lan = if matches!(mode, ProgressMode::NeverReach) {
+            Some(
+                tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         let relay = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let relay_origin = format!("http://{}", relay.local_addr().unwrap());
         let relay_accepted = Arc::new(AtomicUsize::new(0));
         let relay_count = relay_accepted.clone();
-        let relay_task = tokio::spawn(async move {
+        let mut relay_task = Some(tokio::spawn(async move {
             if relay.accept().await.is_ok() {
                 relay_count.fetch_add(1, Ordering::SeqCst);
             }
-        });
+        }));
         let mut credential = peer.credential();
+        if let Some(listener) = &blocked_lan {
+            credential.endpoints = vec![EndpointAddr {
+                host: "127.0.0.1".into(),
+                port: listener.local_addr().unwrap().port(),
+            }];
+        }
         credential.relay_origin = Some(relay_origin);
         credential.device_token = Some(test_jwt(i64::MAX / 2));
         let root = temp.path().to_path_buf();
-        let owner =
-            tokio::spawn(
-                async move { start_private_link_owner(&root, credential, "stream").await },
-            );
-        while peer.accepted_carriers() == 0 {
-            tokio::task::yield_now().await;
+        let (owner_task, owner_startup) = OwnerStartupProbe::spawn(root, credential);
+        let mut owner_task = Some(owner_task);
+        let mut owner = None;
+        let mut log = CleanupLog::new();
+        let body = async {
+            bounded_progress(
+                bound,
+                "delayed-TLS peer carrier accept",
+                async {
+                    if matches!(mode, ProgressMode::Reach) {
+                        tokio::select! {
+                            () = peer.wait_for_accepted_carriers(1) => Ok(()),
+                            outcome = owner_startup.wait() => Err(owner_startup_returned_first("delayed-TLS peer carrier accept", &outcome)),
+                        }
+                    } else {
+                        peer.wait_for_accepted_carriers(1).await;
+                        Ok(())
+                    }
+                },
+            )
+            .await??;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tls_gate.notify_one();
+            let owner_result = {
+                let owner_task = owner_task.as_mut().ok_or("owner startup task missing")?;
+                bounded_progress(PROGRESS_BOUND, "private-link owner startup", owner_task).await?
+            };
+            owner_task.take();
+            log.push("owner startup task");
+            let started_owner = owner_result
+                .map_err(|error| format!("owner startup task failed: {error}"))?
+                .map_err(|error| format!("owner start failed: {error}"))?;
+            owner = Some(started_owner);
+            Ok(DelayedLanFlowObserved {
+                accepted_carriers: peer.accepted_carriers(),
+                relay_accepted: relay_accepted.load(Ordering::SeqCst),
+            })
         }
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tls_gate.notify_one();
-        let owner = owner.await.unwrap().unwrap();
-        assert_eq!(peer.accepted_carriers(), 1);
-        assert_eq!(relay_accepted.load(Ordering::SeqCst), 0);
-        owner.shutdown().await.unwrap();
-        relay_task.abort();
+        .await;
+
+        stop_and_await(&mut owner_task, "owner startup task", &mut log).await;
+        let mut cleanup_error = None;
+        if let Some(owner) = owner.take()
+            && let Err(error) = shutdown_owner(owner, &mut log).await
+        {
+            cleanup_error = Some(error);
+        }
+        stop_and_await(&mut relay_task, "relay task", &mut log).await;
+        reported_accepted.store(peer.accepted_carriers(), Ordering::SeqCst);
         peer.shutdown().await;
+        log.push("peer shutdown");
+
+        let result = match body {
+            Err(error) => Err(error),
+            Ok(observed) => match cleanup_error {
+                Some(error) => Err(error),
+                None => Ok(observed),
+            },
+        };
+        (log, result)
+    }
+
+    // Paused setup and deterministic advance; bounded_progress owns only real loopback waits.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_lan_tls_reaches_relay_within_registration_budget() {
+        let lan_accepted = Arc::new(AtomicUsize::new(0));
+        let (log, result) =
+            run_stalled_lan_tls_flow(ProgressMode::Reach, PROGRESS_BOUND, lan_accepted).await;
+        let observed = result.unwrap();
+        assert_eq!(
+            observed.relay_accepted, 1,
+            "relay connection count after stalled LAN deadline"
+        );
+        assert_eq!(observed.lan_accepted, 1);
+        assert_eq!(
+            log,
+            vec![
+                "relay task",
+                "owner startup task",
+                "owner shutdown",
+                "stalled LAN task",
+                "peer shutdown"
+            ]
+        );
+    }
+
+    // Paused setup and deterministic advance; bounded_progress owns only real loopback waits.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_lan_tls_missing_accept_cleans_up() {
+        let lan_accepted = Arc::new(AtomicUsize::new(0));
+        let (log, result) = run_stalled_lan_tls_flow(
+            ProgressMode::NeverReach,
+            Duration::from_millis(250),
+            lan_accepted.clone(),
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "stalled LAN TCP accept not reached within 250ms of real time"
+        );
+        assert_eq!(lan_accepted.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            log,
+            vec![
+                "owner startup task",
+                "relay task",
+                "stalled LAN task",
+                "peer shutdown"
+            ]
+        );
+    }
+
+    // Paused setup and deterministic LAN-preference advance; bounded_progress owns real loopback waits.
+    #[tokio::test(start_paused = true)]
+    async fn delayed_lan_remains_preferred_over_relay() {
+        let reported_accepted = Arc::new(AtomicUsize::new(0));
+        let (log, result) =
+            run_delayed_lan_flow(ProgressMode::Reach, PROGRESS_BOUND, reported_accepted).await;
+        let observed = result.unwrap();
+        assert_eq!(observed.accepted_carriers, 1);
+        assert_eq!(observed.relay_accepted, 0);
+        assert_eq!(
+            log,
+            vec![
+                "owner startup task",
+                "owner shutdown",
+                "relay task",
+                "peer shutdown"
+            ]
+        );
+    }
+
+    // Paused setup and deterministic LAN-preference advance; bounded_progress owns real loopback waits.
+    #[tokio::test(start_paused = true)]
+    async fn delayed_lan_missing_peer_accept_cleans_up() {
+        let reported_accepted = Arc::new(AtomicUsize::new(usize::MAX));
+        let (log, result) = run_delayed_lan_flow(
+            ProgressMode::NeverReach,
+            Duration::from_millis(250),
+            reported_accepted.clone(),
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "delayed-TLS peer carrier accept not reached within 250ms of real time"
+        );
+        assert_eq!(reported_accepted.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            log,
+            vec!["owner startup task", "relay task", "peer shutdown"]
+        );
     }
 
     #[tokio::test]
