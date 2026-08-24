@@ -3313,11 +3313,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn delayed_lan_remains_preferred_over_relay() {
         let reported_accepted = Arc::new(AtomicUsize::new(0));
-        let (log, result) =
-            run_delayed_lan_flow(ProgressMode::Reach, PROGRESS_BOUND, reported_accepted).await;
+        let (log, result) = run_delayed_lan_flow(
+            ProgressMode::Reach,
+            PROGRESS_BOUND,
+            reported_accepted.clone(),
+        )
+        .await;
         let observed = result.unwrap();
         assert_eq!(observed.accepted_carriers, 1);
         assert_eq!(observed.relay_accepted, 0);
+        assert_eq!(reported_accepted.load(Ordering::SeqCst), 1);
         assert_eq!(
             log,
             vec![
