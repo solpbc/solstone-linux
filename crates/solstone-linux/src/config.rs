@@ -4,9 +4,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
+    collections::HashMap,
     env, fs, io,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Component, PathBuf},
     sync::{
         Mutex, MutexGuard, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -23,7 +24,7 @@ pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_micros(100);
-static CONFIG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CONFIG_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
 static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -197,14 +198,22 @@ fn json_truthy(value: Option<&Value>, default: bool) -> bool {
     }
 }
 
-pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
+fn resolve_config_paths(paths: &ConfigPaths) -> Config {
     let mut config = Config::default();
-    if let Some(base_dir) = paths.base_dir {
-        config.base_dir = base_dir;
+    if let Some(base_dir) = &paths.base_dir {
+        config.base_dir = base_dir.clone();
     }
-    if let Some(config_dir) = paths.config_dir {
-        config.config_dir = config_dir;
+    if let Some(config_dir) = &paths.config_dir {
+        config.config_dir = config_dir.clone();
     }
+    config
+}
+
+pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
+    load_resolved_config(resolve_config_paths(&paths))
+}
+
+fn load_resolved_config(mut config: Config) -> LoadedConfig {
     let mut warnings = Vec::new();
     if let Err(error) = migrate(&config) {
         warnings.push(ConfigWarning {
@@ -275,11 +284,33 @@ pub fn load_config(paths: ConfigPaths) -> LoadedConfig {
     LoadedConfig { config, warnings }
 }
 
-fn acquire_config_write_lock() -> io::Result<MutexGuard<'static, ()>> {
-    // The guard protects filesystem syscalls only (read, write, chmod, and rename), never an
-    // await or interactive prompt. Normal contention is therefore sub-millisecond; the bounded
-    // deadline is a backstop for a stalled writer rather than an expected wait.
-    let lock = CONFIG_WRITE_LOCK.get_or_init(|| Mutex::new(()));
+fn config_write_lock_key(config: &Config) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in config.config_path().components() {
+        if component != Component::CurDir {
+            normalized.push(component.as_os_str());
+        }
+    }
+    normalized
+}
+
+fn acquire_config_write_lock(config: &Config) -> io::Result<MutexGuard<'static, ()>> {
+    // The per-destination guard protects filesystem syscalls only (read, write, chmod, and
+    // rename), never an await or interactive prompt. Independent destinations do not contend;
+    // normal same-destination contention is therefore sub-millisecond, and the bounded deadline
+    // remains a backstop for a stalled writer rather than an expected wait.
+    let lock = {
+        let locks = CONFIG_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut locks = locks
+            .lock()
+            .map_err(|_| io::Error::other("config write lock registry is poisoned"))?;
+        *locks
+            .entry(config_write_lock_key(config))
+            .or_insert_with(|| {
+                // Entries are never evicted; this is bounded by distinct config destinations in one process.
+                Box::leak(Box::new(Mutex::new(())))
+            })
+    };
     let deadline = Instant::now() + CONFIG_WRITE_LOCK_TIMEOUT;
     loop {
         match lock.try_lock() {
@@ -317,8 +348,9 @@ fn write_link_config(
     stream: Option<&str>,
     fault: &dyn DurableWriteFault,
 ) -> io::Result<Config> {
-    let _guard = acquire_config_write_lock()?;
-    let mut config = load_config(paths.clone()).config;
+    let resolved = resolve_config_paths(paths);
+    let _guard = acquire_config_write_lock(&resolved)?;
+    let mut config = load_resolved_config(resolved).config;
     if let Some(stream) = stream {
         config.stream = stream.to_owned();
     }
@@ -354,12 +386,13 @@ pub(crate) fn save_linked_stream_with_fault(
 }
 
 fn save_config_inner(paths: &ConfigPaths, source: Option<&Config>) -> io::Result<()> {
-    let _guard = acquire_config_write_lock()?;
+    let resolved = resolve_config_paths(paths);
+    let _guard = acquire_config_write_lock(&resolved)?;
     let mut merged = source
         .cloned()
-        .unwrap_or_else(|| load_config(paths.clone()).config);
+        .unwrap_or_else(|| load_resolved_config(resolved.clone()).config);
     if merged.config_path().exists() {
-        merged.stream = load_config(paths.clone()).config.stream;
+        merged.stream = load_resolved_config(resolved).config.stream;
     }
     write_config(&merged)
 }
@@ -402,7 +435,13 @@ mod tests {
     use super::*;
     use crate::private_file::DurableWriteStage;
     use serde_json::json;
-    use std::{collections::BTreeSet, os::unix::fs::symlink};
+    use std::{
+        collections::BTreeSet,
+        os::unix::fs::{MetadataExt, symlink},
+        process::Command,
+        thread,
+        time::Duration,
+    };
 
     struct FailStage(DurableWriteStage);
 
@@ -413,6 +452,168 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ConfigWriteFlow {
+        Settings,
+        Linked,
+    }
+
+    #[derive(Clone, Copy)]
+    enum SettingsField {
+        SegmentInterval,
+        CacheRetentionDays,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ConfigWriteValue {
+        stream: &'static str,
+        field: SettingsField,
+        setting: i64,
+    }
+
+    const FIRST_WRITE: ConfigWriteValue = ConfigWriteValue {
+        stream: "linked-first",
+        field: SettingsField::SegmentInterval,
+        setting: 111,
+    };
+    const SECOND_WRITE: ConfigWriteValue = ConfigWriteValue {
+        stream: "linked-second",
+        field: SettingsField::CacheRetentionDays,
+        setting: 22,
+    };
+
+    #[derive(Clone, Copy)]
+    enum DestinationRelation {
+        Distinct,
+        SameLexicalAlias,
+    }
+
+    fn config_paths(base_dir: PathBuf, config_dir: PathBuf) -> ConfigPaths {
+        ConfigPaths {
+            base_dir: Some(base_dir),
+            config_dir: Some(config_dir),
+        }
+    }
+
+    fn run_config_write_flow(
+        flow: ConfigWriteFlow,
+        paths: &ConfigPaths,
+        value: ConfigWriteValue,
+    ) -> io::Result<()> {
+        match flow {
+            ConfigWriteFlow::Settings => {
+                let mut config = load_config(paths.clone()).config;
+                match value.field {
+                    SettingsField::SegmentInterval => config.segment_interval = value.setting,
+                    SettingsField::CacheRetentionDays => {
+                        config.cache_retention_days = value.setting;
+                    }
+                }
+                save_config(&config)
+            }
+            ConfigWriteFlow::Linked => save_linked_stream(paths, value.stream).map(drop),
+        }
+    }
+
+    fn assert_config_write_value(flow: ConfigWriteFlow, value: ConfigWriteValue, config: &Config) {
+        match flow {
+            ConfigWriteFlow::Settings => match value.field {
+                SettingsField::SegmentInterval => {
+                    assert_eq!(config.segment_interval, value.setting);
+                }
+                SettingsField::CacheRetentionDays => {
+                    assert_eq!(config.cache_retention_days, value.setting);
+                }
+            },
+            ConfigWriteFlow::Linked => assert_eq!(config.stream, value.stream),
+        }
+    }
+
+    fn assert_config_write_timeout(result: io::Result<()>) {
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "timed out waiting to write config");
+    }
+
+    fn assert_config_write_admission_case(
+        relation: DestinationRelation,
+        first: ConfigWriteFlow,
+        second: ConfigWriteFlow,
+        mut run: impl FnMut(ConfigWriteFlow, &ConfigPaths, ConfigWriteValue) -> io::Result<()>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let first_dir = temp.path().join("first-config");
+        let second_dir = match relation {
+            DestinationRelation::Distinct => temp.path().join("second-config"),
+            DestinationRelation::SameLexicalAlias => first_dir.join("."),
+        };
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let first_paths = config_paths(temp.path().join("first-data"), first_dir.clone());
+        let second_paths = config_paths(temp.path().join("second-data"), second_dir.clone());
+
+        if matches!(relation, DestinationRelation::SameLexicalAlias) {
+            let first_metadata = fs::metadata(&first_dir).unwrap();
+            let second_metadata = fs::metadata(&second_dir).unwrap();
+            assert_eq!(
+                (first_metadata.dev(), first_metadata.ino()),
+                (second_metadata.dev(), second_metadata.ino())
+            );
+            fs::write(first_dir.join("config.json"), b"{\"stream\":\"seed\"}\n").unwrap();
+        }
+
+        let resolved = resolve_config_paths(&first_paths);
+        let guard = acquire_config_write_lock(&resolved).unwrap();
+        let blocked = run(second, &second_paths, SECOND_WRITE);
+        match relation {
+            DestinationRelation::Distinct => {
+                blocked.unwrap();
+                assert_config_write_value(
+                    second,
+                    SECOND_WRITE,
+                    &load_config(second_paths.clone()).config,
+                );
+            }
+            DestinationRelation::SameLexicalAlias => {
+                assert_config_write_timeout(blocked);
+                assert_eq!(
+                    fs::read(first_dir.join("config.json")).unwrap(),
+                    b"{\"stream\":\"seed\"}\n"
+                );
+            }
+        }
+        drop(guard);
+
+        run(first, &first_paths, FIRST_WRITE).unwrap();
+        run(second, &second_paths, SECOND_WRITE).unwrap();
+
+        match relation {
+            DestinationRelation::Distinct => {
+                assert_config_write_value(first, FIRST_WRITE, &load_config(first_paths).config);
+                assert_config_write_value(second, SECOND_WRITE, &load_config(second_paths).config);
+            }
+            DestinationRelation::SameLexicalAlias => {
+                let saved = load_config(first_paths).config;
+                assert_config_write_value(second, SECOND_WRITE, &saved);
+                // Both linked writes set `stream`, so the later write legitimately wins.
+                if !(first == ConfigWriteFlow::Linked && second == ConfigWriteFlow::Linked) {
+                    assert_config_write_value(first, FIRST_WRITE, &saved);
+                }
+            }
+        }
+    }
+
+    fn for_each_config_write_pair(mut check: impl FnMut(ConfigWriteFlow, ConfigWriteFlow)) {
+        for (first, second) in [
+            (ConfigWriteFlow::Settings, ConfigWriteFlow::Linked),
+            (ConfigWriteFlow::Linked, ConfigWriteFlow::Settings),
+            (ConfigWriteFlow::Settings, ConfigWriteFlow::Settings),
+            (ConfigWriteFlow::Linked, ConfigWriteFlow::Linked),
+        ] {
+            check(first, second);
         }
     }
 
@@ -831,6 +1032,119 @@ mod tests {
         let saved = load_config(config_paths).config;
         assert_eq!(saved.stream, "desktop-new");
         assert_eq!(saved.cache_retention_days, 30);
+    }
+
+    #[test]
+    fn config_write_key_is_destination_scoped_and_lexically_normalized() {
+        let first = Config {
+            base_dir: PathBuf::from("first-data"),
+            config_dir: PathBuf::from("./config-root//cfg/."),
+            ..Config::default()
+        };
+        let second = Config {
+            base_dir: PathBuf::from("second-data"),
+            config_dir: PathBuf::from("config-root/cfg"),
+            ..Config::default()
+        };
+        let parent = Config {
+            config_dir: PathBuf::from("config-root/cfg/.."),
+            ..Config::default()
+        };
+        assert_eq!(
+            config_write_lock_key(&first),
+            config_write_lock_key(&second)
+        );
+        assert_ne!(
+            config_write_lock_key(&first),
+            config_write_lock_key(&parent)
+        );
+    }
+
+    #[test]
+    fn distinct_destinations_do_not_contend() {
+        for_each_config_write_pair(|first, second| {
+            assert_config_write_admission_case(
+                DestinationRelation::Distinct,
+                first,
+                second,
+                run_config_write_flow,
+            );
+        });
+    }
+
+    #[test]
+    fn same_destination_regular_alias_admission_times_out_then_recovers() {
+        for_each_config_write_pair(|first, second| {
+            assert_config_write_admission_case(
+                DestinationRelation::SameLexicalAlias,
+                first,
+                second,
+                run_config_write_flow,
+            );
+        });
+    }
+
+    #[test]
+    fn same_destination_serializes_across_migrate_park() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("config");
+        let alternate_config_dir = config_dir.join(".");
+
+        let first_base = temp.path().join("first-data");
+        let legacy_dir = first_base.join("config");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_config = legacy_dir.join("config.json");
+        let status = Command::new("mkfifo").arg(&legacy_config).status().unwrap();
+        assert!(status.success());
+
+        let first_paths = config_paths(first_base, config_dir.clone());
+        let second_base = temp.path().join("second-data");
+        let second_paths = config_paths(second_base.clone(), alternate_config_dir.clone());
+        let second_config = Config {
+            base_dir: second_base,
+            config_dir: second_paths.config_dir.clone().unwrap(),
+            cache_retention_days: 44,
+            ..Config::default()
+        };
+
+        let first = thread::spawn(move || save_linked_stream(&first_paths, "migrate-first"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !config_dir.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "migration should create the destination directory before opening the FIFO"
+            );
+            thread::yield_now();
+        }
+        let primary_metadata = fs::metadata(&config_dir).unwrap();
+        let alternate_metadata = fs::metadata(&alternate_config_dir).unwrap();
+        assert_eq!(
+            (primary_metadata.dev(), primary_metadata.ino()),
+            (alternate_metadata.dev(), alternate_metadata.ino())
+        );
+        let absent_before_second = !config_dir.join("config.json").exists();
+        let second_result = save_config(&second_config);
+        let absent_after_second = !config_dir.join("config.json").exists();
+        drop(
+            fs::OpenOptions::new()
+                .write(true)
+                .open(legacy_config)
+                .unwrap(),
+        );
+        let first_result = first.join().unwrap();
+
+        // A replacement-only lock leaves A's load/migrate outside admission, so B succeeds
+        // here instead of timing out; B never reads the migration FIFO, so the test fails rather
+        // than hangs.
+        assert!(absent_before_second);
+        assert_config_write_timeout(second_result);
+        assert!(absent_after_second);
+        first_result.unwrap();
+
+        save_config(&second_config).unwrap();
+        let saved = load_config(second_paths).config;
+        assert_eq!(saved.stream, "migrate-first");
+        assert_eq!(saved.cache_retention_days, 44);
     }
 
     #[test]
