@@ -9,7 +9,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Component, PathBuf},
     sync::{
-        Mutex, MutexGuard, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -24,7 +24,7 @@ pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_micros(100);
-static CONFIG_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+static CONFIG_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -294,23 +294,26 @@ fn config_write_lock_key(config: &Config) -> PathBuf {
     normalized
 }
 
-fn acquire_config_write_lock(config: &Config) -> io::Result<MutexGuard<'static, ()>> {
+fn config_write_lock(config: &Config) -> io::Result<Arc<Mutex<()>>> {
+    let locks = CONFIG_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .map_err(|_| io::Error::other("config write lock registry is poisoned"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let key = config_write_lock_key(config);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+fn acquire_config_write_lock(lock: &Mutex<()>) -> io::Result<MutexGuard<'_, ()>> {
     // The per-destination guard protects filesystem syscalls only (read, write, chmod, and
     // rename), never an await or interactive prompt. Independent destinations do not contend;
     // normal same-destination contention is therefore sub-millisecond, and the bounded deadline
     // remains a backstop for a stalled writer rather than an expected wait.
-    let lock = {
-        let locks = CONFIG_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut locks = locks
-            .lock()
-            .map_err(|_| io::Error::other("config write lock registry is poisoned"))?;
-        *locks
-            .entry(config_write_lock_key(config))
-            .or_insert_with(|| {
-                // Entries are never evicted; this is bounded by distinct config destinations in one process.
-                Box::leak(Box::new(Mutex::new(())))
-            })
-    };
     let deadline = Instant::now() + CONFIG_WRITE_LOCK_TIMEOUT;
     loop {
         match lock.try_lock() {
@@ -349,7 +352,8 @@ fn write_link_config(
     fault: &dyn DurableWriteFault,
 ) -> io::Result<Config> {
     let resolved = resolve_config_paths(paths);
-    let _guard = acquire_config_write_lock(&resolved)?;
+    let lock = config_write_lock(&resolved)?;
+    let _guard = acquire_config_write_lock(&lock)?;
     let mut config = load_resolved_config(resolved).config;
     if let Some(stream) = stream {
         config.stream = stream.to_owned();
@@ -387,7 +391,8 @@ pub(crate) fn save_linked_stream_with_fault(
 
 fn save_config_inner(paths: &ConfigPaths, source: Option<&Config>) -> io::Result<()> {
     let resolved = resolve_config_paths(paths);
-    let _guard = acquire_config_write_lock(&resolved)?;
+    let lock = config_write_lock(&resolved)?;
+    let _guard = acquire_config_write_lock(&lock)?;
     let mut merged = source
         .cloned()
         .unwrap_or_else(|| load_resolved_config(resolved.clone()).config);
@@ -566,7 +571,8 @@ mod tests {
         }
 
         let resolved = resolve_config_paths(&first_paths);
-        let guard = acquire_config_write_lock(&resolved).unwrap();
+        let lock = config_write_lock(&resolved).unwrap();
+        let guard = acquire_config_write_lock(&lock).unwrap();
         let blocked = run(second, &second_paths, SECOND_WRITE);
         match relation {
             DestinationRelation::Distinct => {
