@@ -69,7 +69,6 @@ struct PeerState {
     requests: Arc<Mutex<Vec<PeerRequest>>>,
     request_arrived: Arc<Notify>,
     accepted: Arc<AtomicUsize>,
-    accept_changed: Arc<Notify>,
     response_gate_changed: Arc<Notify>,
     hold_request_credit: Arc<std::sync::atomic::AtomicBool>,
     request_credit_changed: Arc<Notify>,
@@ -85,14 +84,6 @@ pub(crate) struct PrivateLinkPeer {
 
 impl PrivateLinkPeer {
     pub(crate) async fn start() -> Self {
-        Self::start_with_tls_gate(None).await
-    }
-
-    pub(crate) async fn start_with_delayed_tls(gate: Arc<Notify>) -> Self {
-        Self::start_with_tls_gate(Some(gate)).await
-    }
-
-    async fn start_with_tls_gate(tls_gate: Option<Arc<Notify>>) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (credential, acceptor) = credential_and_acceptor(listener.local_addr().unwrap().port());
         let state = PeerState {
@@ -100,7 +91,6 @@ impl PrivateLinkPeer {
             requests: Arc::new(Mutex::new(Vec::new())),
             request_arrived: Arc::new(Notify::new()),
             accepted: Arc::new(AtomicUsize::new(0)),
-            accept_changed: Arc::new(Notify::new()),
             response_gate_changed: Arc::new(Notify::new()),
             hold_request_credit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             request_credit_changed: Arc::new(Notify::new()),
@@ -111,10 +101,6 @@ impl PrivateLinkPeer {
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 task_state.accepted.fetch_add(1, Ordering::SeqCst);
-                task_state.accept_changed.notify_one();
-                if let Some(gate) = &tls_gate {
-                    gate.notified().await;
-                }
                 let Ok(tls) = acceptor.accept(stream).await else {
                     continue;
                 };
@@ -187,17 +173,6 @@ impl PrivateLinkPeer {
             .expect("static response to gate")
             .nonblocking_gate = Some(gate);
     }
-    pub(crate) fn gate_queued_responses_nonblocking(
-        &self,
-        count: usize,
-        gate: Arc<std::sync::atomic::AtomicBool>,
-    ) {
-        for response in self.state.responses.lock().unwrap().iter_mut().take(count) {
-            if let QueuedResponse::Static(response) = response {
-                response.nonblocking_gate = Some(gate.clone());
-            }
-        }
-    }
     pub(crate) fn gate_queued_response_nonblocking(
         &self,
         index: usize,
@@ -246,15 +221,6 @@ impl PrivateLinkPeer {
     }
     pub(crate) fn accepted_carriers(&self) -> usize {
         self.state.accepted.load(Ordering::SeqCst)
-    }
-    pub(crate) async fn wait_for_accepted_carriers(&self, count: usize) {
-        loop {
-            let notified = self.state.accept_changed.notified();
-            if self.accepted_carriers() >= count {
-                return;
-            }
-            notified.await;
-        }
     }
     pub(crate) async fn wait_for_requests(&self, count: usize) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {

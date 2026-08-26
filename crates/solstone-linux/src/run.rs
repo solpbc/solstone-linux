@@ -13,10 +13,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ashpd::zbus::Connection;
-use sd_notify::NotifyState;
-use serde_json::{Map, Value, json};
-
 #[cfg(test)]
 use crate::private_link::{start_private_link_owner, start_private_link_session};
 use crate::{
@@ -25,8 +21,8 @@ use crate::{
     config::Config,
     observer::{
         Backends, BackgroundCaptureStats, Clock, EventSink, Mode, Observer, ObserverError,
-        SegmentCompletedEvent, StateSnapshot, StoppedStream, StreamSilentEvent, VideoCapture,
-        VideoStream, WatchStateSink, lifecycle,
+        SegmentCompletedEvent, StateSnapshot, StoppedStream, VideoCapture, VideoStream,
+        WatchStateSink, lifecycle,
     },
     private_link::{
         PrivateLinkCapability, PrivateStateLock, load_credential,
@@ -47,6 +43,8 @@ use crate::{
         x11::X11VideoCapture,
     },
 };
+use ashpd::zbus::Connection;
+use sd_notify::NotifyState;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
 const CONSTRUCTION_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
@@ -140,7 +138,7 @@ pub(crate) fn tick_once(
     Ok(())
 }
 
-async fn shutdown_in_order<O, DF, SF, JF, LS, EF, LF>(
+async fn shutdown_in_order<O, DF, SF, JF, LS, LF>(
     mut observer: O,
     shutdown_callbacks: (
         impl FnOnce(&mut O) -> Result<(), ObserverError>,
@@ -149,10 +147,8 @@ async fn shutdown_in_order<O, DF, SF, JF, LS, EF, LF>(
     desktop_shutdown: DF,
     sync_shutdown: SF,
     linked_lifecycle: (JF, impl FnOnce(LS) -> LF),
-    sender_stop: impl FnOnce() -> EF,
     trace: &mut dyn FnMut(&'static str),
 ) -> (
-    Result<(), ObserverError>,
     Result<(), ObserverError>,
     Result<(), ObserverError>,
     Result<(), ObserverError>,
@@ -161,7 +157,6 @@ where
     DF: std::future::Future<Output = ()>,
     SF: std::future::Future<Output = Result<(), tokio::task::JoinError>>,
     JF: std::future::Future<Output = LS>,
-    EF: std::future::Future<Output = Result<(), ObserverError>>,
     LF: std::future::Future<Output = Result<(), ObserverError>>,
 {
     let (observer_shutdown, disable_open_journal) = shutdown_callbacks;
@@ -181,31 +176,10 @@ where
     trace("linked_start_join");
     let linked_start = linked_start_join.await;
     trace("linked_start_join_complete");
-    trace("event_sender_stop");
-    let sender_result = sender_stop().await;
     trace("linked_owner_shutdown");
     let linked_result = linked_shutdown(linked_start).await;
     trace("linked_owner_join_complete");
-    (observer_result, sync_result, sender_result, linked_result)
-}
-
-async fn stop_upload_sender(
-    upload: Arc<UploadClient>,
-    timeout: Duration,
-) -> Result<(), ObserverError> {
-    match Arc::try_unwrap(upload) {
-        Ok(mut client) => {
-            client.stop(timeout).await;
-            Ok(())
-        }
-        Err(client) => {
-            client.request_stop();
-            tracing::error!("UploadClient still shared after sync shutdown");
-            Err(ObserverError::Io(
-                "UploadClient still shared after sync shutdown".into(),
-            ))
-        }
-    }
+    (observer_result, sync_result, linked_result)
 }
 
 // Runtime order is a safety contract:
@@ -215,12 +189,10 @@ async fn stop_upload_sender(
 // 4. the run closure constructs capture backends, sync, and the observer.
 // 5. initialize publishes the first snapshot, then desktop surfaces start and commands wake the
 //    absolute-deadline tick loop.
-// 6. desktop surfaces stop first, then observer capture/audio cleanup and sync; linked startup is
-//    joined before event delivery stops so it cannot retain the upload client.
+// 6. desktop surfaces stop first, then observer capture/audio cleanup and sync.
 // 7. the linked owner closes streams and joins bridge/carrier tasks last, then releases its lock.
 pub(crate) fn run_observer(
     config: Config,
-    host: String,
     state_lock: PrivateStateLock,
     transport_enabled: bool,
     process_epoch: Option<ProcessEpoch>,
@@ -267,7 +239,6 @@ pub(crate) fn run_observer(
             run_capture(
                 &runtime,
                 run_config,
-                host,
                 connection,
                 state_lock,
                 transport_enabled,
@@ -282,7 +253,6 @@ pub(crate) fn run_observer(
 fn run_capture(
     runtime: &tokio::runtime::Runtime,
     config: Config,
-    host: String,
     connection: Option<Connection>,
     state_lock: PrivateStateLock,
     transport_enabled: bool,
@@ -298,9 +268,6 @@ fn run_capture(
     let upload = Arc::new(UploadClient::new(
         &config,
         None::<PrivateLinkCapability>,
-        host.clone(),
-        "linux",
-        env!("CARGO_PKG_VERSION"),
         Arc::new(clock.clone()),
     ));
     let open_journal = crate::private_link::OpenJournalAccess::default();
@@ -363,15 +330,12 @@ fn run_capture(
         activity: CompositeActivityProbe::spawn(),
         mute,
         writer: FlacAudioWriter,
-        events: UploadEventSink {
-            client: Arc::clone(&upload),
-            sync: sync_trigger,
-        },
+        events: UploadEventSink { sync: sync_trigger },
         clock,
         stats: BackgroundCaptureStats::new(),
         states,
     };
-    let mut observer = Observer::new(config, backends, host, "linux".into());
+    let mut observer = Observer::new(config, backends);
     let mut run_result = if stopped.load(Ordering::Acquire) {
         Ok(())
     } else {
@@ -430,33 +394,31 @@ fn run_capture(
     if let Err(error) = notifier.stopping() {
         tracing::warn!(%error, "Failed to notify systemd stopping state");
     }
-    let (shutdown, sync_shutdown, sender_shutdown, linked_shutdown) =
-        runtime.block_on(shutdown_in_order(
-            observer,
-            (Observer::shutdown, || open_journal.close_current()),
-            desktop_shell.shutdown(SHUTDOWN_TIMEOUT),
-            sync.shutdown(SHUTDOWN_TIMEOUT),
-            (linked_start, |linked_start| async move {
-                match linked_start {
-                    Ok(Ok(owner)) => owner.shutdown().await.map_err(|error| {
-                        ObserverError::Io(format!("linked shutdown failed: {error}"))
-                    }),
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "Linked transport remained unavailable");
-                        Ok(())
-                    }
-                    Err(error) => Err(ObserverError::Io(format!(
-                        "linked startup task failed: {error}"
-                    ))),
+    let (shutdown, sync_shutdown, linked_shutdown) = runtime.block_on(shutdown_in_order(
+        observer,
+        (Observer::shutdown, || open_journal.close_current()),
+        desktop_shell.shutdown(SHUTDOWN_TIMEOUT),
+        sync.shutdown(SHUTDOWN_TIMEOUT),
+        (linked_start, |linked_start| async move {
+            match linked_start {
+                Ok(Ok(owner)) => owner
+                    .shutdown()
+                    .await
+                    .map_err(|error| ObserverError::Io(format!("linked shutdown failed: {error}"))),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Linked transport remained unavailable");
+                    Ok(())
                 }
-            }),
-            || stop_upload_sender(upload, SHUTDOWN_TIMEOUT),
-            &mut |_| {},
-        ));
+                Err(error) => Err(ObserverError::Io(format!(
+                    "linked startup task failed: {error}"
+                ))),
+            }
+        }),
+        &mut |_| {},
+    ));
     run_result
         .and(shutdown)
         .and(sync_shutdown)
-        .and(sender_shutdown)
         .and(linked_shutdown)
 }
 
@@ -484,20 +446,12 @@ async fn start_linked_owner(
             return Err(error);
         }
     };
-    let (hostname, platform, version) = upload.registration_metadata();
-    let mut owner = start_private_link_owner_with_lock(
-        state_lock,
-        credential,
-        &stream,
-        hostname,
-        platform,
-        version,
-        upload.link_facts(),
-    )
-    .await
-    .inspect_err(|_| {
-        upload.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
-    })?;
+    let mut owner =
+        start_private_link_owner_with_lock(state_lock, credential, &stream, upload.link_facts())
+            .await
+            .inspect_err(|_| {
+                upload.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
+            })?;
     owner.install_open_journal_access(open_journal);
     upload.install_capability(owner.capability());
     Ok(owner)
@@ -665,36 +619,11 @@ impl SyncWake for SyncTrigger {
     }
 }
 
-fn stream_silent_fields(event: &StreamSilentEvent) -> Map<String, Value> {
-    let mut fields = Map::new();
-    fields.insert("connector".into(), json!(event.connector));
-    fields.insert("position".into(), json!(event.position));
-    fields.insert("node_id".into(), json!(event.node_id));
-    fields.insert("file_bytes".into(), json!(event.file_bytes));
-    fields.insert("segment_dir".into(), json!(event.segment_dir));
-    fields.insert("duration_seconds".into(), json!(event.duration_seconds));
-    fields.insert("host".into(), json!(event.host));
-    fields.insert("platform".into(), json!(event.platform));
-    if let Some(reason) = event.reason {
-        fields.insert("reason".into(), json!(reason));
-    }
-    fields
-}
-
 struct UploadEventSink<W = SyncTrigger> {
-    client: Arc<UploadClient>,
     sync: W,
 }
 
 impl<W: SyncWake> EventSink for UploadEventSink<W> {
-    fn status(&mut self, fields: Map<String, Value>) {
-        self.client.enqueue_status(fields);
-    }
-    fn stream_silent(&mut self, event: StreamSilentEvent) {
-        let _ = self
-            .client
-            .enqueue_stream_silent(stream_silent_fields(&event));
-    }
     fn segment_completed(&mut self, event: SegmentCompletedEvent) {
         tracing::debug!(key = %event.key, "segment completed");
         self.sync.trigger();
@@ -733,9 +662,8 @@ mod tests {
         dbus_service::{ObserverCommands, clamp_pause},
         observer::StateSink,
         private_link::{
-            CREDENTIALS_FILENAME, LinkFactState, OBSERVER_FILENAME, ObserverState,
-            PRIVATE_STATE_READY_LOCK_FILENAME, PrivateLinkOwner, PrivateStateError,
-            PrivateStateLock, persist_credential, publish_observer_registration,
+            CREDENTIALS_FILENAME, LinkFactState, PRIVATE_STATE_READY_LOCK_FILENAME,
+            PrivateLinkOwner, PrivateStateError, PrivateStateLock, persist_credential,
         },
         private_link_test_peer::PrivateLinkPeer,
         sync_health::{
@@ -978,95 +906,25 @@ mod tests {
         }
     }
 
-    // AC: only segment completion wakes sync; status and silent events do not.
+    // Segment completion wakes sync.
     #[tokio::test]
     async fn segment_completion_is_the_only_sync_trigger() {
-        let t = tempfile::tempdir().unwrap();
-        let config = Config {
-            base_dir: t.path().into(),
-            config_dir: t.path().join("config"),
-            ..Config::default()
-        };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
-            &config,
-            "host",
-            "linux",
-            "test",
-            Arc::new(SystemClock::new()),
-        ));
         let count = Arc::new(AtomicUsize::new(0));
         let mut sink = UploadEventSink {
-            client: Arc::clone(&client),
             sync: CountingWake(Arc::clone(&count)),
         };
-        sink.status(Map::new());
-        sink.stream_silent(StreamSilentEvent {
-            connector: "c".into(),
-            position: "p".into(),
-            node_id: 1,
-            file_bytes: 0,
-            segment_dir: "s".into(),
-            duration_seconds: 1,
-            host: "h".into(),
-            platform: "linux".into(),
-            reason: None,
-        });
-        assert_eq!(count.load(Ordering::Acquire), 0);
         sink.segment_completed(SegmentCompletedEvent {
             key: "120000_300".into(),
         });
         assert_eq!(count.load(Ordering::Acquire), 1);
-        drop(sink);
-        let mut client = Arc::try_unwrap(client).ok().expect("sink released client");
-        client.stop(Duration::from_secs(1)).await;
     }
 
-    // AC9: reason is omitted when None and present only when Some.
-    #[test]
-    fn stream_silent_omits_reason_unless_some() {
-        let none = stream_silent_fields(&StreamSilentEvent {
-            connector: "c".into(),
-            position: "p".into(),
-            node_id: 1,
-            file_bytes: 0,
-            segment_dir: "s".into(),
-            duration_seconds: 1,
-            host: "h".into(),
-            platform: "linux".into(),
-            reason: None,
-        });
-        assert!(none.get("reason").is_none());
-        assert_eq!(none["connector"], json!("c"));
-        assert_eq!(none["position"], json!("p"));
-        assert_eq!(none["node_id"], json!(1));
-        assert_eq!(none["file_bytes"], json!(0));
-        assert_eq!(none["segment_dir"], json!("s"));
-        assert_eq!(none["duration_seconds"], json!(1));
-        assert_eq!(none["host"], json!("h"));
-        assert_eq!(none["platform"], json!("linux"));
-
-        let some = stream_silent_fields(&StreamSilentEvent {
-            connector: "c".into(),
-            position: "p".into(),
-            node_id: 1,
-            file_bytes: 0,
-            segment_dir: "s".into(),
-            duration_seconds: 1,
-            host: "h".into(),
-            platform: "linux".into(),
-            reason: Some(crate::observer::EMPTY_WINDOW_REASON),
-        });
-        assert_eq!(some["reason"], json!("empty_window"));
-        assert_eq!(some["connector"], json!("c"));
-    }
-
-    // AC: 8 — desktop tasks stop before final observer work, walker join, and sender stop.
+    // Desktop tasks stop before final observer work, sync, and linked-owner shutdown.
     #[tokio::test]
     async fn shutdown_order_includes_linked_owner_last() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let observer_events = Arc::clone(&events);
         let disable_events = Arc::clone(&events);
-        let sender_events = Arc::clone(&events);
         let trace_events = Arc::clone(&events);
         let mut trace = move |event| trace_events.lock().unwrap().push(event);
         let results = shutdown_in_order(
@@ -1088,10 +946,6 @@ mod tests {
             },
             async { Ok(()) },
             (async {}, |()| async { Ok(()) }),
-            move || async move {
-                sender_events.lock().unwrap().push("sender_stopped");
-                Ok(())
-            },
             &mut trace,
         )
         .await;
@@ -1109,8 +963,6 @@ mod tests {
                 "sync_join_complete",
                 "linked_start_join",
                 "linked_start_join_complete",
-                "event_sender_stop",
-                "sender_stopped",
                 "linked_owner_shutdown",
                 "linked_owner_join_complete",
             ]
@@ -1131,21 +983,18 @@ mod tests {
             (async {}, |()| async {
                 Err(ObserverError::Io("linked failed".into()))
             }),
-            || async { Err(ObserverError::Io("sender failed".into())) },
             &mut |_| {},
         )
         .await;
         assert!(results.0.is_err());
         assert!(results.1.is_err());
         assert!(results.2.is_err());
-        assert!(results.3.is_err());
     }
 
     #[tokio::test]
-    async fn shutdown_waits_for_active_sync_and_event_work() {
+    async fn shutdown_waits_for_active_sync_and_linked_work() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sync_events = events.clone();
-        let sender_events = events.clone();
         let linked_events = events.clone();
         let results = shutdown_in_order(
             (),
@@ -1160,50 +1009,16 @@ mod tests {
                 linked_events.lock().unwrap().push("linked_complete");
                 Ok(())
             }),
-            move || async move {
-                sender_events.lock().unwrap().push("sender_complete");
-                Ok(())
-            },
             &mut |_| {},
         )
         .await;
         assert!(results.0.is_ok());
         assert!(results.1.is_ok());
         assert!(results.2.is_ok());
-        assert!(results.3.is_ok());
         assert_eq!(
             &*events.lock().unwrap(),
-            &["sync_complete", "sender_complete", "linked_complete"]
+            &["sync_complete", "linked_complete"]
         );
-    }
-
-    #[tokio::test]
-    async fn linked_start_join_releases_upload_before_sender_stop() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = Config {
-            base_dir: temp.path().to_path_buf(),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
-        let upload = Arc::new(crate::upload::capability_less_client_for_test(
-            &config,
-            "host",
-            "linux",
-            "test",
-            Arc::new(SystemClock::new()),
-        ));
-        let linked_upload = Arc::clone(&upload);
-        let results = shutdown_in_order(
-            (),
-            (|_| Ok(()), || {}),
-            async {},
-            async { Ok(()) },
-            (async move { drop(linked_upload) }, |()| async { Ok(()) }),
-            move || stop_upload_sender(upload, Duration::from_secs(1)),
-            &mut |_| {},
-        )
-        .await;
-        assert!(results.2.is_ok());
     }
 
     async fn drive_real_link_start(
@@ -1224,9 +1039,6 @@ mod tests {
         let upload = Arc::new(UploadClient::new(
             &config,
             None::<PrivateLinkCapability>,
-            "host",
-            "linux",
-            "1",
             Arc::new(SystemClock::new()),
         ));
         let lock = PrivateStateLock::acquire(temp.path()).unwrap();
@@ -1273,179 +1085,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mismatched_or_corrupt_observer_ticks_then_register() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        persist_credential(temp.path(), &peer.credential()).unwrap();
-        std::fs::write(temp.path().join(OBSERVER_FILENAME), b"{").unwrap();
-        peer.enqueue_response(
-            200,
-            serde_json::json!({
-                "key":"K", "name":"stream", "prefix":"prefix",
-                "ingest_url":"/app/observer/ingest", "protocol_version":2
-            })
-            .to_string(),
-        );
-        let (result, facts, _upload) = drive_real_link_start(&temp, true).await;
-        let owner = result.unwrap();
-        assert!(facts.observer_registered);
-        let registration: serde_json::Value =
-            serde_json::from_slice(&peer.requests()[0].body).unwrap();
-        assert_eq!(registration["hostname"], "host");
-        assert_eq!(registration["label"], "stream");
-        assert_ne!(registration["hostname"], registration["label"]);
-        owner.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn unavailable_peer_observer_ticks_without_transport_wait() {
+    async fn unavailable_peer_owner_starts_without_a_carrier_dial() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         persist_credential(temp.path(), &peer.credential()).unwrap();
         peer.shutdown().await;
         let (result, facts, _upload) = drive_real_link_start(&temp, true).await;
-        let owner = result.expect("retryable carrier failure must retain the owner");
-        assert!(facts.transport_unavailable);
+        let owner = result.expect("owner startup does not require a carrier dial");
+        assert!(facts.listener_ready);
+        assert!(!facts.transport_unavailable);
         owner.shutdown().await.unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn failed_initial_registration_observer_ticks_without_transport_wait() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        persist_credential(temp.path(), &peer.credential()).unwrap();
-        peer.enqueue_response(503, Vec::new());
-        let (result, facts, upload) = drive_real_link_start(&temp, true).await;
-        let owner = result.expect("retryable registration failure must retain the owner");
-        assert!(facts.transport_unavailable);
-        assert_eq!(peer.requests().len(), 1);
-        enqueue_registration(&peer);
-        let mut config = Config {
-            config_dir: temp.path().to_path_buf(),
-            stream: "stream".to_owned(),
-            ..Config::default()
-        };
-        assert!(upload.ensure_registered(&mut config).await);
-        assert_eq!(peer.requests().len(), 2);
-        assert!(upload.is_registered());
-        let recovered = upload.link_fact_state().unwrap();
-        assert!(recovered.observer_registered);
-        assert!(!recovered.transport_unavailable);
-        owner.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    async fn assert_real_initial_registration_succeeds() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        enqueue_registration(&peer);
-        let gate = Arc::new(AtomicBool::new(false));
-        peer.gate_next_response_nonblocking(gate.clone());
-        let owner = tokio::spawn({
-            let credential = peer.credential();
-            let root = temp.path().to_path_buf();
-            async move { start_private_link_owner(&root, credential, "stream").await }
-        });
-        peer.wait_for_requests(1).await;
-        assert!(!owner.is_finished());
-        assert_real_observer_ticks_advance();
-        gate.store(true, Ordering::Release);
-        peer.notify_response_gates();
-        let owner = owner.await.unwrap().unwrap();
-        assert_eq!(peer.requests().len(), 1);
-        owner.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    fn enqueue_registration(peer: &PrivateLinkPeer) {
-        peer.enqueue_response(
-            200,
-            serde_json::json!({
-                "key":"K",
-                "name":"stream",
-                "prefix":"prefix",
-                "ingest_url":"/app/observer/ingest",
-                "protocol_version":2
-            })
-            .to_string(),
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn multithreaded_observer_ticks_advance_while_real_link_registers() {
-        assert_real_initial_registration_succeeds().await;
-    }
-
-    #[tokio::test]
-    async fn concurrent_ensure_registered_waiters_share_one_attempt_and_result() {
-        assert_concurrent_initial_registration(200, true).await;
-        assert_concurrent_initial_registration(503, false).await;
-    }
-
-    async fn assert_concurrent_initial_registration(status: u16, expected: bool) {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        peer.enqueue_response(
-            status,
-            serde_json::json!({
-                "key":"K",
-                "name":"stream",
-                "prefix":"prefix",
-                "ingest_url":"/app/observer/ingest",
-                "protocol_version":2
-            })
-            .to_string(),
-        );
-        let response_gate = Arc::new(AtomicBool::new(false));
-        peer.gate_next_response_nonblocking(response_gate.clone());
-        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
-            .await
-            .unwrap();
-        let capability = session.capability();
-        let config = Config {
-            config_dir: temp.path().to_path_buf(),
-            stream: "stream".to_owned(),
-            ..Config::default()
-        };
-        let client = Arc::new(UploadClient::new(
-            &config,
-            capability,
-            "host",
-            "linux",
-            "1",
-            Arc::new(SystemClock::new()),
-        ));
-        let mut demands = Vec::new();
-        for _ in 0..3 {
-            let client = client.clone();
-            let mut config = config.clone();
-            demands.push(tokio::spawn(async move {
-                client.ensure_registered(&mut config).await
-            }));
-        }
-        peer.wait_for_requests(1).await;
-        assert!(demands.iter().all(|demand| !demand.is_finished()));
-        assert!(
-            peer.requests()
-                .iter()
-                .all(|request| request.path == "/app/devices/register")
-        );
-        response_gate.store(true, Ordering::Release);
-        peer.notify_response_gates();
-        for demand in demands {
-            assert_eq!(demand.await.unwrap(), expected);
-        }
-        assert_eq!(peer.requests().len(), 1);
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
     }
 
     #[tokio::test]
     async fn linked_owner_holds_lock_through_bridge_task_join() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
-        enqueue_registration(&peer);
         let mut owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
@@ -1479,7 +1134,6 @@ mod tests {
     async fn private_state_lock_releases_only_after_join() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
-        enqueue_registration(&peer);
         let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
@@ -1506,7 +1160,6 @@ mod tests {
     async fn setup_and_runtime_contend_on_same_canonical_lock() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
-        enqueue_registration(&peer);
         let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
@@ -1627,18 +1280,6 @@ mod tests {
         let session = start_private_link_session(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
-        publish_observer_registration(
-            &session,
-            &ObserverState {
-                credential_instance_id: peer.credential().instance_id,
-                key: "K".to_owned(),
-                prefix: "prefix".to_owned(),
-                name: "stream".to_owned(),
-                ingest_url: "/app/devices/ingest".to_owned(),
-                protocol_version: 2,
-            },
-        )
-        .unwrap();
         let config = Config {
             config_dir: temp.path().to_path_buf(),
             stream: "stream".to_owned(),
@@ -1647,9 +1288,6 @@ mod tests {
         let client = Arc::new(UploadClient::new(
             &config,
             session.capability(),
-            "host",
-            "linux",
-            "1",
             Arc::new(SystemClock::new()),
         ));
         (session, client)
@@ -1700,9 +1338,6 @@ mod tests {
             crate::private_link::LinkOutcome::Success { status, .. } => {
                 panic!("chunked request unexpectedly succeeded with {status}");
             }
-            crate::private_link::LinkOutcome::Unauthorized { .. } => {
-                panic!("chunked request unexpectedly reached authority");
-            }
             crate::private_link::LinkOutcome::Forbidden => {
                 panic!("chunked request unexpectedly reached guard");
             }
@@ -1716,28 +1351,6 @@ mod tests {
     }
 
     // AC: an unexpected shared UploadClient is still cancelled before shutdown reports the bug.
-    #[tokio::test]
-    async fn shared_upload_client_requests_stop() {
-        let t = tempfile::tempdir().unwrap();
-        let config = Config {
-            base_dir: t.path().into(),
-            config_dir: t.path().join("config"),
-            ..Config::default()
-        };
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
-            &config,
-            "host",
-            "linux",
-            "test",
-            Arc::new(SystemClock::new()),
-        ));
-        let extra_owner = Arc::clone(&client);
-        let result = stop_upload_sender(client, Duration::from_millis(1)).await;
-        assert!(result.is_err());
-        assert!(extra_owner.stop_requested());
-        drop(extra_owner);
-    }
-
     #[test]
     fn singleton_lock_precedes_recovery_exactly() {
         let config = Config::default();
@@ -1924,15 +1537,11 @@ mod tests {
 
         async fn start_owner(
             config: &Config,
-            peer: &PrivateLinkPeer,
             lock: PrivateStateLock,
         ) -> (PrivateLinkOwner, Arc<UploadClient>) {
             let upload = Arc::new(UploadClient::new(
                 config,
                 None::<PrivateLinkCapability>,
-                "upgrade-host",
-                "linux",
-                "test",
                 Arc::new(SystemClock::new()),
             ));
             let owner = start_linked_owner(
@@ -1945,9 +1554,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(upload.is_registered());
             assert_real_observer_ticks_advance();
-            assert!(peer.accepted_carriers() >= 1);
             (owner, upload)
         }
 
@@ -2005,9 +1612,6 @@ mod tests {
             let upload = Arc::new(UploadClient::new(
                 &config,
                 None::<PrivateLinkCapability>,
-                "upgrade-host",
-                "linux",
-                "test",
                 Arc::new(SystemClock::new()),
             ));
             let first_start = start_linked_owner(
@@ -2098,14 +1702,10 @@ mod tests {
             assert!(errors.is_empty());
             assert!(load_credential(&config.config_dir).unwrap().is_some());
 
-            peer.enqueue_response(503, Vec::new());
             let registration_failure_lock = PrivateStateLock::acquire(&config.config_dir).unwrap();
             let failed_upload = Arc::new(UploadClient::new(
                 &config,
                 None::<PrivateLinkCapability>,
-                "upgrade-host",
-                "linux",
-                "test",
                 Arc::new(SystemClock::new()),
             ));
             let failed_owner = start_linked_owner(
@@ -2118,20 +1718,11 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(!failed_upload.is_registered());
             assert_pending_unchanged(&pending, &[true, true, true]);
             failed_owner.shutdown().await.unwrap();
 
-            peer.enqueue_response(
-                200,
-                serde_json::json!({
-                    "key":"UPGRADE-KEY", "name":"desktop", "prefix":"upgrade",
-                    "ingest_url":"/app/observer/ingest", "protocol_version":2
-                })
-                .to_string(),
-            );
             let restart_lock = PrivateStateLock::acquire(&config.config_dir).unwrap();
-            let (owner, upload) = start_owner(&config, &peer, restart_lock).await;
+            let (owner, upload) = start_owner(&config, restart_lock).await;
             assert_eq!(pair_calls.load(Ordering::SeqCst), 1);
 
             peer.enqueue_response(503, Vec::new());
@@ -2196,9 +1787,8 @@ mod tests {
             let (final_lock, final_config, final_transport, _process_epoch) =
                 crate::cli::prepare_run_config(paths).unwrap();
             assert!(final_transport);
-            let (final_owner, final_upload) = start_owner(&final_config, &peer, final_lock).await;
+            let (final_owner, final_upload) = start_owner(&final_config, final_lock).await;
             assert_eq!(pair_calls.load(Ordering::SeqCst), 1);
-            assert!(final_upload.is_registered());
             assert_eq!(peer.requests().len(), requests_before_final_restart);
             assert_real_observer_ticks_advance();
             final_owner.shutdown().await.unwrap();

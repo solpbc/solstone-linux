@@ -21,7 +21,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 
 use crate::{
     config::Config,
-    observer::{Clock, HealthBeacon},
+    observer::Clock,
     private_link::{LinkFactState, LinkFacts},
     segment::timestamp_parts,
     sync_health::{
@@ -80,7 +80,6 @@ pub struct SyncService {
     pending_trigger: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     facts: Arc<Mutex<SyncFacts>>,
-    recent_error_count: Arc<AtomicU8>,
     stale_threshold: f64,
     clock: Arc<dyn Clock + Send + Sync>,
     link_facts: LinkFacts,
@@ -198,7 +197,6 @@ impl SyncService {
             pending_trigger,
             running,
             facts,
-            recent_error_count,
             stale_threshold: config.sync_stale_threshold as f64,
             clock,
             link_facts,
@@ -233,8 +231,7 @@ impl SyncService {
     pub async fn shutdown(mut self, timeout: Duration) -> Result<(), tokio::task::JoinError> {
         self.running.store(false, Ordering::Release);
         self.notify.notify_one();
-        // Never cancel the shared UploadClient here: the walker must finish before the
-        // event sender is stopped, making walker-then-sender shutdown structural.
+        // Never cancel the shared UploadClient here: the walker may still complete its pass.
         match tokio::time::timeout(timeout, &mut self.task).await {
             Ok(result) => result,
             Err(_) => {
@@ -257,23 +254,6 @@ impl SyncService {
 
     pub fn link_persistence_failure_count(&self) -> usize {
         self.link_persistence_failures.load(Ordering::Acquire)
-    }
-
-    pub fn health_beacon(&self) -> HealthBeacon {
-        let facts = self.facts.lock().unwrap();
-        HealthBeacon {
-            last_successful_sync: facts.last_successful_sync.map(|value| value as i64),
-            pending_queue_depth: facts
-                .pending_confirmed
-                .and_then(|value| u64::try_from(value).ok()),
-            recent_error_count: self.recent_error_count.load(Ordering::Acquire).min(99),
-            last_error_reason: facts.last_error_class.map(|class| {
-                let class = error_name(class);
-                facts
-                    .last_error_code
-                    .map_or_else(|| class.to_owned(), |code| format!("{class}:{code}"))
-            }),
-        }
     }
 }
 
@@ -311,7 +291,6 @@ struct SyncWorker {
     last_full_sync: f64,
     last_contact_flush: f64,
     draining_shutdown: bool,
-    last_recovery_generation: u64,
     #[cfg(test)]
     fail_next_pass: bool,
 }
@@ -326,7 +305,6 @@ impl SyncWorker {
         recent_error_count: Arc<AtomicU8>,
     ) -> Self {
         let synced_days = load_synced_days(&config.state_dir());
-        let last_recovery_generation = client.recovery_generation();
         let link_facts = client.link_facts();
         Self {
             config,
@@ -349,7 +327,6 @@ impl SyncWorker {
             last_full_sync: 0.0,
             last_contact_flush: 0.0,
             draining_shutdown: false,
-            last_recovery_generation,
             #[cfg(test)]
             fail_next_pass: false,
         }
@@ -371,8 +348,6 @@ impl SyncWorker {
                 }
                 break;
             }
-            // Registration still establishes the retained keyed event route and stream name,
-            // but v3 ingest is certificate-authenticated and must not wait for it.
             if self.client.is_revoked() {
                 tracing::warn!("Sync refused: observer credential is revoked");
                 continue;
@@ -381,9 +356,6 @@ impl SyncWorker {
             // unpaired notification into a repeated transient-error log or retry loop.
             if !self.client.has_capability() {
                 continue;
-            }
-            if !self.client.is_registered() {
-                let _ = self.client.ensure_registered(&mut self.config).await;
             }
             if self.circuit_open && !self.try_probe().await {
                 continue;
@@ -422,13 +394,8 @@ impl SyncWorker {
             self.clear_progress();
             return false;
         }
-        let generation = self.client.recovery_generation();
-        let skip_cooldown = generation != self.last_recovery_generation;
-        if skip_cooldown {
-            self.last_recovery_generation = generation;
-        }
         let elapsed = self.clock.monotonic_seconds() - self.circuit_open_since;
-        if !skip_cooldown && elapsed < self.circuit_cooldown {
+        if elapsed < self.circuit_cooldown {
             self.set_progress(
                 format!("{:.0}s until probe", self.circuit_cooldown - elapsed),
                 false,
@@ -438,8 +405,6 @@ impl SyncWorker {
         self.set_progress("probing journal...".to_owned(), true);
         // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
         let result = self.client.probe_manifest().await;
-        // Consume a recovery that completed inside this probe so it cannot skip a future breaker.
-        self.last_recovery_generation = self.client.recovery_generation();
         if result.error_type.is_none() {
             self.record_contact(true);
             self.circuit_open = false;
@@ -829,15 +794,6 @@ impl SyncWorker {
     }
 }
 
-fn error_name(error: ErrorType) -> &'static str {
-    match error {
-        ErrorType::Auth => "auth",
-        ErrorType::Client => "client",
-        ErrorType::Transient => "transient",
-        ErrorType::Incompatible => "incompatible",
-    }
-}
-
 fn eligible_files(segment_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(segment_dir)? {
@@ -1078,9 +1034,7 @@ fn remove_if_empty(path: &Path) {
 mod tests {
     use super::*;
     use crate::{
-        private_link::{
-            LinkFactState, ObserverState, publish_observer_registration, start_private_link_session,
-        },
+        private_link::{LinkFactState, start_private_link_session},
         private_link_test_peer::PrivateLinkPeer,
         sync_health::{HealthState, load_facts_with_liveness},
         test_support::{
@@ -1091,20 +1045,6 @@ mod tests {
     };
     use serde_json::{Value, json};
     use tracing::instrument::WithSubscriber;
-
-    #[derive(Clone)]
-    struct Buffer(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Buffer {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     struct FixedClock {
         wall: f64,
@@ -1231,9 +1171,6 @@ mod tests {
         let client = Arc::new(UploadClient::new(
             &config,
             server.capability(),
-            "host",
-            "linux",
-            "test",
             clock.clone(),
         ));
         let worker = SyncWorker::new(
@@ -1249,68 +1186,6 @@ mod tests {
             Arc::new(AtomicU8::new(0)),
         );
         (server, worker)
-    }
-
-    async fn linked_worker(
-        temp: &tempfile::TempDir,
-        peer: &PrivateLinkPeer,
-        clock: Arc<dyn Clock + Send + Sync>,
-        retention: i64,
-    ) -> (crate::private_link::PrivateLinkSession, SyncWorker) {
-        let config = Config {
-            stream: "desktop".to_owned(),
-            sync_retry_delays: vec![0],
-            cache_retention_days: retention,
-            base_dir: temp.path().to_path_buf(),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
-        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
-            .await
-            .unwrap();
-        publish_observer_registration(
-            &session,
-            &ObserverState {
-                credential_instance_id: peer.credential().instance_id,
-                key: "STALE-KEY-FULL".to_owned(),
-                prefix: "prefix".to_owned(),
-                name: "desktop".to_owned(),
-                ingest_url: "/app/devices/ingest".to_owned(),
-                protocol_version: 2,
-            },
-        )
-        .unwrap();
-        let client = Arc::new(UploadClient::new(
-            &config,
-            session.capability(),
-            "host",
-            "linux",
-            "test",
-            clock.clone(),
-        ));
-        let worker = SyncWorker::new(
-            config,
-            client,
-            clock,
-            SyncControl {
-                notify: Arc::new(Notify::new()),
-                pending_trigger: Arc::new(AtomicBool::new(false)),
-                running: Arc::new(AtomicBool::new(true)),
-            },
-            Arc::new(Mutex::new(SyncFacts::default())),
-            Arc::new(AtomicU8::new(0)),
-        );
-        (session, worker)
-    }
-
-    fn registration(key: &str, name: &str) -> Value {
-        json!({
-            "key": key,
-            "name": name,
-            "prefix": "prefix",
-            "ingest_url": "/app/observer/ingest",
-            "protocol_version": 2
-        })
     }
 
     trait RequestLog {
@@ -2076,9 +1951,6 @@ mod tests {
         let server = MockServer::new(vec![]).await;
         let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -2154,9 +2026,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -2258,9 +2127,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::clone(&clock),
         ));
         client.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
@@ -2338,9 +2204,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::clone(&clock),
         ));
         let epoch = ProcessEpoch::for_test(8);
@@ -2429,9 +2292,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::clone(&clock),
         ));
         let service = SyncService::start_with_epoch(
@@ -2508,9 +2368,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::clone(&clock),
         ));
         let service = SyncService::start_with_epoch(
@@ -2714,7 +2571,6 @@ mod tests {
             &temp,
             vec![
                 (401, json!({})),
-                (200, registration("RECOVERED-KEY", "desktop")),
                 (200, json!({"days": {}})),
                 (200, custody(Vec::new())),
                 (200, custody(Vec::new())),
@@ -2744,168 +2600,6 @@ mod tests {
 
     // AC 4/16: listing alone repairs a distinct key and skips the still-active breaker wait once.
     #[tokio::test]
-    async fn recovery_generation_skips_breaker_wait_once_with_empty_event_queue() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        peer.enqueue_response(401, Vec::new());
-        peer.enqueue_response(200, registration("NEW-KEY", "desktop-new").to_string());
-        peer.enqueue_day_custody(DayCustodyFixture::new("20260101", Vec::new()));
-        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
-        let (session, mut worker) = linked_worker(&temp, &peer, clock.clone(), -1).await;
-
-        worker.sync_pass(true).await;
-        assert!(worker.circuit_open);
-        assert_eq!(worker.client.recovery_generation(), 2);
-        assert!(clock.monotonic_seconds() < worker.circuit_open_since + worker.circuit_cooldown);
-        let before = peer.requests().len();
-        assert!(worker.try_probe().await);
-        assert_eq!(peer.requests().len(), before + 1);
-        assert_eq!(clock.monotonic_seconds(), 100.0);
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    // AC 14: positive-control the sync-path record, then prove it contains prefixes but no full key.
-    #[tokio::test]
-    async fn sync_recovery_log_has_name_and_prefixes_without_full_keys() {
-        const STALE: &str = "STALE-KEY-FULL";
-        const NEW: &str = "NEW-KEY-FULL";
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        peer.enqueue_response(401, Vec::new());
-        peer.enqueue_response(200, registration(NEW, "desktop-new").to_string());
-        let clock = Arc::new(FixedClock {
-            wall: 1_800_000_000.0,
-            mono: 100.0,
-        });
-        let (session, mut worker) = linked_worker(&temp, &peer, clock, -1).await;
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let writer = Buffer(Arc::clone(&output));
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        tokio::spawn(async move { worker.sync_pass(true).await }.with_subscriber(subscriber))
-            .await
-            .unwrap();
-        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert!(
-            captured.contains("Journal identity repair completed"),
-            "{captured}"
-        );
-        assert!(captured.contains("desktop-new"), "{captured}");
-        assert!(captured.contains("STALE-KE"), "{captured}");
-        assert!(captured.contains("NEW-KEY-"), "{captured}");
-        assert!(!captured.contains(STALE), "{captured}");
-        assert!(!captured.contains(NEW), "{captured}");
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    // AC 15: twenty sync-path rejections emit exactly one first-rejection warning.
-    #[tokio::test]
-    async fn first_rejection_warning_is_once_per_window() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        peer.enqueue_response(401, Vec::new());
-        peer.enqueue_response(200, registration("STALE-KEY-FULL", "desktop").to_string());
-        for _ in 0..19 {
-            peer.enqueue_response(401, Vec::new());
-        }
-        let clock = Arc::new(FixedClock {
-            wall: 1_800_000_000.0,
-            mono: 100.0,
-        });
-        let (session, worker) = linked_worker(&temp, &peer, clock, -1).await;
-        let client = Arc::clone(&worker.client);
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let writer = Buffer(Arc::clone(&output));
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        tokio::spawn(
-            async move {
-                for _ in 0..20 {
-                    let _ = client.fetch_day_custody("20260101").await;
-                }
-            }
-            .with_subscriber(subscriber),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            peer.requests()
-                .iter()
-                .filter(|request| request.path == "/app/devices/register")
-                .count(),
-            1
-        );
-        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert_eq!(
-            captured
-                .matches("Journal rejected the current key; attempting identity repair")
-                .count(),
-            1,
-            "{captured}"
-        );
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    // AC 15: one sync-path rejection emits exactly one first-rejection warning.
-    #[tokio::test]
-    async fn one_rejection_emits_one_first_rejection_warning() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        peer.enqueue_response(401, Vec::new());
-        peer.enqueue_response(200, registration("STALE-KEY-FULL", "desktop").to_string());
-        let clock = Arc::new(FixedClock {
-            wall: 1_800_000_000.0,
-            mono: 100.0,
-        });
-        let (session, worker) = linked_worker(&temp, &peer, clock, -1).await;
-        let client = Arc::clone(&worker.client);
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let writer = Buffer(Arc::clone(&output));
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        tokio::spawn(
-            async move {
-                let _ = client.fetch_day_custody("20260101").await;
-            }
-            .with_subscriber(subscriber),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            peer.requests()
-                .iter()
-                .filter(|request| request.path == "/app/devices/register")
-                .count(),
-            1
-        );
-        let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert_eq!(
-            captured
-                .matches("Journal rejected the current key; attempting identity repair")
-                .count(),
-            1,
-            "{captured}"
-        );
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    // Named deviation from the legacy breaker AC 2+5:
-    // tests/test_sync.py::test_auth_opens_immediately parity: both statuses open immediately,
-    // but only a revoked 403 is permanent.
-    #[tokio::test]
     async fn auth_opens_immediately_but_only_403_is_permanent() {
         for status in [401, 403] {
             let temp = tempfile::tempdir().unwrap();
@@ -2934,7 +2628,6 @@ mod tests {
                 (200, custody(Vec::new())),
                 (200, custody(Vec::new())),
                 (401, json!({})),
-                (200, registration("RECOVERED-KEY", "desktop")),
                 (200, json!({"days": {}})),
                 (200, custody(Vec::new())),
                 (200, custody(Vec::new())),
@@ -3239,9 +2932,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -3279,9 +2969,6 @@ mod tests {
         .unwrap();
         let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -3430,18 +3117,6 @@ mod tests {
         let session = start_private_link_session(&config.config_dir, peer.credential(), "host")
             .await
             .unwrap();
-        publish_observer_registration(
-            &session,
-            &ObserverState {
-                credential_instance_id: peer.credential().instance_id,
-                key: "K".to_owned(),
-                prefix: "prefix".into(),
-                name: "host".into(),
-                ingest_url: "/app/devices/ingest".into(),
-                protocol_version: 2,
-            },
-        )
-        .unwrap();
         let clock = Arc::new(FixedClock {
             wall: 1_800_000_000.0,
             mono: 100.0,
@@ -3449,9 +3124,6 @@ mod tests {
         let client = Arc::new(UploadClient::new(
             &config,
             session.capability(),
-            "host",
-            "linux",
-            "test",
             clock.clone(),
         ));
         let mut worker = SyncWorker::new(
@@ -3497,18 +3169,6 @@ mod tests {
         let session = start_private_link_session(&config.config_dir, peer.credential(), "host")
             .await
             .unwrap();
-        publish_observer_registration(
-            &session,
-            &ObserverState {
-                credential_instance_id: peer.credential().instance_id,
-                key: "K".to_owned(),
-                prefix: "prefix".into(),
-                name: "host".into(),
-                ingest_url: "/app/devices/ingest".into(),
-                protocol_version: 2,
-            },
-        )
-        .unwrap();
         let clock = Arc::new(FixedClock {
             wall: 1_800_000_000.0,
             mono: 100.0,
@@ -3516,9 +3176,6 @@ mod tests {
         let client = Arc::new(UploadClient::new(
             &config,
             session.capability(),
-            "host",
-            "linux",
-            "test",
             clock.clone(),
         ));
         let mut worker = SyncWorker::new(
@@ -3856,64 +3513,9 @@ mod tests {
         assert!(!old.exists());
     }
 
-    // AC: beacon fields clamp, truncate, and format error reasons.
+    // Negative pending values persist unchanged.
     #[tokio::test]
-    async fn health_beacon_converts_all_fields() {
-        let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![]).await;
-        let config = Config {
-            base_dir: temp.path().to_path_buf(),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
-        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
-            &config,
-            &server.url,
-            "host",
-            "linux",
-            "test",
-            Arc::new(FixedClock {
-                wall: 0.0,
-                mono: 0.0,
-            }),
-        ));
-        let service = SyncService::start(
-            config,
-            client,
-            Arc::new(FixedClock {
-                wall: 1_800_000_000.0,
-                mono: 0.0,
-            }),
-        );
-        *service.facts.lock().unwrap() = SyncFacts {
-            last_successful_sync: Some(100.9),
-            pending_confirmed: Some(7),
-            last_error_class: Some(ErrorType::Incompatible),
-            last_error_code: Some(404),
-            ..SyncFacts::default()
-        };
-        service.recent_error_count.store(120, Ordering::Release);
-        let beacon = service.health_beacon();
-        assert_eq!(beacon.last_successful_sync, Some(100));
-        assert_eq!(beacon.pending_queue_depth, Some(7));
-        assert_eq!(beacon.recent_error_count, 99);
-        assert_eq!(
-            beacon.last_error_reason.as_deref(),
-            Some("incompatible:404")
-        );
-        service.facts.lock().unwrap().last_error_code = None;
-        assert_eq!(
-            service.health_beacon().last_error_reason.as_deref(),
-            Some("incompatible")
-        );
-        service.facts.lock().unwrap().last_error_class = None;
-        assert_eq!(service.health_beacon().last_error_reason, None);
-        service.shutdown(Duration::from_secs(1)).await.unwrap();
-    }
-
-    // AC: negative pending values persist but never enter the unsigned beacon.
-    #[tokio::test]
-    async fn negative_pending_round_trips_but_beacon_is_none() {
+    async fn negative_pending_round_trips() {
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
             base_dir: temp.path().to_path_buf(),
@@ -3926,26 +3528,6 @@ mod tests {
         };
         save_facts(&config.state_dir(), &facts).unwrap();
         assert_eq!(load_facts(&config.state_dir()).pending_confirmed, Some(-5));
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
-            &config,
-            "host",
-            "linux",
-            "test",
-            Arc::new(FixedClock {
-                wall: 0.0,
-                mono: 0.0,
-            }),
-        ));
-        let service = SyncService::start(
-            config,
-            client,
-            Arc::new(FixedClock {
-                wall: 1.0,
-                mono: 0.0,
-            }),
-        );
-        assert_eq!(service.health_beacon().pending_queue_depth, None);
-        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // AC: a completion notification starts a pass.
@@ -3961,9 +3543,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -3996,9 +3575,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -4050,9 +3626,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -4109,9 +3682,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -4156,9 +3726,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -4249,9 +3816,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -4273,73 +3837,8 @@ mod tests {
         assert!(server.requests().len() >= 5);
     }
 
-    // AC7: an unregistered worker retries once and falls through to sync on success.
     #[tokio::test]
-    async fn unregistered_worker_retries_registration_and_syncs_on_success() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        peer.enqueue_response(200, registration("REGISTERED-KEY", "desktop").to_string());
-        peer.enqueue_day_custody(DayCustodyFixture::new("20260101", Vec::new()));
-        let config = Config {
-            stream: "desktop".to_owned(),
-            base_dir: temp.path().join("data"),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
-        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
-            .await
-            .unwrap();
-        let client = Arc::new(UploadClient::new(
-            &config,
-            session.capability(),
-            "host",
-            "linux",
-            "test",
-            Arc::new(FixedClock {
-                wall: 1_800_000_000.0,
-                mono: 100.0,
-            }),
-        ));
-        let notify = Arc::new(Notify::new());
-        let running = Arc::new(AtomicBool::new(true));
-        let mut worker = SyncWorker::new(
-            config,
-            client.clone(),
-            Arc::new(FixedClock {
-                wall: 1_800_000_000.0,
-                mono: 100.0,
-            }),
-            SyncControl {
-                notify: notify.clone(),
-                pending_trigger: Arc::new(AtomicBool::new(false)),
-                running: running.clone(),
-            },
-            Arc::new(Mutex::new(SyncFacts::default())),
-            Arc::new(AtomicU8::new(0)),
-        );
-        let task = tokio::spawn(async move { worker.run().await });
-        notify.notify_one();
-        let _ = tokio::time::timeout(Duration::from_secs(1), peer.wait_for_requests(2)).await;
-        assert_eq!(
-            peer.requests().len(),
-            2,
-            "registration and same-tick sync requests: registered={}, paths={:?}",
-            client.is_registered(),
-            peer.requests()
-                .iter()
-                .map(|request| &request.path)
-                .collect::<Vec<_>>()
-        );
-        assert!(client.is_registered());
-        running.store(false, Ordering::Release);
-        notify.notify_one();
-        task.await.unwrap();
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn revoked_worker_never_attempts_registration() {
+    async fn revoked_worker_makes_no_requests() {
         let temp = tempfile::tempdir().unwrap();
         let peer = PrivateLinkPeer::start().await;
         let config = Config {
@@ -4354,9 +3853,6 @@ mod tests {
         let client = Arc::new(UploadClient::new(
             &config,
             session.capability(),
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 1_800_000_000.0,
                 mono: 0.0,
@@ -4380,14 +3876,7 @@ mod tests {
             Arc::new(Mutex::new(SyncFacts::default())),
             Arc::new(AtomicU8::new(0)),
         );
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let writer = Buffer(output.clone());
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let task = tokio::spawn(async move { worker.run().await }.with_subscriber(subscriber));
+        let task = tokio::spawn(async move { worker.run().await });
         notify.notify_one();
         for _ in 0..100 {
             tokio::task::yield_now().await;
@@ -4395,100 +3884,11 @@ mod tests {
         running.store(false, Ordering::Release);
         notify.notify_one();
         task.await.unwrap();
-        assert_eq!(peer.requests().len(), 0, "revoked registration requests");
-        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert_eq!(output.matches("Sync refused").count(), 1);
+        assert!(peer.requests().is_empty());
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn unregistered_worker_registration_retry_respects_cooldown() {
-        let temp = tempfile::tempdir().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        peer.enqueue_response(503, Vec::new());
-        peer.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
-        peer.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
-        peer.enqueue_response(200, registration("REGISTERED-KEY", "desktop").to_string());
-        peer.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
-        let config = Config {
-            stream: "desktop".to_owned(),
-            base_dir: temp.path().join("data"),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
-        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
-            .await
-            .unwrap();
-        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
-        let client = Arc::new(UploadClient::new(
-            &config,
-            session.capability(),
-            "host",
-            "linux",
-            "test",
-            clock.clone(),
-        ));
-        let client_for_test = Arc::clone(&client);
-        let notify = Arc::new(Notify::new());
-        let running = Arc::new(AtomicBool::new(true));
-        let mut worker = SyncWorker::new(
-            config,
-            client,
-            clock.clone(),
-            SyncControl {
-                notify: notify.clone(),
-                pending_trigger: Arc::new(AtomicBool::new(false)),
-                running: running.clone(),
-            },
-            Arc::new(Mutex::new(SyncFacts::default())),
-            Arc::new(AtomicU8::new(0)),
-        );
-        let task = tokio::spawn(async move { worker.run().await });
-        notify.notify_one();
-        peer.wait_for_requests(4).await;
-        assert_eq!(
-            peer.requests()
-                .iter()
-                .filter(|request| request.path == "/app/devices/register")
-                .count(),
-            1,
-            "first registration request"
-        );
-        assert_eq!(client_for_test.last_recovery_attempt_for_test(), Some(0.0));
-
-        clock.set_mono(60.0);
-        notify.notify_one();
-        peer.wait_for_requests(7).await;
-        assert_eq!(
-            peer.requests()
-                .iter()
-                .filter(|request| request.path == "/app/devices/register")
-                .count(),
-            1,
-            "registration requests during cooldown"
-        );
-        assert_eq!(client_for_test.last_recovery_attempt_for_test(), Some(0.0));
-
-        clock.set_mono(300.0);
-        notify.notify_one();
-        peer.wait_for_requests(8).await;
-        assert_eq!(
-            peer.requests()
-                .iter()
-                .filter(|request| request.path == "/app/devices/register")
-                .count(),
-            2,
-            "registration requests after cooldown"
-        );
-        running.store(false, Ordering::Release);
-        notify.notify_one();
-        task.await.unwrap();
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    // AC: an unpaired worker has no transport, performs no HTTP, and only runs when notified.
     #[tokio::test]
     async fn unpaired_worker_does_not_busy_loop_or_emit_refusal_noise() {
         #[derive(Clone)]
@@ -4507,9 +3907,6 @@ mod tests {
         let config = worker.config.clone();
         worker.client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
@@ -4570,9 +3967,6 @@ mod tests {
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
-            "host",
-            "linux",
-            "test",
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,

@@ -10,9 +10,9 @@ use crate::{
     encoding::{AudioOutputPlan, audio_output_plan},
     recovery::{SegmentProgress, scan_segment_progress, write_segment_metadata},
     segment::{clamp_duration, finalize_segment_dir, segment_key, timestamp_parts},
-    streams::is_healthy_file_size,
 };
-use serde_json::{Map, Value, json};
+#[cfg(test)]
+use serde_json::Value;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -130,41 +130,11 @@ impl CaptureStatsSource for BackgroundCaptureStats {
         }
     }
 }
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct HealthBeacon {
-    pub last_successful_sync: Option<i64>,
-    pub pending_queue_depth: Option<u64>,
-    pub recent_error_count: u8,
-    pub last_error_reason: Option<String>,
-}
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Registration {
-    pub is_registered: bool,
-    pub version: String,
-    pub health: HealthBeacon,
-}
-
-pub const EMPTY_WINDOW_REASON: &str = "empty_window";
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct StreamSilentEvent {
-    pub connector: String,
-    pub position: String,
-    pub node_id: u32,
-    pub file_bytes: u64,
-    pub segment_dir: String,
-    pub duration_seconds: i64,
-    pub host: String,
-    pub platform: String,
-    pub reason: Option<&'static str>,
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentCompletedEvent {
     pub key: String,
 }
 pub trait EventSink {
-    fn status(&mut self, fields: Map<String, Value>);
-    fn stream_silent(&mut self, event: StreamSilentEvent);
     fn segment_completed(&mut self, event: SegmentCompletedEvent);
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -240,7 +210,6 @@ pub struct ObserverState {
     pub current_streams: Vec<VideoStream>,
     // Survives stop_video: the watchdog must not look like "video never started".
     pub video_started: bool,
-    pub empty_window_signalled: bool,
     pub hit_gate: HitGate,
     pub frames: Vec<f32>,
     pub capture_stats: CaptureStats,
@@ -251,9 +220,6 @@ pub struct Observer<V, A, P, M, W, E, C, Q, N> {
     pub config: Config,
     pub state: ObserverState,
     pub backends: Backends<V, A, P, M, W, E, C, Q, N>,
-    pub registration: Registration,
-    pub host: String,
-    pub platform: String,
 }
 
 impl<V, A, P, M, W, E, C, Q, N> Observer<V, A, P, M, W, E, C, Q, N>
@@ -268,21 +234,13 @@ where
     Q: CaptureStatsSource,
     N: StateSink,
 {
-    pub fn new(
-        config: Config,
-        backends: Backends<V, A, P, M, W, E, C, Q, N>,
-        host: String,
-        platform: String,
-    ) -> Self {
+    pub fn new(config: Config, backends: Backends<V, A, P, M, W, E, C, Q, N>) -> Self {
         let wall = backends.clock.wall_seconds();
         let mono = backends.clock.monotonic_seconds();
         let paused = config.start_paused;
         Self {
             config,
             backends,
-            registration: Registration::default(),
-            host,
-            platform,
             state: ObserverState {
                 mode: Mode::Idle,
                 paused,
@@ -297,7 +255,6 @@ where
                 cached_activity: ActivityState::default(),
                 current_streams: vec![],
                 video_started: false,
-                empty_window_signalled: false,
                 hit_gate: HitGate::default(),
                 frames: vec![],
                 capture_stats: CaptureStats {
@@ -351,7 +308,6 @@ where
         if self.state.paused {
             self.finish_paused_segment()?;
             let _ = self.backends.audio.drain();
-            self.emit_status();
             self.publish();
             return Ok(());
         }
@@ -368,7 +324,6 @@ where
                 Err(error) => return Err(error),
                 Ok(()) => {}
             }
-            self.emit_status();
             self.publish();
             return Ok(());
         }
@@ -402,7 +357,6 @@ where
         if elapsed >= self.config.segment_interval as f64 || screen_transition || mute_transition {
             self.handle_boundary(target)?;
         }
-        self.emit_status();
         self.publish();
         Ok(())
     }
@@ -414,27 +368,6 @@ where
         self.write_gated_audio()?;
         self.state.frames.clear();
         self.state.hit_gate = HitGate::default();
-        // shutdown and finish_paused_segment deliberately do not signal empty_window.
-        if let Some(dir) = self.state.segment_dir.as_ref() {
-            let (has_media, _) = scan_segment_progress(dir);
-            if has_media {
-                self.state.empty_window_signalled = false;
-            } else if !self.state.video_started && !self.state.empty_window_signalled {
-                // !video_started keeps the watchdog path from double-counting: x11/portal
-                // unlink header-only webms inside stop() before emit_silent, so emptiness
-                // alone is not sufficient.
-                self.emit_silent(
-                    StoppedStream {
-                        node_id: 0,
-                        connector: String::new(),
-                        position: String::new(),
-                        file_bytes: 0,
-                    },
-                    Some(EMPTY_WINDOW_REASON),
-                );
-                self.state.empty_window_signalled = true;
-            }
-        }
         self.finalize_segment()?;
         self.state.segment_is_muted = self.state.cached_is_muted;
         self.state.mode = target;
@@ -538,42 +471,13 @@ where
         Ok(())
     }
     fn stop_video(&mut self) -> Result<(), ObserverError> {
-        let stopped = self
+        let _ = self
             .backends
             .video
             .stop()
             .map_err(ObserverError::VideoStop)?;
         self.state.current_streams.clear();
-        for s in stopped
-            .into_iter()
-            .filter(|s| !is_healthy_file_size(Some(s.file_bytes)))
-        {
-            self.emit_silent(s, None)
-        }
         Ok(())
-    }
-    fn emit_silent(&mut self, s: StoppedStream, reason: Option<&'static str>) {
-        let segment_dir = self
-            .state
-            .segment_dir
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|x| x.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        // Deliberate reference parity: silent duration is unclamped and may be negative after a wall-clock jump.
-        let duration_seconds =
-            (self.backends.clock.wall_seconds() - self.state.segment_start_wall) as i64;
-        self.backends.events.stream_silent(StreamSilentEvent {
-            connector: s.connector,
-            position: s.position,
-            node_id: s.node_id,
-            file_bytes: s.file_bytes,
-            segment_dir,
-            duration_seconds,
-            host: self.host.clone(),
-            platform: self.platform.clone(),
-            reason,
-        });
     }
     fn refresh_stats(&mut self) {
         let (today, _) = timestamp_parts(self.backends.clock.wall_seconds());
@@ -592,72 +496,6 @@ where
         self.state.cached_is_active =
             target == Mode::Screencast || self.state.hit_gate.should_save();
         Ok(target)
-    }
-    fn emit_status(&mut self) {
-        let hits = self.state.hit_gate.hits();
-        let elapsed =
-            (self.backends.clock.monotonic_seconds() - self.state.segment_start_mono) as i64;
-        let mut m = Map::new();
-        m.insert(
-            "mode".into(),
-            json!(match self.state.mode {
-                Mode::Idle => "idle",
-                Mode::Screencast => "screencast",
-            }),
-        );
-        let screencast =
-            if self.state.mode == Mode::Screencast && !self.state.current_streams.is_empty() {
-                let streams: Vec<_> = self
-                    .state
-                    .current_streams
-                    .iter()
-                    .map(|stream| {
-                        json!({
-                            "position": stream.position,
-                            "connector": stream.connector,
-                            "file": stream.file_path,
-                        })
-                    })
-                    .collect();
-                json!({"recording": true, "streams": streams, "window_elapsed_seconds": elapsed})
-            } else {
-                json!({"recording": false})
-            };
-        m.insert("screencast".into(), screencast);
-        m.insert(
-            "audio".into(),
-            json!({
-                "threshold_hits": hits,
-                "will_save": self.state.hit_gate.should_save(),
-                "available": self.backends.audio.audio_available(),
-            }),
-        );
-        m.insert(
-            "activity".into(),
-            json!({
-                "active": self.state.cached_is_active,
-                "screen_locked": self.state.cached_activity.screen_locked,
-                "sink_muted": self.state.cached_is_muted,
-                "power_save": self.state.cached_activity.power_save,
-                "user_idle": self.state.cached_activity.user_idle,
-            }),
-        );
-        m.insert("host".into(), json!(self.host));
-        m.insert("platform".into(), json!(self.platform));
-        m.insert("paused".into(), json!(self.state.paused));
-        if self.registration.is_registered && !self.config.stream.is_empty() {
-            m.insert("name".into(), json!(self.config.stream));
-            m.insert("stream_type".into(), json!("desktop"));
-            m.insert("version".into(), json!(self.registration.version));
-            // Deliberate reference parity: uptime is segment elapsed, not process uptime.
-            m.insert("uptime".into(), json!(elapsed));
-            let h = &self.registration.health;
-            m.insert("last_successful_sync".into(), json!(h.last_successful_sync));
-            m.insert("pending_queue_depth".into(), json!(h.pending_queue_depth));
-            m.insert("recent_error_count".into(), json!(h.recent_error_count));
-            m.insert("last_error_reason".into(), json!(h.last_error_reason));
-        }
-        self.backends.events.status(m)
     }
     fn publish(&mut self) {
         self.backends.states.publish(StateSnapshot {
@@ -858,22 +696,10 @@ pub(crate) mod tests {
     }
     #[derive(Clone, Default)]
     struct Events {
-        statuses: Rc<RefCell<Vec<Map<String, Value>>>>,
-        silent: Rc<RefCell<Vec<StreamSilentEvent>>>,
         completed: Rc<RefCell<Vec<SegmentCompletedEvent>>>,
-        order: Rc<RefCell<Vec<&'static str>>>,
     }
     impl EventSink for Events {
-        fn status(&mut self, v: Map<String, Value>) {
-            self.order.borrow_mut().push("status");
-            self.statuses.borrow_mut().push(v)
-        }
-        fn stream_silent(&mut self, v: StreamSilentEvent) {
-            self.order.borrow_mut().push("silent");
-            self.silent.borrow_mut().push(v)
-        }
         fn segment_completed(&mut self, v: SegmentCompletedEvent) {
-            self.order.borrow_mut().push("completed");
             self.completed.borrow_mut().push(v)
         }
     }
@@ -1009,7 +835,7 @@ pub(crate) mod tests {
         };
         Fixture {
             _temp: temp,
-            observer: Observer::new(config, backends, "host".into(), "linux".into()),
+            observer: Observer::new(config, backends),
             wall,
             mono,
             wall_step,
@@ -1070,17 +896,15 @@ pub(crate) mod tests {
         f.observer.tick().unwrap();
         assert_eq!(f.events.completed.borrow().len(), 1)
     }
-    // No 1:1 Python ancestor: AC2 interval+mute witness; observer.py:712-733 agrees boundary precedes one status.
+    // No 1:1 Python ancestor: AC2 interval+mute witness.
     #[test]
-    fn interval_and_mute_flip_rotate_once_then_status() {
+    fn interval_and_mute_flip_rotate_once() {
         let mut f = fixture(false);
         initialize(&mut f);
         f.mono.set(300.0);
         f.observer.backends.mute.0.push_back(Ok(true));
         f.observer.tick().unwrap();
         assert_eq!(f.events.completed.borrow().len(), 1);
-        assert_eq!(f.events.statuses.borrow().len(), 1);
-        assert_eq!(&*f.events.order.borrow(), &["completed", "status"])
     }
     // tests/test_observer.py::test_start_paused_false_starts_capture
     // No 1:1 Python ancestor: AC2 screencast entry and exit triggers.
@@ -1247,40 +1071,6 @@ pub(crate) mod tests {
 
         assert_eq!(notifier.0.load(std::sync::atomic::Ordering::Acquire), 4);
     }
-    // tests/test_observer_emits_stream_silent_event.py::test_emits_with_full_fields
-    #[test]
-    fn stop_path_uses_file_threshold_and_enriches_silent_event() {
-        let mut f = fixture(false);
-        initialize(&mut f);
-        f.observer.backends.video.stopped = vec![
-            StoppedStream {
-                node_id: 1,
-                connector: "x".into(),
-                position: "left".into(),
-                file_bytes: 2047,
-            },
-            StoppedStream {
-                node_id: 2,
-                connector: "y".into(),
-                position: "right".into(),
-                file_bytes: 2048,
-            },
-        ];
-        f.wall.set(f.wall.get() + 400.0);
-        f.observer.handle_boundary(Mode::Idle).unwrap();
-        let s = f.events.silent.borrow();
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].connector, "x");
-        assert_eq!(s[0].position, "left");
-        assert_eq!(s[0].node_id, 1);
-        assert_eq!(s[0].file_bytes, 2047);
-        assert!(s[0].segment_dir.ends_with(".incomplete"));
-        assert_eq!(s[0].duration_seconds, 400);
-        assert_eq!(
-            (&s[0].host, &s[0].platform),
-            (&"host".into(), &"linux".into())
-        )
-    }
     // No 1:1 Python ancestor: startup activity failure defaults to screencast.
     #[test]
     fn startup_activity_failure_defaults_screencast_and_start_failure_is_fatal() {
@@ -1444,111 +1234,6 @@ pub(crate) mod tests {
         );
         assert_eq!(code, 1);
         assert!(cleaned.get());
-    }
-    // tests/test_observer_health_beacon.py::test_registered_first_emit_includes_all_health_fields_top_level
-    // tests/test_observer_health_beacon.py::test_periodic_reemit_carries_same_health_fields
-    // tests/test_observer_health_beacon.py::test_health_fields_exclude_captured_content_and_extra_health_keys
-    #[test]
-    fn registered_status_has_exact_flat_health_set() {
-        let mut f = fixture(false);
-        initialize(&mut f);
-        f.observer.registration = Registration {
-            is_registered: true,
-            version: "1".into(),
-            health: HealthBeacon::default(),
-        };
-        f.observer.tick().unwrap();
-        let s = f.events.statuses.borrow();
-        let keys: std::collections::BTreeSet<_> =
-            s.last().unwrap().keys().map(String::as_str).collect();
-        let base = std::collections::BTreeSet::from([
-            "mode",
-            "screencast",
-            "audio",
-            "activity",
-            "host",
-            "platform",
-            "paused",
-        ]);
-        let health = std::collections::BTreeSet::from([
-            "name",
-            "stream_type",
-            "version",
-            "uptime",
-            "last_successful_sync",
-            "pending_queue_depth",
-            "recent_error_count",
-            "last_error_reason",
-        ]);
-        assert_eq!(
-            keys.difference(&base)
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>(),
-            health
-        );
-        assert!(!keys.contains("health"));
-        let status = s.last().unwrap();
-        assert_eq!(status["name"], "desk");
-        assert_eq!(status["stream_type"], "desktop");
-        assert_eq!(status["version"], "1");
-        assert!(status["uptime"].is_i64());
-        assert_eq!(status["screencast"]["recording"], true);
-        assert_eq!(status["screencast"]["streams"][0]["connector"], "HDMI-1");
-        assert_eq!(status["screencast"]["streams"][0]["position"], "left");
-        assert_eq!(status["screencast"]["streams"][0]["file"], "screen.webm");
-        assert!(status["screencast"]["window_elapsed_seconds"].is_i64());
-        assert!(status["last_successful_sync"].is_null());
-        assert_eq!(status["recent_error_count"], 0)
-    }
-    // tests/test_observer.py::test_emit_status_audio_available_reflects_recorder
-    // tests/test_observer_health_beacon.py::test_unregistered_observer_emits_base_status_without_health_fields
-    // tests/test_observer_health_beacon.py::test_status_includes_paused_state
-    #[test]
-    fn status_every_tick_including_paused_and_resume_and_active_uses_stale_hits() {
-        let mut f = fixture(false);
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        initialize(&mut f);
-        for _ in 0..3 {
-            f.observer.backends.activity.0.push_back(Ok(idle()));
-            f.observer.backends.audio.chunks.push_back(chunk(0.02));
-            f.observer.tick().unwrap()
-        }
-        let s = f.events.statuses.borrow();
-        assert_eq!(s[2]["activity"]["active"], false);
-        drop(s);
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.observer.backends.audio.available = false;
-        f.observer.tick().unwrap();
-        let s = f.events.statuses.borrow();
-        assert_eq!(s[3]["activity"]["active"], true);
-        assert_eq!(s[3]["audio"]["available"], false);
-        drop(s);
-        f.observer.pause(0);
-        f.observer.tick().unwrap();
-        assert_eq!(f.events.statuses.borrow().last().unwrap()["paused"], true);
-        f.observer.resume();
-        f.observer.tick().unwrap();
-        assert_eq!(f.events.statuses.borrow().last().unwrap()["paused"], false);
-        assert_eq!(f.events.statuses.borrow().len(), 6)
-    }
-    // tests/test_observer_emits_stream_silent_event.py::test_segment_dir_empty_when_none
-    #[test]
-    fn silent_without_segment_has_empty_name_and_unclamped_negative_duration() {
-        let mut f = fixture(true);
-        initialize(&mut f);
-        f.wall.set(f.wall.get() - 10.0);
-        f.observer.emit_silent(
-            StoppedStream {
-                node_id: 1,
-                connector: "x".into(),
-                position: "p".into(),
-                file_bytes: 1,
-            },
-            None,
-        );
-        let s = f.events.silent.borrow();
-        assert_eq!(s[0].segment_dir, "");
-        assert_eq!(s[0].duration_seconds, -10)
     }
     // tests/test_observer.py::test_degraded_segment_finalizes_with_video_only; AC10/13.
     #[test]
@@ -1815,104 +1500,9 @@ pub(crate) mod tests {
         );
     }
 
-    // AC6: empty-window latch across consecutive empty rotations and a media reset.
+    // AC8: Idle→Idle boundary that keeps planted media completes.
     #[test]
-    fn empty_window_latch_across_rotations() {
-        let mut f = fixture(false);
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        initialize(&mut f);
-        let first = f.observer.state.segment_dir.clone().unwrap();
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.wall.set(1_700_000_001.0);
-        f.mono.set(300.0);
-        f.observer.tick().unwrap();
-        assert!(!first.exists());
-        {
-            let silent = f.events.silent.borrow();
-            assert_eq!(silent.len(), 1);
-            assert_eq!(silent[0].reason, Some(EMPTY_WINDOW_REASON));
-            assert_eq!(silent[0].connector, "");
-            assert_eq!(silent[0].position, "");
-            assert_eq!(silent[0].node_id, 0);
-            assert_eq!(silent[0].file_bytes, 0);
-            assert!(silent[0].segment_dir.ends_with(".incomplete"));
-            assert_eq!(silent[0].duration_seconds, 1);
-            assert_eq!(silent[0].host, "host");
-            assert_eq!(silent[0].platform, "linux");
-        }
-        assert!(f.events.completed.borrow().is_empty());
-
-        let second = f.observer.state.segment_dir.clone().unwrap();
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.wall.set(1_700_000_002.0);
-        f.mono.set(600.0);
-        f.observer.tick().unwrap();
-        assert!(!second.exists());
-        assert_eq!(f.events.silent.borrow().len(), 1);
-        assert!(f.events.completed.borrow().is_empty());
-
-        let media = f.observer.state.segment_dir.clone().unwrap();
-        fs::write(media.join("kept.bin"), b"keep").unwrap();
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.wall.set(1_700_000_003.0);
-        f.mono.set(900.0);
-        f.observer.tick().unwrap();
-        assert_eq!(f.events.silent.borrow().len(), 1);
-        assert_eq!(f.events.completed.borrow().len(), 1);
-        assert!(!f.observer.state.empty_window_signalled);
-
-        let fourth = f.observer.state.segment_dir.clone().unwrap();
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.wall.set(1_700_000_004.0);
-        f.mono.set(1_200.0);
-        f.observer.tick().unwrap();
-        assert!(!fourth.exists());
-        assert_eq!(f.events.silent.borrow().len(), 2);
-        assert_eq!(
-            f.events.silent.borrow()[1].reason,
-            Some(EMPTY_WINDOW_REASON)
-        );
-        assert_eq!(f.events.completed.borrow().len(), 1);
-    }
-
-    // AC7: unhealthy silent is unchanged and is not joined by empty_window.
-    #[test]
-    fn unhealthy_silent_is_not_empty_window() {
-        let mut f = fixture(false);
-        initialize(&mut f);
-        f.observer.backends.video.stopped = vec![
-            StoppedStream {
-                node_id: 1,
-                connector: "x".into(),
-                position: "left".into(),
-                file_bytes: 2047,
-            },
-            StoppedStream {
-                node_id: 2,
-                connector: "y".into(),
-                position: "right".into(),
-                file_bytes: 2048,
-            },
-        ];
-        f.wall.set(f.wall.get() + 400.0);
-        f.observer.handle_boundary(Mode::Idle).unwrap();
-        let silent = f.events.silent.borrow();
-        assert_eq!(silent.len(), 1);
-        assert_eq!(silent[0].connector, "x");
-        assert_eq!(silent[0].position, "left");
-        assert_eq!(silent[0].node_id, 1);
-        assert_eq!(silent[0].file_bytes, 2047);
-        assert!(silent[0].reason.is_none());
-        assert!(
-            silent
-                .iter()
-                .all(|event| event.reason != Some(EMPTY_WINDOW_REASON))
-        );
-    }
-
-    // AC8: Idle→Idle boundary that keeps planted media completes and does not signal empty_window.
-    #[test]
-    fn idle_boundary_with_media_completes_without_empty_window() {
+    fn idle_boundary_with_media_completes() {
         let mut f = fixture(false);
         f.observer.backends.activity.0.push_back(Ok(idle()));
         initialize(&mut f);
@@ -1929,32 +1519,6 @@ pub(crate) mod tests {
         f.observer.backends.activity.0.push_back(Ok(idle()));
         f.mono.set(300.0);
         f.observer.tick().unwrap();
-        assert!(f.events.silent.borrow().is_empty());
         assert_eq!(f.events.completed.borrow().len(), 1);
-    }
-
-    // Watchdog already emitted (or would have) via stop_video; video_started blocks empty_window.
-    #[test]
-    fn watchdog_stop_does_not_also_emit_empty_window() {
-        let mut f = fixture(false);
-        initialize(&mut f);
-        fs::remove_file(
-            f.observer
-                .state
-                .segment_dir
-                .as_ref()
-                .unwrap()
-                .join("screen.webm"),
-        )
-        .unwrap();
-        f.observer.backends.video.healthy = false;
-        f.observer.tick().unwrap();
-        assert!(
-            f.events
-                .silent
-                .borrow()
-                .iter()
-                .all(|event| event.reason != Some(EMPTY_WINDOW_REASON))
-        );
     }
 }

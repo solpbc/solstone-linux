@@ -3,7 +3,7 @@
 
 use crate::{
     config::Config,
-    private_link::{PrivateLinkOwner, start_registered_private_link_for_test},
+    private_link::{PrivateLinkOwner, start_private_link_for_test},
     private_link_test_peer::PrivateLinkPeer,
     upload::UploadClient,
 };
@@ -487,9 +487,6 @@ fn client(config: &Config, capability: crate::private_link::PrivateLinkCapabilit
     UploadClient::new(
         config,
         capability,
-        "archon",
-        "linux",
-        "1.4.0",
         std::sync::Arc::new(crate::test_support::MutableClock::new(0.0, 0.0)),
     )
 }
@@ -503,13 +500,7 @@ struct LinkedHarness {
 impl LinkedHarness {
     async fn start(temp: &TempDir) -> Self {
         let peer = PrivateLinkPeer::start().await;
-        let (_state, owner) = start_registered_private_link_for_test(
-            peer.credential(),
-            "desktop",
-            "K",
-            "/app/devices/ingest",
-        )
-        .await;
+        let (_state, owner) = start_private_link_for_test(peer.credential(), "desktop").await;
         let client = client(&config(temp), owner.capability());
         Self {
             peer,

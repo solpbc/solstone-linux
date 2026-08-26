@@ -586,13 +586,7 @@ fn cmd_run(interval: Option<i64>) -> i32 {
         }
         return 1;
     }
-    crate::run::run_observer(
-        config,
-        hostname().unwrap_or_else(|_| "linux".into()),
-        state_lock,
-        transport_enabled,
-        process_epoch,
-    )
+    crate::run::run_observer(config, state_lock, transport_enabled, process_epoch)
 }
 
 fn run_preparation_error_guidance(error: &PrivateStateError) -> &'static str {
@@ -659,7 +653,6 @@ pub(crate) fn prepare_run_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::upload::key_prefix;
     use clap::CommandFactory;
     use std::{
         cell::Cell,
@@ -1333,11 +1326,5 @@ mod tests {
         ] {
             assert!(!out.contains(sentinel));
         }
-    }
-
-    // AC: key truncation counts characters rather than UTF-8 bytes.
-    #[test]
-    fn status_key_prefix_is_character_based() {
-        assert_eq!(key_prefix("ééééééééé"), "éééééééé");
     }
 }

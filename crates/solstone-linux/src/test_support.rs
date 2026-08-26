@@ -3,10 +3,7 @@
 
 use crate::{
     observer::Clock,
-    private_link::{
-        ObserverState, PrivateLinkCapability, PrivateLinkSession, publish_observer_registration,
-        start_private_link_session,
-    },
+    private_link::{PrivateLinkCapability, PrivateLinkSession, start_private_link_session},
     private_link_test_peer::PrivateLinkPeer,
 };
 use http_body_util::{BodyExt, Full};
@@ -327,18 +324,6 @@ impl LinkedMockServer {
             "desktop",
         )
         .await
-        .unwrap();
-        publish_observer_registration(
-            &session,
-            &ObserverState {
-                credential_instance_id: peer.credential().instance_id,
-                key: "K".to_owned(),
-                prefix: "prefix".to_owned(),
-                name: "desktop".to_owned(),
-                ingest_url: "/app/devices/ingest".to_owned(),
-                protocol_version: 2,
-            },
-        )
         .unwrap();
         Self { peer, session }
     }

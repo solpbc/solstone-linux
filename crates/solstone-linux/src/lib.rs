@@ -12,7 +12,6 @@ pub mod dbus_service;
 pub mod desktop_component;
 pub mod doctor;
 pub mod encoding;
-pub mod event_sender;
 pub mod matching;
 pub mod observer;
 pub mod pipeline;
