@@ -352,7 +352,7 @@ impl SyncWorker {
                 tracing::warn!("Sync refused: observer credential is revoked");
                 continue;
             }
-            // Pairing, unlike registration, is a hard transport prerequisite. Do not turn an
+            // Pairing is a hard transport prerequisite. Do not turn an
             // unpaired notification into a repeated transient-error log or retry loop.
             if !self.client.has_capability() {
                 continue;
@@ -2561,8 +2561,7 @@ mod tests {
         );
     }
 
-    // Legacy breaker criterion: a listing 401 opens a recoverable breaker and a later probe
-    // resumes segment upload; this does not exercise stale-key repair.
+    // A listing 401 opens a recoverable breaker; a later probe after cooldown resumes upload.
     #[tokio::test]
     async fn listing_401_opens_breaker_and_later_probe_resumes_upload() {
         let temp = tempfile::tempdir().unwrap();
@@ -2598,7 +2597,7 @@ mod tests {
         );
     }
 
-    // AC 4/16: listing alone repairs a distinct key and skips the still-active breaker wait once.
+    // Both auth statuses open the breaker immediately, but only 403 is permanent and revokes.
     #[tokio::test]
     async fn auth_opens_immediately_but_only_403_is_permanent() {
         for status in [401, 403] {
@@ -2616,8 +2615,7 @@ mod tests {
         }
     }
 
-    // Legacy breaker criterion: an upload 401 opens a recoverable breaker and a later probe
-    // permits the segment POST to be retried; this does not exercise successful stale-key repair.
+    // An upload 401 opens a recoverable breaker; a later probe after cooldown retries the POST.
     #[tokio::test]
     async fn upload_401_opens_recoverable_breaker_and_later_retries() {
         let temp = tempfile::tempdir().unwrap();

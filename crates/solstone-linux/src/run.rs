@@ -1702,7 +1702,7 @@ mod tests {
             assert!(errors.is_empty());
             assert!(load_credential(&config.config_dir).unwrap().is_some());
 
-            let registration_failure_lock = PrivateStateLock::acquire(&config.config_dir).unwrap();
+            let contended_lock = PrivateStateLock::acquire(&config.config_dir).unwrap();
             let failed_upload = Arc::new(UploadClient::new(
                 &config,
                 None::<PrivateLinkCapability>,
@@ -1712,7 +1712,7 @@ mod tests {
                 Arc::clone(&failed_upload),
                 config.config_dir.clone(),
                 config.stream.clone(),
-                registration_failure_lock,
+                contended_lock,
                 true,
                 crate::private_link::OpenJournalAccess::default(),
             )

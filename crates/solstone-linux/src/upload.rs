@@ -1519,7 +1519,7 @@ mod tests {
 
     // A paired keyless capability can use the v3 mTLS ingest route.
     #[tokio::test]
-    async fn unregistered_upload_uses_v3_route() {
+    async fn paired_keyless_upload_uses_v3_route() {
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, json!({"status":"ok", "segment":"s"}).to_string());
         let temp = TempDir::new().unwrap();
