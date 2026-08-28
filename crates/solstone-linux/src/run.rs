@@ -337,10 +337,11 @@ fn run_capture(
         states,
     };
     let mut observer = Observer::new(config, backends);
-    let mut run_result = if stopped.load(Ordering::Acquire) {
-        Ok(())
-    } else {
+    let initialized = !stopped.load(Ordering::Acquire);
+    let mut run_result = if initialized {
         observer.initialize()
+    } else {
+        Ok(())
     };
     let desktop_shell = crate::shell::start(
         runtime,
@@ -358,6 +359,12 @@ fn run_capture(
             open_journal: open_journal.clone(),
         },
     );
+    if initialized && run_result.is_ok() {
+        // systemd readiness precedes portal and observer initialization so its watchdog can
+        // cover that work. This log marks the later point after observer initialization and
+        // desktop-surface startup have both been attempted.
+        tracing::info!("observer initialization complete");
+    }
     let mut next_tick = Instant::now() + TICK_INTERVAL;
     // Startup can include portal consent and observer initialization. Once the tick loop is
     // ready, its successful five-second ticks own the watchdog heartbeat.
