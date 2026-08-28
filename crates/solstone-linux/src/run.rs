@@ -47,7 +47,7 @@ use ashpd::zbus::Connection;
 use sd_notify::NotifyState;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
-const CONSTRUCTION_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
+const STARTUP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) trait ServiceNotifier: Send + Sync {
@@ -112,19 +112,20 @@ impl Drop for WatchdogHeartbeat {
     }
 }
 
-fn construct_video<T>(
+fn begin_startup(notifier: Arc<dyn ServiceNotifier>) -> WatchdogHeartbeat {
+    begin_startup_with_interval(notifier, STARTUP_WATCHDOG_INTERVAL)
+}
+
+fn begin_startup_with_interval(
     notifier: Arc<dyn ServiceNotifier>,
-    build: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
+    interval: Duration,
+) -> WatchdogHeartbeat {
     if let Err(error) = notifier.ready() {
         tracing::warn!(%error, "Failed to notify systemd readiness");
     }
-    // Consent may block on a human indefinitely; the construction heartbeat deliberately
-    // prevents systemd's watchdog from killing that wait. Drop ends it before the tick loop.
-    let heartbeat = WatchdogHeartbeat::spawn(Arc::clone(&notifier), CONSTRUCTION_WATCHDOG_INTERVAL);
-    let result = build();
-    drop(heartbeat);
-    result
+    // Portal consent and the subsequent observer initialization may each block. Keep the
+    // startup heartbeat alive through both; the normal tick loop takes over after startup.
+    WatchdogHeartbeat::spawn(notifier, interval)
 }
 
 pub(crate) fn tick_once(
@@ -261,8 +262,8 @@ fn run_capture(
     let notifier: Arc<dyn ServiceNotifier> = Arc::new(SdNotifier);
     let stopped = Arc::new(AtomicBool::new(false));
     spawn_signal_task(Arc::clone(&stopped)).map_err(ObserverError::Io)?;
-    let video = construct_video(Arc::clone(&notifier), || VideoBackend::new(&config))
-        .map_err(ObserverError::VideoStart)?;
+    let startup_heartbeat = begin_startup(Arc::clone(&notifier));
+    let video = VideoBackend::new(&config).map_err(ObserverError::VideoStart)?;
     let (audio, mute) = PulseAudioCapture::spawn().map_err(ObserverError::Io)?;
     let clock = SystemClock::new();
     let upload = Arc::new(UploadClient::new(
@@ -358,6 +359,9 @@ fn run_capture(
         },
     );
     let mut next_tick = Instant::now() + TICK_INTERVAL;
+    // Startup can include portal consent and observer initialization. Once the tick loop is
+    // ready, its successful five-second ticks own the watchdog heartbeat.
+    drop(startup_heartbeat);
     let mut disconnected = false;
     while run_result.is_ok() && !stopped.load(Ordering::Acquire) {
         let now = Instant::now();
@@ -693,25 +697,19 @@ mod tests {
         }
     }
 
-    // AC: READY precedes potentially blocking video construction.
+    // AC: READY precedes the startup watchdog, which covers every blocking startup phase.
     #[test]
-    fn ready_precedes_blocking_video_construction() {
+    fn ready_precedes_startup_watchdog() {
         let notifier = Arc::new(RecordingNotifier::default());
         let dynamic: Arc<dyn ServiceNotifier> = notifier.clone();
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let worker = thread::spawn(move || {
-            construct_video(dynamic, || {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok::<_, String>(())
-            })
-            .unwrap()
-        });
-        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let heartbeat = begin_startup_with_interval(dynamic, Duration::from_millis(1));
         assert_eq!(&*notifier.events.lock().unwrap(), &["ready"]);
-        release_tx.send(()).unwrap();
-        worker.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while notifier.watchdogs.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(notifier.watchdogs.load(Ordering::Acquire) > 0);
+        drop(heartbeat);
     }
 
     // AC: construction heartbeat Drop stops and joins its worker before ticks can begin.
