@@ -4,10 +4,14 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [1.0.3] - 2026-08-28
 
 ### Changed
 - this observer now speaks your journal's version-3 linked-device ingest contract. its device certificate identifies it for that co-experience, and it releases local capture data only after your journal proves it holds the same bytes.
+
+### Fixed
+- starting the app no longer treats its early system-service readiness signal as a completed desktop and observer initialization.
+- stopping the app now gives its desktop portal, audio, sync, and linked transport tasks bounded time to finish their cleanup.
 
 ## [1.0.2] - 2026-08-01
 

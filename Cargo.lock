@@ -2525,7 +2525,7 @@ dependencies = [
 
 [[package]]
 name = "rust-release-manifest"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "ar",
  "base64",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "solstone-linux"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "ashpd",
  "chrono",
