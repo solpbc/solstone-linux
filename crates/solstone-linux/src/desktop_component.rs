@@ -11,9 +11,9 @@ use std::sync::{
 };
 
 pub const OBSERVER_BUS_NAME: &str = "org.solpbc.solstone.Observer1";
-pub const ALREADY_RUNNING_MESSAGE: &str = "Another solstone-linux observer is already running (owns org.solpbc.solstone.Observer1). Check: systemctl --user status solstone-linux";
+pub const ALREADY_RUNNING_MESSAGE: &str = "Another solstone app process is already running (owns org.solpbc.solstone.Observer1). Check: systemctl --user status solstone-linux";
 pub(crate) const OPEN_JOURNAL_REMEDIATION: &str =
-    "Could not open your journal. Wait for sol to reconnect, then try again.";
+    "Could not open your journal. Wait for the solstone app to reconnect, then try again.";
 
 pub trait BusNameRequester {
     fn request_name(
@@ -261,7 +261,7 @@ mod tests {
             DesktopComponent::new(Config::default())
                 .perform_desktop_command(crate::tray::TrayCommand::OpenJournal),
             Err(
-                "Could not open your journal. Wait for sol to reconnect, then try again."
+                "Could not open your journal. Wait for the solstone app to reconnect, then try again."
                     .to_owned()
             )
         );

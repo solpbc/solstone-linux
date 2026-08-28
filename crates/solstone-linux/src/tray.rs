@@ -141,7 +141,10 @@ impl Tray for KsniTray {
             SubMenu {
                 label: "about".into(),
                 submenu: vec![
-                    item(format!("sol v{}", env!("CARGO_PKG_VERSION")), false),
+                    item(
+                        format!("solstone app v{}", env!("CARGO_PKG_VERSION")),
+                        false,
+                    ),
                     action(
                         "solstone.app",
                         TrayCommand::OpenUrl("https://solstone.app/observers"),

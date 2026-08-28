@@ -10,7 +10,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub const AGENT_INSTRUCTIONS: &str = "sol for Linux (repo: solstone-linux)\nSource: https://github.com/solpbc/solstone-linux\nRead INSTALL.md at https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md for setup and architecture.\nConfig: {config_path}\nCaptures: {captures_dir}\nLogs: journalctl --user -u solstone-linux -f\nService: systemctl --user status solstone-linux";
+pub const AGENT_INSTRUCTIONS: &str = "solstone app for linux (repo: solstone-linux)\nSource: https://github.com/solpbc/solstone-linux\nRead INSTALL.md at https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md for setup and architecture.\nConfig: {config_path}\nSegments: {captures_dir}\nLogs: journalctl --user -u solstone-linux -f\nService: systemctl --user status solstone-linux";
 
 fn invoke(program: &str, args: &[&str], text: &str) -> io::Result<bool> {
     let mut child = Command::new(program)
@@ -78,7 +78,7 @@ mod tests {
         let s = agent_instructions("/c/config.json", "/d/captures");
         assert_eq!(
             s,
-            "sol for Linux (repo: solstone-linux)\nSource: https://github.com/solpbc/solstone-linux\nRead INSTALL.md at https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md for setup and architecture.\nConfig: /c/config.json\nCaptures: /d/captures\nLogs: journalctl --user -u solstone-linux -f\nService: systemctl --user status solstone-linux"
+            "solstone app for linux (repo: solstone-linux)\nSource: https://github.com/solpbc/solstone-linux\nRead INSTALL.md at https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md for setup and architecture.\nConfig: /c/config.json\nSegments: /d/captures\nLogs: journalctl --user -u solstone-linux -f\nService: systemctl --user status solstone-linux"
         );
     }
     #[derive(Clone, Debug, PartialEq, Eq)]

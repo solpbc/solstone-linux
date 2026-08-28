@@ -486,7 +486,7 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                 if matches!(command, TrayCommand::OpenJournal) {
                     let message = crate::desktop_component::OPEN_JOURNAL_REMEDIATION;
                     if let Err(notification_error) = notify_rust::Notification::new()
-                        .summary("sol")
+                        .summary("solstone app")
                         .body(message)
                         .show()
                     {

@@ -27,7 +27,7 @@ use std::{
 #[derive(Debug, Parser)]
 #[command(
     name = "solstone-linux",
-    about = "sol for Linux — takes in your screen and audio and keeps it in your journal. part of solstone.",
+    about = "the solstone app for linux takes in what you share with it, and all of it goes into your journal. part of solstone.",
     version
 )]
 pub struct Args {
@@ -39,12 +39,12 @@ pub struct Args {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 enum Commands {
-    #[command(about = "start sol")]
+    #[command(about = "start the solstone app")]
     Run {
         #[arg(long, help = "Segment duration in seconds (default: 300)")]
         interval: Option<i64>,
     },
-    #[command(about = "Pair sol with your journal from standard input")]
+    #[command(about = "Pair the solstone app with your journal from standard input")]
     Setup {
         #[arg(long, help = "Stream name (defaults to hostname-derived)")]
         stream_name: Option<String>,
@@ -290,7 +290,7 @@ fn render_setup_result(
 ) -> i32 {
     match result {
         Ok(()) => {
-            let _ = write_line(output, "sol can now connect to your journal.");
+            let _ = write_line(output, "the solstone app can now connect to your journal.");
             0
         }
         Err(PrivateStateError::PairInputInvalid) => {
@@ -300,21 +300,21 @@ fn render_setup_result(
         Err(PrivateStateError::PairingFailed) => {
             let _ = write_line(
                 errors,
-                "Setup failed: sol could not connect to your journal.",
+                "Setup failed: the solstone app could not connect to your journal.",
             );
             1
         }
         Err(PrivateStateError::LockContended) => {
             let _ = write_line(
                 errors,
-                "Setup could not start because sol is running. Stop sol first and try again. No input was consumed; capture, config, and private state are unchanged.",
+                "Setup could not start because the solstone app is running. Stop the solstone app first and try again. No input was consumed; app state, config, and private state are unchanged.",
             );
             1
         }
         Err(error @ (PrivateStateError::Io { .. } | PrivateStateError::InvalidTarget { .. })) => {
             let _ = write_line(
                 errors,
-                "Setup failed before pairing because sol could not safely update its config.",
+                "Setup failed before pairing because the solstone app could not safely update its config.",
             );
             let _ = write_line(errors, format!("Config update error: {error}"));
             1
@@ -449,7 +449,7 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
         ))?;
         // Config is read once at startup and never re-read, so a running sol keeps the
         // old values. Saying only "saved" invites the owner to believe otherwise.
-        prompt.write_line("These take effect the next time sol starts.")?;
+        prompt.write_line("These take effect the next time the solstone app starts.")?;
         prompt.write_line("  systemctl --user restart solstone-linux")
     })();
     if let Err(error) = result {
@@ -593,10 +593,10 @@ fn run_preparation_error_guidance(error: &PrivateStateError) -> &'static str {
     match error {
         PrivateStateError::LockContended => "Linked private state is already in use",
         PrivateStateError::HealthInitializationFailed => {
-            "Startup could not continue because sol could not clear the sync status from the previous run. Make sure sol can write its local data, then try again."
+            "Startup could not continue because the solstone app could not clear the sync status from the previous run. Make sure the solstone app can write its local data, then try again."
         }
         _ => {
-            "Startup could not continue because sol could not safely prepare its local data. Make sure sol can write its local data, then try again."
+            "Startup could not continue because the solstone app could not safely prepare its local data. Make sure the solstone app can write its local data, then try again."
         }
     }
 }
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "Setup could not start because sol is running. Stop sol first and try again. No input was consumed; capture, config, and private state are unchanged.\n"
+            "Setup could not start because the solstone app is running. Stop the solstone app first and try again. No input was consumed; app state, config, and private state are unchanged.\n"
         );
         let after = std::fs::read_dir(&config_root)
             .unwrap()
@@ -999,11 +999,11 @@ mod tests {
         assert_eq!(contention, "Linked private state is already in use");
         assert_eq!(
             initialization,
-            "Startup could not continue because sol could not clear the sync status from the previous run. Make sure sol can write its local data, then try again."
+            "Startup could not continue because the solstone app could not clear the sync status from the previous run. Make sure the solstone app can write its local data, then try again."
         );
         assert_eq!(
             generic,
-            "Startup could not continue because sol could not safely prepare its local data. Make sure sol can write its local data, then try again."
+            "Startup could not continue because the solstone app could not safely prepare its local data. Make sure the solstone app can write its local data, then try again."
         );
         assert_ne!(contention, initialization);
         assert_ne!(generic, initialization);
@@ -1065,7 +1065,7 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         let errors = String::from_utf8(errors).unwrap();
         assert!(errors.contains(
-            "Setup failed before pairing because sol could not safely update its config."
+            "Setup failed before pairing because the solstone app could not safely update its config."
         ));
         assert!(errors.contains("Config update error:"));
         assert!(!errors.contains("pair-secret"));

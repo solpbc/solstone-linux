@@ -1,5 +1,5 @@
 [Unit]
-Description=sol for Linux
+Description=solstone app for linux
 After=graphical-session.target
 PartOf=graphical-session.target
 StartLimitIntervalSec=300
