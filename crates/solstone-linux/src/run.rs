@@ -418,7 +418,7 @@ fn run_capture(
                 ))),
             }
         }),
-        &mut |_| {},
+        &mut |stage| tracing::info!(stage, "shutdown progress"),
     ));
     run_result
         .and(shutdown)
