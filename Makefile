@@ -22,7 +22,7 @@ CARGO_GENERATE_RPM_VERSION := 0.21.0
 # the post-conversion review by changing this checked-in activation switch to 1.
 TRANSPARENCY_ACTIVATED ?= 0
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
-UBUNTU_STOCK_BASE := sha256:b8e6b596a32475661d9fcaf4a212fcc7736e0d8d1494973aefdbcc71c442d890
+UBUNTU_STOCK_BASE := sha256:4d0600e5088ac5da5119401c70292ea3a9d9dc71f76a234ad5390c1f6a8e5669
 FEDORA_STOCK_BASE := sha256:8c219b734f781909b9384edc01eb52318330b57fa58e0410dfcf973b01d28fcd
 SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/extract_changelog.sh scripts/install.sh scripts/publish-release.sh
 
