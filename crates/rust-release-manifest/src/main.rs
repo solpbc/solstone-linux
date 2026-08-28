@@ -7,7 +7,7 @@ use rust_release_manifest::{
     ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, RepoRoot, SPL_PIN_OK_MESSAGE, audit_packages,
     classify_release_dir, create_candidate, emit_lane_handoff, emit_proof_handoff, prove_candidate,
     publish_transparency, recover_candidate, resign_transparency_pointer, run_audit,
-    validate_spl_pin, verify_manifest_mode,
+    sign_release_manifest, validate_spl_pin, verify_manifest_mode, verify_release_signature,
 };
 use std::path::PathBuf;
 
@@ -46,6 +46,18 @@ enum Command {
         release_dir: Option<PathBuf>,
     },
     ValidateSplPin,
+    SignReleaseManifest {
+        #[arg(long)]
+        release_dir: PathBuf,
+        #[arg(long)]
+        secret_key: PathBuf,
+        #[arg(long)]
+        passphrase_file: PathBuf,
+    },
+    VerifyReleaseSignature {
+        #[arg(long)]
+        release_dir: PathBuf,
+    },
     #[command(hide = true)]
     LaneHandoff(Box<LaneHandoffArgs>),
     #[command(hide = true)]
@@ -185,6 +197,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let root = RepoRoot::resolve()?;
             validate_spl_pin(&root)?;
             println!("{SPL_PIN_OK_MESSAGE}");
+        }
+        Command::SignReleaseManifest {
+            release_dir,
+            secret_key,
+            passphrase_file,
+        } => {
+            let root = RepoRoot::resolve()?;
+            let signature =
+                sign_release_manifest(&root, &release_dir, &secret_key, &passphrase_file)?;
+            println!("{}", signature.display());
+        }
+        Command::VerifyReleaseSignature { release_dir } => {
+            let root = RepoRoot::resolve()?;
+            verify_release_signature(&root, &release_dir)?;
+            println!("Release manifest signature and artifacts verified.");
         }
         Command::LaneHandoff(args) => {
             let LaneHandoffArgs {

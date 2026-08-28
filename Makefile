@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format brand-sync test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format brand-sync test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover sign-release-manifest verify-release-signature publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -256,6 +256,16 @@ release-candidate-prove: rust-preflight
 release-candidate-recover: rust-preflight
 	@test -n "$(strip $(VERSION))" || { echo "error: candidate version mismatch: expected VERSION, actual missing" >&2; echo "repair: make release-candidate-recover VERSION=<version>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- candidate recover --version "$(VERSION)"
+
+sign-release-manifest: rust-preflight
+	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: release signature mismatch: expected RELEASE_DIR, actual missing" >&2; exit 1; }
+	@test -n "$(strip $(RELEASE_MINISIGN_KEY))" || { echo "error: release signature mismatch: expected RELEASE_MINISIGN_KEY, actual missing" >&2; exit 1; }
+	@test -n "$(strip $(RELEASE_MINISIGN_PASS))" || { echo "error: release signature mismatch: expected RELEASE_MINISIGN_PASS, actual missing" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- sign-release-manifest --release-dir "$(RELEASE_DIR)" --secret-key "$(RELEASE_MINISIGN_KEY)" --passphrase-file "$(RELEASE_MINISIGN_PASS)"
+
+verify-release-signature: rust-preflight
+	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: release signature mismatch: expected RELEASE_DIR, actual missing" >&2; exit 1; }
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- verify-release-signature --release-dir "$(RELEASE_DIR)"
 
 clean:
 	@echo "Cleaning build artifacts and cache files..."

@@ -96,6 +96,7 @@ expected_names=(
     "SHA256SUMS"
     "solstone-linux-$version-1.x86_64.rpm"
     "$manifest_name"
+    "$manifest_name.minisig"
     "solstone-linux-$version-linux-x86_64.tar.gz"
     "solstone-linux_$version-1_amd64.deb"
 )

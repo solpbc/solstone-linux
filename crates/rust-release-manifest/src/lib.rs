@@ -42,13 +42,14 @@ pub const CHECKSUM_NAME: &str = "SHA256SUMS";
 pub const PRODUCT: &str = "solstone-linux";
 pub const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 pub const CARGO_DENY_VERSION: &str = "0.20.2";
+pub const RELEASE_PUBLIC_KEY_PATH: &str = "packaging/keys/solstone-linux-release.pub";
 pub(crate) const CONTEXT_BINDING_NAME: &str = ".release-context.json";
 pub(crate) const CONTEXT_ARCHIVE_NAME: &str = ".release-context.tar";
 pub const MANIFEST_OK_MESSAGE: &str =
     "Named manifest and artifacts verified; this is NOT candidate-readiness classification.";
 pub const SPL_PIN_OK_MESSAGE: &str = "SPL dependency pin verified.";
 pub const RELEASE_DIR_OK_MESSAGE: &str =
-    "Release directory verified as a complete five-file candidate.";
+    "Release directory verified as a complete candidate; a present manifest signature is verified.";
 pub const LEDGER_SCHEMA_SHA256: &str =
     "4b387f19d8018752c6d016a4c0c74343ed80d2b64a3ff9480aa75b04fa66882d";
 pub const PROOF_SCHEMA_SHA256: &str =
@@ -56,6 +57,10 @@ pub const PROOF_SCHEMA_SHA256: &str =
 
 pub fn manifest_name(version: &str) -> String {
     format!("solstone-linux-{version}-linux-x86_64.rust-release-manifest.json")
+}
+
+pub fn manifest_signature_name(version: &str) -> String {
+    format!("{}.minisig", manifest_name(version))
 }
 
 const SCHEMA_BYTES: &[u8] =
@@ -66,6 +71,8 @@ const LEDGER_SCHEMA_BYTES: &[u8] = include_bytes!(
 const PROOF_SCHEMA_BYTES: &[u8] = include_bytes!(
     "../../../vendor/rust-release-candidate-proof/rust-release-candidate-proof.schema.json"
 );
+const RELEASE_PUBLIC_KEY_BYTES: &[u8] =
+    include_bytes!("../../../packaging/keys/solstone-linux-release.pub");
 const EXPECTED_LAYOUT: [&str; 9] = [
     "Cargo.toml",
     "Cargo.lock",
@@ -1463,14 +1470,174 @@ fn classify_release(repo: &RepoRoot, root: &Path, bind_live: bool) -> Result<()>
         .iter()
         .filter(|name| name.ends_with(".rust-release-manifest.json"))
         .collect::<Vec<_>>();
-    if manifests.len() != 1 || names.len() != 5 {
+    if manifests.len() != 1 || !matches!(names.len(), 5 | 6) {
         return Err(Error::new(format!(
-            "release inventory mismatch: expected 5 files, actual {}",
+            "release inventory mismatch: expected 5 unsigned files or 6 signed files, actual {}",
             names.len()
         )));
     }
     let manifest_path = root.join(manifests[0]);
-    verify_manifest(repo, &manifest_path, bind_live)
+    verify_manifest(repo, &manifest_path, bind_live)?;
+    if names.len() == 6 {
+        verify_manifest_signature_at(repo, root, &manifest_path)?;
+    }
+    Ok(())
+}
+
+fn release_public_key(repo: &RepoRoot) -> Result<PathBuf> {
+    let path = repo.path().join(RELEASE_PUBLIC_KEY_PATH);
+    require_regular(&path, "release signature public key")?;
+    if fs::read(&path).map_err(display_error)? != RELEASE_PUBLIC_KEY_BYTES {
+        return Err(Error::new(
+            "release signature public key mismatch: expected committed trust pin, actual drift\nrepair: restore packaging/keys/solstone-linux-release.pub from the release commit",
+        ));
+    }
+    Ok(path)
+}
+
+fn manifest_and_signature_paths(root: &Path) -> Result<(PathBuf, PathBuf)> {
+    require_directory(root, "release root")?;
+    let manifests = fs::read_dir(root)
+        .map_err(display_error)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(display_error)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.ends_with(".rust-release-manifest.json"))
+        })
+        .collect::<Vec<_>>();
+    if manifests.len() != 1 {
+        return Err(Error::new(format!(
+            "release manifest inventory mismatch: expected 1 manifest, actual {}",
+            manifests.len()
+        )));
+    }
+    let manifest = manifests.into_iter().next().unwrap();
+    let name = manifest
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| Error::new("release manifest name mismatch: expected UTF-8 basename"))?;
+    Ok((manifest.clone(), root.join(format!("{name}.minisig"))))
+}
+
+fn verify_manifest_signature_at(repo: &RepoRoot, root: &Path, manifest: &Path) -> Result<()> {
+    let manifest_name = manifest
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| Error::new("release manifest name mismatch: expected UTF-8 basename"))?;
+    let signature = root.join(format!("{manifest_name}.minisig"));
+    require_regular(&signature, "release manifest signature")?;
+    let public_key = release_public_key(repo)?;
+    verify_minisign_bytes(
+        repo.path(),
+        &public_key,
+        &fs::read(manifest).map_err(display_error)?,
+        &fs::read(&signature).map_err(display_error)?,
+        "release manifest signature",
+    )
+    .map_err(|_| {
+        Error::new(
+            "release manifest signature mismatch: expected valid signature from the committed solstone-linux trust pin, actual verification failure\nrepair: restore the exact manifest and adjacent .minisig sidecar from the signed candidate",
+        )
+    })
+}
+
+pub fn verify_release_signature(repo: &RepoRoot, root: &Path) -> Result<()> {
+    classify_release(repo, root, true)?;
+    let (manifest, signature) = manifest_and_signature_paths(root)?;
+    require_regular(&signature, "release manifest signature")?;
+    verify_manifest_signature_at(repo, root, &manifest)
+}
+
+pub fn sign_release_manifest(
+    repo: &RepoRoot,
+    root: &Path,
+    secret_key: &Path,
+    passphrase_file: &Path,
+) -> Result<PathBuf> {
+    classify_release(repo, root, true)?;
+    let (manifest, signature) = manifest_and_signature_paths(root)?;
+    if signature.symlink_metadata().is_ok() {
+        return Err(Error::new(
+            "release manifest signature output mismatch: expected absent sidecar, actual present\nrepair: sign only an unsigned candidate or retain the existing signed candidate unchanged",
+        ));
+    }
+    require_regular(secret_key, "release signing secret key")?;
+    require_regular(passphrase_file, "release signing passphrase file")?;
+    let public_key = release_public_key(repo)?;
+    let mut passphrase = fs::read(passphrase_file).map_err(display_error)?;
+    while passphrase
+        .last()
+        .is_some_and(|byte| matches!(*byte, b'\n' | b'\r'))
+    {
+        passphrase.pop();
+    }
+    if passphrase.is_empty() {
+        return Err(Error::new(
+            "release signing passphrase mismatch: expected nonempty vaulted passphrase, actual empty",
+        ));
+    }
+    let temporary = root.join(format!(
+        ".{}.{}.minisig.tmp",
+        manifest
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("manifest"),
+        std::process::id()
+    ));
+    if temporary.symlink_metadata().is_ok() {
+        passphrase.fill(0);
+        return Err(Error::new(
+            "release manifest signature temporary mismatch: expected absent output, actual present\nrepair: inspect only the named temporary and retry",
+        ));
+    }
+    let signing = (|| {
+        let mut child = Command::new("minisign")
+            .args(["-S", "-s"])
+            .arg(secret_key)
+            .arg("-m")
+            .arg(&manifest)
+            .arg("-x")
+            .arg(&temporary)
+            .args(["-t", "solstone-linux release manifest"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(display_error)?;
+        let stdin = child.stdin.as_mut().ok_or_else(|| {
+            Error::new("release signing stdin mismatch: expected pipe, actual unavailable")
+        })?;
+        use std::io::Write;
+        stdin.write_all(&passphrase).map_err(display_error)?;
+        stdin.write_all(b"\n").map_err(display_error)?;
+        let status = child.wait().map_err(display_error)?;
+        if !status.success() {
+            return Err(Error::new(
+                "release manifest signing mismatch: expected successful minisign invocation, actual failure\nrepair: verify the encrypted signing key and vaulted passphrase",
+            ));
+        }
+        let bytes = fs::read(&temporary).map_err(display_error)?;
+        verify_minisign_bytes(
+            repo.path(),
+            &public_key,
+            &fs::read(&manifest).map_err(display_error)?,
+            &bytes,
+            "new release manifest signature",
+        )?;
+        atomic_write_0644(&signature, &bytes)?;
+        Ok(())
+    })();
+    passphrase.fill(0);
+    if temporary.symlink_metadata().is_ok() {
+        fs::remove_file(&temporary).map_err(display_error)?;
+    }
+    signing?;
+    verify_release_signature(repo, root)?;
+    Ok(signature)
 }
 
 pub fn schema_bytes() -> &'static [u8] {

@@ -115,13 +115,29 @@ directory as lock recovery.
 
 ## Outputs and meanings
 
-The promoted payload is exactly:
+The unsigned promoted payload is exactly:
 
 - `dist/rust/solstone-linux-<VERSION>-linux-x86_64.tar.gz`
 - `dist/rust/solstone-linux_<VERSION>-1_amd64.deb`
 - `dist/rust/solstone-linux-<VERSION>-1.x86_64.rpm`
 - `dist/rust/SHA256SUMS`
 - `dist/rust/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json`
+
+Before delivery, sign that manifest with the dedicated Linux identity. This writes
+`dist/rust/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json.minisig`;
+the signed candidate therefore has six files. Verification checks the pinned public
+key, manifest, checksums, and all three artifacts together:
+
+```bash
+make sign-release-manifest \
+  RELEASE_DIR=dist/rust \
+  RELEASE_MINISIGN_KEY=/absolute/path/to/solstone-linux-release-1.key \
+  RELEASE_MINISIGN_PASS=/absolute/path/to/solstone-linux-release-1.pass
+make verify-release-signature RELEASE_DIR=dist/rust
+```
+
+The detached signature is a step the verifier takes; `apt` and `dnf` do not
+verify it automatically.
 
 Retained evidence is versioned and disjoint from the payload:
 
