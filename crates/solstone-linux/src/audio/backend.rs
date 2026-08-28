@@ -20,6 +20,9 @@ use crate::{
 
 const MAX_CONSECUTIVE_FAILURES: u8 = 3;
 const REDETECT_INTERVAL: Duration = Duration::from_secs(5);
+// The process is shutting down after this bound, so a wedged Pulse mainloop
+// must not keep the observer alive waiting for a Rust thread join forever.
+const AUDIO_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[must_use = "audio diagnostics must be reported or explicitly consumed"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +214,7 @@ pub(crate) struct PulseAudioCapture {
     shared: Arc<Mutex<Shared>>,
     stopped: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+    worker_finished: Option<mpsc::Receiver<()>>,
 }
 
 pub(crate) struct PulseMuteProbe {
@@ -222,6 +226,7 @@ impl PulseAudioCapture {
         let (sender, receiver) = mpsc::channel();
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
+        let (worker_finished_sender, worker_finished) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("solstone-audio".into())
             .spawn(move || {
@@ -236,6 +241,7 @@ impl PulseAudioCapture {
                     |_| {},
                     failures,
                 );
+                let _ = worker_finished_sender.send(());
             })
             .map_err(|error| error.to_string())?;
         let shared = Arc::new(Mutex::new(Shared {
@@ -247,6 +253,7 @@ impl PulseAudioCapture {
                 shared: Arc::clone(&shared),
                 stopped,
                 worker: Some(worker),
+                worker_finished: Some(worker_finished),
             },
             PulseMuteProbe { shared },
         ))
@@ -343,6 +350,13 @@ fn wait_interruptibly_with(
     !stopped.load(Ordering::Acquire)
 }
 
+fn worker_stopped_within(
+    worker_finished: &mpsc::Receiver<()>,
+    timeout: Duration,
+) -> Result<(), mpsc::RecvTimeoutError> {
+    worker_finished.recv_timeout(timeout)
+}
+
 impl AudioCapture for PulseAudioCapture {
     fn drain(&mut self) -> DrainedChunk {
         let mut shared = self.shared.lock().expect("audio state lock");
@@ -370,7 +384,27 @@ impl AudioCapture for PulseAudioCapture {
         self.stopped.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
             worker.thread().unpark();
-            let _ = worker.join();
+            let stopped = self
+                .worker_finished
+                .take()
+                .map(|finished| worker_stopped_within(&finished, AUDIO_SHUTDOWN_TIMEOUT));
+            match stopped {
+                Some(Ok(())) => {}
+                Some(Err(mpsc::RecvTimeoutError::Timeout)) => {
+                    tracing::warn!(
+                        timeout_seconds = AUDIO_SHUTDOWN_TIMEOUT.as_secs(),
+                        "Audio worker did not stop before shutdown bound; detaching"
+                    );
+                }
+                Some(Err(mpsc::RecvTimeoutError::Disconnected)) => {
+                    tracing::warn!("Audio worker ended without its shutdown acknowledgement");
+                }
+                None => {}
+            }
+            // Do not join here. A join can block forever inside a wedged Pulse
+            // mainloop; dropping the handle detaches this process-owned worker,
+            // which the process exit immediately following observer shutdown ends.
+            drop(worker);
         }
     }
 }
@@ -446,6 +480,25 @@ mod tests {
         shared.pump(&mut |d| seen.push(d));
         assert!(seen.is_empty());
         assert!(shared.state.available);
+    }
+
+    #[test]
+    fn worker_shutdown_wait_has_a_hard_timeout() {
+        let (_sender, receiver) = mpsc::sync_channel(0);
+        assert_eq!(
+            worker_stopped_within(&receiver, Duration::from_millis(1)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+    }
+
+    #[test]
+    fn worker_shutdown_wait_accepts_the_completion_acknowledgement() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(()).unwrap();
+        assert_eq!(
+            worker_stopped_within(&receiver, Duration::from_millis(1)),
+            Ok(())
+        );
     }
 
     #[test]
