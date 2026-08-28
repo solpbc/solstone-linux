@@ -60,6 +60,8 @@ const START_OPERATION_BUDGET: Duration = Duration::from_secs(
 );
 const COMMAND_TIMEOUT: Duration =
     Duration::from_secs(START_OPERATION_BUDGET.as_secs() + DISPATCH_MARGIN.as_secs());
+const SHUTDOWN_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortalOperation {
@@ -340,6 +342,7 @@ enum Command {
     },
     Stop {
         reply: mpsc::Sender<Result<Vec<StoppedStream>, String>>,
+        shutdown: bool,
     },
     Shutdown {
         reply: mpsc::Sender<()>,
@@ -444,7 +447,7 @@ impl PortalVideoCapture {
                             worker_health.store(false, Ordering::Release);
                         }
                     }
-                    Command::Stop { reply } => {
+                    Command::Stop { reply, shutdown } => {
                         let mut pipelines: Vec<StoppingPipeline<'_>> = tracked.iter_mut().map(|record| StoppingPipeline { identity: format!("{} ({})", record.connector, record.node_id), pipeline: &mut record.pipeline }).collect();
                         stop_pipelines(&mut pipelines, Duration::from_secs(5));
                         drop(pipelines);
@@ -458,7 +461,17 @@ impl PortalVideoCapture {
                                 // D2: each five-minute stop/start tears down and rebuilds the
                                 // portal session. Restore normally avoids UI, but an invalid
                                 // restore token can therefore re-prompt at every boundary.
-                                let close = runtime.block_on(ops.close());
+                                let close = if shutdown {
+                                    runtime.block_on(async {
+                                        tokio::time::timeout(SHUTDOWN_CLOSE_TIMEOUT, ops.close())
+                                            .await
+                                            .map_err(|_| {
+                                                "portal close timed out during app shutdown".to_owned()
+                                            })?
+                                    })
+                                } else {
+                                    runtime.block_on(ops.close())
+                                };
                                 portal_session = None;
                                 if let Err(error) = close { warn!(%error, "failed to close portal session during stop"); }
                             }
@@ -470,6 +483,9 @@ impl PortalVideoCapture {
                         }
                         worker_health.store(false, Ordering::Release);
                         let _ = reply.send(Ok(stopped));
+                        if shutdown {
+                            break;
+                        }
                     }
                     Command::Shutdown { reply } => { let _ = runtime.block_on(ops.close()); worker_health.store(false, Ordering::Release); let _ = reply.send(()); break; }
                 }
@@ -479,17 +495,19 @@ impl PortalVideoCapture {
         Ok(Self { commands, healthy })
     }
 
-    fn request<T>(&self, build: impl FnOnce(mpsc::Sender<T>) -> Command) -> Result<T, String> {
+    fn request<T>(
+        &self,
+        timeout: Duration,
+        build: impl FnOnce(mpsc::Sender<T>) -> Command,
+    ) -> Result<T, String> {
         let (reply, receiver) = mpsc::channel();
         self.commands
             .send(build(reply))
             .map_err(|_| "portal worker disconnected".to_owned())?;
-        receiver
-            .recv_timeout(COMMAND_TIMEOUT)
-            .map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => "portal worker reply timed out".into(),
-                mpsc::RecvTimeoutError::Disconnected => "portal worker disconnected".into(),
-            })
+        receiver.recv_timeout(timeout).map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => "portal worker reply timed out".into(),
+            mpsc::RecvTimeoutError::Disconnected => "portal worker disconnected".into(),
+        })
     }
 }
 
@@ -500,7 +518,7 @@ impl VideoCapture for PortalVideoCapture {
         framerate: i64,
         draw_cursor: bool,
     ) -> Result<Vec<VideoStream>, String> {
-        self.request(|reply| Command::Start {
+        self.request(COMMAND_TIMEOUT, |reply| Command::Start {
             directory: directory.to_owned(),
             framerate,
             draw_cursor,
@@ -508,7 +526,16 @@ impl VideoCapture for PortalVideoCapture {
         })?
     }
     fn stop(&mut self) -> Result<Vec<StoppedStream>, String> {
-        self.request(|reply| Command::Stop { reply })?
+        self.request(COMMAND_TIMEOUT, |reply| Command::Stop {
+            reply,
+            shutdown: false,
+        })?
+    }
+    fn stop_for_shutdown(&mut self) -> Result<Vec<StoppedStream>, String> {
+        self.request(SHUTDOWN_COMMAND_TIMEOUT, |reply| Command::Stop {
+            reply,
+            shutdown: true,
+        })?
     }
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
@@ -517,10 +544,10 @@ impl VideoCapture for PortalVideoCapture {
 
 impl Drop for PortalVideoCapture {
     fn drop(&mut self) {
-        let (reply, receiver) = mpsc::channel();
-        if self.commands.send(Command::Shutdown { reply }).is_ok() {
-            let _ = receiver.recv_timeout(Duration::from_secs(30));
-        }
+        let (reply, _) = mpsc::channel();
+        // Destructors run after all normal shutdown bounds. Signal the worker but never add a
+        // second, hidden portal-close wait that can make systemd abort a clean stop.
+        let _ = self.commands.send(Command::Shutdown { reply });
     }
 }
 
@@ -1194,6 +1221,27 @@ mod tests {
                 .contains("already active")
         );
         capture.stop().unwrap();
+    }
+
+    #[test]
+    fn shutdown_stop_finalizes_streams_and_closes_the_portal_session() {
+        let ops = two_stream_ops();
+        let calls = ops.calls.clone();
+        let mut capture = PortalVideoCapture::spawn(
+            ops,
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        capture.start(directory.path(), 1, true).unwrap();
+
+        let stopped = capture.stop_for_shutdown().unwrap();
+
+        assert_eq!(stopped.len(), 2);
+        assert_eq!(calls.lock().unwrap().last(), Some(&"close"));
+        assert!(!capture.is_healthy());
     }
 
     #[test]

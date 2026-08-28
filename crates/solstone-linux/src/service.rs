@@ -265,6 +265,16 @@ mod tests {
             )));
         }
     }
+
+    #[test]
+    fn installed_unit_has_a_bounded_cleanup_backstop() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = fixture(&t, None);
+        install(&paths, &FakeRunner::ok(), &mut Vec::new());
+
+        let unit = fs::read_to_string(paths.unit()).unwrap();
+        assert!(unit.contains("TimeoutStopSec=90"));
+    }
     // tests/test_cli.py::test_cmd_install_service_always_rewrites
     #[test]
     fn always_rewrites_and_repeats_rust_sequence() {

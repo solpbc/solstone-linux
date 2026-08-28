@@ -49,6 +49,9 @@ pub trait VideoCapture {
         draw_cursor: bool,
     ) -> Result<Vec<VideoStream>, String>;
     fn stop(&mut self) -> Result<Vec<StoppedStream>, String>;
+    fn stop_for_shutdown(&mut self) -> Result<Vec<StoppedStream>, String> {
+        self.stop()
+    }
     fn is_healthy(&self) -> bool;
 }
 pub trait AudioCapture {
@@ -376,7 +379,12 @@ where
 
     pub fn shutdown(&mut self) -> Result<(), ObserverError> {
         if self.state.mode == Mode::Screencast {
-            self.stop_video()?;
+            let _ = self
+                .backends
+                .video
+                .stop_for_shutdown()
+                .map_err(ObserverError::VideoStop)?;
+            self.state.current_streams.clear();
         }
         self.write_gated_audio()?;
         self.finalize_segment()?;
