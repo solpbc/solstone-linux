@@ -1662,7 +1662,7 @@ pub(crate) fn run_success_owned(
         let stderr = sanitize_process_stderr(&output.stderr);
         let context = (!stderr.is_empty()).then(|| format!("\nstderr: {stderr}"));
         return Err(Error::new(format!(
-            "{program} command mismatch: expected success, actual {}{}\nrepair: run make release-images",
+            "{program} command mismatch: expected success, actual {}{}\nrepair: inspect the container diagnostic above, correct the reported release input, and retry",
             output.status,
             context.unwrap_or_default()
         )));

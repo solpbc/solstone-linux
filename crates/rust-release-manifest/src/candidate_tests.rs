@@ -710,7 +710,9 @@ fn container_build_failure_reports_sanitized_container_stderr() {
     assert!(error.contains(
         "stderr: error: Rust compiler mismatch: expected 1.97.1 x86_64-unknown-linux-gnu, actual different\\x01"
     ));
-    assert!(error.contains("repair: run make release-images"));
+    assert!(error.contains(
+        "repair: inspect the container diagnostic above, correct the reported release input, and retry"
+    ));
 }
 
 #[test]

@@ -215,6 +215,24 @@ fn package_assets_exist_and_match() {
     );
 }
 
+// AC: Debian sealing must hash the release binary, every declared asset, and
+// cargo-deb's generated copyright file. Keep the Containerfile bound coupled
+// to the package manifest so an asset addition cannot strand the candidate.
+#[test]
+fn debian_sealing_enumerates_every_installed_payload() {
+    let (_, member) = metadata();
+    let payload_count = deb_assets(&member).len() + 1;
+    assert_eq!(
+        payload_count, 19,
+        "18 declared assets + generated copyright"
+    );
+
+    let containerfile =
+        fs::read_to_string(workspace_root().join("packaging/Containerfile")).unwrap();
+    assert!(containerfile.contains(&format!("test \"${{md5_count}}\" -eq {payload_count}")));
+    assert!(containerfile.contains("Debian md5 inventory mismatch"));
+}
+
 fn copy_tree(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {

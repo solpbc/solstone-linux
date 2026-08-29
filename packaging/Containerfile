@@ -76,7 +76,10 @@ RUN actual="$(cargo deb --version)" \
     && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' \
         | LC_ALL=C sort -z \
         | xargs -0 -r md5sum -- > DEBIAN/md5sums \
-    && test "$(wc -l < DEBIAN/md5sums)" -eq 17 \
+    && md5_count="$(wc -l < DEBIAN/md5sums)" \
+    && { test "${md5_count}" -eq 19 \
+        || { echo "error: Debian md5 inventory mismatch: expected 19 payloads, actual ${md5_count:-unavailable}" >&2; \
+             echo "repair: align the sealing bound with package assets and generated copyright" >&2; exit 1; }; } \
     && chmod 0644 DEBIAN/md5sums \
     && dpkg-deb --root-owner-group -Zxz -z9 --build "$DEB_ROOT" "${DEB}.sealed" >/dev/null \
     && mv "${DEB}.sealed" "$DEB" \
