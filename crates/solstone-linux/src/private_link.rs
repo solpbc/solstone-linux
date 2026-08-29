@@ -996,7 +996,14 @@ fn proxy_headers_for_v3(
         .iter()
         .filter(|(name, _)| name == ROUTE_CLASS_MARKER_HEADER_NAME)
         .collect::<Vec<_>>();
-    if !matches!(markers.as_slice(), [(_, value)] if value == INGEST_V3_ROUTE_CLASS) {
+    // The internal marker identifies app-originated ingest calls.  A browser
+    // request that reached the loopback bridge through Open Journal has no
+    // such marker, and is authorized instead by the bridge capability cookie.
+    // Preserve the explicit-marker check: a malformed or duplicate marker must
+    // still fail closed rather than being mistaken for browser traffic.
+    let marker_valid = markers.is_empty()
+        || matches!(markers.as_slice(), [(_, value)] if value == INGEST_V3_ROUTE_CLASS);
+    if !marker_valid {
         return Err(TransportError::Pairing("invalid route class marker".into()));
     }
     let mut headers = upstream_headers
@@ -2859,9 +2866,8 @@ mod tests {
     }
 
     #[test]
-    fn route_class_marker_malformed_and_duplicate_forms_are_rejected_locally() {
+    fn explicit_route_class_marker_malformed_and_duplicate_forms_are_rejected_locally() {
         for headers in [
-            vec![],
             vec![(ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(), String::new())],
             vec![(ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(), " 1".to_owned())],
             vec![(ROUTE_CLASS_MARKER_HEADER_NAME.to_owned(), "1 ".to_owned())],
@@ -2873,6 +2879,19 @@ mod tests {
         ] {
             assert!(proxy_headers_for_v3(&headers).is_err());
         }
+    }
+
+    #[test]
+    fn browser_headers_without_internal_route_marker_are_forwarded() {
+        let headers =
+            proxy_headers_for_v3(&[("accept".to_owned(), "text/html".to_owned())]).unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                ("accept".to_owned(), "text/html".to_owned()),
+                (PROTOCOL_VERSION_HEADER_NAME.to_owned(), "3".to_owned()),
+            ]
+        );
     }
 
     #[test]
@@ -2889,20 +2908,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_v3_data_routes_are_rejected_without_dialing() {
+    async fn capability_authorized_browser_route_without_marker_reaches_the_peer() {
         let peer = PrivateLinkPeer::start().await;
-        let temp = tempfile::tempdir().unwrap();
-        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
-            .await
-            .unwrap();
-        let response = session
-            .request(Method::GET, "/data")
-            .unwrap()
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(peer.accepted_carriers(), 0);
+        peer.enqueue_response(200, b"{}".to_vec());
+        let (_temp, session, capability) = session_with_capability(&peer).await;
+        let port = session.handle.port();
+        let response = raw_local_request(
+            port,
+            format!(
+                "GET /app/timeline HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: solstone_linux_cap={capability}\r\nAccept: text/html\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        let requests = peer.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/app/timeline");
+        assert_eq!(
+            requests[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(PROTOCOL_VERSION_HEADER_NAME))
+                .map(|(_, value)| value.as_str()),
+            Some("3")
+        );
+        assert!(
+            !requests[0]
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(ROUTE_CLASS_MARKER_HEADER_NAME))
+        );
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
