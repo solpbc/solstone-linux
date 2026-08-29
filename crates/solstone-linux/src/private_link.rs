@@ -18,7 +18,7 @@ use std::{
 #[cfg(test)]
 use reqwest::Method;
 use reqwest::{RequestBuilder, StatusCode, Url, multipart};
-use spl_core::bridge::{BridgeNames, RequestHeaderPolicy};
+use spl_core::bridge::{BridgeNames, RequestHead, RequestHeaderPolicy};
 use spl_core::pairlink::{self, ParsedPairLink};
 use spl_transport::credential::Credential;
 use spl_transport::{
@@ -54,6 +54,7 @@ pub(crate) const PROTOCOL_VERSION_HEADER_NAME: &str = "x-solstone-protocol-versi
 const ROUTE_CLASS_MARKER_HEADER_NAME: &str = "x-solstone-linux-route-class";
 const INGEST_V3_ROUTE_CLASS: &str = "ingest-v3";
 const INGEST_PATH: &str = "/app/devices/ingest";
+const JOURNAL_MEDIA_PATH_PREFIX: &str = "/app/transcripts/api/serve_file/";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PrivateTargetKind {
@@ -1015,6 +1016,12 @@ fn proxy_headers_for_v3(
     Ok(headers)
 }
 
+fn streams_journal_response(request: &RequestHead) -> bool {
+    request.method == "GET"
+        && (request.path() == "/sse/events"
+            || request.path().starts_with(JOURNAL_MEDIA_PATH_PREFIX))
+}
+
 pub(crate) struct PrivateLinkSession {
     client: reqwest::Client,
     origin: Url,
@@ -1651,7 +1658,7 @@ async fn start_private_link_session_inner(
     let policy = BridgePolicy {
         port: 0,
         capability_gate: CapabilityGate::Enabled,
-        stream_response: BridgePolicy::default().stream_response,
+        stream_response: Arc::new(streams_journal_response),
         local_response: Arc::new(|_, _| None),
         attribution_headers: Arc::new(|_| Vec::new()),
         request_headers: RequestHeaderPolicy::Allow(
@@ -2892,6 +2899,30 @@ mod tests {
                 (PROTOCOL_VERSION_HEADER_NAME.to_owned(), "3".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn journal_media_downloads_stream_without_widening_other_bridge_routes() {
+        let request = |method: &str, target: &str| RequestHead {
+            method: method.to_owned(),
+            target: target.to_owned(),
+            headers: Vec::new(),
+        };
+
+        assert!(streams_journal_response(&request("GET", "/sse/events")));
+        assert!(streams_journal_response(&request(
+            "GET",
+            "/app/transcripts/api/serve_file/20260829/run/screen.mp4?download=1",
+        )));
+        assert!(!streams_journal_response(&request(
+            "HEAD",
+            "/app/transcripts/api/serve_file/20260829/run/screen.mp4",
+        )));
+        assert!(!streams_journal_response(&request("GET", "/app/timeline")));
+        assert!(!streams_journal_response(&request(
+            "GET",
+            "/app/devices/ingest"
+        )));
     }
 
     #[test]
