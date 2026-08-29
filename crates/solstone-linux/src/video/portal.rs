@@ -23,6 +23,7 @@ use ashpd::desktop::{
         StartCastOptions,
     },
 };
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
@@ -62,6 +63,7 @@ const COMMAND_TIMEOUT: Duration =
     Duration::from_secs(START_OPERATION_BUDGET.as_secs() + DISPATCH_MARGIN.as_secs());
 const SHUTDOWN_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_CANCELLED: &str = "portal startup cancelled";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortalOperation {
@@ -362,7 +364,30 @@ impl PortalVideoCapture {
         G: PortalGeometry,
         F: PipelineFactory + 'static,
     {
-        Self::spawn_with_strategy(ops, tokens, geometry, factory, reconnect_strategy(false))
+        Self::spawn_with_cancellation(ops, tokens, geometry, factory, CancellationToken::new())
+    }
+
+    pub(crate) fn spawn_with_cancellation<O, T, G, F>(
+        ops: O,
+        tokens: T,
+        geometry: G,
+        factory: F,
+        startup_cancellation: CancellationToken,
+    ) -> Result<Self, String>
+    where
+        O: PortalOps,
+        T: TokenStore,
+        G: PortalGeometry,
+        F: PipelineFactory + 'static,
+    {
+        Self::spawn_with_strategy(
+            ops,
+            tokens,
+            geometry,
+            factory,
+            reconnect_strategy(false),
+            startup_cancellation,
+        )
     }
 
     fn spawn_with_strategy<O, T, G, F>(
@@ -371,6 +396,7 @@ impl PortalVideoCapture {
         mut geometry: G,
         mut factory: F,
         strategy: ReconnectStrategy,
+        startup_cancellation: CancellationToken,
     ) -> Result<Self, String>
     where
         O: PortalOps,
@@ -381,6 +407,7 @@ impl PortalVideoCapture {
         let (commands, receiver) = mpsc::channel();
         let healthy = Arc::new(AtomicBool::new(false));
         let worker_health = healthy.clone();
+        let worker_cancellation = startup_cancellation.clone();
         thread::Builder::new().name("solstone-portal".into()).spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(runtime) => runtime,
@@ -406,13 +433,31 @@ impl PortalVideoCapture {
                         }
                         let attempt = catch_unwind(AssertUnwindSafe(|| {
                             if portal_session.is_none() {
-                                portal_session = Some(runtime.block_on(open_session(&mut ops, &tokens, &mut geometry, draw_cursor))?);
+                                let session = runtime.block_on(async {
+                                    tokio::select! {
+                                        result = open_session(&mut ops, &tokens, &mut geometry, draw_cursor) => result,
+                                        () = worker_cancellation.cancelled() => Err(STARTUP_CANCELLED.to_owned()),
+                                    }
+                                })?;
+                                portal_session = Some(session);
                             }
                             let session = portal_session.as_ref().ok_or_else(|| "portal session was not established".to_owned())?;
                             let matched = match_streams_to_monitors(&session.streams.streams, &session.monitors);
                             let mut streams = Vec::new();
                             for stream in matched {
-                                let remote = match runtime.block_on(ops.open_pipe_wire_remote()) { Ok(fd) => fd, Err(error) => { warn!(connector = %stream.connector, %error, "could not open PipeWire remote; other streams continue"); continue; } };
+                                let remote = match runtime.block_on(async {
+                                    tokio::select! {
+                                        result = ops.open_pipe_wire_remote() => result,
+                                        () = worker_cancellation.cancelled() => Err(STARTUP_CANCELLED.to_owned()),
+                                    }
+                                }) {
+                                    Ok(fd) => fd,
+                                    Err(error) if error == STARTUP_CANCELLED => return Err(error),
+                                    Err(error) => {
+                                        warn!(connector = %stream.connector, %error, "could not open PipeWire remote; other streams continue");
+                                        continue;
+                                    }
+                                };
                                 let output = directory.join(stream_filename(&stream.position_label, &stream.connector));
                                 let description = pipeline_description(remote.as_raw_fd(), stream.node_id, clamp_framerate(framerate), &output);
                                 let mut pipeline = match factory.build(&description) { Ok(pipeline) => pipeline, Err(error) => { warn!(connector = %stream.connector, %error, "portal pipeline construction failed; other streams continue"); continue; } };
@@ -560,7 +605,7 @@ mod tests {
     };
     use std::{
         collections::VecDeque,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, mpsc},
     };
 
     #[derive(Default)]
@@ -645,6 +690,96 @@ mod tests {
                 } else {
                     Ok(())
                 }
+            })
+        }
+    }
+
+    struct BlockingSelectOps {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        select_entered: mpsc::Sender<()>,
+    }
+
+    impl PortalOps for BlockingSelectOps {
+        fn create_session(&mut self) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("create");
+                Ok(())
+            })
+        }
+
+        fn select_sources(&mut self, _: Option<String>, _: u32) -> PortalFuture<'_, ()> {
+            let select_entered = self.select_entered.clone();
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("select");
+                let _ = select_entered.send(());
+                std::future::pending::<Result<(), String>>().await
+            })
+        }
+
+        fn start(&mut self) -> PortalFuture<'_, PortalStartResult> {
+            Box::pin(async { Err("start must not follow a cancelled selection".into()) })
+        }
+
+        fn open_pipe_wire_remote(&mut self) -> PortalFuture<'_, OwnedFd> {
+            Box::pin(async { Err("open must not follow a cancelled selection".into()) })
+        }
+
+        fn close(&mut self) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("close");
+                Ok(())
+            })
+        }
+    }
+
+    struct BlockingOpenOps {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        open_entered: mpsc::Sender<()>,
+    }
+
+    impl PortalOps for BlockingOpenOps {
+        fn create_session(&mut self) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("create");
+                Ok(())
+            })
+        }
+
+        fn select_sources(&mut self, _: Option<String>, _: u32) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("select");
+                Ok(())
+            })
+        }
+
+        fn start(&mut self) -> PortalFuture<'_, PortalStartResult> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("start");
+                Ok(PortalStartResult {
+                    streams: vec![PortalStream {
+                        index: 0,
+                        node_id: 10,
+                        position: Some((0, 0)),
+                        size: Some((1920, 1080)),
+                    }],
+                    restore_token: None,
+                })
+            })
+        }
+
+        fn open_pipe_wire_remote(&mut self) -> PortalFuture<'_, OwnedFd> {
+            let open_entered = self.open_entered.clone();
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("open");
+                let _ = open_entered.send(());
+                std::future::pending::<Result<OwnedFd, String>>().await
+            })
+        }
+
+        fn close(&mut self) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("close");
+                Ok(())
             })
         }
     }
@@ -782,6 +917,84 @@ mod tests {
             Duration::from_secs(30)
         );
         assert!(COMMAND_TIMEOUT > START_OPERATION_BUDGET);
+    }
+
+    #[test]
+    fn cancellation_unblocks_pending_portal_start_before_shutdown() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let (select_entered, selected) = mpsc::channel();
+        let cancellation = CancellationToken::new();
+        let mut capture = PortalVideoCapture::spawn_with_cancellation(
+            BlockingSelectOps {
+                calls: calls.clone(),
+                select_entered,
+            },
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+            cancellation.clone(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().to_path_buf();
+        let (finished, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let start = capture.start(&directory_path, 1, true);
+            let shutdown = capture.stop_for_shutdown();
+            let _keep_directory = directory;
+            let _ = finished.send((start, shutdown));
+        });
+
+        selected.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancellation.cancel();
+        let (start, shutdown) = result.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+
+        assert!(start.unwrap_err().contains("portal startup cancelled"));
+        assert!(shutdown.unwrap().is_empty());
+        assert_eq!(
+            &*calls.lock().unwrap(),
+            &["create", "select", "close", "close"]
+        );
+    }
+
+    #[test]
+    fn cancellation_unblocks_pending_pipewire_open_before_shutdown() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let (open_entered, opened) = mpsc::channel();
+        let cancellation = CancellationToken::new();
+        let mut capture = PortalVideoCapture::spawn_with_cancellation(
+            BlockingOpenOps {
+                calls: calls.clone(),
+                open_entered,
+            },
+            Store::default(),
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+            cancellation.clone(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().to_path_buf();
+        let (finished, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let start = capture.start(&directory_path, 1, true);
+            let shutdown = capture.stop_for_shutdown();
+            let _keep_directory = directory;
+            let _ = finished.send((start, shutdown));
+        });
+
+        opened.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancellation.cancel();
+        let (start, shutdown) = result.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+
+        assert!(start.unwrap_err().contains(STARTUP_CANCELLED));
+        assert!(shutdown.unwrap().is_empty());
+        assert_eq!(
+            &*calls.lock().unwrap(),
+            &["create", "select", "start", "open", "close", "close"]
+        );
     }
     #[test]
     fn failures_after_create_always_close() {
@@ -1268,6 +1481,7 @@ mod tests {
             Geometry(vec![monitor()]),
             FakeFactory::default(),
             ReconnectStrategy::ReusePortalSession,
+            CancellationToken::new(),
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();

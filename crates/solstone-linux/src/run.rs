@@ -45,6 +45,7 @@ use crate::{
 };
 use ashpd::zbus::Connection;
 use sd_notify::NotifyState;
+use tokio_util::sync::CancellationToken;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
 const STARTUP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
@@ -261,9 +262,12 @@ fn run_capture(
 ) -> Result<(), ObserverError> {
     let notifier: Arc<dyn ServiceNotifier> = Arc::new(SdNotifier);
     let stopped = Arc::new(AtomicBool::new(false));
-    spawn_signal_task(Arc::clone(&stopped)).map_err(ObserverError::Io)?;
+    let portal_startup_cancellation = CancellationToken::new();
+    spawn_signal_task(Arc::clone(&stopped), portal_startup_cancellation.clone())
+        .map_err(ObserverError::Io)?;
     let startup_heartbeat = begin_startup(Arc::clone(&notifier));
-    let video = VideoBackend::new(&config).map_err(ObserverError::VideoStart)?;
+    let video = VideoBackend::new(&config, portal_startup_cancellation)
+        .map_err(ObserverError::VideoStart)?;
     let (audio, mute) = PulseAudioCapture::spawn().map_err(ObserverError::Io)?;
     let clock = SystemClock::new();
     let upload = Arc::new(UploadClient::new(
@@ -556,7 +560,10 @@ fn dispatch_wake<T, E>(
     }
 }
 
-fn spawn_signal_task(stopped: Arc<AtomicBool>) -> Result<(), String> {
+fn spawn_signal_task(
+    stopped: Arc<AtomicBool>,
+    portal_startup_cancellation: CancellationToken,
+) -> Result<(), String> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut interrupt = signal(SignalKind::interrupt()).map_err(|error| error.to_string())?;
     let mut terminate = signal(SignalKind::terminate()).map_err(|error| error.to_string())?;
@@ -567,6 +574,7 @@ fn spawn_signal_task(stopped: Arc<AtomicBool>) -> Result<(), String> {
         }
         tracing::info!("Received shutdown signal");
         stopped.store(true, Ordering::Release);
+        portal_startup_cancellation.cancel();
     });
     Ok(())
 }
@@ -577,18 +585,22 @@ enum VideoBackend {
 }
 
 impl VideoBackend {
-    fn new(config: &Config) -> Result<Self, String> {
+    fn new(
+        config: &Config,
+        portal_startup_cancellation: CancellationToken,
+    ) -> Result<Self, String> {
         match select_backend(
             env::var("XDG_SESSION_TYPE").ok().as_deref(),
             env::var("WAYLAND_DISPLAY").ok().as_deref(),
             env::var("DISPLAY").ok().as_deref(),
         ) {
             BackendKind::X11 => X11VideoCapture::new().map(Self::X11),
-            BackendKind::Portal => PortalVideoCapture::spawn(
+            BackendKind::Portal => PortalVideoCapture::spawn_with_cancellation(
                 AshpdPortalOps::new(),
                 FileTokenStore::new(config.restore_token_path()),
                 NativeWaylandGeometry,
                 GstreamerPipelineFactory::new()?,
+                portal_startup_cancellation,
             )
             .map(Self::Portal),
         }
