@@ -689,6 +689,25 @@ fn package_tool_versions_match_authority() {
     assert!(makefile.contains("cargo-deny $(CARGO_DENY_VERSION)"));
 }
 
+// AC: the release lanes verify the provisioned tool versions at container runtime,
+// so those build arguments must survive into their respective final tool images.
+#[test]
+fn release_tool_images_persist_packaging_tool_version_authority() {
+    let root = workspace_root();
+    let makefile = fs::read_to_string(root.join("Makefile")).unwrap();
+    let variables = make_variables(&makefile);
+    let tools = fs::read_to_string(root.join("packaging/Containerfile.tools")).unwrap();
+    for name in ["CARGO_DEB_VERSION", "CARGO_GENERATE_RPM_VERSION"] {
+        assert!(tools.lines().any(|line| line == format!("ARG {name}")));
+        assert!(
+            tools
+                .lines()
+                .any(|line| line == format!("ENV {name}=\"${{{name}}}\""))
+        );
+        assert!(!variables[name].is_empty());
+    }
+}
+
 // AC: dependency policy retains explicit wildcard and unknown-source denial.
 #[test]
 fn dependency_policy_denies_wildcards_and_unknown_sources() {

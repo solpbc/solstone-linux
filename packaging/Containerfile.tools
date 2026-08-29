@@ -52,6 +52,7 @@ RUN apt-get update \
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 ENV RUSTUP_TOOLCHAIN="${RUST_VERSION}"
+ENV CARGO_DEB_VERSION="${CARGO_DEB_VERSION}"
 
 RUN rustc --version --verbose > /tmp/rustc-verbose \
     && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
@@ -99,6 +100,7 @@ RUN dnf install -y \
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 ENV RUSTUP_TOOLCHAIN="${RUST_VERSION}"
+ENV CARGO_GENERATE_RPM_VERSION="${CARGO_GENERATE_RPM_VERSION}"
 
 RUN rustc --version --verbose > /tmp/rustc-verbose \
     && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
