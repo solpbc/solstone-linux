@@ -110,7 +110,21 @@ fn systemctl_nonfatal(
     }
 }
 
+fn service_is_active(runner: &dyn Runner) -> bool {
+    matches!(
+        systemctl(
+            runner,
+            &["--user", "is-active", "--quiet", "solstone-linux.service"],
+        ),
+        Ok(result) if result.success
+    )
+}
+
 pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::Write) -> i32 {
+    // Preserve update semantics without racing a freshly-created service: an existing
+    // owner is stopped before its replacement starts, while a first install reaches
+    // `enable --now` exactly once.
+    let was_active = service_is_active(runner);
     let path = match service_path(&paths.binary, paths.path.as_deref()) {
         Ok(path) => path,
         Err(error) => {
@@ -137,15 +151,24 @@ pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::W
         let _ = writeln!(output, "Error writing service files: {error}");
         return 1;
     }
+    systemctl_nonfatal(
+        runner,
+        &["--user", "daemon-reload"],
+        "daemon-reload",
+        output,
+    );
+    if was_active {
+        systemctl_nonfatal(
+            runner,
+            &["--user", "stop", "solstone-linux.service"],
+            "stop solstone-linux.service",
+            output,
+        );
+    }
     for (args, operation) in [
-        (&["--user", "daemon-reload"][..], "daemon-reload"),
         (
             &["--user", "enable", "--now", "solstone-linux.service"][..],
             "enable --now solstone-linux.service",
-        ),
-        (
-            &["--user", "restart", "solstone-linux.service"][..],
-            "restart solstone-linux.service",
         ),
         (
             &["--user", "--no-pager", "status", "solstone-linux.service"][..],
@@ -195,6 +218,7 @@ mod tests {
     struct FakeRunner {
         found: bool,
         success: bool,
+        active: bool,
         calls: RefCell<Vec<Vec<String>>>,
     }
     impl FakeRunner {
@@ -202,6 +226,7 @@ mod tests {
             Self {
                 found: true,
                 success: true,
+                active: true,
                 calls: RefCell::new(Vec::new()),
             }
         }
@@ -220,8 +245,13 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(args.iter().map(|value| (*value).into()).collect());
+            let active_query = args == ["--user", "is-active", "--quiet", "solstone-linux.service"];
             Ok(Output {
-                success: self.success,
+                success: if active_query {
+                    self.active
+                } else {
+                    self.success
+                },
                 stdout: String::new(),
             })
         }
@@ -289,8 +319,65 @@ mod tests {
                 .unwrap()
                 .starts_with("[Unit]")
         );
-        // Python also made four systemctl calls per invocation; pin the native sequence explicitly.
-        assert_eq!(runner.calls.borrow().len(), 8);
+        // An existing owner is stopped before its replacement starts. A restart after
+        // `enable --now` would race a newly-created service during desktop initialization.
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 10);
+        assert_eq!(
+            calls[0],
+            ["--user", "is-active", "--quiet", "solstone-linux.service"],
+        );
+        assert_eq!(calls[1], ["--user", "daemon-reload"],);
+        assert_eq!(calls[2], ["--user", "stop", "solstone-linux.service"]);
+        assert_eq!(
+            calls[3],
+            &["--user", "enable", "--now", "solstone-linux.service"],
+        );
+        assert_eq!(
+            calls[4],
+            &["--user", "--no-pager", "status", "solstone-linux.service"],
+        );
+        assert_eq!(&calls[..5], &calls[5..]);
+        assert!(
+            calls
+                .iter()
+                .all(|call| !call.iter().any(|argument| argument == "restart"))
+        );
+    }
+
+    #[test]
+    fn first_install_starts_once_without_stopping_or_restarting() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = fixture(&t, None);
+        let runner = FakeRunner {
+            found: true,
+            success: true,
+            active: false,
+            calls: RefCell::new(Vec::new()),
+        };
+
+        assert_eq!(install(&paths, &runner, &mut Vec::new()), 0);
+
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            calls[0],
+            ["--user", "is-active", "--quiet", "solstone-linux.service"],
+        );
+        assert_eq!(calls[1], ["--user", "daemon-reload"]);
+        assert_eq!(
+            calls[2],
+            ["--user", "enable", "--now", "solstone-linux.service"],
+        );
+        assert_eq!(
+            calls[3],
+            ["--user", "--no-pager", "status", "solstone-linux.service"],
+        );
+        assert!(calls.iter().all(|call| {
+            !call
+                .iter()
+                .any(|argument| argument == "stop" || argument == "restart")
+        }));
     }
     // tests/test_cli.py::test_cmd_install_service_writes_autostart_entry
     #[test]
@@ -319,6 +406,7 @@ mod tests {
         let runner = FakeRunner {
             found: false,
             success: true,
+            active: false,
             calls: RefCell::new(Vec::new()),
         };
         let mut output = Vec::new();
@@ -337,6 +425,7 @@ mod tests {
         let runner = FakeRunner {
             found: true,
             success: false,
+            active: false,
             calls: RefCell::new(Vec::new()),
         };
         let mut output = Vec::new();
