@@ -1255,12 +1255,13 @@ mod tests {
     fn status_prints_quarantine_line() {
         let t = tempfile::tempdir().unwrap();
         let config = status_config(&t);
-        fs::create_dir_all(
-            config
-                .captures_dir()
-                .join("20260101/test-stream/120000_300.failed"),
-        )
-        .unwrap();
+        let failed = config
+            .captures_dir()
+            .join("20260101/test-stream/120000_300.failed");
+        fs::create_dir_all(&failed).unwrap();
+        // Only a segment holding real media is reported as held; a metadata-only stub
+        // captured nothing and is not unsent content.
+        fs::write(failed.join("audio.flac"), b"x").unwrap();
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out = String::from_utf8(out).unwrap();

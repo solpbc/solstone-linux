@@ -11,7 +11,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const METADATA_FILENAME: &str = ".metadata";
+pub(crate) const METADATA_FILENAME: &str = ".metadata";
 const MINIMUM_AGE_SECONDS: f64 = 120.0;
 
 pub trait MediaDurationProbe {

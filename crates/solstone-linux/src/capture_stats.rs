@@ -143,6 +143,25 @@ pub fn compute_status_capture_stats(root: &Path) -> StatusCaptureStats {
     stats
 }
 
+/// A quarantined segment holding nothing but its metadata stub never captured a byte:
+/// `recovery::recover_segment` marks an empty interrupted segment `.failed` by the same
+/// path it uses for one carrying real media, so the suffix alone cannot tell them apart.
+/// Counting the empty shape reports unsent content that does not exist, and it can never
+/// drain, because there is nothing to send — it is held forever at a growing age.
+/// Unreadable is deliberately not empty: a segment we cannot inspect keeps being counted
+/// rather than disappearing from the owner's total on an I/O error.
+fn holds_payload(segment_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(segment_dir) else {
+        return true;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .path()
+            .file_name()
+            .is_some_and(|name| name != crate::recovery::METADATA_FILENAME)
+    })
+}
+
 pub fn compute_quarantine_stats(root: &Path, now: f64) -> QuarantineStats {
     let mut count = 0;
     let mut oldest_mtime: Option<f64> = None;
@@ -164,6 +183,7 @@ pub fn compute_quarantine_stats(root: &Path, now: f64) -> QuarantineStats {
                     let segment = segment?;
                     if !segment.path().is_dir()
                         || classify_segment_name(&segment.file_name()) != SegmentClass::Failed
+                        || !holds_payload(&segment.path())
                     {
                         continue;
                     }
@@ -235,6 +255,8 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let a = segment(t.path(), "20260101", "120000_300.failed");
         let b = segment(t.path(), "20260101", "130000.failed");
+        fs::write(a.join("audio.flac"), b"x").unwrap();
+        fs::write(b.join("audio.flac"), b"x").unwrap();
         set_mtime(&a, 1_000_000.0 - 2.0 * 86_400.0);
         set_mtime(&b, 1_000_000.0 - 5.0 * 86_400.0);
         assert_eq!(
@@ -329,10 +351,45 @@ mod tests {
     fn injected_now() {
         let t = tempfile::tempdir().unwrap();
         let failed = segment(t.path(), "20260101", "120000.failed");
+        fs::write(failed.join("audio.flac"), b"x").unwrap();
         set_mtime(&failed, 200.0);
         assert_eq!(
             compute_quarantine_stats(t.path(), 100.0).oldest_age_seconds,
             Some(0.0)
+        );
+    }
+
+    // AC: a failed segment holding only its metadata stub captured nothing, so it is not
+    // reported as unsent content the owner could still recover.
+    #[test]
+    fn quarantine_skips_payload_free_failed() {
+        // Far enough from the epoch that a 30-day-old fixture mtime stays positive.
+        const NOW: f64 = 1_700_000_000.0;
+        let t = tempfile::tempdir().unwrap();
+        let empty = segment(t.path(), "20260101", "120000.failed");
+        let stub = segment(t.path(), "20260101", "130000.failed");
+        fs::write(stub.join(crate::recovery::METADATA_FILENAME), b"{}").unwrap();
+        set_mtime(&empty, NOW - 30.0 * 86_400.0);
+        set_mtime(&stub, NOW - 29.0 * 86_400.0);
+        assert_eq!(
+            compute_quarantine_stats(t.path(), NOW),
+            QuarantineStats {
+                count: 0,
+                oldest_age_seconds: None
+            }
+        );
+
+        // A sibling carrying real media is still held, and sets the reported age alone.
+        let real = segment(t.path(), "20260101", "140000.failed");
+        fs::write(real.join(crate::recovery::METADATA_FILENAME), b"{}").unwrap();
+        fs::write(real.join("audio.flac"), b"x").unwrap();
+        set_mtime(&real, NOW - 3.0 * 86_400.0);
+        assert_eq!(
+            compute_quarantine_stats(t.path(), NOW),
+            QuarantineStats {
+                count: 1,
+                oldest_age_seconds: Some(3.0 * 86_400.0)
+            }
         );
     }
     // AC: byte totals truncate rather than round.
