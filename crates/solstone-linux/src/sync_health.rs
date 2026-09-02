@@ -605,9 +605,17 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
     }))
     .map_err(io::Error::other)?;
     text.push('\n');
+    // Match `private_file::atomic_write_bytes`: a failed write never leaves its scratch
+    // file behind. The temporary is pid-named and nothing ever collects it, so an early
+    // return here litters the owner's state directory permanently.
     fs::write(&temporary, text)?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-    fs::rename(temporary, path)
+    let write = || -> io::Result<()> {
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&temporary, &path)
+    };
+    write().inspect_err(|_| {
+        let _ = fs::remove_file(&temporary);
+    })
 }
 
 #[cfg(test)]
@@ -615,6 +623,24 @@ mod tests {
     use super::*;
     use crate::config::DEFAULT_SYNC_STALE_THRESHOLD;
     use crate::private_link::LinkFactState;
+
+    // AC: a failed save leaves no pid-named scratch file behind. The temporary is never
+    // collected by anything, so an early return would litter the state directory forever.
+    #[test]
+    fn failed_save_leaves_no_temporary() {
+        let t = tempfile::tempdir().unwrap();
+        let state = t.path().join("state");
+        // A directory at the destination makes the rename fail after the temporary exists.
+        fs::create_dir_all(sync_health_path(&state)).unwrap();
+        assert!(save_facts(&state, &SyncFacts::default()).is_err());
+        let leftovers: Vec<_> = fs::read_dir(&state)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    }
 
     // tests/test_sync_health.py::test_empty_facts_derive_unknown
     #[test]
