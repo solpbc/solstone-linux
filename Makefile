@@ -18,8 +18,10 @@ CARGO_LOCKED := --locked
 CARGO_DENY_VERSION := 0.20.2
 CARGO_DEB_VERSION := 3.7.0
 CARGO_GENERATE_RPM_VERSION := 0.21.0
-# Transparency is paused during the Rust conversion freeze. Restore only after
-# the post-conversion review by changing this checked-in activation switch to 1.
+# Transparency publication is suspended while the shared v2 trust/transparency
+# rail (see solpbc/solstone-transparency) is built and rehearsed on throwaway
+# keys. Restoring it for a real release needs that rail's production key
+# ceremony, not just flipping this checked-in flag.
 TRANSPARENCY_ACTIVATED ?= 0
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
 UBUNTU_STOCK_BASE := sha256:4d0600e5088ac5da5119401c70292ea3a9d9dc71f76a234ad5390c1f6a8e5669
@@ -173,7 +175,7 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 
 check-transparency-minisign:
-	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency publication is suspended pending the v2 rail's production key ceremony (see solpbc/solstone-transparency); this flag does not by itself authorize a real publish" >&2; exit 2; }
 	@$(MAKE) rust-preflight
 	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest transparency_tests::real_minisign_sign_verify_and_reject_tamper -- --exact --ignored
@@ -183,7 +185,7 @@ check-audit-signed-packet: rust-preflight check-cargo-deny
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest audit_tests::real_signed_packet_local_audit -- --exact --ignored
 
 publish-transparency:
-	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency publication is suspended pending the v2 rail's production key ceremony (see solpbc/solstone-transparency); this flag does not by itself authorize a real publish" >&2; exit 2; }
 	@$(MAKE) rust-preflight
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
@@ -193,7 +195,7 @@ publish-release: rust-preflight
 	bash scripts/publish-release.sh "$(RELEASE_DIR)"
 
 resign-transparency-pointer:
-	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency is suspended for the Rust conversion freeze; restore with TRANSPARENCY_ACTIVATED=1 only after the post-conversion review" >&2; exit 2; }
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency publication is suspended pending the v2 rail's production key ceremony (see solpbc/solstone-transparency); this flag does not by itself authorize a real publish" >&2; exit 2; }
 	@$(MAKE) rust-preflight
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency resign-pointer
 
