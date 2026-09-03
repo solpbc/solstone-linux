@@ -32,9 +32,47 @@ sudo zypper install libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins
 
 ## Install a release
 
-Use the Debian or RPM package published for your distribution when available.
-The portable installer is in the matching release source checkout, not inside
-the archive:
+**Verify first.** Download the package you will install, the release manifest,
+and its adjacent `.minisig` file from the
+[latest release](https://github.com/solpbc/solstone-linux/releases/latest).
+Then fetch the published key, authenticate the manifest, and check the package
+against the digest in that manifest:
+
+```bash
+curl -fLo solstone-linux-release.pub https://updates.solstone.app/solstone-linux/minisign.pub
+minisign -Vm solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json -p solstone-linux-release.pub
+jq -r --arg package '<downloaded-package>' \
+  '.artifacts[] | select(.path == $package) | "\(.sha256)  \(.path)"' \
+  solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json \
+  | sha256sum -c -
+```
+
+Minisign authenticates the release manifest. The next command checks the
+downloaded package against the authenticated SHA-256 digest. Replace
+`<downloaded-package>` with its exact filename. You run these checks; `apt`,
+`dnf`, and `scripts/install.sh` do not. If either command refuses the files,
+stop.
+
+Then install one of the release artifacts. Use the Debian or RPM package
+published for your distribution when available.
+
+**Debian / Ubuntu:** `apt` does not check our minisign signature, so complete
+the verify-first step above before running:
+
+```bash
+sudo apt install ./solstone-linux_<VERSION>-1_amd64.deb
+```
+
+**Fedora / RHEL:** `dnf` does not check our minisign signature, so complete the
+verify-first step above before running:
+
+```bash
+sudo dnf install ./solstone-linux-<VERSION>-1.x86_64.rpm
+```
+
+For the portable archive, `scripts/install.sh` does not check our minisign
+signature either. Complete the verify-first step above before running it. The
+installer is in the matching release source checkout, not inside the archive:
 
 ```bash
 scripts/install.sh solstone-linux-<VERSION>-linux-x86_64.tar.gz

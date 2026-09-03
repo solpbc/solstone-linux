@@ -171,4 +171,4 @@ while IFS= read -r -d '' ICON; do
 done < <(find "$SOURCE/share/icons/hicolor" -type f -print0)
 
 echo "installed solstone-linux $RELEASE_VERSION under $PREFIX"
-echo "optional after the Rust command is implemented: solstone-linux install-service"
+echo "next: solstone-linux install-service"
