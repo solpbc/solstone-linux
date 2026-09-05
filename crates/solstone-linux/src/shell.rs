@@ -40,6 +40,12 @@ impl BusNameRequester for ConnectionRequester<'_> {
             .runtime
             .block_on(Connection::session())
             .map_err(|e| e.to_string())?;
+        // Start zbus's object-server dispatch task before claiming the name (still
+        // strictly before serve_at, capture, or any other side effect -- the
+        // singleton-gate ordering `acquire_singleton` documents is unchanged). This
+        // closes the race zbus warns about: a method call arriving in that window now
+        // gets a proper "unknown interface" reply instead of going unanswered.
+        let _ = connection.object_server();
         let reply = self
             .runtime
             .block_on(connection.request_name_with_flags(name, flag.into()))

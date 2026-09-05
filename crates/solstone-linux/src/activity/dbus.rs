@@ -166,21 +166,42 @@ impl NativeSystemBus {
         let Some(connection) = &self.connection else {
             return BackendOutcome::Absent;
         };
+        // GetSessionByPID requires this process to be a member of a login session's
+        // cgroup, which a `systemd --user` service never is (it lives under
+        // `user@<uid>.service`, not `session-N.scope`), so it always fails here with
+        // NoSessionForPID. GetUserByPID only needs the PID's owning UID -- true of any
+        // process -- then the user's own Display property names their primary
+        // graphical session, which is the session we actually want to watch.
         let result: BackendOutcome<zbus::zvariant::OwnedObjectPath> =
             self.runtime.block_on(timeout(async {
-                let proxy = Proxy::new(
+                let manager = Proxy::new(
                     connection,
                     "org.freedesktop.login1",
                     "/org/freedesktop/login1",
                     "org.freedesktop.login1.Manager",
                 )
                 .await?;
-                proxy
+                let user_path: zbus::zvariant::OwnedObjectPath = manager
                     .call::<_, _, zbus::zvariant::OwnedObjectPath>(
-                        "GetSessionByPID",
+                        "GetUserByPID",
                         &(std::process::id(),),
                     )
-                    .await
+                    .await?;
+                let user = PropertiesProxy::builder(connection)
+                    .destination("org.freedesktop.login1")?
+                    .path(user_path)?
+                    .build()
+                    .await?;
+                let interface =
+                    zbus::names::InterfaceName::try_from("org.freedesktop.login1.User")?;
+                let display: (String, zbus::zvariant::OwnedObjectPath) =
+                    user.get(interface, "Display").await?.try_into()?;
+                if display.1.as_str() == "/" {
+                    return Err(zbus::Error::Failure(
+                        "user has no active display session".into(),
+                    ));
+                }
+                Ok(display.1)
             }));
         if let BackendOutcome::Available(path) = &result {
             self.session_path = Some(path.clone());
