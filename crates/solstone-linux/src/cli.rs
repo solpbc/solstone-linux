@@ -505,10 +505,11 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 match stored {
                     Some(entry) if entry.identity_key == current_key => {
                         let is_current = liveness == PrivateStateLockLiveness::LiveOwner
-                            && facts
-                                .link
-                                .as_ref()
-                                .is_some_and(|l| l.journal_version_observed);
+                            && facts.link.as_ref().is_some_and(|l| {
+                                l.journal_version_observed
+                                    && l.carrier_proven
+                                    && !l.transport_unavailable
+                            });
                         if is_current {
                             escape_display_version(&entry.version)
                         } else {

@@ -15,7 +15,7 @@ use serde_json::json;
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -93,7 +93,6 @@ pub(crate) struct Inner {
     capability: std::sync::RwLock<Option<PrivateLinkCapability>>,
     fallback_link_facts: crate::private_link::LinkFacts,
     latest_started_generation: Arc<AtomicU64>,
-    last_committed_generation: Arc<Mutex<u64>>,
     #[cfg(test)]
     expose_link_facts: AtomicBool,
     revoked: AtomicBool,
@@ -122,7 +121,6 @@ impl UploadClient {
             capability: std::sync::RwLock::new(capability.into()),
             fallback_link_facts: crate::private_link::LinkFacts::default(),
             latest_started_generation: Arc::new(AtomicU64::new(0)),
-            last_committed_generation: Arc::new(Mutex::new(0)),
             #[cfg(test)]
             expose_link_facts: AtomicBool::new(true),
             revoked: AtomicBool::new(false),
@@ -156,10 +154,6 @@ impl UploadClient {
         Arc::clone(&self.inner.latest_started_generation)
     }
 
-    pub(crate) fn last_committed_generation(&self) -> Arc<Mutex<u64>> {
-        Arc::clone(&self.inner.last_committed_generation)
-    }
-
     pub(crate) fn link_fact_state(&self) -> Option<crate::private_link::LinkFactState> {
         #[cfg(test)]
         if !self.inner.expose_link_facts.load(Ordering::Acquire) {
@@ -191,11 +185,6 @@ impl UploadClient {
         self.inner
             .latest_started_generation
             .store(0, Ordering::Release);
-        *self
-            .inner
-            .last_committed_generation
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = 0;
         self.link_facts().begin_owner_generation();
     }
 

@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -143,21 +143,6 @@ struct SyncControl {
     running: Arc<AtomicBool>,
 }
 
-pub(crate) fn should_persist_generation<'a>(
-    latest_started: &AtomicU64,
-    last_committed: &'a Mutex<u64>,
-    current_gen: u64,
-) -> Option<std::sync::MutexGuard<'a, u64>> {
-    if latest_started.load(Ordering::Acquire) != current_gen {
-        return None;
-    }
-    let guard = last_committed.lock().unwrap_or_else(|p| p.into_inner());
-    if latest_started.load(Ordering::Acquire) != current_gen || current_gen <= *guard {
-        return None;
-    }
-    Some(guard)
-}
-
 impl SyncService {
     #[cfg(test)]
     pub fn start(
@@ -192,7 +177,6 @@ impl SyncService {
             failures: Arc::clone(&link_persistence_failures),
         });
         let latest_started_generation = client.latest_started_generation();
-        let last_committed_generation = client.last_committed_generation();
         let sink_client = Arc::downgrade(&client);
         let sink_config = config.clone();
         link_facts.install_sink(Arc::new(move |facts| {
@@ -205,35 +189,30 @@ impl SyncService {
                     crate::private_link::load_credential(&sink_config.config_dir)
             {
                 let current_gen = snapshot.dial_generation;
+                let epoch_at_fire = facts.owner_epoch();
+                // Coalesces duplicate fetches for the same generation (e.g. a
+                // CarrierProven followed by ObserverRegistered); the freshness
+                // check that decides whether a completed fetch may persist is
+                // commit_journal_version's job, not this gate's.
                 let prev = latest_started_generation.fetch_max(current_gen, Ordering::AcqRel);
                 if current_gen > prev {
                     let identity_key = crate::private_link::journal_identity_key(&credential);
                     let state_dir = sink_config.state_dir();
-                    let latest_started = Arc::clone(&latest_started_generation);
-                    let last_committed = Arc::clone(&last_committed_generation);
                     let facts_publish = client.link_facts();
                     tokio::spawn(async move {
                         if let Ok(Some(version)) = capability.system_status().await {
-                            if let Some(mut guard) = should_persist_generation(
-                                &latest_started,
-                                &last_committed,
+                            facts_publish.commit_journal_version(
+                                epoch_at_fire,
                                 current_gen,
-                            ) {
-                                if crate::sync_health::save_paired_journal_version(
-                                    &state_dir,
-                                    &identity_key,
-                                    &version,
-                                )
-                                .is_ok()
-                                {
-                                    *guard = current_gen;
-                                    drop(guard);
-                                    facts_publish.publish_with_generation(
-                                        crate::private_link::LinkFact::JournalVersionObserved,
-                                        current_gen,
-                                    );
-                                }
-                            }
+                                || {
+                                    crate::sync_health::save_paired_journal_version(
+                                        &state_dir,
+                                        &identity_key,
+                                        &version,
+                                    )
+                                    .is_ok()
+                                },
+                            );
                         }
                     });
                 }
@@ -1095,6 +1074,8 @@ fn remove_if_empty(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
+
     use crate::{
         private_link::{LinkFactState, start_private_link_session},
         private_link_test_peer::PrivateLinkPeer,
@@ -2375,7 +2356,6 @@ mod tests {
             crate::private_link::LinkFact::TransportUnavailable,
             crate::private_link::LinkFact::TerminalRevocation,
             crate::private_link::LinkFact::TokenPersistenceFailure,
-            crate::private_link::LinkFact::JournalVersionObserved,
         ];
         let publishers = facts.map(|fact| {
             let client = Arc::clone(&client);
@@ -2403,13 +2383,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(persisted["link"], expected);
+        // journal_version_observed is no longer settable via publish_link_fact
+        // (only commit_journal_version's atomic write-and-mark can set it), so
+        // it alone is expected to remain false here.
         assert!(
-            persisted["link"]
+            expected
                 .as_object()
                 .unwrap()
-                .values()
-                .all(|value| value.as_bool() == Some(true))
+                .iter()
+                .filter(|(key, _)| key.as_str() != "journal_version_observed")
+                .all(|(_, value)| value.as_bool() == Some(true))
         );
+        assert_eq!(persisted["link"]["journal_version_observed"], false);
 
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
@@ -4076,55 +4061,45 @@ mod tests {
     }
 
     #[test]
-    fn should_persist_generation_discards_obsolete_and_duplicate_generations() {
-        let latest_started = AtomicU64::new(2);
-        let last_committed = Mutex::new(0);
+    fn commit_journal_version_requires_epoch_and_generation_to_match_before_writing() {
+        let link_facts = crate::private_link::LinkFacts::default();
+        let stale_epoch = link_facts.owner_epoch();
 
-        // Generation 2 completes and writes first -> allowed
-        let mut guard = should_persist_generation(&latest_started, &last_committed, 2)
-            .expect("gen 2 should be allowed");
-        *guard = 2;
-        drop(guard);
+        // The owner reconnects (a new epoch begins) and its dial reaches generation 2.
+        link_facts.begin_owner_generation();
+        link_facts.publish_with_generation(crate::private_link::LinkFact::CarrierProven, 2);
+        let live_epoch = link_facts.owner_epoch();
+        assert_ne!(stale_epoch, live_epoch);
 
-        // Generation 1 completes late -> discarded
-        assert!(should_persist_generation(&latest_started, &last_committed, 1).is_none());
+        // A completion captured under the prior (now dead) owner epoch is
+        // refused and never runs its write, even for a dial_generation number
+        // the live epoch also reached - the ABA hazard a bare generation-number
+        // comparison alone can't see.
+        let mut called = false;
+        assert!(!link_facts.commit_journal_version(stale_epoch, 2, || {
+            called = true;
+            true
+        }));
+        assert!(
+            !called,
+            "save must not run once the owner epoch no longer matches"
+        );
+        assert!(!link_facts.snapshot().journal_version_observed);
 
-        // Generation 2 duplicate/replayed completion -> discarded
-        assert!(should_persist_generation(&latest_started, &last_committed, 2).is_none());
+        // A dial_generation that has since moved on within the SAME epoch (e.g.
+        // a transport-level reconnect) is refused too.
+        assert!(!link_facts.commit_journal_version(live_epoch, 1, || true));
+        assert!(!link_facts.snapshot().journal_version_observed);
 
-        // Generation 3 completes -> allowed once latest_started is 3
-        latest_started.store(3, Ordering::Release);
-        let mut guard = should_persist_generation(&latest_started, &last_committed, 3)
-            .expect("gen 3 should be allowed");
-        *guard = 3;
-        drop(guard);
-    }
+        // Matching epoch and generation commits the write and marks the
+        // version observed atomically with it.
+        assert!(link_facts.commit_journal_version(live_epoch, 2, || true));
+        assert!(link_facts.snapshot().journal_version_observed);
 
-    #[tokio::test]
-    async fn obsolete_generation_fetch_does_not_overwrite_newer_generation_sidecar() {
-        let latest_started = Arc::new(AtomicU64::new(0));
-        let last_committed = Arc::new(Mutex::new(0));
-
-        // Gen 1 starts
-        latest_started.store(1, Ordering::Release);
-
-        // Gen 2 starts before Gen 1 completes
-        latest_started.store(2, Ordering::Release);
-
-        // Gen 1 completes -> should_persist_generation rejects it
-        assert!(should_persist_generation(&latest_started, &last_committed, 1).is_none());
-        assert_eq!(*last_committed.lock().unwrap(), 0);
-
-        // Even if Gen 2 fails / never commits, Gen 1 is still rejected
-        assert!(should_persist_generation(&latest_started, &last_committed, 1).is_none());
-        assert_eq!(*last_committed.lock().unwrap(), 0);
-
-        // Gen 2 completes -> allowed
-        let mut guard = should_persist_generation(&latest_started, &last_committed, 2)
-            .expect("gen 2 should be allowed");
-        *guard = 2;
-        drop(guard);
-        assert_eq!(*last_committed.lock().unwrap(), 2);
+        // owner_lost invalidates it again immediately, without waiting for a
+        // subsequent reconnect to supersede the generation number.
+        link_facts.owner_lost();
+        assert!(!link_facts.commit_journal_version(live_epoch, 2, || true));
     }
 
     #[tokio::test]

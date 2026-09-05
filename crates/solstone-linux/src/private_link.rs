@@ -826,7 +826,6 @@ pub(crate) enum LinkFact {
     TransportUnavailable,
     TerminalRevocation,
     TokenPersistenceFailure,
-    JournalVersionObserved,
 }
 
 pub(crate) type LinkFactSink = Arc<dyn Fn(&LinkFacts) + Send + Sync>;
@@ -835,6 +834,10 @@ pub(crate) type LinkFactSink = Arc<dyn Fn(&LinkFacts) + Send + Sync>;
 struct LinkFactsInner {
     state: Mutex<LinkFactState>,
     sink: Mutex<Option<LinkFactSink>>,
+    // Never reset to 0, unlike dial_generation: it identifies the owner
+    // association itself, so a stale in-flight fetch from a prior owner can't
+    // alias a same-numbered dial_generation from a later one (ABA).
+    owner_epoch: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -859,11 +862,13 @@ pub(crate) struct LinkFactState {
 
 impl LinkFacts {
     pub(crate) fn begin_owner_generation(&self) {
+        self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
         *self.inner.state.lock().unwrap_or_else(|p| p.into_inner()) = LinkFactState::default();
         self.persist();
     }
 
     pub(crate) fn owner_lost(&self) {
+        self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
             *state = LinkFactState {
@@ -874,6 +879,15 @@ impl LinkFacts {
         self.persist();
     }
 
+    /// Identifies the current owner association, independent of dial_generation
+    /// (which resets to 0 at the start of every owner epoch and so can repeat
+    /// across them). Bumped by begin_owner_generation and owner_lost so a
+    /// completion captured under a prior owner can never be mistaken for one
+    /// from the current owner, even when their dial_generation numbers match.
+    pub(crate) fn owner_epoch(&self) -> u64 {
+        self.inner.owner_epoch.load(Ordering::Acquire)
+    }
+
     pub(crate) fn publish(&self, fact: LinkFact) {
         self.publish_with_generation(fact, self.snapshot().dial_generation);
     }
@@ -881,6 +895,14 @@ impl LinkFacts {
     pub(crate) fn publish_with_generation(&self, fact: LinkFact, generation: u64) {
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            // A freshly proven dial hasn't had its own journal version confirmed
+            // yet: an observed flag left over from an earlier generation within
+            // the same owner epoch (e.g. a transport-level reconnect) must not
+            // be reported as current until commit_journal_version confirms it
+            // again for this generation.
+            if fact == LinkFact::CarrierProven && generation != state.dial_generation {
+                state.journal_version_observed = false;
+            }
             state.dial_generation = generation;
             match fact {
                 LinkFact::PairingRequired => state.pairing_required = true,
@@ -894,13 +916,48 @@ impl LinkFacts {
                         state.transport_unavailable = false;
                     }
                 }
-                LinkFact::TransportUnavailable => state.transport_unavailable = true,
-                LinkFact::TerminalRevocation => state.terminal_revocation = true,
+                LinkFact::TransportUnavailable => {
+                    state.transport_unavailable = true;
+                    state.journal_version_observed = false;
+                }
+                LinkFact::TerminalRevocation => {
+                    state.terminal_revocation = true;
+                    state.journal_version_observed = false;
+                }
                 LinkFact::TokenPersistenceFailure => state.token_persistence_failure = true,
-                LinkFact::JournalVersionObserved => state.journal_version_observed = true,
             }
         }
         self.persist();
+    }
+
+    /// Atomically validates that the owner epoch, dial generation, and carrier
+    /// state captured when a fetch started are still current, then runs `save`
+    /// and marks the journal version observed for this generation - all under
+    /// the same state lock. Consolidating the freshness check, the disk write,
+    /// and the fact update into one critical section closes the window where
+    /// owner_lost could interleave between a completed write and the
+    /// journal_version_observed publish and restore stale metadata into a
+    /// just-reset state. Returns whether the version was committed.
+    pub(crate) fn commit_journal_version(
+        &self,
+        epoch_at_fire: u64,
+        dial_generation: u64,
+        save: impl FnOnce() -> bool,
+    ) -> bool {
+        let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if self.inner.owner_epoch.load(Ordering::Acquire) != epoch_at_fire
+            || !state.carrier_proven
+            || state.dial_generation != dial_generation
+        {
+            return false;
+        }
+        if !save() {
+            return false;
+        }
+        state.journal_version_observed = true;
+        drop(state);
+        self.persist();
+        true
     }
 
     pub(crate) fn snapshot(&self) -> LinkFactState {
@@ -3752,12 +3809,32 @@ mod tests {
             LinkFact::TransportUnavailable,
             LinkFact::TerminalRevocation,
             LinkFact::TokenPersistenceFailure,
-            LinkFact::JournalVersionObserved,
         ] {
             facts.publish(fact);
         }
         facts.begin_owner_generation();
         assert_eq!(facts.snapshot(), LinkFactState::default());
+    }
+
+    #[test]
+    fn owner_epoch_advances_on_generation_reset_and_owner_loss_only() {
+        let facts = LinkFacts::default();
+        let initial = facts.owner_epoch();
+
+        facts.publish(LinkFact::CarrierProven);
+        assert_eq!(
+            facts.owner_epoch(),
+            initial,
+            "publishing a fact must not itself advance the owner epoch"
+        );
+
+        facts.begin_owner_generation();
+        let after_begin = facts.owner_epoch();
+        assert_ne!(after_begin, initial);
+
+        facts.owner_lost();
+        let after_loss = facts.owner_epoch();
+        assert_ne!(after_loss, after_begin);
     }
 
     fn open_journal_fixture(target: &str) -> (Arc<OpenJournalTarget>, OpenJournalCapability) {
