@@ -862,15 +862,18 @@ pub(crate) struct LinkFactState {
 
 impl LinkFacts {
     pub(crate) fn begin_owner_generation(&self) {
-        self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
-        *self.inner.state.lock().unwrap_or_else(|p| p.into_inner()) = LinkFactState::default();
+        {
+            let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
+            *state = LinkFactState::default();
+        }
         self.persist();
     }
 
     pub(crate) fn owner_lost(&self) {
-        self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
             *state = LinkFactState {
                 transport_unavailable: true,
                 ..LinkFactState::default()
@@ -879,11 +882,22 @@ impl LinkFacts {
         self.persist();
     }
 
+    fn begin_journal_dial(&self) {
+        {
+            let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
+            state.journal_version_observed = false;
+            state.carrier_proven = false;
+        }
+        self.persist();
+    }
+
     /// Identifies the current owner association, independent of dial_generation
     /// (which resets to 0 at the start of every owner epoch and so can repeat
-    /// across them). Bumped by begin_owner_generation and owner_lost so a
+    /// across them). Bumped on owner changes and dial attempts so a
     /// completion captured under a prior owner can never be mistaken for one
     /// from the current owner, even when their dial_generation numbers match.
+    #[cfg(test)]
     pub(crate) fn owner_epoch(&self) -> u64 {
         self.inner.owner_epoch.load(Ordering::Acquire)
     }
@@ -947,6 +961,9 @@ impl LinkFacts {
         let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
         if self.inner.owner_epoch.load(Ordering::Acquire) != epoch_at_fire
             || !state.carrier_proven
+            || state.transport_unavailable
+            || state.terminal_revocation
+            || state.token_persistence_failure
             || state.dial_generation != dial_generation
         {
             return false;
@@ -958,6 +975,14 @@ impl LinkFacts {
         drop(state);
         self.persist();
         true
+    }
+
+    pub(crate) fn snapshot_with_epoch(&self) -> (LinkFactState, u64) {
+        let state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        (
+            state.clone(),
+            self.inner.owner_epoch.load(Ordering::Acquire),
+        )
     }
 
     pub(crate) fn snapshot(&self) -> LinkFactState {
@@ -1058,6 +1083,7 @@ impl CarrierOpener for PrivateLinkOpener {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<DialedCarrier, TransportError>> + Send + '_>> {
         Box::pin(async move {
+            self.facts.begin_journal_dial();
             let carrier = self
                 .admit_dial(async {
                     let mut lan_error = None;
@@ -3814,6 +3840,25 @@ mod tests {
         }
         facts.begin_owner_generation();
         assert_eq!(facts.snapshot(), LinkFactState::default());
+    }
+
+    #[test]
+    fn journal_version_dial_start_fences_pending_result_and_clears_freshness() {
+        let facts = LinkFacts::default();
+        facts.publish_with_generation(LinkFact::CarrierProven, 1);
+        let before = facts.owner_epoch();
+        assert!(facts.commit_journal_version(before, 1, || true));
+        facts.begin_journal_dial();
+        assert!(!facts.snapshot().journal_version_observed);
+        assert!(!facts.commit_journal_version(before, 1, || panic!("obsolete write")));
+        facts.publish_with_generation(LinkFact::CarrierProven, 2);
+        let current = facts.owner_epoch();
+        facts.publish_with_generation(LinkFact::TransportUnavailable, 2);
+        assert!(!facts.commit_journal_version(current, 2, || panic!("disconnected write")));
+        facts.publish_with_generation(LinkFact::ObserverRegistered, 2);
+        assert!(facts.commit_journal_version(current, 2, || true));
+        facts.publish_with_generation(LinkFact::TerminalRevocation, 2);
+        assert!(!facts.commit_journal_version(current, 2, || panic!("revoked write")));
     }
 
     #[test]

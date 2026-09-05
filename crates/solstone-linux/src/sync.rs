@@ -181,21 +181,26 @@ impl SyncService {
         let sink_config = config.clone();
         link_facts.install_sink(Arc::new(move |facts| {
             persistence.persist(facts);
-            let snapshot = facts.snapshot();
+            let (snapshot, epoch_at_fire) = facts.snapshot_with_epoch();
             if snapshot.carrier_proven
+                && !snapshot.transport_unavailable
+                && !snapshot.terminal_revocation
+                && !snapshot.token_persistence_failure
                 && let Some(client) = sink_client.upgrade()
                 && let Some(capability) = client.capability()
                 && let Ok(Some(credential)) =
                     crate::private_link::load_credential(&sink_config.config_dir)
             {
                 let current_gen = snapshot.dial_generation;
-                let epoch_at_fire = facts.owner_epoch();
                 // Coalesces duplicate fetches for the same generation (e.g. a
                 // CarrierProven followed by ObserverRegistered); the freshness
                 // check that decides whether a completed fetch may persist is
                 // commit_journal_version's job, not this gate's.
-                let prev = latest_started_generation.fetch_max(current_gen, Ordering::AcqRel);
-                if current_gen > prev {
+                // Epochs also distinguish a lazy initial dial from the trigger
+                // which opened it, even if their numeric dial generation matches.
+                let fetch_generation = epoch_at_fire.saturating_add(1);
+                let prev = latest_started_generation.fetch_max(fetch_generation, Ordering::AcqRel);
+                if fetch_generation > prev {
                     let identity_key = crate::private_link::journal_identity_key(&credential);
                     let state_dir = sink_config.state_dir();
                     let facts_publish = client.link_facts();
@@ -4106,7 +4111,7 @@ mod tests {
     async fn sync_service_records_paired_journal_version_on_carrier_proven() {
         let temp = tempfile::tempdir().unwrap();
         let server =
-            LinkedMockServer::new(vec![(200, json!({"version": {"current": "1.4.0"}}))]).await;
+            LinkedMockServer::new(vec![(200, json!({"version": {"current": "1.4.0"}})); 2]).await;
         let config = Config {
             base_dir: temp.path().into(),
             config_dir: temp.path().join("config"),
@@ -4123,6 +4128,8 @@ mod tests {
                 mono: 0.0,
             }),
         ));
+        // Establish a real carrier before installing the metadata observer.
+        assert!(server.capability().system_status().await.is_ok());
         let service = SyncService::start(
             config.clone(),
             Arc::clone(&client),
@@ -4132,8 +4139,6 @@ mod tests {
             }),
         );
         let link_facts = client.link_facts();
-        link_facts.publish_with_generation(crate::private_link::LinkFact::CarrierProven, 1);
-        link_facts.publish_with_generation(crate::private_link::LinkFact::ObserverRegistered, 1);
 
         // Allow detached task to complete
         for _ in 0..50 {
@@ -4171,7 +4176,7 @@ mod tests {
         ));
         let server = LinkedMockServer::new_with_facts(
             client.link_facts(),
-            vec![(200, json!({"version": {"current": "1.5.0"}}))],
+            vec![(200, json!({"version": {"current": "1.5.0"}})); 2],
         )
         .await;
         let credential = server.credential();
@@ -4186,7 +4191,7 @@ mod tests {
         );
         let link_facts = client.link_facts();
         // CarrierProven fires BEFORE capability is installed
-        link_facts.publish_with_generation(crate::private_link::LinkFact::CarrierProven, 1);
+        assert!(server.capability().system_status().await.is_ok());
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_none());
         assert!(!link_facts.snapshot().journal_version_observed);
