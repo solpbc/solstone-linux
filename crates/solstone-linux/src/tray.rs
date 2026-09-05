@@ -559,7 +559,7 @@ mod tests {
 // Python tray provenance (35/35):
 // test_resolve_icon_theme_path_prefers_installed: retired-by-dependency; build-generated pixmaps replace icon-theme filesystem lookup.
 // test_resolve_icon_theme_path_contrib_fallback: retired-by-dependency; build-generated pixmaps replace icon-theme filesystem lookup.
-// test_make_app_uses_observer_config: retired-by-wiring; Rust components are constructed separately until the sibling run-loop lode.
+// test_make_app_uses_observer_config: retired-by-wiring; Rust components are constructed separately until the sibling run-loop work lands.
 // test_build_menu_creates_expected_items -> tray::tests::menu_contains_reference_top_level_structure.
 // test_update_status_paused -> tray_model::tests::paused_and_idle_snapshots_select_typed_status.
 // test_update_status_idle -> tray_model::tests::paused_and_idle_snapshots_select_typed_status.

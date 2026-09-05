@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 //! Background segment reconciliation and sync-health persistence.
-//! A later D-Bus lode hooks health-change emission beside `save_health`.
+//! Later D-Bus work hooks health-change emission beside `save_health`.
 
 use chrono::{DateTime, Duration as ChronoDuration, Local};
 use sha2::{Digest, Sha256};
@@ -426,7 +426,7 @@ impl SyncWorker {
             // Named deviation: Python's _record_failure (sync.py:496) resets the cooldown to
             // INITIAL whenever failures have reached the threshold. An open breaker always has
             // threshold failures, so Python's ladder never climbs past 60 seconds. That conflicts
-            // with sync.py:14 and this lode's exponential-backoff AC. Capture the pre-probe
+            // with sync.py:14 and this crate's exponential-backoff contract. Capture the pre-probe
             // cooldown before recording the failure so the ladder can climb. Python's tests miss
             // this by setting _consecutive_failures = 0, which is unreachable for an open breaker.
             let previous_cooldown = self.circuit_cooldown;
@@ -2062,7 +2062,7 @@ mod tests {
     }
 
     // tests/test_sync_health_surfaces.py::test_health_facts_drive_all_surfaces_consistently
-    // Named deviation: surface consumption belongs to the tray/CLI/D-Bus lodes.
+    // Named deviation: surface consumption belongs to the tray/CLI/D-Bus layers.
     #[test]
     fn health_facts_drive_all_derived_surfaces_consistently() {
         let cases = [
@@ -2435,7 +2435,7 @@ mod tests {
     }
 
     // tests/test_sync_health_surfaces.py::test_404_query_cycle_drives_failing_state_on_all_surfaces
-    // Named deviation: surface consumption belongs to the tray/CLI/D-Bus lodes.
+    // Named deviation: surface consumption belongs to the tray/CLI/D-Bus layers.
     #[tokio::test]
     async fn listing_404_drives_update_needed_derived_surfaces() {
         let temp = tempfile::tempdir().unwrap();
