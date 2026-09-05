@@ -2886,7 +2886,7 @@ dependencies = [
 [[package]]
 name = "spl-core"
 version = "0.1.0"
-source = "git+https://github.com/solpbc/spl-rust?rev=d64f8a1e2d5b5489183b1d95e178d840ad27cac1#d64f8a1e2d5b5489183b1d95e178d840ad27cac1"
+source = "git+https://github.com/solpbc/spl-rust?rev=3fec91a2f35a14ead111a5c669aa9aca2be394fe#3fec91a2f35a14ead111a5c669aa9aca2be394fe"
 dependencies = [
  "base64",
  "hkdf",
@@ -2898,9 +2898,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spl-home"
+version = "0.1.0"
+source = "git+https://github.com/solpbc/spl-rust?rev=3fec91a2f35a14ead111a5c669aa9aca2be394fe#3fec91a2f35a14ead111a5c669aa9aca2be394fe"
+dependencies = [
+ "rustls",
+ "spl-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "spl-transport"
 version = "0.1.0"
-source = "git+https://github.com/solpbc/spl-rust?rev=d64f8a1e2d5b5489183b1d95e178d840ad27cac1#d64f8a1e2d5b5489183b1d95e178d840ad27cac1"
+source = "git+https://github.com/solpbc/spl-rust?rev=3fec91a2f35a14ead111a5c669aa9aca2be394fe#3fec91a2f35a14ead111a5c669aa9aca2be394fe"
 dependencies = [
  "base64",
  "futures-util",
@@ -2910,6 +2922,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spl-core",
+ "spl-home",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
