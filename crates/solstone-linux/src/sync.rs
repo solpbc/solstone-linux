@@ -143,9 +143,19 @@ struct SyncControl {
     running: Arc<AtomicBool>,
 }
 
-pub(crate) fn should_persist_generation(last_written: &AtomicU64, current_gen: u64) -> bool {
-    let prev_written = last_written.fetch_max(current_gen, Ordering::AcqRel);
-    current_gen > prev_written
+pub(crate) fn should_persist_generation<'a>(
+    latest_started: &AtomicU64,
+    last_committed: &'a Mutex<u64>,
+    current_gen: u64,
+) -> Option<std::sync::MutexGuard<'a, u64>> {
+    if latest_started.load(Ordering::Acquire) != current_gen {
+        return None;
+    }
+    let guard = last_committed.lock().unwrap_or_else(|p| p.into_inner());
+    if latest_started.load(Ordering::Acquire) != current_gen || current_gen <= *guard {
+        return None;
+    }
+    Some(guard)
 }
 
 impl SyncService {
@@ -181,34 +191,49 @@ impl SyncService {
             last_persisted: Mutex::new(None),
             failures: Arc::clone(&link_persistence_failures),
         });
-        let latest_started_generation = Arc::new(AtomicU64::new(0));
-        let last_written_generation = Arc::new(AtomicU64::new(0));
+        let latest_started_generation = client.latest_started_generation();
+        let last_committed_generation = client.last_committed_generation();
         let sink_client = Arc::downgrade(&client);
         let sink_config = config.clone();
         link_facts.install_sink(Arc::new(move |facts| {
             persistence.persist(facts);
             let snapshot = facts.snapshot();
-            if snapshot.carrier_proven {
+            if snapshot.carrier_proven
+                && let Some(client) = sink_client.upgrade()
+                && let Some(capability) = client.capability()
+                && let Ok(Some(credential)) =
+                    crate::private_link::load_credential(&sink_config.config_dir)
+            {
                 let current_gen = snapshot.dial_generation;
                 let prev = latest_started_generation.fetch_max(current_gen, Ordering::AcqRel);
-                if current_gen > prev
-                    && let Some(client) = sink_client.upgrade()
-                    && let Some(capability) = client.capability()
-                    && let Ok(Some(credential)) =
-                        crate::private_link::load_credential(&sink_config.config_dir)
-                {
+                if current_gen > prev {
                     let identity_key = crate::private_link::journal_identity_key(&credential);
                     let state_dir = sink_config.state_dir();
-                    let last_written = Arc::clone(&last_written_generation);
+                    let latest_started = Arc::clone(&latest_started_generation);
+                    let last_committed = Arc::clone(&last_committed_generation);
+                    let facts_publish = client.link_facts();
                     tokio::spawn(async move {
-                        if let Ok(Some(version)) = capability.system_status().await
-                            && should_persist_generation(&last_written, current_gen)
-                        {
-                            let _ = crate::sync_health::save_paired_journal_version(
-                                &state_dir,
-                                &identity_key,
-                                &version,
-                            );
+                        if let Ok(Some(version)) = capability.system_status().await {
+                            if let Some(mut guard) = should_persist_generation(
+                                &latest_started,
+                                &last_committed,
+                                current_gen,
+                            ) {
+                                if crate::sync_health::save_paired_journal_version(
+                                    &state_dir,
+                                    &identity_key,
+                                    &version,
+                                )
+                                .is_ok()
+                                {
+                                    *guard = current_gen;
+                                    drop(guard);
+                                    facts_publish.publish_with_generation(
+                                        crate::private_link::LinkFact::JournalVersionObserved,
+                                        current_gen,
+                                    );
+                                }
+                            }
                         }
                     });
                 }
@@ -2350,6 +2375,7 @@ mod tests {
             crate::private_link::LinkFact::TransportUnavailable,
             crate::private_link::LinkFact::TerminalRevocation,
             crate::private_link::LinkFact::TokenPersistenceFailure,
+            crate::private_link::LinkFact::JournalVersionObserved,
         ];
         let publishers = facts.map(|fact| {
             let client = Arc::clone(&client);
@@ -2370,6 +2396,7 @@ mod tests {
             "transport_unavailable": snapshot.transport_unavailable,
             "terminal_revocation": snapshot.terminal_revocation,
             "token_persistence_failure": snapshot.token_persistence_failure,
+            "journal_version_observed": snapshot.journal_version_observed,
         });
         let persisted: serde_json::Value = serde_json::from_slice(
             &fs::read(crate::sync_health::sync_health_path(&config.state_dir())).unwrap(),
@@ -4050,19 +4077,54 @@ mod tests {
 
     #[test]
     fn should_persist_generation_discards_obsolete_and_duplicate_generations() {
-        let last_written = AtomicU64::new(0);
+        let latest_started = AtomicU64::new(2);
+        let last_committed = Mutex::new(0);
 
         // Generation 2 completes and writes first -> allowed
-        assert!(should_persist_generation(&last_written, 2));
+        let mut guard = should_persist_generation(&latest_started, &last_committed, 2)
+            .expect("gen 2 should be allowed");
+        *guard = 2;
+        drop(guard);
 
         // Generation 1 completes late -> discarded
-        assert!(!should_persist_generation(&last_written, 1));
+        assert!(should_persist_generation(&latest_started, &last_committed, 1).is_none());
 
         // Generation 2 duplicate/replayed completion -> discarded
-        assert!(!should_persist_generation(&last_written, 2));
+        assert!(should_persist_generation(&latest_started, &last_committed, 2).is_none());
 
-        // Generation 3 completes -> allowed
-        assert!(should_persist_generation(&last_written, 3));
+        // Generation 3 completes -> allowed once latest_started is 3
+        latest_started.store(3, Ordering::Release);
+        let mut guard = should_persist_generation(&latest_started, &last_committed, 3)
+            .expect("gen 3 should be allowed");
+        *guard = 3;
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn obsolete_generation_fetch_does_not_overwrite_newer_generation_sidecar() {
+        let latest_started = Arc::new(AtomicU64::new(0));
+        let last_committed = Arc::new(Mutex::new(0));
+
+        // Gen 1 starts
+        latest_started.store(1, Ordering::Release);
+
+        // Gen 2 starts before Gen 1 completes
+        latest_started.store(2, Ordering::Release);
+
+        // Gen 1 completes -> should_persist_generation rejects it
+        assert!(should_persist_generation(&latest_started, &last_committed, 1).is_none());
+        assert_eq!(*last_committed.lock().unwrap(), 0);
+
+        // Even if Gen 2 fails / never commits, Gen 1 is still rejected
+        assert!(should_persist_generation(&latest_started, &last_committed, 1).is_none());
+        assert_eq!(*last_committed.lock().unwrap(), 0);
+
+        // Gen 2 completes -> allowed
+        let mut guard = should_persist_generation(&latest_started, &last_committed, 2)
+            .expect("gen 2 should be allowed");
+        *guard = 2;
+        drop(guard);
+        assert_eq!(*last_committed.lock().unwrap(), 2);
     }
 
     #[tokio::test]
@@ -4111,6 +4173,69 @@ mod tests {
             }
         }
         assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());
+        assert!(link_facts.snapshot().journal_version_observed);
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capability_installed_after_carrier_proven_fetches_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().into(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        fs::create_dir_all(&config.config_dir).unwrap();
+        let client = Arc::new(UploadClient::new(
+            &config,
+            None::<crate::private_link::PrivateLinkCapability>,
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
+        let server = LinkedMockServer::new_with_facts(
+            client.link_facts(),
+            vec![(200, json!({"version": {"current": "1.5.0"}}))],
+        )
+        .await;
+        let credential = server.credential();
+        crate::private_link::persist_credential(&config.config_dir, &credential).unwrap();
+        let service = SyncService::start(
+            config.clone(),
+            Arc::clone(&client),
+            Arc::new(FixedClock {
+                wall: 1_800_000_000.0,
+                mono: 0.0,
+            }),
+        );
+        let link_facts = client.link_facts();
+        // CarrierProven fires BEFORE capability is installed
+        link_facts.publish_with_generation(crate::private_link::LinkFact::CarrierProven, 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_none());
+        assert!(!link_facts.snapshot().journal_version_observed);
+
+        // Capability is installed later (e.g. session established) -> republish triggers exactly 1 fetch
+        client.install_capability(server.capability());
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if let Some(loaded) =
+                crate::sync_health::load_paired_journal_version(&config.state_dir())
+            {
+                let identity_key = crate::private_link::journal_identity_key(&credential);
+                assert_eq!(loaded.identity_key, identity_key);
+                assert_eq!(loaded.version, "1.5.0");
+                break;
+            }
+        }
+        assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());
+        assert!(link_facts.snapshot().journal_version_observed);
+
+        // Duplicate event in generation 1 does not re-fetch
+        link_facts.publish_with_generation(crate::private_link::LinkFact::ObserverRegistered, 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 }

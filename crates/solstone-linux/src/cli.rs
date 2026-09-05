@@ -250,9 +250,9 @@ fn cmd_setup(
         .stream_name
         .filter(|value| !value.is_empty())
         .or_else(|| stream_name(Some(&host), None, None).ok());
-    let config_root = paths
-        .config_dir
-        .unwrap_or_else(|| Config::default().config_dir);
+    let config = load_config(paths).config;
+    let config_root = config.config_dir.clone();
+    let state_dir = config.state_dir();
     if write_line(
         output,
         "Paste the pair link from your journal, then press Enter:",
@@ -274,6 +274,7 @@ fn cmd_setup(
     render_setup_result(
         runtime.block_on(setup_with_stream(
             &config_root,
+            &state_dir,
             &host,
             stream.as_deref(),
             input,
@@ -330,6 +331,7 @@ fn render_setup_result(
 pub(crate) async fn dispatch_setup_with_pairer_for_test<R: Read>(
     pairer: &dyn crate::private_link::Pairer,
     config_root: &std::path::Path,
+    state_dir: &std::path::Path,
     stream: &str,
     input: R,
     output: &mut dyn Write,
@@ -346,6 +348,7 @@ pub(crate) async fn dispatch_setup_with_pairer_for_test<R: Read>(
     let result = crate::private_link::setup_with_pairer_for_test(
         pairer,
         config_root,
+        state_dir,
         "linux",
         Some(stream),
         input,
@@ -502,7 +505,10 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 match stored {
                     Some(entry) if entry.identity_key == current_key => {
                         let is_current = liveness == PrivateStateLockLiveness::LiveOwner
-                            && facts.link.as_ref().is_some_and(|l| l.carrier_proven);
+                            && facts
+                                .link
+                                .as_ref()
+                                .is_some_and(|l| l.journal_version_observed);
                         if is_current {
                             escape_display_version(&entry.version)
                         } else {
@@ -1436,13 +1442,14 @@ mod tests {
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains("Journal version: 1.4.0 (last known)"));
 
-        // 4. Paired, live owner + carrier_proven -> "Journal version: 1.4.0"
+        // 4. Paired, live owner + carrier_proven but NOT yet journal_version_observed -> still "(last known)"
         let mut state_lock =
             crate::private_link::PrivateStateLock::acquire(&config.config_dir).unwrap();
         state_lock.mark_ready().unwrap();
         let facts = SyncFacts {
             link: Some(crate::private_link::LinkFactState {
                 carrier_proven: true,
+                journal_version_observed: false,
                 ..Default::default()
             }),
             link_epoch: Some(crate::sync_health::ProcessEpoch::for_test(1)),
@@ -1453,7 +1460,96 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("Journal version: 1.4.0 (last known)"));
+
+        // 5. Paired, live owner + journal_version_observed -> "Journal version: 1.4.0" (current)
+        let facts_observed = SyncFacts {
+            link: Some(crate::private_link::LinkFactState {
+                carrier_proven: true,
+                journal_version_observed: true,
+                ..Default::default()
+            }),
+            link_epoch: Some(crate::sync_health::ProcessEpoch::for_test(1)),
+            ..Default::default()
+        };
+        crate::sync_health::save_facts(&config.state_dir(), &facts_observed).unwrap();
+
+        let mut out = Vec::new();
+        assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
+        let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains("Journal version: 1.4.0"));
         assert!(!out_str.contains("(last known)"));
+    }
+
+    #[tokio::test]
+    async fn setup_pairing_clears_stale_paired_journal_sidecar() {
+        use spl_transport::credential::Credential;
+
+        let t = tempfile::tempdir().unwrap();
+        let config = status_config(&t);
+        let cred = Credential {
+            instance_id: "inst-42".to_string(),
+            ca_fp_prefix: vec![0xaa, 0xbb],
+            endpoints: vec![],
+            local_endpoints: None,
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
+            ca_chain_pem: vec![],
+            home_label: "home".into(),
+            home_attestation: None,
+            relay_origin: None,
+            device_token: None,
+            device_token_expires_at: None,
+        };
+        crate::private_link::persist_credential(&config.config_dir, &cred).unwrap();
+        let identity_key = crate::private_link::journal_identity_key(&cred);
+
+        // Populate stale paired_journal.json
+        crate::sync_health::save_paired_journal_version(
+            &config.state_dir(),
+            &identity_key,
+            "1.2.0",
+        )
+        .unwrap();
+        assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());
+
+        struct DirectPairer(Credential);
+        impl crate::private_link::Pairer for DirectPairer {
+            fn pair<'a>(
+                &'a self,
+                _link: &'a str,
+                _device_label: &'a str,
+                _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                spl_transport::credential::Credential,
+                                crate::private_link::PrivateStateError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move { Ok(self.0.clone()) })
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status = dispatch_setup_with_pairer_for_test(
+            &DirectPairer(cred.clone()),
+            &config.config_dir,
+            &config.state_dir(),
+            "desktop",
+            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(status, 0);
+
+        // After successful pairing, paired_journal.json MUST have been deleted
+        assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_none());
     }
 }

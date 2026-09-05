@@ -313,6 +313,25 @@ impl LinkedMockServer {
         .await
     }
 
+    pub(crate) async fn new_with_facts(
+        facts: crate::private_link::LinkFacts,
+        responses: Vec<(u16, Value)>,
+    ) -> Self {
+        let peer = PrivateLinkPeer::start().await;
+        for (status, body) in responses {
+            peer.enqueue_response(status, body.to_string().into_bytes());
+        }
+        let session = crate::private_link::start_private_link_session_with_facts(
+            &tempfile::tempdir().unwrap().keep(),
+            peer.credential(),
+            "desktop",
+            facts,
+        )
+        .await
+        .unwrap();
+        Self { peer, session }
+    }
+
     pub(crate) async fn new_raw(responses: Vec<(u16, Vec<u8>)>) -> Self {
         let peer = PrivateLinkPeer::start().await;
         for (status, body) in responses {

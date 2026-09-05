@@ -597,45 +597,66 @@ impl Pairer for SplPairer {
 #[cfg(test)]
 pub(crate) async fn setup<R: Read>(
     config_root: &Path,
+    state_dir: &Path,
     device_label: &str,
     input: R,
 ) -> Result<(), PrivateStateError> {
-    setup_with_stream(config_root, device_label, None, input).await
+    setup_with_stream(config_root, state_dir, device_label, None, input).await
 }
 
 pub(crate) async fn setup_with_stream<R: Read>(
     config_root: &Path,
+    state_dir: &Path,
     device_label: &str,
     stream: Option<&str>,
     input: R,
 ) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream(&SplPairer, config_root, device_label, stream, input).await
+    setup_with_pairer_and_stream(
+        &SplPairer,
+        config_root,
+        state_dir,
+        device_label,
+        stream,
+        input,
+    )
+    .await
 }
 
 #[cfg(test)]
 async fn setup_with_pairer<R: Read>(
     pairer: &dyn Pairer,
     config_root: &Path,
+    state_dir: &Path,
     device_label: &str,
     input: R,
 ) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream(pairer, config_root, device_label, None, input).await
+    setup_with_pairer_and_stream(pairer, config_root, state_dir, device_label, None, input).await
 }
 
 async fn setup_with_pairer_and_stream<R: Read>(
     pairer: &dyn Pairer,
     config_root: &Path,
+    state_dir: &Path,
     device_label: &str,
     stream: Option<&str>,
     input: R,
 ) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream_with_fault(pairer, config_root, device_label, stream, input, None)
-        .await
+    setup_with_pairer_and_stream_with_fault(
+        pairer,
+        config_root,
+        state_dir,
+        device_label,
+        stream,
+        input,
+        None,
+    )
+    .await
 }
 
 async fn setup_with_pairer_and_stream_with_fault<R: Read>(
     pairer: &dyn Pairer,
     config_root: &Path,
+    state_dir: &Path,
     device_label: &str,
     stream: Option<&str>,
     input: R,
@@ -669,21 +690,26 @@ async fn setup_with_pairer_and_stream_with_fault<R: Read>(
         TransportClient::new_relay_only(credential.clone(), None)
             .map_err(|_| PrivateStateError::PairingFailed)?;
     }
-    match credential_fault {
+    let result = match credential_fault {
         Some(fault) => persist_credential_with_fault(state_lock.root(), &credential, fault),
         None => persist_credential(state_lock.root(), &credential),
+    };
+    if result.is_ok() {
+        let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
     }
+    result
 }
 
 #[cfg(test)]
 pub(crate) async fn setup_with_pairer_for_test<R: Read>(
     pairer: &dyn Pairer,
     config_root: &Path,
+    state_dir: &Path,
     device_label: &str,
     stream: Option<&str>,
     input: R,
 ) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream(pairer, config_root, device_label, stream, input).await
+    setup_with_pairer_and_stream(pairer, config_root, state_dir, device_label, stream, input).await
 }
 
 fn private_config_paths(config_root: &Path) -> ConfigPaths {
@@ -800,6 +826,7 @@ pub(crate) enum LinkFact {
     TransportUnavailable,
     TerminalRevocation,
     TokenPersistenceFailure,
+    JournalVersionObserved,
 }
 
 pub(crate) type LinkFactSink = Arc<dyn Fn(&LinkFacts) + Send + Sync>;
@@ -826,6 +853,7 @@ pub(crate) struct LinkFactState {
     pub(crate) transport_unavailable: bool,
     pub(crate) terminal_revocation: bool,
     pub(crate) token_persistence_failure: bool,
+    pub(crate) journal_version_observed: bool,
     pub(crate) dial_generation: u64,
 }
 
@@ -869,6 +897,7 @@ impl LinkFacts {
                 LinkFact::TransportUnavailable => state.transport_unavailable = true,
                 LinkFact::TerminalRevocation => state.terminal_revocation = true,
                 LinkFact::TokenPersistenceFailure => state.token_persistence_failure = true,
+                LinkFact::JournalVersionObserved => state.journal_version_observed = true,
             }
         }
         self.persist();
@@ -884,6 +913,10 @@ impl LinkFacts {
 
     pub(crate) fn install_sink(&self, sink: LinkFactSink) {
         *self.inner.sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
+        self.persist();
+    }
+
+    pub(crate) fn republish_current(&self) {
         self.persist();
     }
 
@@ -1624,6 +1657,25 @@ pub(crate) async fn start_private_link_session(
 }
 
 #[cfg(test)]
+pub(crate) async fn start_private_link_session_with_facts(
+    config_root: &Path,
+    credential: Credential,
+    expected_name: &str,
+    facts: LinkFacts,
+) -> Result<PrivateLinkSession, PrivateStateError> {
+    start_private_link_session_inner(
+        config_root,
+        credential,
+        expected_name,
+        SessionStartOptions {
+            shared_facts: Some(facts),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
 #[derive(Default)]
 struct SessionTestCapture {
     capability: Option<Arc<Mutex<Option<String>>>>,
@@ -2268,6 +2320,7 @@ mod tests {
                 result: Some(source.clone()),
             },
             direct_temp.path(),
+            &direct_temp.path().join("state"),
             "device",
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
@@ -2296,6 +2349,7 @@ mod tests {
                 result: Some(source.clone()),
             },
             relay_temp.path(),
+            &relay_temp.path().join("state"),
             "device",
             Cursor::new(RELAY_PAIR_LINK.as_bytes()),
         )
@@ -2361,6 +2415,7 @@ mod tests {
                     result: Some(invalid),
                 },
                 temp.path(),
+                &temp.path().join("state"),
                 "device",
                 Cursor::new(RELAY_PAIR_LINK.as_bytes()),
             )
@@ -2399,6 +2454,7 @@ mod tests {
                 result: Some(mismatched),
             },
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(RELAY_PAIR_LINK.as_bytes()),
         )
@@ -2424,6 +2480,7 @@ mod tests {
                 result: None,
             },
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(RELAY_PAIR_LINK.as_bytes()),
         )
@@ -2467,6 +2524,7 @@ mod tests {
                 result: Some(paired),
             },
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(relay_pair_link.as_bytes()),
         )
@@ -2518,6 +2576,7 @@ mod tests {
                 result: Some(credential()),
             },
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(b"not-a-pair-link"),
         )
@@ -2564,6 +2623,7 @@ mod tests {
                     result: Some(hybrid.clone()),
                 },
                 temp.path(),
+                &temp.path().join("state"),
                 "device",
                 None,
                 Cursor::new(RELAY_PAIR_LINK.as_bytes()),
@@ -2613,6 +2673,7 @@ mod tests {
         let failed = setup_with_pairer(
             &pairer,
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
@@ -2627,6 +2688,7 @@ mod tests {
         setup_with_pairer(
             &pairer,
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
@@ -2900,6 +2962,7 @@ mod tests {
                     result: Some(credential()),
                 },
                 temp.path(),
+                &temp.path().join("state"),
                 "device",
                 CountingReader(reads.clone()),
             )
@@ -3423,6 +3486,7 @@ mod tests {
         setup_with_pairer(
             &pairer,
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
@@ -3688,6 +3752,7 @@ mod tests {
             LinkFact::TransportUnavailable,
             LinkFact::TerminalRevocation,
             LinkFact::TokenPersistenceFailure,
+            LinkFact::JournalVersionObserved,
         ] {
             facts.publish(fact);
         }
@@ -3977,6 +4042,7 @@ mod tests {
                 result: Some(paired),
             },
             temp.path(),
+            &temp.path().join("state"),
             "device",
             Cursor::new(relay_pair_link.as_bytes()),
         )

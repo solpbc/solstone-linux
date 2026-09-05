@@ -533,6 +533,7 @@ pub(crate) fn load_link_facts(
         transport_unavailable: boolean("transport_unavailable")?,
         terminal_revocation: boolean("terminal_revocation")?,
         token_persistence_failure: boolean("token_persistence_failure")?,
+        journal_version_observed: boolean("journal_version_observed")?,
         dial_generation: 0,
     }))
 }
@@ -590,6 +591,7 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
                 "transport_unavailable": link.transport_unavailable,
                 "terminal_revocation": link.terminal_revocation,
                 "token_persistence_failure": link.token_persistence_failure,
+                "journal_version_observed": link.journal_version_observed,
             })
         });
     let mut text = serde_json::to_string(&json!({
@@ -1064,6 +1066,7 @@ mod tests {
             transport_unavailable: true,
             terminal_revocation: true,
             token_persistence_failure: true,
+            journal_version_observed: true,
             dial_generation: 0,
         };
         let conflicting_cases = [

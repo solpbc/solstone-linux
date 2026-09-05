@@ -1181,7 +1181,13 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            crate::private_link::setup(temp.path(), "device", std::io::Cursor::new(b"pair")).await,
+            crate::private_link::setup(
+                temp.path(),
+                &temp.path().join("state"),
+                "device",
+                std::io::Cursor::new(b"pair")
+            )
+            .await,
             Err(PrivateStateError::LockContended)
         ));
         owner.shutdown().await.unwrap();
@@ -1663,6 +1669,7 @@ mod tests {
                 dispatch_setup_with_pairer_for_test(
                     &failed_pairer,
                     &failure_root,
+                    &failure_root.join("state"),
                     "desktop",
                     Cursor::new(b"pair link with whitespace\n"),
                     &mut failure_output,
@@ -1678,6 +1685,7 @@ mod tests {
                 dispatch_setup_with_pairer_for_test(
                     &failed_pairer,
                     &failure_root,
+                    &failure_root.join("state"),
                     "desktop",
                     Cursor::new(format!(
                         "{}\n",
@@ -1704,6 +1712,7 @@ mod tests {
                 dispatch_setup_with_pairer_for_test(
                     &pairer,
                     &config.config_dir,
+                    &config.state_dir(),
                     "desktop",
                     Cursor::new(format!(
                         "{}\n",
