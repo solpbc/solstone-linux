@@ -332,6 +332,10 @@ impl LinkedMockServer {
         self.session.capability()
     }
 
+    pub(crate) fn credential(&self) -> spl_transport::credential::Credential {
+        self.peer.credential()
+    }
+
     pub(crate) fn enqueue_day_custody(&self, fixture: DayCustodyFixture) {
         self.peer.enqueue_day_custody(fixture);
     }

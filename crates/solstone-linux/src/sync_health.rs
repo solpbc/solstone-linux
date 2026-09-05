@@ -533,6 +533,7 @@ pub(crate) fn load_link_facts(
         transport_unavailable: boolean("transport_unavailable")?,
         terminal_revocation: boolean("terminal_revocation")?,
         token_persistence_failure: boolean("token_persistence_failure")?,
+        dial_generation: 0,
     }))
 }
 
@@ -616,6 +617,56 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
     write().inspect_err(|_| {
         let _ = fs::remove_file(&temporary);
     })
+}
+
+pub const PAIRED_JOURNAL_FILENAME: &str = "paired_journal.json";
+
+pub fn paired_journal_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(PAIRED_JOURNAL_FILENAME)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PairedJournalVersion {
+    pub identity_key: String,
+    pub version: String,
+    pub observed_at: f64,
+}
+
+pub fn load_paired_journal_version(state_dir: &Path) -> Option<PairedJournalVersion> {
+    let text = fs::read_to_string(paired_journal_path(state_dir)).ok()?;
+    let Value::Object(data) = serde_json::from_str(&text).ok()? else {
+        return None;
+    };
+    let identity_key = data.get("identity_key")?.as_str()?.to_owned();
+    let version = data.get("version")?.as_str()?.to_owned();
+    let observed_at = data.get("observed_at")?.as_f64()?;
+    Some(PairedJournalVersion {
+        identity_key,
+        version,
+        observed_at,
+    })
+}
+
+pub fn save_paired_journal_version(
+    state_dir: &Path,
+    identity_key: &str,
+    version: &str,
+) -> io::Result<()> {
+    let observed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    fs::create_dir_all(state_dir)?;
+    let path = paired_journal_path(state_dir);
+    let mut text = serde_json::to_string(&json!({
+        "identity_key": identity_key,
+        "version": version,
+        "observed_at": observed_at,
+    }))
+    .map_err(io::Error::other)?;
+    text.push('\n');
+    crate::private_file::atomic_write_bytes(&path, text.as_bytes())
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 #[cfg(test)]
@@ -1013,6 +1064,7 @@ mod tests {
             transport_unavailable: true,
             terminal_revocation: true,
             token_persistence_failure: true,
+            dial_generation: 0,
         };
         let conflicting_cases = [
             (all.clone(), HealthState::UnsafeLinkState),
@@ -1189,5 +1241,27 @@ mod tests {
             ("sync_ts", "changed".to_owned()),
         ]);
         assert_eq!(fill("sync: {progress}", &values), "sync: {sync_ts}");
+    }
+
+    #[test]
+    fn paired_journal_version_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(load_paired_journal_version(temp.path()), None);
+
+        save_paired_journal_version(temp.path(), "inst-1:fp-1", "1.4.0").unwrap();
+        let loaded = load_paired_journal_version(temp.path()).unwrap();
+        assert_eq!(loaded.identity_key, "inst-1:fp-1");
+        assert_eq!(loaded.version, "1.4.0");
+        assert!(loaded.observed_at > 0.0);
+
+        // Overwrite
+        save_paired_journal_version(temp.path(), "inst-2:fp-2", "2.0.0").unwrap();
+        let loaded2 = load_paired_journal_version(temp.path()).unwrap();
+        assert_eq!(loaded2.identity_key, "inst-2:fp-2");
+        assert_eq!(loaded2.version, "2.0.0");
+
+        // Corrupt file falls back to None
+        fs::write(paired_journal_path(temp.path()), "not-json").unwrap();
+        assert_eq!(load_paired_journal_version(temp.path()), None);
     }
 }

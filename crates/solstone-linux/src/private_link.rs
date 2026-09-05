@@ -10,7 +10,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -49,6 +49,8 @@ const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
 const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
+const SYSTEM_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+const SYSTEM_STATUS_PATH: &str = "/api/system/status";
 pub(crate) const OBSERVER_HEADER_NAME: &str = "x-solstone-observer";
 pub(crate) const PROTOCOL_VERSION_HEADER_NAME: &str = "x-solstone-protocol-version";
 const ROUTE_CLASS_MARKER_HEADER_NAME: &str = "x-solstone-linux-route-class";
@@ -777,6 +779,16 @@ fn persist_credential_with_fault(
     )
 }
 
+pub(crate) fn journal_identity_key(credential: &Credential) -> String {
+    let mut key = credential.instance_id.clone();
+    key.push(':');
+    for byte in &credential.ca_fp_prefix {
+        use std::fmt::Write;
+        let _ = write!(&mut key, "{byte:02x}");
+    }
+    key
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LinkFact {
     PairingRequired,
@@ -814,6 +826,7 @@ pub(crate) struct LinkFactState {
     pub(crate) transport_unavailable: bool,
     pub(crate) terminal_revocation: bool,
     pub(crate) token_persistence_failure: bool,
+    pub(crate) dial_generation: u64,
 }
 
 impl LinkFacts {
@@ -834,8 +847,13 @@ impl LinkFacts {
     }
 
     pub(crate) fn publish(&self, fact: LinkFact) {
+        self.publish_with_generation(fact, self.snapshot().dial_generation);
+    }
+
+    pub(crate) fn publish_with_generation(&self, fact: LinkFact, generation: u64) {
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.dial_generation = generation;
             match fact {
                 LinkFact::PairingRequired => state.pairing_required = true,
                 LinkFact::PrivateStateInvalid => state.private_state_invalid = true,
@@ -888,6 +906,7 @@ struct PrivateLinkOpener {
     admission: tokio::sync::Mutex<()>,
     transport_unavailable: Arc<AtomicBool>,
     facts: LinkFacts,
+    generation: AtomicU64,
 }
 
 impl PrivateLinkOpener {
@@ -903,6 +922,7 @@ impl PrivateLinkOpener {
             admission: tokio::sync::Mutex::new(()),
             transport_unavailable,
             facts,
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -982,9 +1002,12 @@ impl CarrierOpener for PrivateLinkOpener {
                     Err(lan_error.unwrap_or(TransportError::NoEndpoint))
                 })
                 .await?;
-            self.facts.publish(LinkFact::CarrierProven);
+            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            self.facts
+                .publish_with_generation(LinkFact::CarrierProven, generation);
             // Kept for persisted-schema compatibility: a proven carrier now means the observer is ready.
-            self.facts.publish(LinkFact::ObserverRegistered);
+            self.facts
+                .publish_with_generation(LinkFact::ObserverRegistered, generation);
             Ok(carrier)
         })
     }
@@ -1144,6 +1167,7 @@ impl OpenJournalAccess {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LinkOutcome {
     Success { status: StatusCode, body: Vec<u8> },
     Forbidden,
@@ -1274,6 +1298,58 @@ impl PrivateLinkCapability {
             LISTING_TIMEOUT,
         )
         .await
+    }
+
+    pub(crate) async fn system_status(&self) -> Result<Option<String>, LinkOutcome> {
+        let Ok(url) = confine_path(&self.inner.origin, SYSTEM_STATUS_PATH) else {
+            return Err(LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            });
+        };
+        let outcome = self
+            .send(
+                self.inner
+                    .client
+                    .get(url)
+                    .header(reqwest::header::CACHE_CONTROL, "no-cache"),
+                SYSTEM_STATUS_TIMEOUT,
+            )
+            .await;
+        match outcome {
+            LinkOutcome::Success { status, body } if status == StatusCode::OK => {
+                let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                    return Ok(None);
+                };
+                let Some(raw_version) = json
+                    .get("version")
+                    .and_then(|v| v.get("current"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    return Ok(None);
+                };
+                if let Some(sanitized) = sanitize_journal_version(raw_version) {
+                    Ok(Some(sanitized))
+                } else {
+                    Ok(None)
+                }
+            }
+            LinkOutcome::Success { status, body } => Err(LinkOutcome::Success { status, body }),
+            other => Err(other),
+        }
+    }
+}
+
+pub(crate) fn sanitize_journal_version(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.len() > 64 {
+        return None;
+    }
+    let is_valid_char = |b: u8| {
+        b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+' || b == b'_' || b == b'~'
+    };
+    if raw.bytes().all(is_valid_char) {
+        Some(raw.to_owned())
+    } else {
+        None
     }
 }
 
@@ -4043,5 +4119,64 @@ mod tests {
         assert!(!DebugProbe::<PrivateLinkOwner>(PhantomData).probe());
         assert!(!CloneProbe::<PrivateLinkOwner>(PhantomData).probe());
         assert!(!SerializeProbe::<PrivateLinkOwner>(PhantomData).probe());
+    }
+
+    #[tokio::test]
+    async fn system_status_success_and_failures() {
+        use serde_json::json;
+
+        let server = crate::test_support::LinkedMockServer::new(vec![
+            (200, json!({"version": {"current": "1.4.0"}})),
+            (200, json!({"version": {"current": "2.0.0-beta+build.3"}})),
+            (200, json!({"version": {"current": ""}})),
+            (200, json!({"version": {}})),
+            (200, json!({"invalid": "json-shape"})),
+            (500, json!({"error": "internal"})),
+        ])
+        .await;
+        let cap = server.capability();
+
+        assert_eq!(cap.system_status().await, Ok(Some("1.4.0".to_string())));
+        assert_eq!(
+            cap.system_status().await,
+            Ok(Some("2.0.0-beta+build.3".to_string()))
+        );
+        assert_eq!(cap.system_status().await, Ok(None));
+        assert_eq!(cap.system_status().await, Ok(None));
+        assert_eq!(cap.system_status().await, Ok(None));
+        assert!(matches!(
+            cap.system_status().await,
+            Err(LinkOutcome::Success { status, .. }) if status == StatusCode::INTERNAL_SERVER_ERROR
+        ));
+    }
+
+    #[test]
+    fn sanitize_journal_version_rules() {
+        assert_eq!(sanitize_journal_version("1.4.0"), Some("1.4.0".to_string()));
+        assert_eq!(
+            sanitize_journal_version("2.0.0-beta+build.3"),
+            Some("2.0.0-beta+build.3".to_string())
+        );
+        assert_eq!(
+            sanitize_journal_version("v1.2.3_rc1~patch"),
+            Some("v1.2.3_rc1~patch".to_string())
+        );
+        assert_eq!(sanitize_journal_version(""), None);
+        assert_eq!(sanitize_journal_version(&"a".repeat(65)), None);
+        assert_eq!(sanitize_journal_version("1.4.0\n"), None);
+        assert_eq!(sanitize_journal_version("1.4.0\r"), None);
+        assert_eq!(sanitize_journal_version("1.4.0\x1b[31m"), None);
+        assert_eq!(sanitize_journal_version("1.4.0\0"), None);
+        assert_eq!(sanitize_journal_version("1.4.0 2.0"), None);
+    }
+
+    #[test]
+    fn journal_identity_key_derivation() {
+        let cred = Credential {
+            instance_id: "inst-123".to_string(),
+            ca_fp_prefix: vec![0x1a, 0x2b, 0x3c, 0x0f],
+            ..credential()
+        };
+        assert_eq!(journal_identity_key(&cred), "inst-123:1a2b3c0f");
     }
 }

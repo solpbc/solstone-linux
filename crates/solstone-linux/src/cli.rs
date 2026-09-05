@@ -460,6 +460,28 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
     }
 }
 
+fn escape_display_version(raw: &str) -> String {
+    let mut clean = String::with_capacity(raw.len());
+    let mut in_escape = false;
+    for ch in raw.chars() {
+        if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        if ch.is_ascii_control() || ch == '\r' || ch == '\n' {
+            continue;
+        }
+        clean.push(ch);
+    }
+    clean
+}
+
 fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -> i32 {
     let loaded = load_config(paths);
     let config = loaded.config;
@@ -468,13 +490,36 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
     } else {
         &config.stream
     };
-    // Resolved before the first line is written: "managed privately" describes a link that
-    // exists. Printing it while sol is telling the owner to pair contradicts the sync line
-    // two lines below it.
-    let link_line = if crate::private_link::credential_present(&config.config_dir) {
-        "Journal link: managed privately"
+    let liveness = PrivateStateLock::try_probe(&config.config_dir)
+        .unwrap_or(PrivateStateLockLiveness::NoLiveOwner);
+    let facts = load_facts_with_liveness(&config.state_dir(), liveness);
+
+    let (link_line, version_line) = if crate::private_link::credential_present(&config.config_dir) {
+        let version_str = match crate::private_link::load_credential(&config.config_dir) {
+            Ok(Some(credential)) => {
+                let current_key = crate::private_link::journal_identity_key(&credential);
+                let stored = crate::sync_health::load_paired_journal_version(&config.state_dir());
+                match stored {
+                    Some(entry) if entry.identity_key == current_key => {
+                        let is_current = liveness == PrivateStateLockLiveness::LiveOwner
+                            && facts.link.as_ref().is_some_and(|l| l.carrier_proven);
+                        if is_current {
+                            escape_display_version(&entry.version)
+                        } else {
+                            format!("{} (last known)", escape_display_version(&entry.version))
+                        }
+                    }
+                    _ => "unknown".to_owned(),
+                }
+            }
+            _ => "unknown".to_owned(),
+        };
+        (
+            "Journal link: managed privately",
+            Some(format!("Journal version: {version_str}")),
+        )
     } else {
-        "Journal link: not paired"
+        ("Journal link: not paired", None)
     };
     let mut render = || -> io::Result<()> {
         write_line(
@@ -482,6 +527,9 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
             format!("Config: {}", config.config_path().display()),
         )?;
         write_line(output, link_line)?;
+        if let Some(line) = &version_line {
+            write_line(output, line)?;
+        }
         write_line(output, format!("Stream: {stream}"))?;
         write_line(output, "")?;
         let captures = config.captures_dir();
@@ -519,9 +567,6 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
             0 => write_line(output, "Retain: delete synced segments after the day ends")?,
             value => write_line(output, format!("Retain: {value} day(s)"))?,
         }
-        let liveness = PrivateStateLock::try_probe(&config.config_dir)
-            .unwrap_or(PrivateStateLockLiveness::NoLiveOwner);
-        let facts = load_facts_with_liveness(&config.state_dir(), liveness);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1243,7 +1288,7 @@ mod tests {
             0
         );
         let expected = format!(
-            "Config: {}\nJournal link: managed privately\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline; held on this device; will retry\n\nService: active\n",
+            "Config: {}\nJournal link: managed privately\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline; held on this device; will retry\n\nService: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );
@@ -1327,5 +1372,88 @@ mod tests {
         ] {
             assert!(!out.contains(sentinel));
         }
+    }
+
+    #[test]
+    fn escape_display_version_cleans_dangerous_formatting() {
+        assert_eq!(escape_display_version("1.4.0"), "1.4.0");
+        assert_eq!(escape_display_version("\x1b[31m1.4.0\x1b[0m"), "1.4.0");
+        assert_eq!(escape_display_version("1.4.0\r\n"), "1.4.0");
+        assert_eq!(escape_display_version("1.4.0\x07\x08"), "1.4.0");
+    }
+
+    #[test]
+    fn status_journal_version_rendering_states() {
+        use spl_transport::credential::Credential;
+
+        let t = tempfile::tempdir().unwrap();
+        let config = status_config(&t);
+        let _ = fs::remove_file(config.config_dir.join("credentials.json"));
+
+        // 1. Unpaired -> no Journal version line
+        let mut out = Vec::new();
+        assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("Journal link: not paired"));
+        assert!(!out_str.contains("Journal version:"));
+
+        // Set up credential
+        let cred = Credential {
+            instance_id: "inst-42".to_string(),
+            ca_fp_prefix: vec![0xaa, 0xbb],
+            endpoints: vec![],
+            local_endpoints: None,
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
+            ca_chain_pem: vec![],
+            home_label: "home".into(),
+            home_attestation: None,
+            relay_origin: None,
+            device_token: None,
+            device_token_expires_at: None,
+        };
+        crate::private_link::persist_credential(&config.config_dir, &cred).unwrap();
+        let identity_key = crate::private_link::journal_identity_key(&cred);
+
+        // 2. Paired but no paired_journal.json -> "Journal version: unknown"
+        let mut out = Vec::new();
+        assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("Journal link: managed privately"));
+        assert!(out_str.contains("Journal version: unknown"));
+
+        // Save version in paired_journal.json
+        crate::sync_health::save_paired_journal_version(
+            &config.state_dir(),
+            &identity_key,
+            "1.4.0",
+        )
+        .unwrap();
+
+        // 3. Paired, cached (no live carrier) -> "Journal version: 1.4.0 (last known)"
+        let mut out = Vec::new();
+        assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("Journal version: 1.4.0 (last known)"));
+
+        // 4. Paired, live owner + carrier_proven -> "Journal version: 1.4.0"
+        let mut state_lock =
+            crate::private_link::PrivateStateLock::acquire(&config.config_dir).unwrap();
+        state_lock.mark_ready().unwrap();
+        let facts = SyncFacts {
+            link: Some(crate::private_link::LinkFactState {
+                carrier_proven: true,
+                ..Default::default()
+            }),
+            link_epoch: Some(crate::sync_health::ProcessEpoch::for_test(1)),
+            ..Default::default()
+        };
+        crate::sync_health::save_facts(&config.state_dir(), &facts).unwrap();
+
+        let mut out = Vec::new();
+        assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("Journal version: 1.4.0"));
+        assert!(!out_str.contains("(last known)"));
     }
 }

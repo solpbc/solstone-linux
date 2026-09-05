@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -143,6 +143,11 @@ struct SyncControl {
     running: Arc<AtomicBool>,
 }
 
+pub(crate) fn should_persist_generation(last_written: &AtomicU64, current_gen: u64) -> bool {
+    let prev_written = last_written.fetch_max(current_gen, Ordering::AcqRel);
+    current_gen > prev_written
+}
+
 impl SyncService {
     #[cfg(test)]
     pub fn start(
@@ -176,7 +181,39 @@ impl SyncService {
             last_persisted: Mutex::new(None),
             failures: Arc::clone(&link_persistence_failures),
         });
-        link_facts.install_sink(Arc::new(move |facts| persistence.persist(facts)));
+        let latest_started_generation = Arc::new(AtomicU64::new(0));
+        let last_written_generation = Arc::new(AtomicU64::new(0));
+        let sink_client = Arc::downgrade(&client);
+        let sink_config = config.clone();
+        link_facts.install_sink(Arc::new(move |facts| {
+            persistence.persist(facts);
+            let snapshot = facts.snapshot();
+            if snapshot.carrier_proven {
+                let current_gen = snapshot.dial_generation;
+                let prev = latest_started_generation.fetch_max(current_gen, Ordering::AcqRel);
+                if current_gen > prev
+                    && let Some(client) = sink_client.upgrade()
+                    && let Some(capability) = client.capability()
+                    && let Ok(Some(credential)) =
+                        crate::private_link::load_credential(&sink_config.config_dir)
+                {
+                    let identity_key = crate::private_link::journal_identity_key(&credential);
+                    let state_dir = sink_config.state_dir();
+                    let last_written = Arc::clone(&last_written_generation);
+                    tokio::spawn(async move {
+                        if let Ok(Some(version)) = capability.system_status().await
+                            && should_persist_generation(&last_written, current_gen)
+                        {
+                            let _ = crate::sync_health::save_paired_journal_version(
+                                &state_dir,
+                                &identity_key,
+                                &version,
+                            );
+                        }
+                    });
+                }
+            }
+        }));
         let recent_error_count = Arc::new(AtomicU8::new(0));
         let mut worker = SyncWorker::new(
             config.clone(),
@@ -3990,5 +4027,90 @@ mod tests {
         let facts = load_facts(&config.state_dir());
         assert_eq!(facts.pending_confirmed, Some(0));
         assert_eq!(facts.last_error_class, None);
+    }
+
+    #[test]
+    fn generation_coalescing_guard_logic() {
+        let latest_started_generation = Arc::new(AtomicU64::new(0));
+
+        // First event for gen 1 -> passes
+        let gen1 = 1u64;
+        let prev1 = latest_started_generation.fetch_max(gen1, Ordering::AcqRel);
+        assert!(gen1 > prev1);
+
+        // Second event for gen 1 (e.g. ObserverRegistered) -> coalesced/skipped
+        let prev2 = latest_started_generation.fetch_max(gen1, Ordering::AcqRel);
+        assert!(gen1 <= prev2);
+
+        // Newer event for gen 2 -> passes
+        let gen2 = 2u64;
+        let prev3 = latest_started_generation.fetch_max(gen2, Ordering::AcqRel);
+        assert!(gen2 > prev3);
+    }
+
+    #[test]
+    fn should_persist_generation_discards_obsolete_and_duplicate_generations() {
+        let last_written = AtomicU64::new(0);
+
+        // Generation 2 completes and writes first -> allowed
+        assert!(should_persist_generation(&last_written, 2));
+
+        // Generation 1 completes late -> discarded
+        assert!(!should_persist_generation(&last_written, 1));
+
+        // Generation 2 duplicate/replayed completion -> discarded
+        assert!(!should_persist_generation(&last_written, 2));
+
+        // Generation 3 completes -> allowed
+        assert!(should_persist_generation(&last_written, 3));
+    }
+
+    #[tokio::test]
+    async fn sync_service_records_paired_journal_version_on_carrier_proven() {
+        let temp = tempfile::tempdir().unwrap();
+        let server =
+            LinkedMockServer::new(vec![(200, json!({"version": {"current": "1.4.0"}}))]).await;
+        let config = Config {
+            base_dir: temp.path().into(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        fs::create_dir_all(&config.config_dir).unwrap();
+        let credential = server.credential();
+        crate::private_link::persist_credential(&config.config_dir, &credential).unwrap();
+        let client = Arc::new(UploadClient::new(
+            &config,
+            server.capability(),
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+        ));
+        let service = SyncService::start(
+            config.clone(),
+            Arc::clone(&client),
+            Arc::new(FixedClock {
+                wall: 1_800_000_000.0,
+                mono: 0.0,
+            }),
+        );
+        let link_facts = client.link_facts();
+        link_facts.publish_with_generation(crate::private_link::LinkFact::CarrierProven, 1);
+        link_facts.publish_with_generation(crate::private_link::LinkFact::ObserverRegistered, 1);
+
+        // Allow detached task to complete
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if let Some(loaded) =
+                crate::sync_health::load_paired_journal_version(&config.state_dir())
+            {
+                let identity_key = crate::private_link::journal_identity_key(&credential);
+                assert_eq!(loaded.identity_key, identity_key);
+                assert_eq!(loaded.version, "1.4.0");
+                break;
+            }
+        }
+        assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 }

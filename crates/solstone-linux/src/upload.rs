@@ -144,6 +144,10 @@ impl UploadClient {
         self.inner.capability().is_some()
     }
 
+    pub(crate) fn capability(&self) -> Option<PrivateLinkCapability> {
+        self.inner.capability()
+    }
+
     pub(crate) fn link_fact_state(&self) -> Option<crate::private_link::LinkFactState> {
         #[cfg(test)]
         if !self.inner.expose_link_facts.load(Ordering::Acquire) {
