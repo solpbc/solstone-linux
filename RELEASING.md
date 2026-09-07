@@ -299,9 +299,8 @@ require a new version.
 
 GitHub does not build, validate, approve, or define the release. There is no
 GitHub workflow or repository-setting gate. Skipping the mirror leaves a
-complete, correct release. The install instructions move to the origin with the
-first `release` publish; until that happens `INSTALL.md` and `README.md` still
-name GitHub, and that is correct, because the `release` lane is empty.
+complete, correct release. From the first `release` publish onward, the install
+documentation names the origin.
 
 ## Host and advisory gates
 
