@@ -14,54 +14,44 @@ use crate::private_link_metadata::{
 
 pub(crate) const DEFAULT_OPTIONAL_DEADLINE: Duration = Duration::from_secs(15);
 
-pub(crate) struct JobSlot<T> {
-    pub(crate) in_flight: bool,
-    pub(crate) in_flight_val: Option<T>,
-    pub(crate) pending: Option<T>,
-    pub(crate) active_pairing_id: Option<String>,
+#[derive(Default)]
+struct Lane {
+    busy: bool,
+    pending: bool,
+    passes: u8,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
-
-impl<T> Default for JobSlot<T> {
-    fn default() -> Self {
-        Self {
-            in_flight: false,
-            in_flight_val: None,
-            pending: None,
-            active_pairing_id: None,
-        }
-    }
+#[derive(Default)]
+struct State {
+    closed: bool,
+    owner: u64,
+    capability: Option<PrivateLinkCapability>,
+    last_trigger: Option<(u64, DeviceSnapshot)>,
+    lanes: [Lane; 2],
 }
-
 pub(crate) struct OptionalJobs {
-    metadata_slot: Mutex<JobSlot<DeviceSnapshot>>,
-    access_slot: Mutex<JobSlot<()>>,
-    meta_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    access_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    state: Mutex<State>,
+    runtime: tokio::runtime::Handle,
     deadline: Duration,
     hostname_source: Arc<dyn Fn() -> io::Result<String> + Send + Sync>,
 }
-
 impl Default for OptionalJobs {
     fn default() -> Self {
         Self::new(DEFAULT_OPTIONAL_DEADLINE, Arc::new(crate::cli::hostname))
     }
 }
-
 impl OptionalJobs {
     pub(crate) fn new(
         deadline: Duration,
         hostname_source: Arc<dyn Fn() -> io::Result<String> + Send + Sync>,
     ) -> Self {
         Self {
-            metadata_slot: Mutex::new(JobSlot::default()),
-            access_slot: Mutex::new(JobSlot::default()),
-            meta_task: Mutex::new(None),
-            access_task: Mutex::new(None),
+            state: Mutex::new(State::default()),
+            runtime: tokio::runtime::Handle::current(),
             deadline,
             hostname_source,
         }
     }
-
     #[cfg(test)]
     pub(crate) fn with_deadline(
         deadline: Duration,
@@ -69,219 +59,117 @@ impl OptionalJobs {
     ) -> Self {
         Self::new(deadline, hostname_source)
     }
-
     pub(crate) fn trigger(
         self: &Arc<Self>,
         capability: &PrivateLinkCapability,
         state_dir: &Path,
         identity_key: &str,
-        facts_snapshot: &LinkFactState,
+        facts: &LinkFactState,
     ) {
-        if facts_snapshot.dial_generation != 0
-            && capability.is_dial_generation_suppressed(facts_snapshot.dial_generation)
-        {
+        if facts.optional_dial {
             return;
         }
-
-        let current_pairing_id = capability.writer().pairing_id().to_string();
-
-        // 1. Metadata slot trigger
-        let current_snapshot = current_device_snapshot(&*self.hostname_source);
-        let mut spawn_meta = false;
-        {
-            let mut meta = self.metadata_slot.lock().unwrap();
-            if meta.active_pairing_id.as_deref() != Some(&current_pairing_id) {
-                if let Some(h) = self.meta_task.lock().unwrap().take() {
-                    h.abort();
-                }
-                meta.active_pairing_id = Some(current_pairing_id.clone());
-                meta.in_flight = false;
-                meta.in_flight_val = None;
-                meta.pending = None;
+        let snapshot = current_device_snapshot(&*self.hostname_source);
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return;
+        }
+        let same_owner = state
+            .capability
+            .as_ref()
+            .is_some_and(|old| Arc::ptr_eq(&old.writer(), &capability.writer()));
+        if !same_owner {
+            if let Some(old) = state.capability.take() {
+                old.writer().invalidate_optional_attempts();
             }
-            if meta.in_flight {
-                if meta.in_flight_val.as_ref() != Some(&current_snapshot) {
-                    meta.pending = Some(current_snapshot);
-                } else {
-                    meta.pending = None;
+            for lane in &mut state.lanes {
+                if let Some(task) = lane.task.take() {
+                    task.abort();
                 }
-            } else {
-                meta.in_flight = true;
-                meta.in_flight_val = Some(current_snapshot);
-                meta.pending = None;
-                spawn_meta = true;
+                *lane = Lane::default();
+            }
+            state.owner += 1;
+            state.capability = Some(capability.clone());
+            state.last_trigger = None;
+        }
+        let trigger = (facts.dial_generation, snapshot);
+        if state.last_trigger.as_ref() == Some(&trigger) {
+            return;
+        }
+        state.last_trigger = Some(trigger);
+        if state.lanes.iter().all(|lane| !lane.busy) {
+            for lane in &mut state.lanes {
+                lane.passes = 0;
             }
         }
-
-        if spawn_meta {
+        let owner = state.owner;
+        for index in 0..2 {
+            let lane = &mut state.lanes[index];
+            if lane.busy || lane.passes == 2 {
+                lane.pending = true;
+                continue;
+            }
+            lane.busy = true;
+            lane.pending = false;
+            lane.passes += 1;
             let jobs = Arc::clone(self);
             let cap = capability.clone();
-            let s_dir = state_dir.to_path_buf();
-            let id_key = identity_key.to_string();
-            let pair_id = current_pairing_id.clone();
-            let handle = tokio::spawn(async move {
-                jobs.run_metadata_loop(cap, s_dir, id_key, pair_id).await;
-            });
-            *self.meta_task.lock().unwrap() = Some(handle);
-        }
-
-        // 2. Access slot trigger
-        let mut spawn_access = false;
-        {
-            let mut acc = self.access_slot.lock().unwrap();
-            if acc.active_pairing_id.as_deref() != Some(&current_pairing_id) {
-                if let Some(h) = self.access_task.lock().unwrap().take() {
-                    h.abort();
-                }
-                acc.active_pairing_id = Some(current_pairing_id.clone());
-                acc.in_flight = false;
-                acc.pending = None;
-            }
-            if acc.in_flight {
-                acc.pending = Some(());
-            } else {
-                acc.in_flight = true;
-                acc.pending = None;
-                spawn_access = true;
-            }
-        }
-
-        if spawn_access {
-            let jobs = Arc::clone(self);
-            let cap = capability.clone();
-            let pair_id = current_pairing_id;
-            let handle = tokio::spawn(async move {
-                jobs.run_access_job(cap, pair_id).await;
-            });
-            *self.access_task.lock().unwrap() = Some(handle);
+            let path = state_dir.to_path_buf();
+            let identity = identity_key.to_owned();
+            // Install under the same lock used by cancellation and completion.
+            lane.task = Some(self.runtime.spawn(async move {
+                jobs.run_lane(index, owner, cap, path, identity).await;
+            }));
         }
     }
-
     pub(crate) fn shutdown(&self) {
-        let mut meta = self.metadata_slot.lock().unwrap();
-        meta.in_flight = false;
-        meta.in_flight_val = None;
-        meta.pending = None;
-        if let Some(h) = self.meta_task.lock().unwrap().take() {
-            h.abort();
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        state.owner += 1;
+        if let Some(cap) = state.capability.take() {
+            cap.writer().invalidate_optional_attempts();
         }
-        let mut acc = self.access_slot.lock().unwrap();
-        acc.in_flight = false;
-        acc.pending = None;
-        if let Some(h) = self.access_task.lock().unwrap().take() {
-            h.abort();
+        for lane in &mut state.lanes {
+            if let Some(task) = lane.task.take() {
+                task.abort();
+            }
+            *lane = Lane::default();
         }
     }
-
-    async fn run_metadata_loop(
+    async fn run_lane(
         self: &Arc<Self>,
+        index: usize,
+        owner: u64,
         capability: PrivateLinkCapability,
         state_dir: PathBuf,
-        identity_key: String,
-        pairing_id: String,
+        identity: String,
     ) {
-        let deadline = self.deadline;
-        let snap_source = {
-            let h = Arc::clone(&self.hostname_source);
-            move || current_device_snapshot(&*h)
-        };
-
-        let _ = tokio::time::timeout(
-            deadline,
-            execute_metadata_sync(
-                &capability,
-                &state_dir,
-                &identity_key,
-                snap_source,
-                deadline,
-            ),
-        )
-        .await;
-
-        let follow_up = {
-            let mut meta = self.metadata_slot.lock().unwrap();
-            if meta.active_pairing_id.as_deref() != Some(&pairing_id) {
-                meta.in_flight = false;
-                meta.in_flight_val = None;
-                meta.pending = None;
-                return;
-            }
-            if let Some(next_snap) = meta.pending.take() {
-                meta.in_flight_val = Some(next_snap);
-                true
-            } else {
-                meta.in_flight = false;
-                meta.in_flight_val = None;
-                false
-            }
-        };
-
-        if follow_up {
-            let snap_source2 = {
-                let h = Arc::clone(&self.hostname_source);
-                move || current_device_snapshot(&*h)
-            };
-            let _ = tokio::time::timeout(
-                deadline,
-                execute_metadata_sync(
+        loop {
+            if index == 0 {
+                let source = Arc::clone(&self.hostname_source);
+                let _ = execute_metadata_sync(
                     &capability,
                     &state_dir,
-                    &identity_key,
-                    snap_source2,
-                    deadline,
-                ),
-            )
-            .await;
-
-            let mut meta = self.metadata_slot.lock().unwrap();
-            if meta.active_pairing_id.as_deref() == Some(&pairing_id) {
-                meta.in_flight = false;
-                meta.in_flight_val = None;
+                    &identity,
+                    move || current_device_snapshot(&*source),
+                    self.deadline,
+                )
+                .await;
             } else {
-                meta.in_flight = false;
-                meta.in_flight_val = None;
-                meta.pending = None;
+                let _ = execute_relay_access_sync(&capability, self.deadline).await;
             }
-        }
-    }
-
-    async fn run_access_job(
-        self: &Arc<Self>,
-        capability: PrivateLinkCapability,
-        pairing_id: String,
-    ) {
-        let deadline = self.deadline;
-        let _ = capability.retry_durable_reconciliation_if_pending();
-        let _ =
-            tokio::time::timeout(deadline, execute_relay_access_sync(&capability, deadline)).await;
-
-        let follow_up = {
-            let mut acc = self.access_slot.lock().unwrap();
-            if acc.active_pairing_id.as_deref() != Some(&pairing_id) {
-                acc.in_flight = false;
-                acc.pending = None;
+            let mut state = self.state.lock().unwrap();
+            if state.closed || state.owner != owner {
                 return;
             }
-            if acc.pending.take().is_some() {
-                true
+            let lane = &mut state.lanes[index];
+            if lane.pending && lane.passes < 2 {
+                lane.pending = false;
+                lane.passes += 1;
             } else {
-                acc.in_flight = false;
-                false
-            }
-        };
-
-        if follow_up {
-            let _ = capability.retry_durable_reconciliation_if_pending();
-            let _ =
-                tokio::time::timeout(deadline, execute_relay_access_sync(&capability, deadline))
-                    .await;
-
-            let mut acc = self.access_slot.lock().unwrap();
-            if acc.active_pairing_id.as_deref() == Some(&pairing_id) {
-                acc.in_flight = false;
-            } else {
-                acc.in_flight = false;
-                acc.pending = None;
+                lane.busy = false;
+                lane.task = None;
+                return;
             }
         }
     }
@@ -290,137 +178,309 @@ impl OptionalJobs {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_job_slot_coalescing_logic() {
-        let mut slot = JobSlot::<String>::default();
-        assert!(!slot.in_flight);
-        assert_eq!(slot.in_flight_val, None);
-        assert_eq!(slot.pending, None);
-
-        // First trigger sets in-flight
-        slot.in_flight = true;
-        slot.in_flight_val = Some("snap1".to_string());
-
-        // Same trigger while in flight -> does not set pending
-        if slot.in_flight_val.as_deref() != Some("snap1") {
-            slot.pending = Some("snap1".to_string());
-        }
-        assert_eq!(slot.pending, None);
-
-        // Changed trigger while in flight -> sets pending
-        if slot.in_flight_val.as_deref() != Some("snap2") {
-            slot.pending = Some("snap2".to_string());
-        }
-        assert_eq!(slot.pending.as_deref(), Some("snap2"));
-    }
+    use crate::private_link::start_private_link_session;
+    use crate::private_link_test_peer::PrivateLinkPeer;
 
     #[tokio::test]
-    async fn test_optional_jobs_self_caused_dial_suppression() {
-        let jobs = Arc::new(OptionalJobs::with_deadline(
-            Duration::from_millis(100),
-            Arc::new(|| Ok("test-host".to_string())),
-        ));
-
-        let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+    async fn deadline_releases_jobs_and_shutdown_refuses_late_facts() {
+        let peer = PrivateLinkPeer::start().await;
         let temp = tempfile::tempdir().unwrap();
-        let session = crate::private_link::start_private_link_session(
-            temp.path(),
-            peer.credential(),
-            "stream",
-        )
-        .await
-        .unwrap();
-        let capability = session.capability();
-
-        // Clear relay transport sets suppressed dial generation to generation + 1 (= 1)
-        capability.clear_relay_transport();
-        assert!(capability.is_dial_generation_suppressed(1));
-
-        let fact_state_suppressed = LinkFactState {
-            dial_generation: 1,
-            ..LinkFactState::default()
-        };
-
-        // Trigger with dial generation 1 -> both slots should be skipped
-        jobs.trigger(&capability, temp.path(), "identity", &fact_state_suppressed);
-
-        // slots should remain not spawned
-        {
-            let meta = jobs.metadata_slot.lock().unwrap();
-            let acc = jobs.access_slot.lock().unwrap();
-            assert!(!meta.in_flight);
-            assert!(!acc.in_flight);
-        }
-
-        // A different generation (e.g. 2) is not suppressed
-        let fact_state_other = LinkFactState {
-            dial_generation: 2,
-            ..LinkFactState::default()
-        };
-        jobs.trigger(&capability, temp.path(), "identity", &fact_state_other);
-        {
-            let meta = jobs.metadata_slot.lock().unwrap();
-            let acc = jobs.access_slot.lock().unwrap();
-            assert!(meta.in_flight);
-            assert!(acc.in_flight);
-        }
-
-        jobs.shutdown();
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_optional_deadline_releases_inflight_slot() {
-        let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
-        let temp = tempfile::tempdir().unwrap();
-        let session = crate::private_link::start_private_link_session(
-            temp.path(),
-            peer.credential(),
-            "stream",
-        )
-        .await
-        .unwrap();
-        let capability = session.capability();
-
-        // Use a short deadline (e.g. 50ms)
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let cap = session.capability();
         let jobs = Arc::new(OptionalJobs::with_deadline(
             Duration::from_millis(50),
-            Arc::new(|| Ok("test-host".to_string())),
+            Arc::new(|| Ok("test".into())),
         ));
-
-        let fact_state = LinkFactState {
+        let mut facts = LinkFactState {
             carrier_proven: true,
             dial_generation: 1,
             ..LinkFactState::default()
         };
-
-        // Don't enqueue any responses on peer -> requests will hang and hit 50ms deadline
-        jobs.trigger(&capability, temp.path(), "ident-1", &fact_state);
-
-        // Immediately after trigger, slots are in flight
-        {
-            assert!(jobs.metadata_slot.lock().unwrap().in_flight);
-            assert!(jobs.access_slot.lock().unwrap().in_flight);
-        }
-
-        // Wait for deadline to expire (e.g. 150ms)
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        // Both in_flight flags are released after deadline
-        {
-            assert!(!jobs.metadata_slot.lock().unwrap().in_flight);
-            assert!(!jobs.access_slot.lock().unwrap().in_flight);
-        }
-
-        // A new trigger can run
-        jobs.trigger(&capability, temp.path(), "ident-1", &fact_state);
-        {
-            assert!(jobs.metadata_slot.lock().unwrap().in_flight);
-            assert!(jobs.access_slot.lock().unwrap().in_flight);
-        }
-
+        jobs.trigger(&cap, temp.path(), "identity", &facts);
+        assert!(
+            jobs.state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .all(|lane| lane.busy)
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while jobs
+                .state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .any(|lane| lane.busy)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!peer.requests().is_empty());
+        facts.dial_generation += 1;
+        jobs.trigger(&cap, temp.path(), "identity", &facts);
+        assert!(
+            jobs.state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .all(|lane| lane.busy)
+        );
+        jobs.shutdown();
+        facts.dial_generation += 1;
+        jobs.trigger(&cap, temp.path(), "identity", &facts);
+        assert!(
+            jobs.state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .all(|lane| !lane.busy)
+        );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+    #[tokio::test]
+    async fn healthy_optional_dials_settle_and_real_external_dial_restarts() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.set_route(
+            "/app/network/api/clients/self",
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "protocol_version":1,"revision":1,"reported":null,"display_label":"test",
+                "owner_label":null,"updated_at":null,"journal":{"name":null,"version":"1.0"}
+            }))
+            .unwrap(),
+        );
+        peer.set_route(
+            "/app/network/api/relay/access",
+            200,
+            br#"{"protocol_version":2,"status":"not_configured"}"#.to_vec(),
+        );
+        peer.set_route("/app/devices/ingest/manifest", 200, b"{}".to_vec());
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let cap = session.capability();
+        let jobs = Arc::new(OptionalJobs::with_deadline(
+            Duration::from_secs(1),
+            Arc::new(|| Ok("test".into())),
+        ));
+        let sink_jobs = Arc::clone(&jobs);
+        let sink_cap = cap.clone();
+        let path = temp.path().to_path_buf();
+        cap.facts().install_sink(Arc::new(move |facts| {
+            let snapshot = facts.snapshot();
+            if snapshot.carrier_proven {
+                sink_jobs.trigger(&sink_cap, &path, "identity", &snapshot);
+            }
+        }));
+        jobs.trigger(&cap, temp.path(), "identity", &LinkFactState::default());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while jobs
+                .state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .any(|lane| lane.busy)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(cap.facts().snapshot().optional_dial);
+        assert_eq!(peer.requests().len(), 3);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(peer.requests().len(), 3);
+        let response = session
+            .request(reqwest::Method::POST, "/app/devices/ingest/manifest")
+            .unwrap()
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while jobs
+                .state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .any(|lane| lane.busy)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!cap.facts().snapshot().optional_dial);
+        assert_eq!(peer.requests().len(), 7);
+        assert_eq!(peer.accepted_carriers(), 2);
+        jobs.shutdown();
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+    #[tokio::test]
+    async fn retired_pair_cannot_clear_new_pair_job_slots() {
+        let old_peer = PrivateLinkPeer::start().await;
+        let new_peer = PrivateLinkPeer::start().await;
+        let old_path = tempfile::tempdir().unwrap();
+        let new_path = tempfile::tempdir().unwrap();
+        let old_session =
+            start_private_link_session(old_path.path(), old_peer.credential(), "stream")
+                .await
+                .unwrap();
+        let new_session =
+            start_private_link_session(new_path.path(), new_peer.credential(), "stream")
+                .await
+                .unwrap();
+        let jobs = Arc::new(OptionalJobs::with_deadline(
+            Duration::from_secs(2),
+            Arc::new(|| Ok("test".into())),
+        ));
+        let old_gate = Arc::new(tokio::sync::Notify::new());
+        let new_gate = Arc::new(tokio::sync::Notify::new());
+        old_peer.enqueue_gated_response(200, b"{}".to_vec(), Arc::clone(&old_gate));
+        new_peer.enqueue_gated_response(200, b"{}".to_vec(), Arc::clone(&new_gate));
+        let facts = LinkFactState::default();
+        jobs.trigger(&old_session.capability(), old_path.path(), "old", &facts);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while old_peer.requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        jobs.trigger(&new_session.capability(), new_path.path(), "new", &facts);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while new_peer.requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let owner = jobs.state.lock().unwrap().owner;
+        old_gate.notify_one();
+        old_session.shutdown().await.unwrap();
+        assert_eq!(jobs.state.lock().unwrap().owner, owner);
+        assert!(
+            jobs.state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .any(|lane| lane.busy)
+        );
+        new_gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while jobs
+                .state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .any(|lane| lane.busy)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        jobs.shutdown();
+        new_session.shutdown().await.unwrap();
+        old_peer.shutdown().await;
+        new_peer.shutdown().await;
+    }
+    #[tokio::test]
+    async fn changed_snapshot_during_get_is_put_and_coalesced_once() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.set_route(
+            "/app/network/api/relay/access",
+            200,
+            br#"{"protocol_version":2,"status":"not_configured"}"#.to_vec(),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let host = Arc::new(Mutex::new("A".to_owned()));
+        let source = Arc::clone(&host);
+        let jobs = Arc::new(OptionalJobs::with_deadline(
+            Duration::from_secs(3),
+            Arc::new(move || Ok(source.lock().unwrap().clone())),
+        ));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let mut resource = serde_json::json!({"protocol_version":1,"revision":1,"reported":null,"display_label":"test","owner_label":null,"updated_at":null,"journal":{"name":null,"version":"1.0"}});
+        peer.enqueue_gated_response(
+            200,
+            serde_json::to_vec(&resource).unwrap(),
+            Arc::clone(&gate),
+        );
+        resource["reported"] =
+            serde_json::to_value(crate::private_link_metadata::ClientSelfReported::from(
+                &current_device_snapshot(|| Ok("B".into())),
+            ))
+            .unwrap();
+        peer.enqueue_response(200, serde_json::to_vec(&resource).unwrap());
+        peer.enqueue_response(200, serde_json::to_vec(&resource).unwrap());
+        let facts = LinkFactState::default();
+        jobs.trigger(&session.capability(), temp.path(), "identity", &facts);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !peer
+                .requests()
+                .iter()
+                .any(|r| r.path.ends_with("/clients/self"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        *host.lock().unwrap() = "B".into();
+        jobs.trigger(&session.capability(), temp.path(), "identity", &facts);
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while jobs
+                .state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .any(|lane| lane.busy)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let metadata: Vec<_> = peer
+            .requests()
+            .into_iter()
+            .filter(|r| r.path.ends_with("/clients/self"))
+            .collect();
+        assert_eq!(metadata.len(), 3);
+        assert_eq!(metadata[1].method, "PUT");
+        let put: serde_json::Value = serde_json::from_slice(&metadata[1].body).unwrap();
+        assert_eq!(put["reported"]["name"], "B");
+        assert!(
+            jobs.state
+                .lock()
+                .unwrap()
+                .lanes
+                .iter()
+                .all(|lane| lane.passes == 2)
+        );
+        jobs.shutdown();
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }

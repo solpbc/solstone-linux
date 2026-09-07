@@ -4,7 +4,8 @@
 use crate::private_link::{LinkOutcome, PrivateLinkCapability};
 use reqwest::StatusCode;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,7 +89,7 @@ pub(crate) struct JournalDescriptor {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub(crate) struct ClientSelfResponse {
     pub(crate) protocol_version: u32,
-    pub(crate) revision: i64,
+    pub(crate) revision: u64,
     pub(crate) reported: Option<ClientSelfReported>,
     pub(crate) owner_label: Option<String>,
     pub(crate) display_label: Option<String>,
@@ -99,7 +100,7 @@ pub(crate) struct ClientSelfResponse {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ClientSelfUpdateRequest {
     pub(crate) protocol_version: u32,
-    pub(crate) expected_revision: i64,
+    pub(crate) expected_revision: u64,
     pub(crate) reported: ClientSelfReported,
 }
 
@@ -117,10 +118,7 @@ pub(crate) fn parse_and_validate_client_self_response(
         return Err(());
     }
 
-    let revision = obj.get("revision").and_then(|v| v.as_i64()).ok_or(())?;
-    if revision < 0 {
-        return Err(());
-    }
+    let revision = obj.get("revision").and_then(|v| v.as_u64()).ok_or(())?;
 
     let display_label = obj
         .get("display_label")
@@ -146,37 +144,17 @@ pub(crate) fn parse_and_validate_client_self_response(
     let reported = match reported_val {
         serde_json::Value::Null => None,
         serde_json::Value::Object(rep_obj) => {
-            let name = rep_obj
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or(())?
-                .to_string();
-            let platform = rep_obj
-                .get("platform")
-                .and_then(|v| v.as_str())
-                .ok_or(())?
-                .to_string();
-            let device_type = rep_obj
-                .get("device_type")
-                .and_then(|v| v.as_str())
-                .ok_or(())?
-                .to_string();
-            let app_id = rep_obj
-                .get("app_id")
-                .and_then(|v| v.as_str())
-                .ok_or(())?
-                .to_string();
-            let app_version = rep_obj
-                .get("app_version")
-                .and_then(|v| v.as_str())
-                .ok_or(())?
-                .to_string();
+            let nullable = |key: &str| match rep_obj.get(key).ok_or(())? {
+                serde_json::Value::Null => Ok(None),
+                serde_json::Value::String(value) => Ok(Some(value.clone())),
+                _ => Err(()),
+            };
             Some(ClientSelfReported {
-                name: Some(name),
-                platform: Some(platform),
-                device_type: Some(device_type),
-                app_id: Some(app_id),
-                app_version: Some(app_version),
+                name: nullable("name")?,
+                platform: nullable("platform")?,
+                device_type: nullable("device_type")?,
+                app_id: nullable("app_id")?,
+                app_version: nullable("app_version")?,
             })
         }
         _ => return Err(()),
@@ -209,6 +187,48 @@ pub(crate) fn parse_and_validate_client_self_response(
     })
 }
 
+struct MetadataPublication {
+    capability: PrivateLinkCapability,
+    state_dir: PathBuf,
+    association_epoch: u64,
+    lease: Arc<crate::private_link::OptionalAttemptLease>,
+}
+
+impl MetadataPublication {
+    async fn save(
+        &self,
+        version: String,
+        name: Option<String>,
+        preserve_name: bool,
+    ) -> Result<(), ()> {
+        let state_dir = self.state_dir.clone();
+        let lease = Arc::clone(&self.lease);
+        let epoch = self.association_epoch;
+        self.capability
+            .blocking_optional(move |writer, _| {
+                writer.publish_metadata(
+                    &lease,
+                    epoch,
+                    &state_dir,
+                    &version,
+                    name.as_deref(),
+                    preserve_name,
+                )
+            })
+            .await
+    }
+
+    async fn record(&self, response: &ClientSelfResponse) -> Result<(), ()> {
+        let journal = response.journal.as_ref().ok_or(())?;
+        self.save(
+            journal.version.clone().ok_or(())?,
+            journal.name.clone(),
+            false,
+        )
+        .await
+    }
+}
+
 pub(crate) async fn execute_metadata_sync<F>(
     capability: &PrivateLinkCapability,
     state_dir: &Path,
@@ -219,150 +239,113 @@ pub(crate) async fn execute_metadata_sync<F>(
 where
     F: Fn() -> DeviceSnapshot,
 {
-    let start = std::time::Instant::now();
-    let remaining_timeout =
-        |timeout: Duration, start: std::time::Instant| -> Result<Duration, ()> {
-            timeout
-                .checked_sub(start.elapsed())
-                .filter(|d| !d.is_zero())
-                .ok_or(())
-        };
-
-    let initial_pairing_id = capability.writer().pairing_id().to_string();
-
-    let save_ver = |ver: &str, name: Option<&str>| {
-        if capability.writer().pairing_id() != initial_pairing_id {
-            return;
-        }
-        let (snap_fact, epoch) = capability.facts().snapshot_with_epoch();
-        if !snap_fact.carrier_proven {
-            return;
-        }
-        let cred = capability.writer().current_credential();
-        let fresh_identity_key = crate::private_link::journal_identity_key(&cred);
-        let _ = capability
-            .facts()
-            .commit_journal_version(epoch, snap_fact.dial_generation, || {
-                crate::sync_health::save_paired_journal_version(
-                    state_dir,
-                    &fresh_identity_key,
-                    ver,
-                    name,
-                )
-                .is_ok()
-            });
+    let deadline = tokio::time::Instant::now() + timeout;
+    let attempt = capability.writer().metadata_attempt(deadline);
+    let publication = MetadataPublication {
+        capability: capability.clone(),
+        state_dir: state_dir.to_path_buf(),
+        association_epoch: capability.facts().association_epoch(),
+        lease: Arc::clone(&attempt.lease),
     };
-
-    let record_journal = |res: &ClientSelfResponse| {
-        if let Some(version) = res.journal.as_ref().and_then(|j| j.version.as_deref()) {
-            let name = res.journal.as_ref().and_then(|j| j.name.as_deref());
-            save_ver(version, name);
-        }
-    };
-
-    let cur_timeout = remaining_timeout(timeout, start)?;
-    let outcome = capability.clients_self_get(cur_timeout).await;
-    match outcome {
-        LinkOutcome::LocalRejected {
-            status: StatusCode::NOT_FOUND,
-        } => {
-            // Authenticated 404 only -> fallback to legacy system_status preserving existing name
-            let existing_name =
-                crate::sync_health::load_paired_journal_version(state_dir).and_then(|p| p.name);
-            let cur_timeout = remaining_timeout(timeout, start)?;
-            if let Ok(Some(version)) = capability.system_status_optional(cur_timeout).await {
-                save_ver(&version, existing_name.as_deref());
+    tokio::time::timeout_at(deadline, async {
+        let remaining = || {
+            if !attempt.lease.is_current() {
+                return Err(());
             }
-            Ok(())
+            Ok(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        };
+        let outcome = capability.clients_self_get(remaining()?).await;
+        remaining()?;
+        if matches!(
+            outcome,
+            LinkOutcome::LocalRejected {
+                status: StatusCode::NOT_FOUND
+            }
+        ) {
+            if let Ok(Some(version)) = capability.system_status_optional(remaining()?).await {
+                remaining()?;
+                publication.save(version, None, true).await?;
+            }
+            return Ok(());
         }
-        LinkOutcome::Success {
+        let LinkOutcome::Success {
             status: StatusCode::OK,
             body,
-        } => {
-            let res = parse_and_validate_client_self_response(&body)?;
-            record_journal(&res);
-            let current_snap = snapshot_source();
-            if res.reported.as_ref() == Some(&ClientSelfReported::from(&current_snap)) {
-                // Unchanged snapshot -> no PUT
+        } = outcome
+        else {
+            return Err(());
+        };
+        let mut response = parse_and_validate_client_self_response(&body)?;
+        publication.record(&response).await?;
+        for retry in 0..2 {
+            remaining()?;
+            let snapshot = snapshot_source();
+            if response.reported.as_ref() == Some(&ClientSelfReported::from(&snapshot)) {
                 return Ok(());
             }
-
-            // Send PUT
-            let req = ClientSelfUpdateRequest {
+            let request = ClientSelfUpdateRequest {
                 protocol_version: 1,
-                expected_revision: res.revision,
-                reported: ClientSelfReported::from(&current_snap),
+                expected_revision: response.revision,
+                reported: ClientSelfReported::from(&snapshot),
             };
-            let req_bytes = serde_json::to_vec(&req).map_err(|_| ())?;
-            let cur_timeout = remaining_timeout(timeout, start)?;
-            let put_outcome = capability.clients_self_put(req_bytes, cur_timeout).await;
-            match put_outcome {
+            let body = serde_json::to_vec(&request).map_err(|_| ())?;
+            let outcome = capability.clients_self_put(body, remaining()?).await;
+            remaining()?;
+            match outcome {
                 LinkOutcome::Success {
                     status: StatusCode::OK,
-                    body: put_body,
+                    body,
                 } => {
-                    if let Ok(put_res) = parse_and_validate_client_self_response(&put_body) {
-                        record_journal(&put_res);
-                    }
-                    Ok(())
+                    let response = parse_and_validate_client_self_response(&body)?;
+                    publication.record(&response).await?;
+                    return Ok(());
                 }
                 LinkOutcome::LocalRejected {
                     status: StatusCode::CONFLICT,
-                } => {
-                    // 409 Conflict: reread GET, retry at most once with newest snapshot
-                    let cur_timeout = remaining_timeout(timeout, start)?;
-                    let get2_outcome = capability.clients_self_get(cur_timeout).await;
-                    match get2_outcome {
-                        LinkOutcome::Success {
-                            status: StatusCode::OK,
-                            body: body2,
-                        } => {
-                            let res2 = parse_and_validate_client_self_response(&body2)?;
-                            record_journal(&res2);
-                            let current_snap2 = snapshot_source();
-                            if res2.reported.as_ref()
-                                == Some(&ClientSelfReported::from(&current_snap2))
-                            {
-                                // Re-read matches newest snapshot -> no PUT
-                                return Ok(());
-                            }
-                            let req2 = ClientSelfUpdateRequest {
-                                protocol_version: 1,
-                                expected_revision: res2.revision,
-                                reported: ClientSelfReported::from(&current_snap2),
-                            };
-                            let req_bytes2 = serde_json::to_vec(&req2).map_err(|_| ())?;
-                            let cur_timeout = remaining_timeout(timeout, start)?;
-                            let put2_outcome =
-                                capability.clients_self_put(req_bytes2, cur_timeout).await;
-                            match put2_outcome {
-                                LinkOutcome::Success {
-                                    status: StatusCode::OK,
-                                    body: put_body2,
-                                } => {
-                                    if let Ok(put_res2) =
-                                        parse_and_validate_client_self_response(&put_body2)
-                                    {
-                                        record_journal(&put_res2);
-                                    }
-                                    Ok(())
-                                }
-                                _ => Ok(()),
-                            }
-                        }
-                        _ => Err(()),
-                    }
+                } if retry == 0 => {
+                    let outcome = capability.clients_self_get(remaining()?).await;
+                    remaining()?;
+                    let LinkOutcome::Success {
+                        status: StatusCode::OK,
+                        body,
+                    } = outcome
+                    else {
+                        return Err(());
+                    };
+                    response = parse_and_validate_client_self_response(&body)?;
+                    publication.record(&response).await?;
                 }
-                _ => Ok(()),
+                _ => return Err(()),
             }
         }
-        _ => Err(()),
-    }
+        Err(())
+    })
+    .await
+    .unwrap_or(Err(()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_reported_object_accepts_all_required_nullable_strings() {
+        let body = serde_json::json!({"protocol_version":1,"revision":u64::MAX,
+            "reported":{"name":null,"platform":null,"device_type":null,"app_id":null,"app_version":null},
+            "owner_label":null,"updated_at":null,"display_label":"test",
+            "journal":{"name":null,"version":"1.0"}});
+        assert!(
+            parse_and_validate_client_self_response(&serde_json::to_vec(&body).unwrap()).is_ok()
+        );
+        for key in ["name", "platform", "device_type", "app_id", "app_version"] {
+            let mut missing = body.clone();
+            missing["reported"].as_object_mut().unwrap().remove(key);
+            assert!(
+                parse_and_validate_client_self_response(&serde_json::to_vec(&missing).unwrap())
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_sanitization_rules() {
@@ -1012,5 +995,107 @@ mod tests {
 
         session.shutdown().await.unwrap();
         peer.shutdown().await;
+    }
+    #[tokio::test]
+    async fn stale_get_cannot_write_or_put_and_legacy_name_is_identity_bound() {
+        use crate::private_link::{LinkFact, start_private_link_session};
+        use crate::private_link_test_peer::PrivateLinkPeer;
+        let peer = PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let cap = session.capability();
+        let body = serde_json::to_vec(&serde_json::json!({"protocol_version":1,"revision":1,"reported":null,
+            "owner_label":null,"updated_at":null,"display_label":"test","journal":{"name":"old","version":"1.0"}})).unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        peer.enqueue_gated_response(200, body, Arc::clone(&gate));
+        let old_cap = cap.clone();
+        let path = temp.path().to_path_buf();
+        let old = tokio::spawn(async move {
+            execute_metadata_sync(
+                &old_cap,
+                &path,
+                "ignored",
+                DeviceSnapshot::default,
+                Duration::from_secs(2),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while peer.requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cap.writer().invalidate_optional_attempts();
+        gate.notify_one();
+        assert!(old.await.unwrap().is_err());
+        assert_eq!(peer.requests().len(), 1);
+        assert!(crate::sync_health::load_paired_journal_version(temp.path()).is_none());
+        crate::sync_health::save_paired_journal_version(
+            temp.path(),
+            "another-pair",
+            "0.1",
+            Some("other name"),
+        )
+        .unwrap();
+        peer.enqueue_response(404, b"".to_vec());
+        peer.enqueue_response(200, br#"{"version":{"current":"2.0"}}"#.to_vec());
+        cap.facts().publish(LinkFact::CarrierProven);
+        execute_metadata_sync(
+            &cap,
+            temp.path(),
+            "ignored",
+            DeviceSnapshot::default,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let saved = crate::sync_health::load_paired_journal_version(temp.path()).unwrap();
+        assert_eq!(saved.identity_key, cap.writer().identity_key());
+        assert_eq!(saved.name, None);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+    #[tokio::test]
+    async fn full_null_clears_name_and_malformed_put_retains_valid_get() {
+        for malformed in [false, true] {
+            let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+            let temp = tempfile::tempdir().unwrap();
+            let session = crate::private_link::start_private_link_session(
+                temp.path(),
+                peer.credential(),
+                "stream",
+            )
+            .await
+            .unwrap();
+            let cap = session.capability();
+            let mut resource = serde_json::json!({"protocol_version":1,"revision":1,"reported":null,"owner_label":null,"updated_at":null,"display_label":"test","journal":{"name":"from GET","version":"1.0"}});
+            peer.enqueue_response(200, serde_json::to_vec(&resource).unwrap());
+            resource["journal"]["name"] = serde_json::Value::Null;
+            if malformed {
+                resource.as_object_mut().unwrap().remove("owner_label");
+            }
+            peer.enqueue_response(200, serde_json::to_vec(&resource).unwrap());
+            let result = execute_metadata_sync(
+                &cap,
+                temp.path(),
+                "ignored",
+                DeviceSnapshot::default,
+                Duration::from_secs(2),
+            )
+            .await;
+            assert_eq!(result.is_err(), malformed);
+            let saved = crate::sync_health::load_paired_journal_version(temp.path()).unwrap();
+            assert_eq!(
+                saved.name.as_deref(),
+                if malformed { Some("from GET") } else { None }
+            );
+            assert_eq!(peer.requests().len(), 2);
+            session.shutdown().await.unwrap();
+            peer.shutdown().await;
+        }
     }
 }

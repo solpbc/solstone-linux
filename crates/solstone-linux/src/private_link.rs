@@ -32,7 +32,8 @@ use spl_transport::{
 use crate::config::{ConfigPaths, sanitize_link_authority, save_linked_stream};
 use crate::private_file::{
     DurableWriteFault, NoWriteFault, PrivateFileError, atomic_write_bytes,
-    atomic_write_bytes_with_fault, ensure_private_directory, open_regular_readonly,
+    atomic_write_bytes_guarded, atomic_write_bytes_with_fault, ensure_private_directory,
+    open_regular_readonly,
 };
 
 pub(crate) const CREDENTIALS_FILENAME: &str = "credentials.json";
@@ -839,6 +840,7 @@ struct LinkFactsInner {
     // association itself, so a stale in-flight fetch from a prior owner can't
     // alias a same-numbered dial_generation from a later one (ABA).
     owner_epoch: AtomicU64,
+    association_epoch: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -859,6 +861,7 @@ pub(crate) struct LinkFactState {
     pub(crate) token_persistence_failure: bool,
     pub(crate) journal_version_observed: bool,
     pub(crate) dial_generation: u64,
+    pub(crate) optional_dial: bool,
 }
 
 impl LinkFacts {
@@ -866,6 +869,7 @@ impl LinkFacts {
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
             self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
+            self.inner.association_epoch.fetch_add(1, Ordering::AcqRel);
             *state = LinkFactState::default();
         }
         self.persist();
@@ -875,6 +879,7 @@ impl LinkFacts {
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
             self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
+            self.inner.association_epoch.fetch_add(1, Ordering::AcqRel);
             *state = LinkFactState {
                 transport_unavailable: true,
                 ..LinkFactState::default()
@@ -908,17 +913,35 @@ impl LinkFacts {
     }
 
     pub(crate) fn publish_with_generation(&self, fact: LinkFact, generation: u64) {
+        self.publish_with_source(fact, generation, false, None);
+    }
+
+    fn publish_with_source(
+        &self,
+        fact: LinkFact,
+        generation: u64,
+        optional: bool,
+        owner: Option<(u64, &AtomicBool)>,
+    ) -> bool {
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            if owner.is_some_and(|(epoch, closed)| {
+                self.association_epoch() != epoch || closed.load(Ordering::Acquire)
+            }) {
+                return false;
+            }
             // A freshly proven dial hasn't had its own journal version confirmed
             // yet: an observed flag left over from an earlier generation within
             // the same owner epoch (e.g. a transport-level reconnect) must not
-            // be reported as current until commit_journal_version confirms it
+            // be reported as current until metadata publication confirms it
             // again for this generation.
             if fact == LinkFact::CarrierProven && generation != state.dial_generation {
                 state.journal_version_observed = false;
             }
             state.dial_generation = generation;
+            if matches!(fact, LinkFact::CarrierProven | LinkFact::ObserverRegistered) {
+                state.optional_dial = optional;
+            }
             match fact {
                 LinkFact::PairingRequired => state.pairing_required = true,
                 LinkFact::PrivateStateInvalid => state.private_state_invalid = true,
@@ -927,9 +950,7 @@ impl LinkFacts {
                 LinkFact::CarrierProven => state.carrier_proven = true,
                 LinkFact::ObserverRegistered => {
                     state.observer_registered = true;
-                    if !state.token_persistence_failure {
-                        state.transport_unavailable = false;
-                    }
+                    state.transport_unavailable = false;
                 }
                 LinkFact::TransportUnavailable => {
                     state.transport_unavailable = true;
@@ -943,39 +964,34 @@ impl LinkFacts {
             }
         }
         self.persist();
+        true
     }
 
-    /// Atomically validates that the owner epoch, dial generation, and carrier
-    /// state captured when a fetch started are still current, then runs `save`
-    /// and marks the journal version observed for this generation - all under
-    /// the same state lock. Consolidating the freshness check, the disk write,
-    /// and the fact update into one critical section closes the window where
-    /// owner_lost could interleave between a completed write and the
-    /// journal_version_observed publish and restore stale metadata into a
-    /// just-reset state. Returns whether the version was committed.
-    pub(crate) fn commit_journal_version(
-        &self,
-        epoch_at_fire: u64,
-        dial_generation: u64,
-        save: impl FnOnce() -> bool,
-    ) -> bool {
+    pub(crate) fn association_epoch(&self) -> u64 {
+        self.inner.association_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn metadata_owner_is_current(&self, epoch: u64) -> bool {
+        let state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        self.association_epoch() == epoch
+            && state.carrier_proven
+            && !state.transport_unavailable
+            && !state.terminal_revocation
+    }
+
+    pub(crate) fn note_metadata_saved(&self, epoch: u64, dial_generation: u64) {
         let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
-        if self.inner.owner_epoch.load(Ordering::Acquire) != epoch_at_fire
+        if self.association_epoch() != epoch
+            || state.dial_generation != dial_generation
             || !state.carrier_proven
             || state.transport_unavailable
             || state.terminal_revocation
-            || state.token_persistence_failure
-            || state.dial_generation != dial_generation
         {
-            return false;
-        }
-        if !save() {
-            return false;
+            return;
         }
         state.journal_version_observed = true;
         drop(state);
         self.persist();
-        true
     }
 
     pub(crate) fn snapshot_with_epoch(&self) -> (LinkFactState, u64) {
@@ -1024,7 +1040,7 @@ pub(crate) struct PrivateLinkOpener {
     facts: LinkFacts,
     generation: AtomicU64,
     relay_incarnation: AtomicU64,
-    suppressed_dial_generation: AtomicU64,
+    shutdown_fenced: AtomicBool,
 }
 
 impl PrivateLinkOpener {
@@ -1042,7 +1058,7 @@ impl PrivateLinkOpener {
             facts,
             generation: AtomicU64::new(0),
             relay_incarnation: AtomicU64::new(1),
-            suppressed_dial_generation: AtomicU64::new(0),
+            shutdown_fenced: AtomicBool::new(false),
         }
     }
 
@@ -1057,9 +1073,7 @@ impl PrivateLinkOpener {
             .unwrap_or_else(|p| p.into_inner());
         *guard = Some(Arc::new(client));
         self.relay_incarnation.fetch_add(1, Ordering::AcqRel);
-        let next_dial_gen = self.generation.load(Ordering::Acquire) + 1;
-        self.suppressed_dial_generation
-            .store(next_dial_gen, Ordering::Release);
+        self.transport_unavailable.store(false, Ordering::Release);
     }
 
     pub(crate) fn clear_relay_transport(&self) {
@@ -1069,17 +1083,10 @@ impl PrivateLinkOpener {
             .unwrap_or_else(|p| p.into_inner());
         *guard = None;
         self.relay_incarnation.fetch_add(1, Ordering::AcqRel);
-        let next_dial_gen = self.generation.load(Ordering::Acquire) + 1;
-        self.suppressed_dial_generation
-            .store(next_dial_gen, Ordering::Release);
-    }
-
-    pub(crate) fn is_dial_generation_suppressed(&self, dial_generation: u64) -> bool {
-        dial_generation != 0
-            && self.suppressed_dial_generation.load(Ordering::Acquire) == dial_generation
     }
 
     pub(crate) fn fence_shutdown(&self) {
+        self.shutdown_fenced.store(true, Ordering::Release);
         self.relay_incarnation.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -1087,7 +1094,9 @@ impl PrivateLinkOpener {
         &self,
         dial: impl Future<Output = Result<T, TransportError>>,
     ) -> Result<T, TransportError> {
-        if self.transport_unavailable.load(Ordering::Acquire) {
+        if self.shutdown_fenced.load(Ordering::Acquire)
+            || (self.lan_transport.is_none() && self.transport_unavailable.load(Ordering::Acquire))
+        {
             return Err(TransportError::Pairing(
                 "linked transport unavailable".into(),
             ));
@@ -1097,13 +1106,17 @@ impl PrivateLinkOpener {
         // this guard keeps a refreshed carrier behind synchronous token persistence.
         // There is no timer, background, or live-stream refresh path.
         let _admission = self.admission.lock().await;
-        if self.transport_unavailable.load(Ordering::Acquire) {
+        if self.shutdown_fenced.load(Ordering::Acquire)
+            || (self.lan_transport.is_none() && self.transport_unavailable.load(Ordering::Acquire))
+        {
             return Err(TransportError::Pairing(
                 "linked transport unavailable".into(),
             ));
         }
         let result = dial.await?;
-        if self.transport_unavailable.load(Ordering::Acquire) {
+        if self.shutdown_fenced.load(Ordering::Acquire)
+            || (self.lan_transport.is_none() && self.transport_unavailable.load(Ordering::Acquire))
+        {
             drop(result);
             return Err(TransportError::Pairing(
                 "linked transport unavailable".into(),
@@ -1124,7 +1137,32 @@ impl CarrierOpener for PrivateLinkOpener {
     fn dial_carrier(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<DialedCarrier, TransportError>> + Send + '_>> {
+        self.dial_carrier_with_source(false)
+    }
+}
+
+struct OptionalPrivateLinkOpener(Arc<PrivateLinkOpener>);
+impl CarrierOpener for OptionalPrivateLinkOpener {
+    fn proxy_headers(
+        &self,
+        headers: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, TransportError> {
+        self.0.proxy_headers(headers)
+    }
+    fn dial_carrier(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<DialedCarrier, TransportError>> + Send + '_>> {
+        self.0.dial_carrier_with_source(true)
+    }
+}
+
+impl PrivateLinkOpener {
+    fn dial_carrier_with_source(
+        &self,
+        optional: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<DialedCarrier, TransportError>> + Send + '_>> {
         Box::pin(async move {
+            let association = self.facts.association_epoch();
             self.facts.begin_journal_dial();
             let (carrier, relay_dial_incarnation) = self
                 .admit_dial(async {
@@ -1166,10 +1204,16 @@ impl CarrierOpener for PrivateLinkOpener {
                         )
                     };
                     if let Some(relay) = relay_client {
+                        if self.transport_unavailable.load(Ordering::Acquire) {
+                            return Err(TransportError::Pairing(
+                                "linked transport unavailable".into(),
+                            ));
+                        }
                         match relay.dial_carrier().await {
                             Ok(carrier) => {
-                                if self.relay_incarnation.load(Ordering::Acquire)
-                                    != dial_incarnation
+                                if self.transport_unavailable.load(Ordering::Acquire)
+                                    || self.relay_incarnation.load(Ordering::Acquire)
+                                        != dial_incarnation
                                 {
                                     return Err(TransportError::Pairing(
                                         "relay transport incarnation changed".into(),
@@ -1186,7 +1230,8 @@ impl CarrierOpener for PrivateLinkOpener {
                 .await?;
 
             if let Some(dial_incarnation) = relay_dial_incarnation
-                && self.relay_incarnation.load(Ordering::Acquire) != dial_incarnation
+                && (self.transport_unavailable.load(Ordering::Acquire)
+                    || self.relay_incarnation.load(Ordering::Acquire) != dial_incarnation)
             {
                 return Err(TransportError::Pairing(
                     "relay transport incarnation changed".into(),
@@ -1194,11 +1239,19 @@ impl CarrierOpener for PrivateLinkOpener {
             }
 
             let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-            self.facts
-                .publish_with_generation(LinkFact::CarrierProven, generation);
-            // Kept for persisted-schema compatibility: a proven carrier now means the observer is ready.
-            self.facts
-                .publish_with_generation(LinkFact::ObserverRegistered, generation);
+            // Owner retirement and proof publication share the facts lock.
+            for fact in [LinkFact::CarrierProven, LinkFact::ObserverRegistered] {
+                if !self.facts.publish_with_source(
+                    fact,
+                    generation,
+                    optional,
+                    Some((association, &self.shutdown_fenced)),
+                ) {
+                    return Err(TransportError::Pairing(
+                        "linked transport unavailable".into(),
+                    ));
+                }
+            }
             Ok(carrier)
         })
     }
@@ -1241,9 +1294,12 @@ pub(crate) struct PrivateLinkSession {
     origin: Url,
     opener: Arc<PrivateLinkOpener>,
     handle: JournalBridgeHandle,
+    optional_handle: JournalBridgeHandle,
+    optional_client: reqwest::Client,
+    optional_origin: Url,
     token_persistence: Arc<TokenPersistence>,
     bootstrap_target: Option<String>,
-    _state_lock: PrivateStateLock,
+    _state_lock: Arc<PrivateStateLock>,
 }
 
 enum OpenJournalGate {
@@ -1371,6 +1427,9 @@ struct PrivateLinkCapabilityInner {
     origin: Url,
     opener: Arc<PrivateLinkOpener>,
     writer: Arc<OrderedCredentialWriter>,
+    optional_client: reqwest::Client,
+    optional_origin: Url,
+    state_lock: std::sync::Weak<PrivateStateLock>,
 }
 
 #[derive(Clone)]
@@ -1427,7 +1486,7 @@ impl PrivateLinkCapability {
     }
 
     pub(crate) async fn clients_self_get(&self, timeout: Duration) -> LinkOutcome {
-        let url = match confine_path(&self.inner.origin, "/app/network/api/clients/self") {
+        let url = match confine_path(&self.inner.optional_origin, "/app/network/api/clients/self") {
             Ok(u) => u,
             Err(_) => {
                 return LinkOutcome::LocalRejected {
@@ -1435,13 +1494,13 @@ impl PrivateLinkCapability {
                 };
             }
         };
-        self.send_optional(self.inner.client.get(url), timeout)
+        self.send_optional(self.inner.optional_client.get(url), timeout)
             .await
     }
 
     // Authenticated current-device PUT is forwarded; optional failure if the journal/bridge rejects it.
     pub(crate) async fn clients_self_put(&self, body: Vec<u8>, timeout: Duration) -> LinkOutcome {
-        let url = match confine_path(&self.inner.origin, "/app/network/api/clients/self") {
+        let url = match confine_path(&self.inner.optional_origin, "/app/network/api/clients/self") {
             Ok(u) => u,
             Err(_) => {
                 return LinkOutcome::LocalRejected {
@@ -1451,7 +1510,7 @@ impl PrivateLinkCapability {
         };
         self.send_optional(
             self.inner
-                .client
+                .optional_client
                 .put(url)
                 .header("content-type", "application/json")
                 .body(body),
@@ -1461,7 +1520,7 @@ impl PrivateLinkCapability {
     }
 
     pub(crate) async fn relay_access_get(&self, timeout: Duration) -> LinkOutcome {
-        let url = match confine_path(&self.inner.origin, "/app/network/api/relay/access") {
+        let url = match confine_path(&self.inner.optional_origin, "/app/network/api/relay/access") {
             Ok(u) => u,
             Err(_) => {
                 return LinkOutcome::LocalRejected {
@@ -1469,8 +1528,35 @@ impl PrivateLinkCapability {
                 };
             }
         };
-        self.send_optional(self.inner.client.get(url), timeout)
+        self.send_optional(self.inner.optional_client.get(url), timeout)
             .await
+    }
+
+    pub(crate) async fn blocking_optional<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(Arc<OrderedCredentialWriter>, Arc<PrivateLinkOpener>) -> Result<T, ()>
+        + Send
+        + 'static,
+    ) -> Result<T, ()> {
+        let state_lock = self.inner.state_lock.upgrade().ok_or(())?;
+        let writer = Arc::clone(&self.inner.writer);
+        let opener = Arc::clone(&self.inner.opener);
+        tokio::task::spawn_blocking(move || {
+            let _state_lock = state_lock;
+            operation(writer, opener)
+        })
+        .await
+        .map_err(|_| ())?
+    }
+
+    pub(crate) async fn retry_optional_reconciliation(
+        &self,
+        attempt: Arc<OptionalAttemptLease>,
+    ) -> Result<bool, ()> {
+        self.blocking_optional(move |writer, opener| {
+            writer.retry_durable_reconciliation_with_attempt(&opener, Some(&attempt))
+        })
+        .await
     }
 
     pub(crate) fn writer(&self) -> Arc<OrderedCredentialWriter> {
@@ -1481,61 +1567,10 @@ impl PrivateLinkCapability {
         self.inner.opener.relay_incarnation()
     }
 
-    pub(crate) fn commit_optional_relay(
-        &self,
-        caller_pairing_id: &str,
-        caller_access_gen: u64,
-        caller_opener_incarnation: u64,
-        relay_origin: &str,
-        device_token: &str,
-        expires_at: i64,
-    ) -> Result<(), ()> {
-        self.inner.writer.commit_optional_relay(
-            &self.inner.opener,
-            caller_pairing_id,
-            caller_access_gen,
-            caller_opener_incarnation,
-            relay_origin,
-            device_token,
-            expires_at,
-        )
-    }
-
-    pub(crate) fn commit_optional_clear(
-        &self,
-        caller_pairing_id: &str,
-        caller_access_gen: u64,
-        caller_opener_incarnation: u64,
-    ) -> Result<(), ()> {
-        self.inner.writer.commit_optional_clear(
-            &self.inner.opener,
-            caller_pairing_id,
-            caller_access_gen,
-            caller_opener_incarnation,
-        )
-    }
-
-    pub(crate) fn retry_durable_reconciliation_if_pending(&self) -> Result<bool, ()> {
-        self.inner
-            .writer
-            .retry_durable_reconciliation_if_pending(&self.inner.opener)
-    }
-
-    pub(crate) fn is_dial_generation_suppressed(&self, dial_generation: u64) -> bool {
-        self.inner
-            .opener
-            .is_dial_generation_suppressed(dial_generation)
-    }
-
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn replace_relay_transport(&self, client: TransportClient) {
         self.inner.opener.replace_relay_transport(client);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn clear_relay_transport(&self) {
-        self.inner.opener.clear_relay_transport();
     }
 
     #[cfg(test)]
@@ -1695,7 +1730,7 @@ impl PrivateLinkCapability {
         &self,
         timeout: Duration,
     ) -> Result<Option<String>, LinkOutcome> {
-        let Ok(url) = confine_path(&self.inner.origin, SYSTEM_STATUS_PATH) else {
+        let Ok(url) = confine_path(&self.inner.optional_origin, SYSTEM_STATUS_PATH) else {
             return Err(LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             });
@@ -1703,7 +1738,7 @@ impl PrivateLinkCapability {
         let outcome = self
             .send_optional(
                 self.inner
-                    .client
+                    .optional_client
                     .get(url)
                     .header(reqwest::header::CACHE_CONTROL, "no-cache"),
                 timeout,
@@ -1815,6 +1850,8 @@ impl PrivateLinkOwner {
 
 impl Drop for PrivateLinkOwner {
     fn drop(&mut self) {
+        self.capability.inner.writer.fence_shutdown();
+        self.capability.inner.opener.fence_shutdown();
         self.close_open_journal();
         self.facts.owner_lost();
     }
@@ -1905,9 +1942,52 @@ pub(crate) struct DurableReadyPending {
     pub(crate) credential: Credential,
 }
 
+pub(crate) struct OptionalAttempt {
+    pub(crate) lease: Arc<OptionalAttemptLease>,
+}
+
+pub(crate) struct OptionalAttemptLease {
+    revision: Arc<AtomicU64>,
+    expected: u64,
+    deadline: tokio::time::Instant,
+}
+
+impl OptionalAttempt {
+    fn new(revision: Arc<AtomicU64>, deadline: tokio::time::Instant) -> Self {
+        let expected = revision.fetch_add(1, Ordering::AcqRel) + 1;
+        Self {
+            lease: Arc::new(OptionalAttemptLease {
+                revision,
+                expected,
+                deadline,
+            }),
+        }
+    }
+}
+impl Drop for OptionalAttempt {
+    fn drop(&mut self) {
+        let _ = self.lease.revision.compare_exchange(
+            self.lease.expected,
+            self.lease.expected.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+impl OptionalAttemptLease {
+    pub(crate) fn is_current(&self) -> bool {
+        tokio::time::Instant::now() < self.deadline
+            && self.revision.load(Ordering::Acquire) == self.expected
+    }
+}
+
 pub(crate) struct OrderedCredentialWriter {
     config_root: PathBuf,
     pairing_id: String,
+    identity_key: String,
+    instance_id: String,
+    metadata_attempt: Arc<AtomicU64>,
+    access_attempt: Arc<AtomicU64>,
     live_hook_epoch: AtomicU64,
     access_mutation_generation: AtomicU64,
     credential: Mutex<Credential>,
@@ -1932,6 +2012,10 @@ impl OrderedCredentialWriter {
         Self {
             config_root,
             pairing_id,
+            identity_key: journal_identity_key(&credential),
+            instance_id: credential.instance_id.clone(),
+            metadata_attempt: Arc::new(AtomicU64::new(0)),
+            access_attempt: Arc::new(AtomicU64::new(0)),
             live_hook_epoch: AtomicU64::new(1),
             access_mutation_generation: AtomicU64::new(1),
             credential: Mutex::new(credential),
@@ -1949,10 +2033,29 @@ impl OrderedCredentialWriter {
         &self.pairing_id
     }
 
+    pub(crate) fn identity_key(&self) -> &str {
+        &self.identity_key
+    }
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    pub(crate) fn metadata_attempt(&self, deadline: tokio::time::Instant) -> OptionalAttempt {
+        OptionalAttempt::new(Arc::clone(&self.metadata_attempt), deadline)
+    }
+    pub(crate) fn access_attempt(&self, deadline: tokio::time::Instant) -> OptionalAttempt {
+        OptionalAttempt::new(Arc::clone(&self.access_attempt), deadline)
+    }
+    pub(crate) fn invalidate_optional_attempts(&self) {
+        self.metadata_attempt.fetch_add(1, Ordering::AcqRel);
+        self.access_attempt.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub(crate) fn access_mutation_generation(&self) -> u64 {
         self.access_mutation_generation.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     pub(crate) fn current_credential(&self) -> Credential {
         self.credential
             .lock()
@@ -1966,6 +2069,7 @@ impl OrderedCredentialWriter {
 
     pub(crate) fn fence_shutdown(&self) {
         self.shutdown_fenced.store(true, Ordering::Release);
+        self.invalidate_optional_attempts();
         self.live_hook_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -2029,10 +2133,13 @@ impl OrderedCredentialWriter {
             *self.failed.lock().unwrap_or_else(|p| p.into_inner()) = true;
             self.transport_unavailable.store(true, Ordering::Release);
             self.facts.publish(LinkFact::TokenPersistenceFailure);
-            self.facts.publish(LinkFact::TransportUnavailable);
+            if current.endpoints.is_empty() {
+                self.facts.publish(LinkFact::TransportUnavailable);
+            }
         }
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_optional_relay(
         self: &Arc<Self>,
@@ -2044,11 +2151,40 @@ impl OrderedCredentialWriter {
         device_token: &str,
         expires_at: i64,
     ) -> Result<(), ()> {
+        self.commit_optional_relay_with_attempt(
+            opener,
+            caller_pairing_id,
+            caller_access_gen,
+            caller_opener_incarnation,
+            relay_origin,
+            device_token,
+            expires_at,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_optional_relay_with_attempt(
+        self: &Arc<Self>,
+        opener: &PrivateLinkOpener,
+        caller_pairing_id: &str,
+        caller_access_gen: u64,
+        caller_opener_incarnation: u64,
+        relay_origin: &str,
+        device_token: &str,
+        expires_at: i64,
+        attempt: Option<&OptionalAttemptLease>,
+    ) -> Result<(), ()> {
         if self.shutdown_fenced.load(Ordering::Acquire) {
             return Err(());
         }
         let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
         if self.shutdown_fenced.load(Ordering::Acquire) {
+            return Err(());
+        }
+        if attempt.is_some_and(|attempt| {
+            !attempt.is_current() || expires_at <= chrono::Utc::now().timestamp()
+        }) {
             return Err(());
         }
         if self.pairing_id != caller_pairing_id {
@@ -2077,8 +2213,28 @@ impl OrderedCredentialWriter {
 
         let bytes = serde_json::to_vec(&updated).map_err(|_| ())?;
         let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
-        let durable =
-            atomic_write_bytes_with_fault(&cred_path, &bytes, self.fault.as_ref()).is_ok();
+        let durable = atomic_write_bytes_guarded(&cred_path, &bytes, self.fault.as_ref(), &|| {
+            !self.shutdown_fenced.load(Ordering::Acquire)
+                && attempt
+                    .is_none_or(|a| a.is_current() && expires_at > chrono::Utc::now().timestamp())
+        })
+        .is_ok();
+        if durable
+            && (self.shutdown_fenced.load(Ordering::Acquire)
+                || attempt.is_some_and(|a| {
+                    !a.is_current() || expires_at <= chrono::Utc::now().timestamp()
+                }))
+        {
+            *self
+                .durable_ready_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(DurableReadyPending {
+                pairing_id: caller_pairing_id.to_owned(),
+                access_mutation_generation: caller_access_gen,
+                credential: updated,
+            });
+            return Err(());
+        }
         if durable {
             *current = updated;
             self.access_mutation_generation
@@ -2099,7 +2255,8 @@ impl OrderedCredentialWriter {
             let read_parseable = std::fs::read(&cred_path)
                 .ok()
                 .and_then(|raw| serde_json::from_slice::<Credential>(&raw).ok())
-                .is_some();
+                .is_some_and(|disk| disk == updated);
+            tracing::warn!(error = %PrivateStateError::TokenPersistenceFailed, optional = true);
             if read_parseable {
                 // Post-rename failure: retain prior live tuple + LAN, new tuple inactive,
                 // store durable_ready_pending for this exact revision.
@@ -2116,6 +2273,7 @@ impl OrderedCredentialWriter {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_optional_clear(
         &self,
         opener: &PrivateLinkOpener,
@@ -2123,11 +2281,31 @@ impl OrderedCredentialWriter {
         caller_access_gen: u64,
         caller_opener_incarnation: u64,
     ) -> Result<(), ()> {
+        self.commit_optional_clear_with_attempt(
+            opener,
+            caller_pairing_id,
+            caller_access_gen,
+            caller_opener_incarnation,
+            None,
+        )
+    }
+
+    pub(crate) fn commit_optional_clear_with_attempt(
+        &self,
+        opener: &PrivateLinkOpener,
+        caller_pairing_id: &str,
+        caller_access_gen: u64,
+        caller_opener_incarnation: u64,
+        attempt: Option<&OptionalAttemptLease>,
+    ) -> Result<(), ()> {
         if self.shutdown_fenced.load(Ordering::Acquire) {
             return Err(());
         }
         let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
         if self.shutdown_fenced.load(Ordering::Acquire) {
+            return Err(());
+        }
+        if attempt.is_some_and(|attempt| !attempt.is_current()) {
             return Err(());
         }
         if self.pairing_id != caller_pairing_id {
@@ -2157,8 +2335,10 @@ impl OrderedCredentialWriter {
 
         let bytes = serde_json::to_vec(&*current).map_err(|_| ())?;
         let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
-        let durable =
-            atomic_write_bytes_with_fault(&cred_path, &bytes, self.fault.as_ref()).is_ok();
+        let durable = atomic_write_bytes_guarded(&cred_path, &bytes, self.fault.as_ref(), &|| {
+            !self.shutdown_fenced.load(Ordering::Acquire) && attempt.is_none_or(|a| a.is_current())
+        })
+        .is_ok();
         if durable {
             *self
                 .durable_clear_pending
@@ -2166,121 +2346,173 @@ impl OrderedCredentialWriter {
                 .unwrap_or_else(|p| p.into_inner()) = None;
             Ok(())
         } else {
-            let disk_is_cleared = std::fs::read(&cred_path)
-                .ok()
-                .and_then(|raw| serde_json::from_slice::<Credential>(&raw).ok())
-                .is_some_and(|reloaded| {
-                    reloaded.relay_origin.is_none() && reloaded.device_token.is_none()
-                });
-            let mut pending = self
+            *self
                 .durable_clear_pending
                 .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if disk_is_cleared {
-                *pending = None;
-            } else {
-                *pending = Some(DurableClearPending {
-                    pairing_id: caller_pairing_id.to_owned(),
-                    access_mutation_generation: new_gen,
-                });
-            }
+                .unwrap_or_else(|p| p.into_inner()) = Some(DurableClearPending {
+                pairing_id: caller_pairing_id.to_owned(),
+                access_mutation_generation: new_gen,
+            });
+            tracing::warn!(error = %PrivateStateError::TokenPersistenceFailed, optional = true);
             Err(())
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn publish_metadata(
+        &self,
+        attempt: &OptionalAttemptLease,
+        association_epoch: u64,
+        state_dir: &Path,
+        version: &str,
+        name: Option<&str>,
+        preserve_name: bool,
+    ) -> Result<(), ()> {
+        let _owner = self.credential.lock().unwrap_or_else(|p| p.into_inner());
+        if self.shutdown_fenced.load(Ordering::Acquire)
+            || !attempt.is_current()
+            || !self.facts.metadata_owner_is_current(association_epoch)
+        {
+            return Err(());
+        }
+        let saved_name = if preserve_name {
+            crate::sync_health::load_paired_journal_version(state_dir)
+                .filter(|saved| saved.identity_key == self.identity_key)
+                .and_then(|saved| saved.name)
+        } else {
+            name.map(str::to_owned)
+        };
+        let dial_generation = self.facts.snapshot().dial_generation;
+        crate::sync_health::save_paired_journal_version_guarded(
+            state_dir,
+            &self.identity_key,
+            version,
+            saved_name.as_deref(),
+            self.fault.as_ref(),
+            &|| {
+                !self.shutdown_fenced.load(Ordering::Acquire)
+                    && attempt.is_current()
+                    && self.facts.metadata_owner_is_current(association_epoch)
+            },
+        )
+        .map_err(|_| ())?;
+        drop(_owner);
+        self.facts
+            .note_metadata_saved(association_epoch, dial_generation);
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn retry_durable_reconciliation_if_pending(
         self: &Arc<Self>,
         opener: &PrivateLinkOpener,
     ) -> Result<bool, ()> {
-        if self.shutdown_fenced.load(Ordering::Acquire) {
+        self.retry_durable_reconciliation_with_attempt(opener, None)
+    }
+
+    fn retry_durable_reconciliation_with_attempt(
+        self: &Arc<Self>,
+        opener: &PrivateLinkOpener,
+        attempt: Option<&OptionalAttemptLease>,
+    ) -> Result<bool, ()> {
+        let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
+        if self.shutdown_fenced.load(Ordering::Acquire) || attempt.is_some_and(|a| !a.is_current())
+        {
             return Ok(false);
         }
-        // Check clear pending
-        let clear_pending = {
-            self.durable_clear_pending
+        let revision = self.access_mutation_generation();
+        let clear = self
+            .durable_clear_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(pending) = clear
+            && pending.pairing_id == self.pairing_id
+            && pending.access_mutation_generation == revision
+        {
+            let bytes = serde_json::to_vec(&*current).map_err(|_| ())?;
+            atomic_write_bytes_guarded(
+                &self.config_root.join(CREDENTIALS_FILENAME),
+                &bytes,
+                self.fault.as_ref(),
+                &|| {
+                    !self.shutdown_fenced.load(Ordering::Acquire)
+                        && attempt.is_none_or(|a| a.is_current())
+                },
+            )
+            .map_err(|_| {
+                tracing::warn!(error = %PrivateStateError::TokenPersistenceFailed, optional = true);
+            })?;
+            *self
+                .durable_clear_pending
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone()
-        };
-        if let Some(pending) = clear_pending {
-            if pending.pairing_id == self.pairing_id
-                && pending.access_mutation_generation
-                    == self.access_mutation_generation.load(Ordering::Acquire)
-            {
-                let current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
-                if self.shutdown_fenced.load(Ordering::Acquire)
-                    || pending.pairing_id != self.pairing_id
-                    || pending.access_mutation_generation
-                        != self.access_mutation_generation.load(Ordering::Acquire)
-                {
-                    return Ok(false);
-                }
-                let bytes = serde_json::to_vec(&*current).map_err(|_| ())?;
-                let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
-                if atomic_write_bytes_with_fault(&cred_path, &bytes, self.fault.as_ref()).is_ok() {
-                    *self
-                        .durable_clear_pending
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner()) = None;
-                    return Ok(true);
-                }
-                return Err(());
-            } else {
-                *self
-                    .durable_clear_pending
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = None;
-            }
+                .unwrap_or_else(|p| p.into_inner()) = None;
+            return Ok(true);
         }
-
-        // Check ready pending
-        let ready_pending = {
-            self.durable_ready_pending
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone()
-        };
-        if let Some(pending) = ready_pending {
-            if pending.pairing_id == self.pairing_id
-                && pending.access_mutation_generation
-                    == self.access_mutation_generation.load(Ordering::Acquire)
+        let ready = self
+            .durable_ready_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(pending) = ready
+            && pending.pairing_id == self.pairing_id
+            && pending.access_mutation_generation == revision
+        {
+            if attempt.is_some()
+                && pending
+                    .credential
+                    .device_token_expires_at
+                    .is_none_or(|exp| exp <= chrono::Utc::now().timestamp())
             {
-                let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
-                if self.shutdown_fenced.load(Ordering::Acquire)
-                    || pending.pairing_id != self.pairing_id
-                    || pending.access_mutation_generation
-                        != self.access_mutation_generation.load(Ordering::Acquire)
-                {
-                    return Ok(false);
-                }
-                let bytes = serde_json::to_vec(&pending.credential).map_err(|_| ())?;
-                let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
-                if atomic_write_bytes_with_fault(&cred_path, &bytes, self.fault.as_ref()).is_ok() {
-                    *current = pending.credential.clone();
-                    self.access_mutation_generation
-                        .fetch_add(1, Ordering::AcqRel);
-                    self.live_hook_epoch.fetch_add(1, Ordering::AcqRel);
-                    let mut test_cred = pending.credential.clone();
-                    test_cred.endpoints.clear();
-                    test_cred.local_endpoints = None;
-                    let hook = self
-                        .create_token_hook_with_epoch(self.live_hook_epoch.load(Ordering::Acquire));
-                    if let Ok(new_client) = TransportClient::new_relay_only(test_cred, Some(hook)) {
-                        opener.replace_relay_transport(new_client);
-                    }
-                    *self
-                        .durable_ready_pending
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner()) = None;
-                    return Ok(true);
-                }
                 return Err(());
-            } else {
-                *self
-                    .durable_ready_pending
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = None;
             }
+            let mut relay_credential = pending.credential.clone();
+            relay_credential.endpoints.clear();
+            relay_credential.local_endpoints = None;
+            let hook =
+                self.create_token_hook_with_epoch(self.live_hook_epoch.load(Ordering::Acquire) + 1);
+            let client =
+                TransportClient::new_relay_only(relay_credential, Some(hook)).map_err(|_| ())?;
+            let bytes = serde_json::to_vec(&pending.credential).map_err(|_| ())?;
+            atomic_write_bytes_guarded(
+                &self.config_root.join(CREDENTIALS_FILENAME),
+                &bytes,
+                self.fault.as_ref(),
+                &|| {
+                    !self.shutdown_fenced.load(Ordering::Acquire)
+                        && attempt.is_none_or(|a| {
+                            a.is_current()
+                                && pending
+                                    .credential
+                                    .device_token_expires_at
+                                    .is_some_and(|exp| exp > chrono::Utc::now().timestamp())
+                        })
+                },
+            )
+            .map_err(|_| {
+                tracing::warn!(error = %PrivateStateError::TokenPersistenceFailed, optional = true);
+            })?;
+            if self.shutdown_fenced.load(Ordering::Acquire)
+                || attempt.is_some_and(|a| {
+                    !a.is_current()
+                        || pending
+                            .credential
+                            .device_token_expires_at
+                            .is_none_or(|exp| exp <= chrono::Utc::now().timestamp())
+                })
+            {
+                return Err(());
+            }
+            *current = pending.credential;
+            self.access_mutation_generation
+                .fetch_add(1, Ordering::AcqRel);
+            self.live_hook_epoch.fetch_add(1, Ordering::AcqRel);
+            opener.replace_relay_transport(client);
+            *self
+                .durable_ready_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = None;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -2331,6 +2563,9 @@ impl PrivateLinkSession {
                 origin: self.origin.clone(),
                 opener: self.opener.clone(),
                 writer: self.token_persistence.writer.clone(),
+                optional_client: self.optional_client.clone(),
+                optional_origin: self.optional_origin.clone(),
+                state_lock: Arc::downgrade(&self._state_lock),
             }),
         }
     }
@@ -2356,13 +2591,20 @@ impl PrivateLinkSession {
     ) -> Result<(), PrivateStateError> {
         self.token_persistence.writer.fence_shutdown();
         self.opener.fence_shutdown();
-        let status = self.handle.shutdown_and_wait().await;
+        let (status, optional_status) = tokio::join!(
+            self.handle.shutdown_and_wait(),
+            self.optional_handle.shutdown_and_wait()
+        );
         #[cfg(test)]
         if let Some((joined, release)) = join_probe {
             joined.notify_one();
             release.notified().await;
         }
-        if status.listener_active || status.active_requests != 0 {
+        if status.listener_active
+            || status.active_requests != 0
+            || optional_status.listener_active
+            || optional_status.active_requests != 0
+        {
             return Err(PrivateStateError::ShutdownFailed);
         }
         if self.token_persistence.failed() {
@@ -2466,7 +2708,7 @@ async fn start_private_link_session_inner(
         save_linked_stream(&paths, expected_name).map_err(config_persist_error)?;
     }
     let transport_unavailable = Arc::new(AtomicBool::new(false));
-    let endpoint_hosts = credential
+    let endpoint_hosts: Vec<String> = credential
         .endpoints
         .iter()
         .map(|endpoint| endpoint.host.clone())
@@ -2547,6 +2789,43 @@ async fn start_private_link_session_inner(
         ),
         max_request_body_bytes: MAX_REQUEST_BODY_BYTES as usize,
     };
+    // This private bridge gives optional requests an actual dial source. The pinned
+    // bridge opener has no per-request context; sharing one listener would require
+    // guessing which caller caused its dial. Both bridges share the same authority,
+    // ordered writer and admission gate, and their listeners shut down together.
+    let optional_handle = spl_transport::journal_bridge::start(JournalBridgeConfig {
+        opener: Arc::new(OptionalPrivateLinkOpener(Arc::clone(&opener))),
+        bridge_names: bridge_names.clone(),
+        endpoint_hosts: endpoint_hosts.clone(),
+        policy: policy.clone(),
+    })
+    .await
+    .map_err(|_| PrivateStateError::BridgeUnavailable)?;
+    let (optional_client, optional_origin) = {
+        let handle = &optional_handle;
+        let bootstrap = handle
+            .bootstrap_url()
+            .ok_or(PrivateStateError::BootstrapFailed)?;
+        let origin = Url::parse(&format!("http://127.0.0.1:{}", handle.port()))
+            .map_err(|_| PrivateStateError::BridgeUnavailable)?;
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(LOOPBACK_CONNECT_TIMEOUT)
+            .build()
+            .map_err(|_| PrivateStateError::BridgeUnavailable)?;
+        let response = client
+            .get(bootstrap)
+            .timeout(BOOTSTRAP_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| PrivateStateError::BootstrapFailed)?;
+        if response.status() != StatusCode::FOUND {
+            return Err(PrivateStateError::BootstrapFailed);
+        }
+        (client, origin)
+    };
     let handle = spl_transport::journal_bridge::start(JournalBridgeConfig {
         opener: opener.clone(),
         bridge_names,
@@ -2595,9 +2874,12 @@ async fn start_private_link_session_inner(
         origin,
         opener,
         handle,
+        optional_handle,
+        optional_client,
+        optional_origin,
         token_persistence,
         bootstrap_target: Some(bootstrap_url),
-        _state_lock: state_lock,
+        _state_lock: Arc::new(state_lock),
     })
 }
 
@@ -2821,6 +3103,7 @@ pub(crate) mod tests {
     }
 
     struct BlockingDirSyncFault {
+        stage: DurableWriteStage,
         stages: Arc<Mutex<Vec<DurableWriteStage>>>,
         entered: std::sync::mpsc::Sender<()>,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
@@ -2829,7 +3112,7 @@ pub(crate) mod tests {
     impl DurableWriteFault for BlockingDirSyncFault {
         fn before(&self, stage: DurableWriteStage) -> io::Result<()> {
             self.stages.lock().unwrap().push(stage);
-            if stage == DurableWriteStage::DirSync {
+            if stage == self.stage {
                 self.entered
                     .send(())
                     .map_err(|_| io::Error::other("test observer dropped"))?;
@@ -2861,6 +3144,7 @@ pub(crate) mod tests {
             temp.path().to_path_buf(),
             peer.credential(),
             Arc::new(BlockingDirSyncFault {
+                stage: DurableWriteStage::DirSync,
                 stages: stages.clone(),
                 entered: entered_tx,
                 release: Mutex::new(release_rx),
@@ -4503,9 +4787,11 @@ pub(crate) mod tests {
         session.token_persistence.persist("failed-refresh", 999);
         let facts = session.opener.facts.snapshot();
         assert!(facts.token_persistence_failure);
-        assert!(facts.transport_unavailable);
-        assert!(session.opener.dial_carrier().await.is_err());
-        assert_eq!(peer.accepted_carriers(), 0);
+        assert!(!facts.transport_unavailable);
+        session.opener.facts.publish(LinkFact::TransportUnavailable);
+        assert!(session.opener.dial_carrier().await.is_ok());
+        assert!(!session.opener.facts.snapshot().transport_unavailable);
+        assert_eq!(peer.accepted_carriers(), 1);
         assert_eq!(
             fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
             prior_bytes
@@ -4579,25 +4865,6 @@ pub(crate) mod tests {
         }
         facts.begin_owner_generation();
         assert_eq!(facts.snapshot(), LinkFactState::default());
-    }
-
-    #[test]
-    fn journal_version_dial_start_fences_pending_result_and_clears_freshness() {
-        let facts = LinkFacts::default();
-        facts.publish_with_generation(LinkFact::CarrierProven, 1);
-        let before = facts.owner_epoch();
-        assert!(facts.commit_journal_version(before, 1, || true));
-        facts.begin_journal_dial();
-        assert!(!facts.snapshot().journal_version_observed);
-        assert!(!facts.commit_journal_version(before, 1, || panic!("obsolete write")));
-        facts.publish_with_generation(LinkFact::CarrierProven, 2);
-        let current = facts.owner_epoch();
-        facts.publish_with_generation(LinkFact::TransportUnavailable, 2);
-        assert!(!facts.commit_journal_version(current, 2, || panic!("disconnected write")));
-        facts.publish_with_generation(LinkFact::ObserverRegistered, 2);
-        assert!(facts.commit_journal_version(current, 2, || true));
-        facts.publish_with_generation(LinkFact::TerminalRevocation, 2);
-        assert!(!facts.commit_journal_version(current, 2, || panic!("revoked write")));
     }
 
     #[test]
@@ -5104,6 +5371,69 @@ pub(crate) mod tests {
         assert_eq!(sanitize_journal_version("1.4.0\x1b[31m"), None);
         assert_eq!(sanitize_journal_version("1.4.0\0"), None);
         assert_eq!(sanitize_journal_version("1.4.0 2.0"), None);
+    }
+
+    #[test]
+    fn postrename_clear_keeps_retry_until_directory_sync_succeeds() {
+        struct FailOnce(std::sync::atomic::AtomicBool);
+        impl DurableWriteFault for FailOnce {
+            fn before(&self, stage: DurableWriteStage) -> io::Result<()> {
+                if stage == DurableWriteStage::DirSync && self.0.swap(false, Ordering::SeqCst) {
+                    return Err(io::Error::other("injected directory sync failure"));
+                }
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let credential = Credential {
+            relay_origin: Some("https://relay.example.com".to_owned()),
+            device_token: Some("old-token".to_owned()),
+            ..credential()
+        };
+        persist_credential(temp.path(), &credential).unwrap();
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_owned(),
+            credential,
+            Arc::new(FailOnce(AtomicBool::new(true))),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let opener = PrivateLinkOpener::new(
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        );
+        assert!(
+            writer
+                .commit_optional_clear(
+                    &opener,
+                    writer.pairing_id(),
+                    writer.access_mutation_generation(),
+                    opener.relay_incarnation()
+                )
+                .is_err()
+        );
+        assert!(
+            load_credential(temp.path())
+                .unwrap()
+                .unwrap()
+                .device_token
+                .is_none()
+        );
+        assert!(
+            writer.durable_clear_pending.lock().unwrap().is_some(),
+            "visible cleared bytes do not prove directory durability"
+        );
+        assert_eq!(
+            writer.retry_durable_reconciliation_if_pending(&opener),
+            Ok(true)
+        );
+        assert!(writer.durable_clear_pending.lock().unwrap().is_none());
+        assert_eq!(
+            writer.retry_durable_reconciliation_if_pending(&opener),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -5789,6 +6119,179 @@ pub(crate) mod tests {
         let (facts2, _) = capability.facts().snapshot_with_epoch();
         assert_eq!(facts2.dial_generation, dial_gen_initial);
 
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+    #[tokio::test]
+    async fn optional_fsync_timeout_keeps_runtime_and_root_ownership_alive() {
+        let peer = PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let session = start_private_link_session_inner(
+            temp.path(),
+            peer.credential(),
+            "stream",
+            SessionStartOptions {
+                persistence_fault: Arc::new(BlockingDirSyncFault {
+                    stage: DurableWriteStage::DirSync,
+                    stages: Arc::new(Mutex::new(Vec::new())),
+                    entered: entered_tx,
+                    release: Mutex::new(release_rx),
+                }),
+                ..SessionStartOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let cap = session.capability();
+        peer.enqueue_response(
+            200,
+            br#"{"protocol_version":2,"status":"not_configured"}"#.to_vec(),
+        );
+        let job_cap = cap.clone();
+        let job = tokio::spawn(async move {
+            crate::private_link_access::execute_relay_access_sync(&job_cap, Duration::from_secs(2))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while entered_rx.try_recv().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // This timer and the HTTP job deadline must progress on the single Tokio thread.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(job.await.unwrap().is_err());
+        session.shutdown().await.unwrap();
+        assert!(PrivateStateLock::acquire(temp.path()).is_err());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(lock) = PrivateStateLock::acquire(temp.path()) {
+                    drop(lock);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            load_credential(temp.path())
+                .unwrap()
+                .unwrap()
+                .relay_origin
+                .is_none()
+        );
+        peer.shutdown().await;
+    }
+    #[tokio::test]
+    async fn expired_optional_staging_never_renames_credentials_or_metadata() {
+        for (metadata, abrupt) in [(false, false), (true, false), (false, true), (true, true)] {
+            let peer = PrivateLinkPeer::start().await;
+            let temp = tempfile::tempdir().unwrap();
+            persist_credential(temp.path(), &peer.credential()).unwrap();
+            let prior = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let session = start_private_link_session_inner(
+                temp.path(),
+                peer.credential(),
+                "stream",
+                SessionStartOptions {
+                    persistence_fault: Arc::new(BlockingDirSyncFault {
+                        stage: DurableWriteStage::Rename,
+                        stages: Arc::new(Mutex::new(Vec::new())),
+                        entered: entered_tx,
+                        release: Mutex::new(release_rx),
+                    }),
+                    ..SessionStartOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+            let cap = session.capability();
+            let body = if metadata {
+                br#"{"protocol_version":1,"revision":1,"reported":null,"owner_label":null,"updated_at":null,"display_label":"test","journal":{"name":"late","version":"1.0"}}"#.to_vec()
+            } else {
+                br#"{"protocol_version":2,"status":"not_configured"}"#.to_vec()
+            };
+            peer.enqueue_response(200, body);
+            let path = temp.path().to_path_buf();
+            let job = tokio::spawn(async move {
+                if metadata {
+                    crate::private_link_metadata::execute_metadata_sync(
+                        &cap,
+                        &path,
+                        "ignored",
+                        crate::private_link_metadata::DeviceSnapshot::default,
+                        Duration::from_secs(2),
+                    )
+                    .await
+                } else {
+                    crate::private_link_access::execute_relay_access_sync(
+                        &cap,
+                        Duration::from_secs(2),
+                    )
+                    .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while entered_rx.try_recv().is_err() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(job.await.unwrap().is_err());
+            if abrupt {
+                drop(finish_owner_start(session).await.unwrap());
+            } else {
+                session.shutdown().await.unwrap();
+            }
+            assert!(PrivateStateLock::acquire(temp.path()).is_err());
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(lock) = PrivateStateLock::acquire(temp.path()) {
+                        drop(lock);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+                prior
+            );
+            assert!(crate::sync_health::load_paired_journal_version(temp.path()).is_none());
+            assert_eq!(peer.requests().len(), 1);
+            peer.shutdown().await;
+        }
+    }
+    #[tokio::test]
+    async fn owner_retired_during_actual_carrier_publication_cannot_restore_proof() {
+        let peer = PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let retired = Arc::new(AtomicBool::new(false));
+        let retire = Arc::clone(&retired);
+        session.opener.facts.install_sink(Arc::new(move |facts| {
+            if facts.snapshot().carrier_proven && !retire.swap(true, Ordering::AcqRel) {
+                facts.owner_lost();
+            }
+        }));
+        assert!(session.opener.dial_carrier().await.is_err());
+        assert!(retired.load(Ordering::Acquire));
+        assert_eq!(peer.accepted_carriers(), 1);
+        assert!(!session.opener.facts.snapshot().carrier_proven);
+        assert!(!session.opener.facts.snapshot().observer_registered);
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }

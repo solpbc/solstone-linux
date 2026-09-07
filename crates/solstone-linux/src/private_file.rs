@@ -195,6 +195,15 @@ pub(crate) fn atomic_write_bytes_with_fault(
     bytes: &[u8],
     fault: &dyn DurableWriteFault,
 ) -> Result<(), PrivateFileError> {
+    atomic_write_bytes_guarded(path, bytes, fault, &|| true)
+}
+
+pub(crate) fn atomic_write_bytes_guarded(
+    path: &Path,
+    bytes: &[u8],
+    fault: &dyn DurableWriteFault,
+    is_current: &dyn Fn() -> bool,
+) -> Result<(), PrivateFileError> {
     let parent = path
         .parent()
         .ok_or(PrivateFileError::InvalidTarget("file"))?;
@@ -216,7 +225,14 @@ pub(crate) fn atomic_write_bytes_with_fault(
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
         name = name.to_string_lossy()
     );
-    write_temporary(&parent_descriptor, name, &temporary, bytes, fault)
+    write_temporary(
+        &parent_descriptor,
+        name,
+        &temporary,
+        bytes,
+        fault,
+        is_current,
+    )
 }
 
 fn open_directory(path: &Path) -> Result<File, PrivateFileError> {
@@ -249,6 +265,7 @@ fn write_temporary(
     temporary: &str,
     bytes: &[u8],
     fault: &dyn DurableWriteFault,
+    is_current: &dyn Fn() -> bool,
 ) -> Result<(), PrivateFileError> {
     fault
         .before(DurableWriteStage::Create)
@@ -283,6 +300,9 @@ fn write_temporary(
         fault
             .before(DurableWriteStage::Rename)
             .map_err(|error| PrivateFileError::io("file", "rename", error))?;
+        if !is_current() {
+            return Err(PrivateFileError::InvalidTarget("file"));
+        }
         rustix::fs::renameat(parent, temporary, parent, name)
             .map_err(|error| PrivateFileError::io("file", "rename", error.into()))?;
         temporary_exists = false;
@@ -454,6 +474,7 @@ mod tests {
             temporary,
             b"replacement",
             &NoWriteFault,
+            &|| true,
         )
         .unwrap_err();
         assert!(matches!(

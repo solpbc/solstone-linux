@@ -188,12 +188,10 @@ impl SyncService {
             if snapshot.carrier_proven
                 && !snapshot.transport_unavailable
                 && !snapshot.terminal_revocation
-                && !snapshot.token_persistence_failure
                 && let Some(client) = sink_client.upgrade()
                 && let Some(capability) = client.capability()
             {
-                let credential = capability.writer().current_credential();
-                let identity_key = crate::private_link::journal_identity_key(&credential);
+                let identity_key = capability.writer().identity_key().to_owned();
                 let state_dir = sink_config.state_dir();
                 optional_jobs_sink.trigger(&capability, &state_dir, &identity_key, &snapshot);
             }
@@ -2372,15 +2370,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(persisted["link"], expected);
-        // journal_version_observed is no longer settable via publish_link_fact
-        // (only commit_journal_version's atomic write-and-mark can set it), so
-        // it alone is expected to remain false here.
+        // Carrier recovery can clear transport_unavailable; its final value depends
+        // on publisher order. Persistence must still match the actual final state.
         assert!(
             expected
                 .as_object()
                 .unwrap()
                 .iter()
-                .filter(|(key, _)| key.as_str() != "journal_version_observed")
+                .filter(|(key, _)| !matches!(
+                    key.as_str(),
+                    "journal_version_observed" | "transport_unavailable"
+                ))
                 .all(|(_, value)| value.as_bool() == Some(true))
         );
         assert_eq!(persisted["link"]["journal_version_observed"], false);
@@ -4031,45 +4031,24 @@ mod tests {
     }
 
     #[test]
-    fn commit_journal_version_requires_epoch_and_generation_to_match_before_writing() {
-        let link_facts = crate::private_link::LinkFacts::default();
-        let stale_epoch = link_facts.owner_epoch();
-
-        // The owner reconnects (a new epoch begins) and its dial reaches generation 2.
-        link_facts.begin_owner_generation();
-        link_facts.publish_with_generation(crate::private_link::LinkFact::CarrierProven, 2);
-        let live_epoch = link_facts.owner_epoch();
-        assert_ne!(stale_epoch, live_epoch);
-
-        // A completion captured under the prior (now dead) owner epoch is
-        // refused and never runs its write, even for a dial_generation number
-        // the live epoch also reached - the ABA hazard a bare generation-number
-        // comparison alone can't see.
-        let mut called = false;
-        assert!(!link_facts.commit_journal_version(stale_epoch, 2, || {
-            called = true;
-            true
-        }));
-        assert!(
-            !called,
-            "save must not run once the owner epoch no longer matches"
-        );
-        assert!(!link_facts.snapshot().journal_version_observed);
-
-        // A dial_generation that has since moved on within the SAME epoch (e.g.
-        // a transport-level reconnect) is refused too.
-        assert!(!link_facts.commit_journal_version(live_epoch, 1, || true));
-        assert!(!link_facts.snapshot().journal_version_observed);
-
-        // Matching epoch and generation commits the write and marks the
-        // version observed atomically with it.
-        assert!(link_facts.commit_journal_version(live_epoch, 2, || true));
-        assert!(link_facts.snapshot().journal_version_observed);
-
-        // owner_lost invalidates it again immediately, without waiting for a
-        // subsequent reconnect to supersede the generation number.
-        link_facts.owner_lost();
-        assert!(!link_facts.commit_journal_version(live_epoch, 2, || true));
+    fn metadata_freshness_requires_current_association_and_dial() {
+        let facts = crate::private_link::LinkFacts::default();
+        let old = facts.association_epoch();
+        facts.begin_owner_generation();
+        facts.publish_with_generation(crate::private_link::LinkFact::CarrierProven, 2);
+        let current = facts.association_epoch();
+        facts.note_metadata_saved(old, 2);
+        assert!(!facts.snapshot().journal_version_observed);
+        facts.note_metadata_saved(current, 1);
+        assert!(!facts.snapshot().journal_version_observed);
+        facts.note_metadata_saved(current, 2);
+        assert!(facts.snapshot().journal_version_observed);
+        facts.publish_with_generation(crate::private_link::LinkFact::TerminalRevocation, 2);
+        facts.note_metadata_saved(current, 2);
+        assert!(!facts.snapshot().journal_version_observed);
+        facts.owner_lost();
+        facts.note_metadata_saved(current, 2);
+        assert!(!facts.snapshot().journal_version_observed);
     }
 
     #[tokio::test]
@@ -4138,7 +4117,9 @@ mod tests {
                 let identity_key = crate::private_link::journal_identity_key(&credential);
                 assert_eq!(loaded.identity_key, identity_key);
                 assert_eq!(loaded.version, "1.4.0");
-                break;
+                if link_facts.snapshot().journal_version_observed {
+                    break;
+                }
             }
         }
         assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());

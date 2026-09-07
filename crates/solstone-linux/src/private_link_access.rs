@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -26,7 +27,7 @@ pub(crate) fn parse_relay_access_response(bytes: &[u8]) -> Result<RelayAccessWir
     }
     let status = obj.get("status").and_then(|v| v.as_str()).ok_or(())?;
     match status {
-        "not_configured" => Ok(RelayAccessWireResponse::NotConfigured),
+        "not_configured" if obj.len() == 2 => Ok(RelayAccessWireResponse::NotConfigured),
         "ready" => {
             let ready: RelayAccess = serde_json::from_value(val).map_err(|_| ())?;
             Ok(RelayAccessWireResponse::Ready(ready))
@@ -48,39 +49,68 @@ pub(crate) async fn execute_relay_access_sync(
     capability: &PrivateLinkCapability,
     timeout: Duration,
 ) -> Result<(), ()> {
+    let deadline = tokio::time::Instant::now() + timeout;
     let writer = capability.writer();
-    let pairing_id = writer.pairing_id().to_string();
-    let access_gen = writer.access_mutation_generation();
-    let opener_incarnation = capability.opener_relay_incarnation();
-
-    let outcome = capability.relay_access_get(timeout).await;
-    match outcome {
-        LinkOutcome::Success {
+    let attempt = writer.access_attempt(deadline);
+    tokio::time::timeout_at(deadline, async {
+        let _ = capability
+            .retry_optional_reconciliation(Arc::clone(&attempt.lease))
+            .await;
+        let pairing_id = writer.pairing_id().to_string();
+        let access_gen = writer.access_mutation_generation();
+        let opener_incarnation = capability.opener_relay_incarnation();
+        if !attempt.lease.is_current() {
+            return Err(());
+        }
+        let outcome = capability
+            .relay_access_get(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            .await;
+        let LinkOutcome::Success {
             status: StatusCode::OK,
             body,
-        } => {
-            let wire = parse_relay_access_response(&body)?;
-            match wire {
-                RelayAccessWireResponse::NotConfigured => {
-                    capability.commit_optional_clear(&pairing_id, access_gen, opener_incarnation)
+        } = outcome
+        else {
+            return Err(());
+        };
+        let wire = parse_relay_access_response(&body)?;
+        let lease = Arc::clone(&attempt.lease);
+        capability
+            .blocking_optional(move |writer, opener| {
+                if !lease.is_current() {
+                    return Err(());
                 }
-                RelayAccessWireResponse::Ready(ready) => {
-                    let cred = writer.current_credential();
-                    let now = chrono::Utc::now().timestamp();
-                    let claims = validate_relay_access_ready(&ready, &cred.instance_id, now)?;
-                    capability.commit_optional_relay(
-                        &pairing_id,
-                        access_gen,
-                        opener_incarnation,
-                        &ready.relay_origin,
-                        &ready.device_token,
-                        claims.exp,
-                    )
+                match wire {
+                    RelayAccessWireResponse::NotConfigured => writer
+                        .commit_optional_clear_with_attempt(
+                            &opener,
+                            &pairing_id,
+                            access_gen,
+                            opener_incarnation,
+                            Some(&lease),
+                        ),
+                    RelayAccessWireResponse::Ready(ready) => {
+                        let claims = validate_relay_access_ready(
+                            &ready,
+                            writer.instance_id(),
+                            chrono::Utc::now().timestamp(),
+                        )?;
+                        writer.commit_optional_relay_with_attempt(
+                            &opener,
+                            &pairing_id,
+                            access_gen,
+                            opener_incarnation,
+                            &ready.relay_origin,
+                            &ready.device_token,
+                            claims.exp,
+                            Some(&lease),
+                        )
+                    }
                 }
-            }
-        }
-        _ => Err(()),
-    }
+            })
+            .await
+    })
+    .await
+    .unwrap_or(Err(()))
 }
 
 #[cfg(test)]

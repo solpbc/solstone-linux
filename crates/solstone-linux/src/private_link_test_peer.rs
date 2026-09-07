@@ -65,6 +65,7 @@ struct OutboundResponse {
 
 #[derive(Clone)]
 struct PeerState {
+    routes: Arc<Mutex<std::collections::HashMap<String, PeerResponse>>>,
     responses: Arc<Mutex<VecDeque<QueuedResponse>>>,
     requests: Arc<Mutex<Vec<PeerRequest>>>,
     request_arrived: Arc<Notify>,
@@ -87,6 +88,7 @@ impl PrivateLinkPeer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (credential, acceptor) = credential_and_acceptor(listener.local_addr().unwrap().port());
         let state = PeerState {
+            routes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             request_arrived: Arc::new(Notify::new()),
@@ -99,12 +101,20 @@ impl PrivateLinkPeer {
         };
         let task_state = state.clone();
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                task_state.accepted.fetch_add(1, Ordering::SeqCst);
-                let Ok(tls) = acceptor.accept(stream).await else {
-                    continue;
-                };
-                let _ = serve_carrier(tls, &task_state).await;
+            let mut carriers = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break; };
+                        task_state.accepted.fetch_add(1, Ordering::SeqCst);
+                        let acceptor = acceptor.clone();
+                        let state = task_state.clone();
+                        carriers.spawn(async move {
+                            if let Ok(tls) = acceptor.accept(stream).await { let _ = serve_carrier(tls, &state).await; }
+                        });
+                    }
+                    _ = carriers.join_next(), if !carriers.is_empty() => {}
+                }
             }
         });
         Self {
@@ -116,6 +126,13 @@ impl PrivateLinkPeer {
 
     pub(crate) fn credential(&self) -> Credential {
         self.credential.clone()
+    }
+    pub(crate) fn set_route(&self, path: &str, status: u16, body: Vec<u8>) {
+        self.state
+            .routes
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), plain_response(status, body));
     }
     pub(crate) fn enqueue_response(&self, status: u16, body: impl Into<Vec<u8>>) {
         self.state
@@ -430,6 +447,9 @@ fn next_response(
     let Some(request) = request else {
         return pop_static_response(state);
     };
+    if let Some(response) = state.routes.lock().unwrap().get(&request.path).cloned() {
+        return response;
+    }
     if request.path == "/app/devices/ingest/manifest" {
         let queued = state.responses.lock().unwrap().pop_front();
         return match queued {
@@ -480,11 +500,7 @@ fn next_response(
                 || contains(b"\"status\": \"ok\"")
                 || contains(b"\"status\":\"quarantine\"")
                 || contains(b"\"status\": \"quarantine\"");
-            if res.gate.is_none()
-                && res.nonblocking_gate.is_none()
-                && !is_sync_payload
-                && let Some(QueuedResponse::Static(res)) = guard.pop_front()
-            {
+            if !is_sync_payload && let Some(QueuedResponse::Static(res)) = guard.pop_front() {
                 return res;
             }
         }

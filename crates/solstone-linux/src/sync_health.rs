@@ -535,6 +535,7 @@ pub(crate) fn load_link_facts(
         token_persistence_failure: boolean("token_persistence_failure")?,
         journal_version_observed: boolean("journal_version_observed")?,
         dial_generation: 0,
+        optional_dial: false,
     }))
 }
 
@@ -661,6 +662,24 @@ pub fn save_paired_journal_version(
     version: &str,
     name: Option<&str>,
 ) -> io::Result<()> {
+    save_paired_journal_version_guarded(
+        state_dir,
+        identity_key,
+        version,
+        name,
+        &crate::private_file::NoWriteFault,
+        &|| true,
+    )
+}
+
+pub(crate) fn save_paired_journal_version_guarded(
+    state_dir: &Path,
+    identity_key: &str,
+    version: &str,
+    name: Option<&str>,
+    fault: &dyn crate::private_file::DurableWriteFault,
+    is_current: &dyn Fn() -> bool,
+) -> io::Result<()> {
     let observed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -680,7 +699,7 @@ pub fn save_paired_journal_version(
     }
     let mut text = serde_json::to_string(&payload).map_err(io::Error::other)?;
     text.push('\n');
-    crate::private_file::atomic_write_bytes(&path, text.as_bytes())
+    crate::private_file::atomic_write_bytes_guarded(&path, text.as_bytes(), fault, is_current)
         .map_err(|e| io::Error::other(e.to_string()))
 }
 
@@ -1081,6 +1100,7 @@ mod tests {
             token_persistence_failure: true,
             journal_version_observed: true,
             dial_generation: 0,
+            optional_dial: false,
         };
         let conflicting_cases = [
             (all.clone(), HealthState::UnsafeLinkState),
