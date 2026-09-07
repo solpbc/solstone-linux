@@ -524,9 +524,25 @@ impl MockServer {
     }
 
     pub(crate) fn requests(&self) -> Vec<Received> {
-        let linked = self.linked.requests();
+        let is_probe = |uri: &str| {
+            uri == "/app/network/api/clients/self"
+                || uri == "/app/network/api/relay/access"
+                || uri == "/api/system/status"
+        };
+        let linked = self
+            .linked
+            .requests()
+            .into_iter()
+            .filter(|r| !is_probe(&r.uri))
+            .collect::<Vec<_>>();
         if linked.is_empty() {
-            self.received.lock().unwrap().clone()
+            self.received
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| !is_probe(&r.uri))
+                .cloned()
+                .collect()
         } else {
             linked
         }

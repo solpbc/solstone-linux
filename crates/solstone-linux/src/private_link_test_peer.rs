@@ -465,14 +465,42 @@ fn next_response(
         let response = fixture.response_for(crate::test_support::DayCustodyLeg::Segments);
         return plain_response(response.0, response.1);
     }
+    if request.path == "/app/network/api/clients/self"
+        || request.path == "/app/network/api/relay/access"
+        || request.path == "/api/system/status"
+    {
+        let mut guard = state.responses.lock().unwrap();
+        if let Some(QueuedResponse::Static(res)) = guard.front() {
+            let contains = |needle: &[u8]| res.body.windows(needle.len()).any(|w| w == needle);
+            let is_sync_payload = contains(b"day_custody_items")
+                || contains(b"day_custody_day")
+                || contains(b"\"segment\"")
+                || contains(b"\"ingest_status\"")
+                || contains(b"\"status\":\"ok\"")
+                || contains(b"\"status\": \"ok\"")
+                || contains(b"\"status\":\"quarantine\"")
+                || contains(b"\"status\": \"quarantine\"");
+            if res.gate.is_none()
+                && res.nonblocking_gate.is_none()
+                && !is_sync_payload
+                && let Some(QueuedResponse::Static(res)) = guard.pop_front()
+            {
+                return res;
+            }
+        }
+        return plain_response(404, Vec::new());
+    }
     pop_static_response(state)
 }
 
 fn pop_static_response(state: &PeerState) -> PeerResponse {
-    match state.responses.lock().unwrap().pop_front() {
-        Some(QueuedResponse::Static(response)) => response,
-        Some(QueuedResponse::DayCustody(_)) | None => plain_response(500, Vec::new()),
+    let mut guard = state.responses.lock().unwrap();
+    if matches!(guard.front(), Some(QueuedResponse::Static(_)))
+        && let Some(QueuedResponse::Static(response)) = guard.pop_front()
+    {
+        return response;
     }
+    plain_response(500, Vec::new())
 }
 
 fn plain_response(status: u16, body: Vec<u8>) -> PeerResponse {

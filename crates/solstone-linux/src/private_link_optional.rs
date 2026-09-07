@@ -3,7 +3,6 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,6 +18,7 @@ pub(crate) struct JobSlot<T> {
     pub(crate) in_flight: bool,
     pub(crate) in_flight_val: Option<T>,
     pub(crate) pending: Option<T>,
+    pub(crate) active_pairing_id: Option<String>,
 }
 
 impl<T> Default for JobSlot<T> {
@@ -27,6 +27,7 @@ impl<T> Default for JobSlot<T> {
             in_flight: false,
             in_flight_val: None,
             pending: None,
+            active_pairing_id: None,
         }
     }
 }
@@ -34,9 +35,10 @@ impl<T> Default for JobSlot<T> {
 pub(crate) struct OptionalJobs {
     metadata_slot: Mutex<JobSlot<DeviceSnapshot>>,
     access_slot: Mutex<JobSlot<()>>,
+    meta_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    access_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     deadline: Duration,
     hostname_source: Arc<dyn Fn() -> io::Result<String> + Send + Sync>,
-    self_caused_dial_generation: AtomicU64,
 }
 
 impl Default for OptionalJobs {
@@ -53,9 +55,10 @@ impl OptionalJobs {
         Self {
             metadata_slot: Mutex::new(JobSlot::default()),
             access_slot: Mutex::new(JobSlot::default()),
+            meta_task: Mutex::new(None),
+            access_task: Mutex::new(None),
             deadline,
             hostname_source,
-            self_caused_dial_generation: AtomicU64::new(0),
         }
     }
 
@@ -74,17 +77,33 @@ impl OptionalJobs {
         identity_key: &str,
         facts_snapshot: &LinkFactState,
     ) {
-        // Retry any pending durable clear from previous not_configured failure
-        let _ = capability.writer().retry_durable_clear_if_pending();
+        if facts_snapshot.dial_generation != 0
+            && capability.is_dial_generation_suppressed(facts_snapshot.dial_generation)
+        {
+            return;
+        }
+
+        let current_pairing_id = capability.writer().pairing_id().to_string();
 
         // 1. Metadata slot trigger
         let current_snapshot = current_device_snapshot(&*self.hostname_source);
         let mut spawn_meta = false;
         {
             let mut meta = self.metadata_slot.lock().unwrap();
+            if meta.active_pairing_id.as_deref() != Some(&current_pairing_id) {
+                if let Some(h) = self.meta_task.lock().unwrap().take() {
+                    h.abort();
+                }
+                meta.active_pairing_id = Some(current_pairing_id.clone());
+                meta.in_flight = false;
+                meta.in_flight_val = None;
+                meta.pending = None;
+            }
             if meta.in_flight {
                 if meta.in_flight_val.as_ref() != Some(&current_snapshot) {
                     meta.pending = Some(current_snapshot);
+                } else {
+                    meta.pending = None;
                 }
             } else {
                 meta.in_flight = true;
@@ -99,23 +118,30 @@ impl OptionalJobs {
             let cap = capability.clone();
             let s_dir = state_dir.to_path_buf();
             let id_key = identity_key.to_string();
-            tokio::spawn(async move {
-                jobs.run_metadata_loop(cap, s_dir, id_key).await;
+            let pair_id = current_pairing_id.clone();
+            let handle = tokio::spawn(async move {
+                jobs.run_metadata_loop(cap, s_dir, id_key, pair_id).await;
             });
+            *self.meta_task.lock().unwrap() = Some(handle);
         }
 
         // 2. Access slot trigger
-        let self_caused = self.self_caused_dial_generation.load(Ordering::Acquire);
-        if facts_snapshot.dial_generation != 0 && facts_snapshot.dial_generation == self_caused {
-            // Skip own self-caused dial generation
-            return;
-        }
-
         let mut spawn_access = false;
         {
             let mut acc = self.access_slot.lock().unwrap();
-            if !acc.in_flight {
+            if acc.active_pairing_id.as_deref() != Some(&current_pairing_id) {
+                if let Some(h) = self.access_task.lock().unwrap().take() {
+                    h.abort();
+                }
+                acc.active_pairing_id = Some(current_pairing_id.clone());
+                acc.in_flight = false;
+                acc.pending = None;
+            }
+            if acc.in_flight {
+                acc.pending = Some(());
+            } else {
                 acc.in_flight = true;
+                acc.pending = None;
                 spawn_access = true;
             }
         }
@@ -123,9 +149,27 @@ impl OptionalJobs {
         if spawn_access {
             let jobs = Arc::clone(self);
             let cap = capability.clone();
-            tokio::spawn(async move {
-                jobs.run_access_job(cap).await;
+            let pair_id = current_pairing_id;
+            let handle = tokio::spawn(async move {
+                jobs.run_access_job(cap, pair_id).await;
             });
+            *self.access_task.lock().unwrap() = Some(handle);
+        }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let mut meta = self.metadata_slot.lock().unwrap();
+        meta.in_flight = false;
+        meta.in_flight_val = None;
+        meta.pending = None;
+        if let Some(h) = self.meta_task.lock().unwrap().take() {
+            h.abort();
+        }
+        let mut acc = self.access_slot.lock().unwrap();
+        acc.in_flight = false;
+        acc.pending = None;
+        if let Some(h) = self.access_task.lock().unwrap().take() {
+            h.abort();
         }
     }
 
@@ -134,51 +178,112 @@ impl OptionalJobs {
         capability: PrivateLinkCapability,
         state_dir: PathBuf,
         identity_key: String,
+        pairing_id: String,
     ) {
-        loop {
-            let deadline = self.deadline;
-            let snap_source = {
+        let deadline = self.deadline;
+        let snap_source = {
+            let h = Arc::clone(&self.hostname_source);
+            move || current_device_snapshot(&*h)
+        };
+
+        let _ = tokio::time::timeout(
+            deadline,
+            execute_metadata_sync(
+                &capability,
+                &state_dir,
+                &identity_key,
+                snap_source,
+                deadline,
+            ),
+        )
+        .await;
+
+        let follow_up = {
+            let mut meta = self.metadata_slot.lock().unwrap();
+            if meta.active_pairing_id.as_deref() != Some(&pairing_id) {
+                meta.in_flight = false;
+                meta.in_flight_val = None;
+                meta.pending = None;
+                return;
+            }
+            if let Some(next_snap) = meta.pending.take() {
+                meta.in_flight_val = Some(next_snap);
+                true
+            } else {
+                meta.in_flight = false;
+                meta.in_flight_val = None;
+                false
+            }
+        };
+
+        if follow_up {
+            let snap_source2 = {
                 let h = Arc::clone(&self.hostname_source);
                 move || current_device_snapshot(&*h)
             };
-
             let _ = tokio::time::timeout(
                 deadline,
                 execute_metadata_sync(
                     &capability,
                     &state_dir,
                     &identity_key,
-                    snap_source,
+                    snap_source2,
                     deadline,
                 ),
             )
             .await;
 
             let mut meta = self.metadata_slot.lock().unwrap();
-            if let Some(next_snap) = meta.pending.take() {
-                meta.in_flight_val = Some(next_snap);
+            if meta.active_pairing_id.as_deref() == Some(&pairing_id) {
+                meta.in_flight = false;
+                meta.in_flight_val = None;
             } else {
                 meta.in_flight = false;
                 meta.in_flight_val = None;
-                break;
+                meta.pending = None;
             }
         }
     }
 
-    async fn run_access_job(self: &Arc<Self>, capability: PrivateLinkCapability) {
+    async fn run_access_job(
+        self: &Arc<Self>,
+        capability: PrivateLinkCapability,
+        pairing_id: String,
+    ) {
         let deadline = self.deadline;
-        let dial_gen_before = capability.facts().snapshot().dial_generation;
-        let res =
+        let _ = capability.retry_durable_reconciliation_if_pending();
+        let _ =
             tokio::time::timeout(deadline, execute_relay_access_sync(&capability, deadline)).await;
-        if matches!(res, Ok(Ok(()))) {
-            let dial_gen_after = capability.facts().snapshot().dial_generation;
-            if dial_gen_after != dial_gen_before {
-                self.self_caused_dial_generation
-                    .store(dial_gen_after, Ordering::Release);
+
+        let follow_up = {
+            let mut acc = self.access_slot.lock().unwrap();
+            if acc.active_pairing_id.as_deref() != Some(&pairing_id) {
+                acc.in_flight = false;
+                acc.pending = None;
+                return;
+            }
+            if acc.pending.take().is_some() {
+                true
+            } else {
+                acc.in_flight = false;
+                false
+            }
+        };
+
+        if follow_up {
+            let _ = capability.retry_durable_reconciliation_if_pending();
+            let _ =
+                tokio::time::timeout(deadline, execute_relay_access_sync(&capability, deadline))
+                    .await;
+
+            let mut acc = self.access_slot.lock().unwrap();
+            if acc.active_pairing_id.as_deref() == Some(&pairing_id) {
+                acc.in_flight = false;
+            } else {
+                acc.in_flight = false;
+                acc.pending = None;
             }
         }
-        let mut acc = self.access_slot.lock().unwrap();
-        acc.in_flight = false;
     }
 }
 
@@ -217,15 +322,6 @@ mod tests {
             Arc::new(|| Ok("test-host".to_string())),
         ));
 
-        // Set self-caused dial generation
-        jobs.self_caused_dial_generation
-            .store(42, Ordering::Release);
-
-        let fact_state_same = LinkFactState {
-            dial_generation: 42,
-            ..LinkFactState::default()
-        };
-
         let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
         let temp = tempfile::tempdir().unwrap();
         let session = crate::private_link::start_private_link_session(
@@ -237,15 +333,40 @@ mod tests {
         .unwrap();
         let capability = session.capability();
 
-        // Trigger with dial generation 42 -> access slot should NOT be spawned
-        jobs.trigger(&capability, temp.path(), "identity", &fact_state_same);
+        // Clear relay transport sets suppressed dial generation to generation + 1 (= 1)
+        capability.clear_relay_transport();
+        assert!(capability.is_dial_generation_suppressed(1));
 
-        // access slot should remain false (not spawned)
+        let fact_state_suppressed = LinkFactState {
+            dial_generation: 1,
+            ..LinkFactState::default()
+        };
+
+        // Trigger with dial generation 1 -> both slots should be skipped
+        jobs.trigger(&capability, temp.path(), "identity", &fact_state_suppressed);
+
+        // slots should remain not spawned
         {
+            let meta = jobs.metadata_slot.lock().unwrap();
             let acc = jobs.access_slot.lock().unwrap();
+            assert!(!meta.in_flight);
             assert!(!acc.in_flight);
         }
 
+        // A different generation (e.g. 2) is not suppressed
+        let fact_state_other = LinkFactState {
+            dial_generation: 2,
+            ..LinkFactState::default()
+        };
+        jobs.trigger(&capability, temp.path(), "identity", &fact_state_other);
+        {
+            let meta = jobs.metadata_slot.lock().unwrap();
+            let acc = jobs.access_slot.lock().unwrap();
+            assert!(meta.in_flight);
+            assert!(acc.in_flight);
+        }
+
+        jobs.shutdown();
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }

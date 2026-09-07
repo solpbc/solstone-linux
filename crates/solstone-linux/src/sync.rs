@@ -191,9 +191,8 @@ impl SyncService {
                 && !snapshot.token_persistence_failure
                 && let Some(client) = sink_client.upgrade()
                 && let Some(capability) = client.capability()
-                && let Ok(Some(credential)) =
-                    crate::private_link::load_credential(&sink_config.config_dir)
             {
+                let credential = capability.writer().current_credential();
                 let identity_key = crate::private_link::journal_identity_key(&credential);
                 let state_dir = sink_config.state_dir();
                 optional_jobs_sink.trigger(&capability, &state_dir, &identity_key, &snapshot);
@@ -252,6 +251,7 @@ impl SyncService {
     }
 
     pub async fn shutdown(mut self, timeout: Duration) -> Result<(), tokio::task::JoinError> {
+        self.optional_jobs.shutdown();
         self.running.store(false, Ordering::Release);
         self.notify.notify_one();
         // Never cancel the shared UploadClient here: the walker may still complete its pass.
@@ -378,6 +378,9 @@ impl SyncWorker {
             // Pairing is a hard transport prerequisite. Do not turn an
             // unpaired notification into a repeated transient-error log or retry loop.
             if !self.client.has_capability() {
+                if completion_pending {
+                    self.pending_trigger.store(true, Ordering::Release);
+                }
                 continue;
             }
             if self.circuit_open && !self.try_probe().await {
@@ -385,7 +388,12 @@ impl SyncWorker {
             }
             let now = self.clock.wall_seconds();
             let force_full = now - self.last_full_sync > 86_400.0;
-            if let Err(error) = self.execute_pass(force_full).await {
+            if completion_pending {
+                self.draining_shutdown = true;
+            }
+            let pass_res = self.execute_pass(force_full).await;
+            self.draining_shutdown = false;
+            if let Err(error) = pass_res {
                 tracing::error!(error, "Sync error");
                 continue;
             }
@@ -4074,8 +4082,13 @@ mod tests {
                 json!({
                     "protocol_version": 1,
                     "revision": 0,
+                    "display_label": "desktop",
+                    "reported": null,
+                    "owner_label": null,
+                    "updated_at": null,
                     "journal": {
-                        "version": "1.4.0"
+                        "version": "1.4.0",
+                        "name": null
                     }
                 }),
             ),
@@ -4159,8 +4172,13 @@ mod tests {
                     json!({
                         "protocol_version": 1,
                         "revision": 0,
+                        "display_label": "desktop",
+                        "reported": null,
+                        "owner_label": null,
+                        "updated_at": null,
                         "journal": {
-                            "version": "1.5.0"
+                            "version": "1.5.0",
+                            "name": null
                         }
                     }),
                 ),
