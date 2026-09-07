@@ -82,6 +82,19 @@ individual `scripts/build-release.sh` lanes write only non-candidate drift evide
 Follow `RELEASING.md` for image and advisory preconditions, stale-lock recovery,
 proof resume, read-only recovery, the separate FLAC checkpoint, and publication.
 
+### Target evidence
+
+Only `x86_64-unknown-linux-gnu` ships (`RELEASING.md`: "Only x86_64 is
+supported"). There is no second target, so there is nothing for a
+cross-target drift gate to check separately from the build itself.
+
+| Target triple | Build command | Host / toolchain | Evidence produced | Evidence class |
+|---|---|---|---|---|
+| `x86_64-unknown-linux-gnu` | `make ci` | Any x86_64 Linux host with the pinned `rust-toolchain.toml` toolchain (rustfmt, clippy) | Formatting, Clippy, the locked Rust test suite, offline license/bans/sources policy | Host gate |
+| `x86_64-unknown-linux-gnu` | `make audit` | Same toolchain plus a signed local advisory packet (`BUNDLE`/`RECEIPT`/`PUBKEY`/`LOCATOR`) | Verifies the locked dependency graph against a signed, offline RustSec mirror | Host gate |
+| `x86_64-unknown-linux-gnu` | `make release-images`, then `make release-candidate EXPECTED_RELEASE_COMMIT=<commit> ADVISORY_DESCRIPTOR=<descriptor>` (`RELEASING.md`) | Podman plus the four locally pinned Ubuntu/Fedora build and proof images (`packaging/release-policy.toml`), on an x86_64 Linux host | Builds `.tar.gz`/`.deb`/`.rpm` from one committed immutable context, then installs and verifies each package's executable path, mode, hash, and version in a separate network-disabled proof container | Shipped-target artifact (build + install half) |
+| `x86_64-unknown-linux-gnu` | The blocking live FLAC checkpoint (`RELEASING.md` § Blocking live FLAC checkpoint) | A real Linux desktop with the runtime dependencies in `packaging/INSTALL-NOTES`, running the candidate-proven package | Confirms the installed observer produces a genuine, non-silent audio segment on both the microphone and system-audio channels | Shipped-target artifact (smoke half) |
+
 ## File Headers
 
 All `.rs` source files under `crates/` must include this header as the first two
