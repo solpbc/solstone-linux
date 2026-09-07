@@ -631,6 +631,7 @@ pub fn paired_journal_path(state_dir: &Path) -> PathBuf {
 pub struct PairedJournalVersion {
     pub identity_key: String,
     pub version: String,
+    pub name: Option<String>,
     pub observed_at: f64,
 }
 
@@ -641,10 +642,15 @@ pub fn load_paired_journal_version(state_dir: &Path) -> Option<PairedJournalVers
     };
     let identity_key = data.get("identity_key")?.as_str()?.to_owned();
     let version = data.get("version")?.as_str()?.to_owned();
+    let name = data
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
     let observed_at = data.get("observed_at")?.as_f64()?;
     Some(PairedJournalVersion {
         identity_key,
         version,
+        name,
         observed_at,
     })
 }
@@ -653,6 +659,7 @@ pub fn save_paired_journal_version(
     state_dir: &Path,
     identity_key: &str,
     version: &str,
+    name: Option<&str>,
 ) -> io::Result<()> {
     let observed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -660,12 +667,18 @@ pub fn save_paired_journal_version(
         .as_secs_f64();
     fs::create_dir_all(state_dir)?;
     let path = paired_journal_path(state_dir);
-    let mut text = serde_json::to_string(&json!({
+    let mut payload = json!({
         "identity_key": identity_key,
         "version": version,
         "observed_at": observed_at,
-    }))
-    .map_err(io::Error::other)?;
+    });
+    if let Some(n) = name {
+        payload
+            .as_object_mut()
+            .expect("payload is object")
+            .insert("name".to_owned(), json!(n));
+    }
+    let mut text = serde_json::to_string(&payload).map_err(io::Error::other)?;
     text.push('\n');
     crate::private_file::atomic_write_bytes(&path, text.as_bytes())
         .map_err(|e| io::Error::other(e.to_string()))
@@ -1251,17 +1264,20 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         assert_eq!(load_paired_journal_version(temp.path()), None);
 
-        save_paired_journal_version(temp.path(), "inst-1:fp-1", "1.4.0").unwrap();
+        save_paired_journal_version(temp.path(), "inst-1:fp-1", "1.4.0", Some("My Journal"))
+            .unwrap();
         let loaded = load_paired_journal_version(temp.path()).unwrap();
         assert_eq!(loaded.identity_key, "inst-1:fp-1");
         assert_eq!(loaded.version, "1.4.0");
+        assert_eq!(loaded.name.as_deref(), Some("My Journal"));
         assert!(loaded.observed_at > 0.0);
 
-        // Overwrite
-        save_paired_journal_version(temp.path(), "inst-2:fp-2", "2.0.0").unwrap();
+        // Overwrite without name
+        save_paired_journal_version(temp.path(), "inst-2:fp-2", "2.0.0", None).unwrap();
         let loaded2 = load_paired_journal_version(temp.path()).unwrap();
         assert_eq!(loaded2.identity_key, "inst-2:fp-2");
         assert_eq!(loaded2.version, "2.0.0");
+        assert_eq!(loaded2.name, None);
 
         // Corrupt file falls back to None
         fs::write(paired_journal_path(temp.path()), "not-json").unwrap();

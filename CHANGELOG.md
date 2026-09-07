@@ -4,6 +4,16 @@ All notable changes to solstone-linux are documented here.
 The format is based on Keep a Changelog (https://keepachangelog.com/),
 and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+- after a usable journal connection this observer can read the journal's current name and version, and can pick up relay access when the journal offers it.
+- sharing this observer's current name and app version with the journal waits on a journal connection that accepts that update.
+
+### Changed
+- older journals keep working over the local connection.
+- hostname is resampled on the next connection-lifecycle trigger, not polled.
+
 ## [1.0.3] - 2026-08-28
 
 ### Changed

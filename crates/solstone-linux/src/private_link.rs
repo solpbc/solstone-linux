@@ -787,7 +787,7 @@ pub(crate) fn persist_credential(
     })
 }
 
-fn persist_credential_with_fault(
+pub(crate) fn persist_credential_with_fault(
     config_root: &Path,
     credential: &Credential,
     fault: &dyn DurableWriteFault,
@@ -1017,7 +1017,7 @@ impl LinkFacts {
 
 struct PrivateLinkOpener {
     lan_transport: Option<Arc<TransportClient>>,
-    relay_transport: Option<Arc<TransportClient>>,
+    relay_transport: Mutex<Option<Arc<TransportClient>>>,
     admission: tokio::sync::Mutex<()>,
     transport_unavailable: Arc<AtomicBool>,
     facts: LinkFacts,
@@ -1033,12 +1033,28 @@ impl PrivateLinkOpener {
     ) -> Self {
         Self {
             lan_transport: lan_transport.map(Arc::new),
-            relay_transport: relay_transport.map(Arc::new),
+            relay_transport: Mutex::new(relay_transport.map(Arc::new)),
             admission: tokio::sync::Mutex::new(()),
             transport_unavailable,
             facts,
             generation: AtomicU64::new(0),
         }
+    }
+
+    fn replace_relay_transport(&self, client: TransportClient) {
+        let mut guard = self
+            .relay_transport
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *guard = Some(Arc::new(client));
+    }
+
+    fn clear_relay_transport(&self) {
+        let mut guard = self
+            .relay_transport
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *guard = None;
     }
 
     async fn admit_dial<T>(
@@ -1087,10 +1103,15 @@ impl CarrierOpener for PrivateLinkOpener {
             let carrier = self
                 .admit_dial(async {
                     let mut lan_error = None;
+                    let has_relay = self
+                        .relay_transport
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_some();
                     if let Some(lan) = &self.lan_transport {
                         // Reserve time for the alternate relay leg only when it exists. A
                         // LAN-only credential keeps the pinned client's behavior unchanged.
-                        let result = if self.relay_transport.is_some() {
+                        let result = if has_relay {
                             match tokio::time::timeout(LAN_CARRIER_TIMEOUT, lan.dial_carrier())
                                 .await
                             {
@@ -1108,7 +1129,12 @@ impl CarrierOpener for PrivateLinkOpener {
                             Err(error) => lan_error = Some(error),
                         }
                     }
-                    if let Some(relay) = &self.relay_transport {
+                    let relay_client = self
+                        .relay_transport
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    if let Some(relay) = relay_client {
                         match relay.dial_carrier().await {
                             Ok(carrier) => return Ok(carrier),
                             Err(error) if lan_error.is_none() => return Err(error),
@@ -1295,6 +1321,7 @@ struct PrivateLinkCapabilityInner {
     client: reqwest::Client,
     origin: Url,
     opener: Arc<PrivateLinkOpener>,
+    writer: Arc<OrderedCredentialWriter>,
 }
 
 #[derive(Clone)]
@@ -1305,6 +1332,109 @@ pub(crate) struct PrivateLinkCapability {
 impl PrivateLinkCapability {
     pub(crate) fn facts(&self) -> LinkFacts {
         self.inner.opener.facts.clone()
+    }
+
+    pub(crate) async fn send_optional(
+        &self,
+        builder: RequestBuilder,
+        timeout: Duration,
+    ) -> LinkOutcome {
+        match builder.timeout(timeout).send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status == StatusCode::FORBIDDEN {
+                    return LinkOutcome::Forbidden;
+                }
+                if status.is_client_error() {
+                    return LinkOutcome::LocalRejected { status };
+                }
+                if let Some(len) = response.content_length()
+                    && len > 65536
+                {
+                    return LinkOutcome::LocalRejected {
+                        status: StatusCode::PAYLOAD_TOO_LARGE,
+                    };
+                }
+                use futures_util::StreamExt;
+                let mut stream = response.bytes_stream();
+                let mut body = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            if body.len() + bytes.len() > 65536 {
+                                return LinkOutcome::LocalRejected {
+                                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                                };
+                            }
+                            body.extend_from_slice(&bytes);
+                        }
+                        Err(_) => return LinkOutcome::TransportUnavailable,
+                    }
+                }
+                LinkOutcome::Success { status, body }
+            }
+            Err(_) => LinkOutcome::TransportUnavailable,
+        }
+    }
+
+    pub(crate) async fn clients_self_get(&self, timeout: Duration) -> LinkOutcome {
+        let url = match confine_path(&self.inner.origin, "/app/network/api/clients/self") {
+            Ok(u) => u,
+            Err(_) => {
+                return LinkOutcome::LocalRejected {
+                    status: StatusCode::BAD_REQUEST,
+                };
+            }
+        };
+        self.send_optional(self.inner.client.get(url), timeout)
+            .await
+    }
+
+    // Publication waits on an operator SPL pin that allows PUT; this observer still
+    // sends PUT; 405 Method Not Allowed from the loopback bridge is an optional failure.
+    pub(crate) async fn clients_self_put(&self, body: Vec<u8>, timeout: Duration) -> LinkOutcome {
+        let url = match confine_path(&self.inner.origin, "/app/network/api/clients/self") {
+            Ok(u) => u,
+            Err(_) => {
+                return LinkOutcome::LocalRejected {
+                    status: StatusCode::BAD_REQUEST,
+                };
+            }
+        };
+        self.send_optional(
+            self.inner
+                .client
+                .put(url)
+                .header("content-type", "application/json")
+                .body(body),
+            timeout,
+        )
+        .await
+    }
+
+    pub(crate) async fn relay_access_get(&self, timeout: Duration) -> LinkOutcome {
+        let url = match confine_path(&self.inner.origin, "/app/network/api/relay/access") {
+            Ok(u) => u,
+            Err(_) => {
+                return LinkOutcome::LocalRejected {
+                    status: StatusCode::BAD_REQUEST,
+                };
+            }
+        };
+        self.send_optional(self.inner.client.get(url), timeout)
+            .await
+    }
+
+    pub(crate) fn writer(&self) -> Arc<OrderedCredentialWriter> {
+        self.inner.writer.clone()
+    }
+
+    pub(crate) fn replace_relay_transport(&self, client: TransportClient) {
+        self.inner.opener.replace_relay_transport(client);
+    }
+
+    pub(crate) fn clear_relay_transport(&self) {
+        self.inner.opener.clear_relay_transport();
     }
 
     async fn send(&self, builder: RequestBuilder, timeout: Duration) -> LinkOutcome {
@@ -1607,6 +1737,315 @@ pub(crate) async fn start_private_link_for_test(
     (temp, finish_owner_start(session).await.unwrap())
 }
 
+pub(crate) fn compute_pairing_id(client_cert_pem: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(client_cert_pem.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DurableClearPending {
+    pub(crate) pairing_id: String,
+    pub(crate) access_mutation_generation: u64,
+}
+
+pub(crate) struct OrderedCredentialWriter {
+    config_root: PathBuf,
+    pairing_id: String,
+    live_hook_epoch: AtomicU64,
+    access_mutation_generation: AtomicU64,
+    credential: Mutex<Credential>,
+    failed: Mutex<bool>,
+    fault: Arc<dyn DurableWriteFault>,
+    transport_unavailable: Arc<AtomicBool>,
+    facts: LinkFacts,
+    durable_clear_pending: Mutex<Option<DurableClearPending>>,
+    shutdown_fenced: AtomicBool,
+}
+
+impl OrderedCredentialWriter {
+    pub(crate) fn new(
+        config_root: PathBuf,
+        credential: Credential,
+        fault: Arc<dyn DurableWriteFault>,
+        transport_unavailable: Arc<AtomicBool>,
+        facts: LinkFacts,
+    ) -> Self {
+        let pairing_id = compute_pairing_id(&credential.client_cert_pem);
+        Self {
+            config_root,
+            pairing_id,
+            live_hook_epoch: AtomicU64::new(1),
+            access_mutation_generation: AtomicU64::new(1),
+            credential: Mutex::new(credential),
+            failed: Mutex::new(false),
+            fault,
+            transport_unavailable,
+            facts,
+            durable_clear_pending: Mutex::new(None),
+            shutdown_fenced: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn pairing_id(&self) -> &str {
+        &self.pairing_id
+    }
+
+    pub(crate) fn access_mutation_generation(&self) -> u64 {
+        self.access_mutation_generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn current_credential(&self) -> Credential {
+        self.credential
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        *self.failed.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(crate) fn fence_shutdown(&self) {
+        self.shutdown_fenced.store(true, Ordering::Release);
+        self.live_hook_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn create_token_hook(self: &Arc<Self>) -> TokenPersistHook {
+        let writer = Arc::clone(self);
+        let captured_pairing_id = self.pairing_id.clone();
+        let captured_hook_epoch = self.live_hook_epoch.load(Ordering::Acquire);
+        Arc::new(move |token, expires_at| {
+            writer.commit_mandatory_refresh(
+                &captured_pairing_id,
+                captured_hook_epoch,
+                token,
+                expires_at,
+            );
+        })
+    }
+
+    pub(crate) fn commit_mandatory_refresh(
+        &self,
+        hook_pairing_id: &str,
+        hook_epoch: u64,
+        token: &str,
+        expires_at: i64,
+    ) {
+        if self.shutdown_fenced.load(Ordering::Acquire) {
+            return;
+        }
+        let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
+        if self.pairing_id != hook_pairing_id {
+            // Stale hook from previous pairing -> no-op
+            return;
+        }
+        if self.live_hook_epoch.load(Ordering::Acquire) != hook_epoch {
+            // Stale hook after newer access/disable mutation -> no-op
+            return;
+        }
+        let mut updated = current.clone();
+        updated.device_token = Some(token.to_owned());
+        updated.device_token_expires_at = Some(expires_at);
+        let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
+        let durable = serde_json::to_vec(&updated).ok().is_some_and(|bytes| {
+            atomic_write_bytes_with_fault(&cred_path, &bytes, self.fault.as_ref()).is_ok()
+        });
+        if durable {
+            *current = updated;
+            self.access_mutation_generation
+                .fetch_add(1, Ordering::AcqRel);
+            let mut pending = self
+                .durable_clear_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *pending = None;
+        } else {
+            *self.failed.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            self.transport_unavailable.store(true, Ordering::Release);
+            self.facts.publish(LinkFact::TokenPersistenceFailure);
+            self.facts.publish(LinkFact::TransportUnavailable);
+        }
+    }
+
+    pub(crate) fn commit_optional_relay(
+        &self,
+        caller_pairing_id: &str,
+        caller_access_gen: u64,
+        relay_origin: &str,
+        device_token: &str,
+        expires_at: i64,
+    ) -> Result<(), ()> {
+        if self.shutdown_fenced.load(Ordering::Acquire) {
+            return Err(());
+        }
+        let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
+        if self.pairing_id != caller_pairing_id {
+            return Err(());
+        }
+        if self.access_mutation_generation.load(Ordering::Acquire) != caller_access_gen {
+            return Err(());
+        }
+        let mut updated = current.clone();
+        updated.relay_origin = Some(relay_origin.to_owned());
+        updated.device_token = Some(device_token.to_owned());
+        updated.device_token_expires_at = Some(expires_at);
+        let bytes = serde_json::to_vec(&updated).map_err(|_| ())?;
+        let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
+        let durable =
+            atomic_write_bytes_with_fault(&cred_path, &bytes, self.fault.as_ref()).is_ok();
+        if durable {
+            *current = updated;
+            self.access_mutation_generation
+                .fetch_add(1, Ordering::AcqRel);
+            self.live_hook_epoch.fetch_add(1, Ordering::AcqRel);
+            let mut pending = self
+                .durable_clear_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *pending = None;
+            Ok(())
+        } else {
+            // Check if disk was written despite fault (DirSync-uncertain)
+            // If parseable new credential: durability-uncertain, do not live-replace,
+            // do not TokenPersistenceFailure, reconcile on next trigger.
+            // If parseable old / unreadable: treat as pre-rename failure.
+            let _ = std::fs::read(&cred_path)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<Credential>(&raw).ok());
+            Err(())
+        }
+    }
+
+    pub(crate) fn commit_optional_clear(
+        &self,
+        caller_pairing_id: &str,
+        caller_access_gen: u64,
+    ) -> Result<(), ()> {
+        if self.shutdown_fenced.load(Ordering::Acquire) {
+            return Err(());
+        }
+        let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
+        if self.pairing_id != caller_pairing_id {
+            return Err(());
+        }
+        if self.access_mutation_generation.load(Ordering::Acquire) != caller_access_gen {
+            return Err(());
+        }
+        // Under writer mutex: bump live_hook_epoch and access_mutation_generation before write
+        self.live_hook_epoch.fetch_add(1, Ordering::AcqRel);
+        let new_gen = self
+            .access_mutation_generation
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+
+        current.relay_origin = None;
+        current.device_token = None;
+        current.device_token_expires_at = None;
+        let bytes = serde_json::to_vec(&*current).map_err(|_| ())?;
+        let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
+        let durable =
+            atomic_write_bytes_with_fault(&cred_path, &bytes, self.fault.as_ref()).is_ok();
+        if durable {
+            let mut pending = self
+                .durable_clear_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *pending = None;
+            Ok(())
+        } else {
+            let disk_is_cleared = std::fs::read(&cred_path)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<Credential>(&raw).ok())
+                .is_some_and(|reloaded| {
+                    reloaded.relay_origin.is_none() && reloaded.device_token.is_none()
+                });
+            let mut pending = self
+                .durable_clear_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if disk_is_cleared {
+                *pending = None;
+            } else {
+                *pending = Some(DurableClearPending {
+                    pairing_id: caller_pairing_id.to_owned(),
+                    access_mutation_generation: new_gen,
+                });
+            }
+            Err(())
+        }
+    }
+
+    pub(crate) fn retry_durable_clear_if_pending(&self) -> Result<bool, ()> {
+        if self.shutdown_fenced.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let pending = {
+            let guard = self
+                .durable_clear_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            guard.clone()
+        };
+        if let Some(pending) = pending {
+            if pending.pairing_id == self.pairing_id
+                && pending.access_mutation_generation
+                    == self.access_mutation_generation.load(Ordering::Acquire)
+            {
+                self.commit_optional_clear(&pending.pairing_id, pending.access_mutation_generation)
+                    .map(|_| true)
+            } else {
+                let mut guard = self
+                    .durable_clear_pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                *guard = None;
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+pub(crate) struct TokenPersistence {
+    pub(crate) writer: Arc<OrderedCredentialWriter>,
+}
+
+impl TokenPersistence {
+    fn new(
+        config_root: PathBuf,
+        credential: Credential,
+        fault: Arc<dyn DurableWriteFault>,
+        transport_unavailable: Arc<AtomicBool>,
+        facts: LinkFacts,
+    ) -> (Arc<Self>, TokenPersistHook) {
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            config_root,
+            credential,
+            fault,
+            transport_unavailable,
+            facts,
+        ));
+        let hook = writer.create_token_hook();
+        let state = Arc::new(Self { writer });
+        (state, hook)
+    }
+
+    fn failed(&self) -> bool {
+        self.writer.failed()
+    }
+
+    #[cfg(test)]
+    fn persist(&self, token: &str, expires_at: i64) {
+        let pairing_id = self.writer.pairing_id().to_string();
+        let access_gen = self.writer.access_mutation_generation();
+        self.writer
+            .commit_mandatory_refresh(&pairing_id, access_gen, token, expires_at);
+    }
+}
+
 impl PrivateLinkSession {
     pub(crate) fn capability(&self) -> PrivateLinkCapability {
         PrivateLinkCapability {
@@ -1614,6 +2053,7 @@ impl PrivateLinkSession {
                 client: self.client.clone(),
                 origin: self.origin.clone(),
                 opener: self.opener.clone(),
+                writer: self.token_persistence.writer.clone(),
             }),
         }
     }
@@ -1637,6 +2077,7 @@ impl PrivateLinkSession {
         #[cfg(test)] join_probe: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         #[cfg(not(test))] _join_probe: Option<()>,
     ) -> Result<(), PrivateStateError> {
+        self.token_persistence.writer.fence_shutdown();
         let status = self.handle.shutdown_and_wait().await;
         #[cfg(test)]
         if let Some((joined, release)) = join_probe {
@@ -1659,68 +2100,6 @@ impl PrivateLinkSession {
         release: Arc<tokio::sync::Notify>,
     ) -> Result<(), PrivateStateError> {
         self.shutdown_inner(Some((joined, release))).await
-    }
-}
-
-struct TokenPersistence {
-    config_root: PathBuf,
-    credential: Mutex<Credential>,
-    failed: Mutex<bool>,
-    fault: Arc<dyn DurableWriteFault>,
-    transport_unavailable: Arc<AtomicBool>,
-    facts: LinkFacts,
-}
-
-impl TokenPersistence {
-    fn new(
-        config_root: PathBuf,
-        credential: Credential,
-        fault: Arc<dyn DurableWriteFault>,
-        transport_unavailable: Arc<AtomicBool>,
-        facts: LinkFacts,
-    ) -> (Arc<Self>, TokenPersistHook) {
-        let state = Arc::new(Self {
-            config_root,
-            credential: Mutex::new(credential),
-            failed: Mutex::new(false),
-            fault,
-            transport_unavailable,
-            facts,
-        });
-        let hook_state = state.clone();
-        let hook: TokenPersistHook = Arc::new(move |token, expires_at| {
-            // Persistence here is synchronous and completes before carrier release;
-            // admit_dial owns the ordering invariant that guarantees it.
-            hook_state.persist(token, expires_at);
-        });
-        (state, hook)
-    }
-
-    fn persist(&self, token: &str, expires_at: i64) {
-        let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
-        let mut updated = current.clone();
-        updated.device_token = Some(token.to_owned());
-        updated.device_token_expires_at = Some(expires_at);
-        let durable = serde_json::to_vec(&updated).ok().is_some_and(|bytes| {
-            atomic_write_bytes_with_fault(
-                &self.config_root.join(CREDENTIALS_FILENAME),
-                &bytes,
-                self.fault.as_ref(),
-            )
-            .is_ok()
-        });
-        if durable {
-            *current = updated;
-        } else {
-            *self.failed.lock().unwrap_or_else(|p| p.into_inner()) = true;
-            self.transport_unavailable.store(true, Ordering::Release);
-            self.facts.publish(LinkFact::TokenPersistenceFailure);
-            self.facts.publish(LinkFact::TransportUnavailable);
-        }
-    }
-
-    fn failed(&self) -> bool {
-        *self.failed.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -2008,13 +2387,20 @@ mod tests {
         output
     }
 
-    fn test_jwt(exp: i64) -> String {
-        let claims = format!(r#"{{"iat":{},"exp":{exp}}}"#, exp - 3600);
+    pub(crate) fn test_jwt_for_instance(instance_id: &str, exp: i64) -> String {
+        let iat = exp - 3600;
+        let claims = format!(
+            r#"{{"iss":"https://relay.example.com","sub":"instance:{instance_id}","aud":"spl-relay","scope":"session.dial","ver":2,"instance_id":"{instance_id}","iat":{iat},"exp":{exp},"jti":"test-jti"}}"#
+        );
         format!(
             "{}.{}.sig",
-            base64url_no_pad(b"{}"),
+            base64url_no_pad(b"{\"alg\":\"none\"}"),
             base64url_no_pad(claims.as_bytes())
         )
+    }
+
+    pub(crate) fn test_jwt(exp: i64) -> String {
+        test_jwt_for_instance("inst-42", exp)
     }
 
     const RELAY_PAIR_LINK: &str = "0R0J6HB7H6NWVVR1VTPVXVYAZTXBW0938NKRKAYDXW00";
@@ -3462,7 +3848,10 @@ mod tests {
     async fn loopback_client_does_not_follow_upstream_redirects() {
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(302, Vec::new());
+        peer.enqueue_response(302, Vec::new());
         let (_temp, session) = start_keyless_peer_session(&peer).await;
+        let capability = session.capability();
+
         let response = session
             .request(Method::GET, "/redirect")
             .unwrap()
@@ -3471,7 +3860,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FOUND);
-        assert_eq!(peer.requests().len(), 1);
+
+        let put_res = capability
+            .clients_self_put(b"{}".to_vec(), Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            put_res,
+            LinkOutcome::LocalRejected {
+                status: StatusCode::METHOD_NOT_ALLOWED,
+            }
+        );
+
+        let get_res = capability.relay_access_get(Duration::from_secs(5)).await;
+        assert!(matches!(
+            get_res,
+            LinkOutcome::Success {
+                status: StatusCode::FOUND,
+                ..
+            }
+        ));
+
+        assert_eq!(peer.requests().len(), 2);
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -3531,7 +3940,10 @@ mod tests {
         );
         let peer = PrivateLinkPeer::start().await;
         peer.enqueue_response(200, b"{}".to_vec());
+        peer.enqueue_response(200, b"{}".to_vec());
         let (_temp, session) = start_keyless_peer_session(&peer).await;
+        let capability = session.capability();
+
         assert_eq!(
             session
                 .request(Method::GET, "/proxy-proof")
@@ -3543,6 +3955,26 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+
+        let put_res = capability
+            .clients_self_put(b"{}".to_vec(), Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            put_res,
+            LinkOutcome::LocalRejected {
+                status: StatusCode::METHOD_NOT_ALLOWED,
+            }
+        );
+
+        let get_res = capability.relay_access_get(Duration::from_secs(5)).await;
+        assert!(matches!(
+            get_res,
+            LinkOutcome::Success {
+                status: StatusCode::OK,
+                ..
+            }
+        ));
+
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
@@ -4359,12 +4791,431 @@ mod tests {
     }
 
     #[test]
-    fn journal_identity_key_derivation() {
+    fn durable_clear_retry_then_ready() {
+        let temp = tempfile::tempdir().unwrap();
         let cred = Credential {
-            instance_id: "inst-123".to_string(),
-            ca_fp_prefix: vec![0x1a, 0x2b, 0x3c, 0x0f],
+            relay_origin: Some("https://relay.example.com".to_string()),
+            device_token: Some("token1".to_string()),
+            device_token_expires_at: Some(1000),
             ..credential()
         };
-        assert_eq!(journal_identity_key(&cred), "inst-123:1a2b3c0f");
+        serde_json::to_writer(
+            std::fs::File::create(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+            &cred,
+        )
+        .unwrap();
+
+        let fault = Arc::new(RecordingFault {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            fail: Some(DurableWriteStage::Rename),
+        });
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred,
+            fault,
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let pairing_id = writer.pairing_id().to_string();
+        let access_gen = writer.access_mutation_generation();
+
+        assert!(
+            writer
+                .commit_optional_clear(&pairing_id, access_gen)
+                .is_err()
+        );
+        assert!(writer.durable_clear_pending.lock().unwrap().is_some());
+
+        let writer_no_fault = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            writer.current_credential(),
+            Arc::new(NoWriteFault),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        *writer_no_fault.durable_clear_pending.lock().unwrap() =
+            writer.durable_clear_pending.lock().unwrap().clone();
+        writer_no_fault.access_mutation_generation.store(
+            writer.access_mutation_generation.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+
+        assert_eq!(writer_no_fault.retry_durable_clear_if_pending(), Ok(true));
+        assert!(
+            writer_no_fault
+                .durable_clear_pending
+                .lock()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(writer_no_fault.current_credential().relay_origin, None);
+
+        let next_gen = writer_no_fault.access_mutation_generation();
+        assert!(
+            writer_no_fault
+                .commit_optional_relay(
+                    &pairing_id,
+                    next_gen,
+                    "https://relay2.example.com",
+                    "token2",
+                    2000,
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            writer_no_fault.current_credential().relay_origin.as_deref(),
+            Some("https://relay2.example.com")
+        );
+    }
+
+    #[test]
+    fn ready_then_stale_durable_clear_retry_noops() {
+        let temp = tempfile::tempdir().unwrap();
+        let cred = Credential {
+            relay_origin: Some("https://relay.example.com".to_string()),
+            device_token: Some("token1".to_string()),
+            device_token_expires_at: Some(1000),
+            ..credential()
+        };
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred,
+            Arc::new(NoWriteFault),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let pairing_id = writer.pairing_id().to_string();
+
+        *writer.durable_clear_pending.lock().unwrap() = Some(DurableClearPending {
+            pairing_id: pairing_id.clone(),
+            access_mutation_generation: 0,
+        });
+
+        let access_gen = writer.access_mutation_generation();
+        assert!(
+            writer
+                .commit_optional_relay(
+                    &pairing_id,
+                    access_gen,
+                    "https://relay-ready.example.com",
+                    "tok",
+                    3000,
+                )
+                .is_ok()
+        );
+
+        assert_eq!(writer.retry_durable_clear_if_pending(), Ok(false));
+        assert_eq!(
+            writer.current_credential().relay_origin.as_deref(),
+            Some("https://relay-ready.example.com")
+        );
+    }
+
+    #[test]
+    fn late_io_after_timeout_cannot_apply_after_newer_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let cred = credential();
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred,
+            Arc::new(NoWriteFault),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let pairing_id = writer.pairing_id().to_string();
+        let gen1 = writer.access_mutation_generation();
+
+        assert!(
+            writer
+                .commit_optional_relay(&pairing_id, gen1, "https://b.example.com", "token_b", 2000)
+                .is_ok()
+        );
+
+        assert!(
+            writer
+                .commit_optional_relay(&pairing_id, gen1, "https://a.example.com", "token_a", 1000)
+                .is_err()
+        );
+        assert_eq!(
+            writer.current_credential().relay_origin.as_deref(),
+            Some("https://b.example.com")
+        );
+
+        assert!(writer.commit_optional_clear(&pairing_id, gen1).is_err());
+        assert_eq!(
+            writer.current_credential().relay_origin.as_deref(),
+            Some("https://b.example.com")
+        );
+    }
+
+    #[test]
+    fn optional_rename_failure_preserves_previous() {
+        let temp = tempfile::tempdir().unwrap();
+        let cred = Credential {
+            relay_origin: Some("https://orig.example.com".to_string()),
+            device_token: Some("orig_token".to_string()),
+            ..credential()
+        };
+        serde_json::to_writer(
+            std::fs::File::create(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+            &cred,
+        )
+        .unwrap();
+
+        let fault = Arc::new(RecordingFault {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            fail: Some(DurableWriteStage::Rename),
+        });
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred.clone(),
+            fault,
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let pairing_id = writer.pairing_id().to_string();
+        let access_gen = writer.access_mutation_generation();
+
+        assert!(
+            writer
+                .commit_optional_relay(
+                    &pairing_id,
+                    access_gen,
+                    "https://new.example.com",
+                    "new_tok",
+                    5000
+                )
+                .is_err()
+        );
+        assert_eq!(
+            writer.current_credential().relay_origin.as_deref(),
+            Some("https://orig.example.com")
+        );
+        assert!(!writer.failed());
+    }
+
+    #[test]
+    fn optional_dirsync_failure_old_or_new_parseable_no_live_replace() {
+        let temp = tempfile::tempdir().unwrap();
+        let cred = Credential {
+            relay_origin: Some("https://orig.example.com".to_string()),
+            device_token: Some("orig_token".to_string()),
+            ..credential()
+        };
+        serde_json::to_writer(
+            std::fs::File::create(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+            &cred,
+        )
+        .unwrap();
+
+        let fault = Arc::new(RecordingFault {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            fail: Some(DurableWriteStage::DirSync),
+        });
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred.clone(),
+            fault,
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let pairing_id = writer.pairing_id().to_string();
+        let access_gen = writer.access_mutation_generation();
+
+        assert!(
+            writer
+                .commit_optional_relay(
+                    &pairing_id,
+                    access_gen,
+                    "https://new.example.com",
+                    "new_tok",
+                    5000
+                )
+                .is_err()
+        );
+        assert_eq!(
+            writer.current_credential().relay_origin.as_deref(),
+            Some("https://orig.example.com")
+        );
+        assert!(!writer.failed());
+    }
+
+    #[test]
+    fn stale_token_hook_after_disable_does_not_resurrect_or_latch_token_persistence_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let cred = Credential {
+            relay_origin: Some("https://orig.example.com".to_string()),
+            device_token: Some("orig_token".to_string()),
+            ..credential()
+        };
+        serde_json::to_writer(
+            std::fs::File::create(temp.path().join(CREDENTIALS_FILENAME)).unwrap(),
+            &cred,
+        )
+        .unwrap();
+
+        let facts = LinkFacts::default();
+        let transport_unavail = Arc::new(AtomicBool::new(false));
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred,
+            Arc::new(NoWriteFault),
+            transport_unavail,
+            facts.clone(),
+        ));
+
+        let stale_hook = writer.create_token_hook();
+
+        let pairing_id = writer.pairing_id().to_string();
+        let access_gen = writer.access_mutation_generation();
+        assert!(
+            writer
+                .commit_optional_clear(&pairing_id, access_gen)
+                .is_ok()
+        );
+        assert_eq!(writer.current_credential().relay_origin, None);
+
+        stale_hook("resurrect_token", 99999);
+
+        assert_eq!(writer.current_credential().relay_origin, None);
+        assert_eq!(writer.current_credential().device_token, None);
+        assert!(!writer.failed());
+        let (fact_state, _) = facts.snapshot_with_epoch();
+        assert!(!fact_state.token_persistence_failure);
+    }
+
+    #[test]
+    fn same_home_repair_pairing_id_rejects_stale_access_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let cred = credential();
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred,
+            Arc::new(NoWriteFault),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let access_gen = writer.access_mutation_generation();
+
+        assert!(
+            writer
+                .commit_optional_relay(
+                    "different_pairing_id",
+                    access_gen,
+                    "https://relay.example.com",
+                    "tok",
+                    1000
+                )
+                .is_err()
+        );
+        assert!(
+            writer
+                .commit_optional_clear("different_pairing_id", access_gen)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_ready_next_dial_uses_new_origin_without_repair() {
+        let peer = PrivateLinkPeer::start().await;
+        let transport_unavailable = Arc::new(AtomicBool::new(false));
+        let facts = LinkFacts::default();
+
+        let mut relay_cred1 = peer.credential();
+        relay_cred1.endpoints.clear();
+        relay_cred1.relay_origin = Some("https://relay1.example.com".to_string());
+        relay_cred1.device_token = Some(test_jwt(i64::MAX / 2));
+        let client1 = TransportClient::new_relay_only(relay_cred1, None).unwrap();
+
+        let opener = Arc::new(PrivateLinkOpener::new(
+            None,
+            Some(client1),
+            transport_unavailable,
+            facts.clone(),
+        ));
+
+        let mut relay_cred2 = peer.credential();
+        relay_cred2.endpoints.clear();
+        relay_cred2.relay_origin = Some("https://relay2.example.com".to_string());
+        relay_cred2.device_token = Some(test_jwt(i64::MAX / 2));
+        let client2 = TransportClient::new_relay_only(relay_cred2, None).unwrap();
+
+        opener.replace_relay_transport(client2);
+        {
+            assert!(opener.relay_transport.lock().unwrap().is_some());
+        }
+
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_lan_only_to_ready_to_not_configured_without_restart() {
+        let peer = PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let capability = session.capability();
+
+        let mut relay_cred = peer.credential();
+        relay_cred.endpoints.clear();
+        relay_cred.relay_origin = Some("https://relay.example.com".to_string());
+        relay_cred.device_token = Some(test_jwt(i64::MAX / 2));
+        let relay_client = TransportClient::new_relay_only(relay_cred, None).unwrap();
+
+        capability.replace_relay_transport(relay_client);
+
+        capability.clear_relay_transport();
+
+        peer.enqueue_response(200, b"{}".to_vec());
+        let outcome = capability.clients_self_get(Duration::from_secs(5)).await;
+        assert!(matches!(
+            outcome,
+            LinkOutcome::Success {
+                status: StatusCode::OK,
+                ..
+            }
+        ));
+
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn request_opens_carrier_does_not_loop_after_settle() {
+        let peer = PrivateLinkPeer::start().await;
+        let (_temp, session) = start_keyless_peer_session(&peer).await;
+        let capability = session.capability();
+
+        peer.enqueue_response(200, b"{}".to_vec());
+        let outcome = capability.clients_self_get(Duration::from_secs(5)).await;
+        assert!(matches!(
+            outcome,
+            LinkOutcome::Success {
+                status: StatusCode::OK,
+                ..
+            }
+        ));
+
+        let (facts, _) = capability.facts().snapshot_with_epoch();
+        assert!(facts.carrier_proven);
+        let dial_gen_initial = facts.dial_generation;
+
+        peer.enqueue_response(200, b"{}".to_vec());
+        let outcome2 = capability.clients_self_get(Duration::from_secs(5)).await;
+        assert!(matches!(
+            outcome2,
+            LinkOutcome::Success {
+                status: StatusCode::OK,
+                ..
+            }
+        ));
+
+        let (facts2, _) = capability.facts().snapshot_with_epoch();
+        assert_eq!(facts2.dial_generation, dial_gen_initial);
+
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 }

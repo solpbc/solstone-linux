@@ -180,7 +180,7 @@ fn set_session_environment_variable(name: &str, value: &str) {
     unsafe { ::std::env::set_var(name, value) };
 }
 
-fn hostname() -> io::Result<String> {
+pub(crate) fn hostname() -> io::Result<String> {
     Ok(fs::read_to_string("/proc/sys/kernel/hostname")?
         .trim()
         .to_owned())
@@ -1434,6 +1434,7 @@ mod tests {
             &config.state_dir(),
             &identity_key,
             "1.4.0",
+            None,
         )
         .unwrap();
 
@@ -1510,6 +1511,7 @@ mod tests {
             &config.state_dir(),
             &identity_key,
             "1.2.0",
+            None,
         )
         .unwrap();
         assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());

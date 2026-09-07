@@ -86,6 +86,8 @@ pub struct SyncService {
     link_persistence_failures: Arc<AtomicUsize>,
     abort: tokio::task::AbortHandle,
     task: JoinHandle<()>,
+    #[allow(dead_code)]
+    optional_jobs: Arc<crate::private_link_optional::OptionalJobs>,
 }
 
 #[derive(Clone)]
@@ -176,12 +178,13 @@ impl SyncService {
             last_persisted: Mutex::new(None),
             failures: Arc::clone(&link_persistence_failures),
         });
-        let latest_started_generation = client.latest_started_generation();
+        let optional_jobs = Arc::new(crate::private_link_optional::OptionalJobs::default());
+        let optional_jobs_sink = Arc::clone(&optional_jobs);
         let sink_client = Arc::downgrade(&client);
         let sink_config = config.clone();
         link_facts.install_sink(Arc::new(move |facts| {
             persistence.persist(facts);
-            let (snapshot, epoch_at_fire) = facts.snapshot_with_epoch();
+            let (snapshot, _epoch_at_fire) = facts.snapshot_with_epoch();
             if snapshot.carrier_proven
                 && !snapshot.transport_unavailable
                 && !snapshot.terminal_revocation
@@ -191,36 +194,9 @@ impl SyncService {
                 && let Ok(Some(credential)) =
                     crate::private_link::load_credential(&sink_config.config_dir)
             {
-                let current_gen = snapshot.dial_generation;
-                // Coalesces duplicate fetches for the same generation (e.g. a
-                // CarrierProven followed by ObserverRegistered); the freshness
-                // check that decides whether a completed fetch may persist is
-                // commit_journal_version's job, not this gate's.
-                // Epochs also distinguish a lazy initial dial from the trigger
-                // which opened it, even if their numeric dial generation matches.
-                let fetch_generation = epoch_at_fire.saturating_add(1);
-                let prev = latest_started_generation.fetch_max(fetch_generation, Ordering::AcqRel);
-                if fetch_generation > prev {
-                    let identity_key = crate::private_link::journal_identity_key(&credential);
-                    let state_dir = sink_config.state_dir();
-                    let facts_publish = client.link_facts();
-                    tokio::spawn(async move {
-                        if let Ok(Some(version)) = capability.system_status().await {
-                            facts_publish.commit_journal_version(
-                                epoch_at_fire,
-                                current_gen,
-                                || {
-                                    crate::sync_health::save_paired_journal_version(
-                                        &state_dir,
-                                        &identity_key,
-                                        &version,
-                                    )
-                                    .is_ok()
-                                },
-                            );
-                        }
-                    });
-                }
+                let identity_key = crate::private_link::journal_identity_key(&credential);
+                let state_dir = sink_config.state_dir();
+                optional_jobs_sink.trigger(&capability, &state_dir, &identity_key, &snapshot);
             }
         }));
         let recent_error_count = Arc::new(AtomicU8::new(0));
@@ -249,6 +225,7 @@ impl SyncService {
             link_persistence_failures,
             abort,
             task,
+            optional_jobs,
         }
     }
 
@@ -1079,7 +1056,6 @@ fn remove_if_empty(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
 
     use crate::{
         private_link::{LinkFactState, start_private_link_session},
@@ -4047,25 +4023,6 @@ mod tests {
     }
 
     #[test]
-    fn generation_coalescing_guard_logic() {
-        let latest_started_generation = Arc::new(AtomicU64::new(0));
-
-        // First event for gen 1 -> passes
-        let gen1 = 1u64;
-        let prev1 = latest_started_generation.fetch_max(gen1, Ordering::AcqRel);
-        assert!(gen1 > prev1);
-
-        // Second event for gen 1 (e.g. ObserverRegistered) -> coalesced/skipped
-        let prev2 = latest_started_generation.fetch_max(gen1, Ordering::AcqRel);
-        assert!(gen1 <= prev2);
-
-        // Newer event for gen 2 -> passes
-        let gen2 = 2u64;
-        let prev3 = latest_started_generation.fetch_max(gen2, Ordering::AcqRel);
-        assert!(gen2 > prev3);
-    }
-
-    #[test]
     fn commit_journal_version_requires_epoch_and_generation_to_match_before_writing() {
         let link_facts = crate::private_link::LinkFacts::default();
         let stale_epoch = link_facts.owner_epoch();
@@ -4110,8 +4067,27 @@ mod tests {
     #[tokio::test]
     async fn sync_service_records_paired_journal_version_on_carrier_proven() {
         let temp = tempfile::tempdir().unwrap();
-        let server =
-            LinkedMockServer::new(vec![(200, json!({"version": {"current": "1.4.0"}})); 2]).await;
+        let server = LinkedMockServer::new(vec![
+            (200, json!({"version": {"current": "1.4.0"}})),
+            (
+                200,
+                json!({
+                    "protocol_version": 1,
+                    "revision": 0,
+                    "journal": {
+                        "version": "1.4.0"
+                    }
+                }),
+            ),
+            (
+                200,
+                json!({
+                    "protocol_version": 2,
+                    "status": "not_configured"
+                }),
+            ),
+        ])
+        .await;
         let config = Config {
             base_dir: temp.path().into(),
             config_dir: temp.path().join("config"),
@@ -4176,7 +4152,26 @@ mod tests {
         ));
         let server = LinkedMockServer::new_with_facts(
             client.link_facts(),
-            vec![(200, json!({"version": {"current": "1.5.0"}})); 2],
+            vec![
+                (200, json!({"version": {"current": "1.5.0"}})),
+                (
+                    200,
+                    json!({
+                        "protocol_version": 1,
+                        "revision": 0,
+                        "journal": {
+                            "version": "1.5.0"
+                        }
+                    }),
+                ),
+                (
+                    200,
+                    json!({
+                        "protocol_version": 2,
+                        "status": "not_configured"
+                    }),
+                ),
+            ],
         )
         .await;
         let credential = server.credential();
