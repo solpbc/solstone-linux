@@ -235,24 +235,73 @@ proofs, bundle digest, or candidate status.
 
 ## Delivery
 
+Delivery has two destinations and they are not equals. The release origin,
+`https://updates.solstone.app`, is where the release is published, and where the
+install documentation points once the first `release` publish lands. GitHub
+Releases is an optional mirror that carries the tag, the release notes, and a
+copy of the same bytes.
+
+### The release origin
+
 After `candidate-proven`, retained-candidate recovery, the live FLAC checkpoint,
-and the product release gates pass, publish the exact five-file candidate:
+and the product release gates pass, publish the exact signed candidate:
+
+```bash
+make publish-origin LANE=release RELEASE_DIR=dist/rust
+```
+
+Objects land at
+`https://updates.solstone.app/solstone-linux/<lane>/<version>/<filename>`, and
+`<lane>/latest` (one line, `version=<version>`, the pointer the documentation
+tells people to read) is written only after every file in the set is published.
+The published key is at `https://updates.solstone.app/solstone-linux/minisign.pub`
+and is the same key this repository pins at
+`packaging/keys/solstone-linux-release.pub`. Nothing else places that object, so
+the publisher owns it: it writes the key when the origin has none, and refuses if
+the two ever disagree.
+
+Lanes are exactly `release`, `staging`, and `dev`. Versioned objects on `release`
+and `staging` are immutable: the publisher refuses to overwrite one, republishing
+identical bytes is a no-op, and adding a missing filename under an existing
+version is allowed. `dev` may be overwritten. `latest` never moves backwards.
+No R2 bucket lock rule covers these prefixes today (`wrangler r2 bucket lock
+list solstone-updates` reports none), so the store enforces none of that and
+`wrangler r2 object put` overwrites silently. The publisher enforces
+it instead, by reading what is already there before it writes.
+
+The origin publish never contacts GitHub and does not require `gh`. A GitHub
+outage cannot delay or fail it.
+
+Before publishing, the publisher runs the same verification the documentation
+asks a reader to run: the exact file set, the manifest signature under the pinned
+key, and every declared digest. The `release` lane adds a clean checkout at the
+manifest's exact source commit, agreement with the shipping package version, and
+the repository's own release-model validation. The `staging` and `dev` proof
+lanes deliberately do not require the publishing checkout to sit at the
+candidate's commit; that is what lets a retained candidate be republished for
+proof without re-cutting it.
+
+### The GitHub mirror
 
 ```bash
 make publish-release RELEASE_DIR=dist/rust
 ```
 
-The publisher requires a clean checkout at the manifest's exact source commit,
-re-runs read-only candidate recovery, and binds the workspace version, changelog,
-annotated tag, release metadata, and all five public files to that commit. GitHub
-is only the download surface: it does not build, validate, approve, or define the
-release. There is no GitHub workflow or repository-setting gate.
+Run this after the origin publish, never before it. It requires a clean checkout
+at the manifest's exact source commit, re-runs read-only candidate recovery, and
+binds the workspace version, changelog, annotated tag, release metadata, and all
+public files to that commit. It creates or resumes one draft, uploads only
+missing files, downloads every existing file to compare its SHA-256 with the
+retained candidate, and publishes only a complete exact set. An exact published
+release is an idempotent success. Any differing tag, metadata, or file is a hard
+stop. Never move, replace, delete, or retarget release state; byte changes
+require a new version.
 
-The publisher creates or resumes one draft, uploads only missing files, downloads
-every existing file to compare its SHA-256 with the retained candidate, and
-publishes only a complete exact set. An exact published release is an idempotent
-success. Any differing tag, metadata, or file is a hard stop. Never move, replace,
-delete, or retarget release state; byte changes require a new version.
+GitHub does not build, validate, approve, or define the release. There is no
+GitHub workflow or repository-setting gate. Skipping the mirror leaves a
+complete, correct release. The install instructions move to the origin with the
+first `release` publish; until that happens `INSTALL.md` and `README.md` still
+name GitHub, and that is correct, because the `release` lane is empty.
 
 ## Host and advisory gates
 

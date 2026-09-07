@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap install format brand-sync test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover sign-release-manifest verify-release-signature publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap install format brand-sync test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover sign-release-manifest verify-release-signature publish-origin publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -26,7 +26,7 @@ TRANSPARENCY_ACTIVATED ?= 0
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
 UBUNTU_STOCK_BASE := sha256:4d0600e5088ac5da5119401c70292ea3a9d9dc71f76a234ad5390c1f6a8e5669
 FEDORA_STOCK_BASE := sha256:8c219b734f781909b9384edc01eb52318330b57fa58e0410dfcf973b01d28fcd
-SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/extract_changelog.sh scripts/install.sh scripts/publish-release.sh
+SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/extract_changelog.sh scripts/install.sh scripts/publish-origin.sh scripts/publish-release.sh
 
 all: install
 
@@ -190,6 +190,17 @@ publish-transparency:
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
 
+# The release origin. This is the publish owners fetch from; it never contacts
+# GitHub and deliberately does not require the Rust toolchain on the staging and
+# dev proof lanes. The release lane adds the source binding and the repository's
+# own release-model validation, which do use cargo.
+publish-origin:
+	@test -n "$(strip $(LANE))" || { echo "error: publish lane mismatch: expected LANE, actual missing" >&2; echo "repair: make publish-origin LANE=release RELEASE_DIR=dist/rust" >&2; exit 1; }
+	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-origin LANE=release RELEASE_DIR=dist/rust" >&2; exit 1; }
+	bash scripts/publish-origin.sh --lane "$(LANE)" --release-dir "$(RELEASE_DIR)"
+
+# The optional GitHub mirror. Run it after the origin publish; a failure here
+# leaves the origin publish intact, because the origin publish already happened.
 publish-release: rust-preflight
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-release RELEASE_DIR=dist/rust" >&2; exit 1; }
 	bash scripts/publish-release.sh "$(RELEASE_DIR)"
