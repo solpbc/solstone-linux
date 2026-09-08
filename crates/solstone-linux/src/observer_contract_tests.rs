@@ -17,23 +17,23 @@ use std::{
 };
 use tempfile::TempDir;
 
-const MANIFEST_SHA256: &str = "93b2a5a1604f1ba6fad30624c00cac98ea3d04a80cb1718886cf665c16f58834";
-const AUTHORITY_COMMIT: &str = "b819bd840765a77322f4fc69f92e593e8c59b8ca";
+const MANIFEST_SHA256: &str = "d9d2f846029fb5990ab458efaf6ac7c10ca306608088fba236dd3e5a148dc8ef";
+const AUTHORITY_COMMIT: &str = "ba16c8ca55b4151430166f0e7f9b0da2d15c6f45";
 
 const LINUX_FIXTURES: &[&str] = &[
-    "declared.observer.ingestUpload.status.collision",
-    "declared.observer.ingestUpload.status.conflict",
-    "declared.observer.ingestUpload.status.duplicate",
-    "declared.observer.ingestUpload.status.failed",
-    "declared.observer.ingestUpload.status.ok",
+    "declared.client.ingestUpload.status.collision",
+    "declared.client.ingestUpload.status.conflict",
+    "declared.client.ingestUpload.status.duplicate",
+    "declared.client.ingestUpload.status.failed",
+    "declared.client.ingestUpload.status.ok",
 ];
 
 const LINUX_VECTORS: &[&str] = &[
-    "observer.ingestUpload.status.collision",
-    "observer.ingestUpload.status.conflict",
-    "observer.ingestUpload.status.duplicate",
-    "observer.ingestUpload.status.failed",
-    "observer.ingestUpload.status.ok",
+    "client.ingestUpload.status.collision",
+    "client.ingestUpload.status.conflict",
+    "client.ingestUpload.status.duplicate",
+    "client.ingestUpload.status.failed",
+    "client.ingestUpload.status.ok",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -233,13 +233,13 @@ fn assert_identities(
     vector_document: &Value,
     consumer_audit: &Value,
 ) {
-    assert_eq!(manifest["bundle_semver"], "9.0.0");
+    assert_eq!(manifest["bundle_semver"], "10.0.0");
     assert_eq!(manifest["openapi_document_version"], "1.0.0");
-    assert_eq!(manifest["observer_protocol_version"], 3);
+    assert_eq!(manifest["client_protocol_version"], 3);
     assert_eq!(manifest["supported_response_variants"], json!([3]));
     assert_eq!(
         manifest["generator_identity"],
-        "solstone.repository_contracts.observer_client_contract_bundle.v1"
+        "solstone.repository_contracts.client_ingest_contract_bundle.v1"
     );
     assert_eq!(
         manifest["schema_dialect_uri"],
@@ -247,15 +247,15 @@ fn assert_identities(
     );
     assert_eq!(
         manifest["bundle_schema_identity"],
-        "solstone.observer-client-contract-bundle.schema.v1"
+        "solstone.client-ingest-contract-bundle.schema.v1"
     );
     assert_eq!(
         manifest["operation_ids"],
         json!([
-            "observer.ingestUpload",
-            "observer.ingestManifest",
-            "observer.ingestManifestDay",
-            "observer.ingestSegments"
+            "client.ingestUpload",
+            "client.ingestManifest",
+            "client.ingestManifestDay",
+            "client.ingestSegments"
         ])
     );
     assert_eq!(
@@ -268,15 +268,15 @@ fn assert_identities(
     );
     assert_eq!(
         fixture_document["schema"],
-        "solstone.observer-client-contract-fixtures.v2"
+        "solstone.client-ingest-contract-fixtures.v2"
     );
     assert_eq!(
         vector_document["schema"],
-        "solstone.observer-client-contract-vectors.v2"
+        "solstone.client-ingest-contract-vectors.v2"
     );
     assert_eq!(
         consumer_audit["schema"],
-        "solstone.observer-client-contract-consumer-audit.v2"
+        "solstone.client-ingest-contract-consumer-audit.v2"
     );
 
     assert_eq!(
@@ -290,10 +290,10 @@ fn assert_identities(
         })
     );
     assert_eq!(
-        vocabulary(manifest, "observer.ingestUpload.status"),
+        vocabulary(manifest, "client.ingestUpload.status"),
         &json!({
             "classification":"closed",
-            "id":"observer.ingestUpload.status",
+            "id":"client.ingestUpload.status",
             "source_pointers":[
                 "/paths/~1app~1devices~1ingest/post/responses/200/content/application~1json/schema/properties/status",
                 "/paths/~1app~1devices~1ingest/post/responses/409"
@@ -346,7 +346,7 @@ fn assert_identities(
         assert!(fixtures.contains_key(vector["fixture_id"].as_str().unwrap()));
     }
     assert_eq!(
-        fixtures["declared.observer.ingestUpload.status.failed"]["schema_validation"],
+        fixtures["declared.client.ingestUpload.status.failed"]["schema_validation"],
         json!({
             "note":"vocabulary-only status value; the full Error payload requires error, reason_code, and detail, and the authority enumerates no HTTP 500 reason code",
             "valid":false
@@ -360,7 +360,7 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
     let expected = json!({
         "authority_repository":"https://github.com/solpbc/solstone-journal",
         "authority_commit":AUTHORITY_COMMIT,
-        "bundle_version":"9.0.0",
+        "bundle_version":"10.0.0",
         "manifest_path":"manifest.json",
         "manifest_sha256":MANIFEST_SHA256,
         "vendored_root":"vendor/observer-client-contract"
@@ -401,17 +401,17 @@ fn assert_read_projection(projection: &Value) {
         (
             "/app/devices/ingest/manifest",
             manifest,
-            "observer.ingestManifest",
+            "client.ingestManifest",
         ),
         (
             "/app/devices/ingest/manifest/{day}",
             day_manifest,
-            "observer.ingestManifestDay",
+            "client.ingestManifestDay",
         ),
         (
             "/app/devices/ingest/segments/{day}",
             segments,
-            "observer.ingestSegments",
+            "client.ingestSegments",
         ),
     ] {
         let methods: Vec<_> = paths[route]
@@ -546,14 +546,14 @@ async fn assert_upload_contract(
     for fixture_id in LINUX_FIXTURES {
         let fixture = &fixtures[*fixture_id];
         let status = fixture["payload"]["status"].as_str().unwrap();
-        let vector_id = format!("observer.ingestUpload.status.{status}");
+        let vector_id = format!("client.ingestUpload.status.{status}");
         let vector = &vectors[&vector_id];
         let decision = &vector["decision"];
         assert_eq!(vector["fixture_id"], *fixture_id);
         assert_eq!(fixture["kind"], "declared");
         assert_eq!(
             fixture["provenance"]["vocabulary"],
-            "observer.ingestUpload.status"
+            "client.ingestUpload.status"
         );
         assert_eq!(
             fixture["provenance"]["http_status"],
@@ -681,7 +681,7 @@ fn assert_mutations(
     );
     for (field, value) in [
         ("bundle_semver", json!("9.9.9")),
-        ("observer_protocol_version", json!(2)),
+        ("client_protocol_version", json!(2)),
     ] {
         let mut mutated = manifest.clone();
         mutated[field] = value;
@@ -735,8 +735,8 @@ async fn assert_production_contradiction_mutation(
     fixtures: &BTreeMap<String, Value>,
     vectors: &BTreeMap<String, Value>,
 ) {
-    let fixture = &fixtures["declared.observer.ingestUpload.status.ok"];
-    let mut mutated_vector = vectors["observer.ingestUpload.status.ok"].clone();
+    let fixture = &fixtures["declared.client.ingestUpload.status.ok"];
+    let mut mutated_vector = vectors["client.ingestUpload.status.ok"].clone();
     mutated_vector["decision"]["accepted"] = json!(false);
     let result = upload_fixture_result(fixture).await;
     assert!(
