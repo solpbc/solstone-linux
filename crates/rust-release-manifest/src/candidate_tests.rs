@@ -59,6 +59,24 @@ fn normalize_fixture_lock_versions(path: &Path) {
     fs::write(path, normalized).unwrap();
 }
 
+fn normalize_fixture_release_helper_dependency(path: &Path) {
+    let manifest = fs::read_to_string(path).unwrap();
+    let mut replaced = 0;
+    let mut normalized = String::new();
+    for line in manifest.lines() {
+        let line = if line.starts_with("rust-release-manifest = { version = ") {
+            replaced += 1;
+            "rust-release-manifest = { version = \"1.0.0\", path = \"../rust-release-manifest\" }"
+        } else {
+            line
+        };
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+    assert_eq!(replaced, 1, "fixture release-helper dependency authority");
+    fs::write(path, normalized).unwrap();
+}
+
 fn normalize_fixture_release_policy(path: &Path) {
     let policy = fs::read_to_string(path).unwrap();
     let mut section = "";
@@ -147,6 +165,9 @@ pub(super) fn fixture() -> TestRepo {
         .unwrap();
     normalize_fixture_workspace_version(&temp.path().join("Cargo.toml"));
     normalize_fixture_lock_versions(&temp.path().join("Cargo.lock"));
+    normalize_fixture_release_helper_dependency(
+        &temp.path().join("crates/solstone-linux/Cargo.toml"),
+    );
     let image_policy = Path::new("packaging/release-policy.toml");
     if !temp.path().join(image_policy).exists() {
         fs::copy(source.join(image_policy), temp.path().join(image_policy)).unwrap();
@@ -205,6 +226,9 @@ pub(super) fn sha256_fixture() -> TestRepo {
         .unwrap();
     normalize_fixture_workspace_version(&temp.path().join("Cargo.toml"));
     normalize_fixture_lock_versions(&temp.path().join("Cargo.lock"));
+    normalize_fixture_release_helper_dependency(
+        &temp.path().join("crates/solstone-linux/Cargo.toml"),
+    );
     let image_policy = Path::new("packaging/release-policy.toml");
     if !temp.path().join(image_policy).exists() {
         fs::copy(source.join(image_policy), temp.path().join(image_policy)).unwrap();
