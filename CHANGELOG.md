@@ -6,22 +6,22 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-08
+
 ### Added
-- after a usable journal connection this observer can read the journal's current name and version, and can pick up relay access when the journal offers it.
-- sharing this observer's current name and app version with the journal waits on a journal connection that accepts that update.
+
+- after pairing, your journal can receive this device's current name and app version, and the connection can pick up private network access when available.
+- `status` now shows the current or last known version of your paired journal and refreshes it after each reconnection.
 
 ### Changed
-- older journals keep working over the local connection.
-- hostname is resampled on the next connection-lifecycle trigger, not polled.
 
-## [1.0.3] - 2026-08-28
-
-### Changed
-- this observer now speaks your journal's version-3 linked-device ingest contract. its device certificate identifies it for that co-experience, and it releases local capture data only after your journal proves it holds the same bytes.
+- the tray now uses the solstone name, and its mark and status text show whether your journal is receiving, connecting, offline, or needs your attention.
 
 ### Fixed
-- starting the app no longer treats its early system-service readiness signal as a completed desktop and observer initialization.
-- stopping the app now gives its desktop portal, audio, sync, and linked transport tasks bounded time to finish their cleanup.
+
+- when your journal returned an incomplete receipt, material held on this device could be cleared before every file was confirmed. it now stays until file names, sizes, and fingerprints match.
+- the solstone app now stays active while desktop intake finishes. stopping it no longer hangs during desktop or audio cleanup, and reinstalling no longer starts a second copy.
+- Open Journal now reaches the requested page, and media starts opening without waiting for the whole file to arrive.
 
 ## [1.0.2] - 2026-08-01
 
