@@ -14,6 +14,7 @@ pub enum SubscriptionOperation {
 pub struct DefaultSink {
     pub index: u32,
     pub name: String,
+    pub default_source_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -138,6 +139,7 @@ mod tests {
             default_sink: Some(DefaultSink {
                 index: 7,
                 name: "default-sink".into(),
+                default_source_name: Some("default-source".into()),
             }),
             mute_status: MuteStatus::Unknown,
             source_selection: None,
@@ -153,6 +155,7 @@ mod tests {
                 monitor_of_sink: None,
                 monitor_of_sink_name: None,
             },
+            microphone_matches_default_source: Some(false),
             monitor: SourceDescriptor {
                 index: 2,
                 name: Some("monitor".into()),
@@ -226,6 +229,7 @@ mod tests {
             SubscriptionEvent::DefaultSinkResolved(Ok(DefaultSink {
                 index: 9,
                 name: "replacement-sink".into(),
+                default_source_name: Some("replacement-source".into()),
             })),
         );
         assert_eq!(resolved.state.default_sink.as_ref().unwrap().index, 9);

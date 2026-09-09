@@ -130,8 +130,15 @@ fn report_selection(selection: &SourceSelection) {
     info!(
         microphone = ?selection.microphone.name,
         monitor = ?selection.monitor.name,
-        "selected first microphone and monitor sources"
+        "selected microphone and monitor sources"
     );
+    match selection.microphone_matches_default_source {
+        Some(true) => {}
+        Some(false) => warn!("chosen microphone is not the default source"),
+        None => {
+            warn!("chosen microphone has no name or server default-source comparison unavailable")
+        }
+    }
     match selection.monitor_matches_default_sink {
         Some(true) => {}
         Some(false) => warn!("chosen monitor is not the default sink monitor"),
@@ -164,6 +171,10 @@ fn drive_subscription(
                         Ok(sources) => classify_sources(
                             &sources,
                             state.default_sink.as_ref().map(|sink| sink.name.as_str()),
+                            state
+                                .default_sink
+                                .as_ref()
+                                .and_then(|sink| sink.default_source_name.as_deref()),
                             None,
                         ),
                         Err(error) => Err(crate::sources::SourceSelectionError::EnumerationFailed(
@@ -536,12 +547,15 @@ fn query_default_sink(
     let (tx, rx) = mpsc::channel();
     mainloop.lock();
     let operation = context.introspect().get_server_info(move |server| {
-        let _ = tx.send(server.default_sink_name.as_deref().map(str::to_owned));
+        let _ = tx.send((
+            server.default_sink_name.as_deref().map(str::to_owned),
+            server.default_source_name.as_deref().map(str::to_owned),
+        ));
     });
     mainloop.unlock();
-    let name = match rx.recv_timeout(PULSE_TIMEOUT) {
-        Ok(Some(name)) => name,
-        Ok(None) => return Err("server has no default sink".into()),
+    let (name, default_source_name) = match rx.recv_timeout(PULSE_TIMEOUT) {
+        Ok((Some(name), default_source_name)) => (name, default_source_name),
+        Ok((None, _)) => return Err("server has no default sink".into()),
         Err(error) => return Err(format!("default sink query failed: {error}")),
     };
     drop(operation);
@@ -560,7 +574,11 @@ fn query_default_sink(
     let result = rx.recv_timeout(PULSE_TIMEOUT);
     drop(operation);
     match result {
-        Ok(Some(index)) => Ok(crate::subscription::DefaultSink { index, name }),
+        Ok(Some(index)) => Ok(crate::subscription::DefaultSink {
+            index,
+            name,
+            default_source_name,
+        }),
         Ok(None) => Err("default sink lookup failed".into()),
         Err(error) => Err(format!("default sink lookup failed: {error}")),
     }
@@ -777,7 +795,7 @@ mod tests {
         };
         let sources = collect_source_metadata(&mut events, &clock).unwrap();
         assert_eq!(clock.now(), Duration::from_secs(3));
-        let selection = classify_sources(&sources, Some("sink"), None).unwrap();
+        let selection = classify_sources(&sources, Some("sink"), None, None).unwrap();
         assert_eq!(selection.microphone.name.as_deref(), Some("mic"));
         assert_eq!(selection.monitor.name.as_deref(), Some("sink.monitor"));
     }
