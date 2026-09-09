@@ -19,6 +19,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- on desktops with more than one microphone, audio could come from an unused input instead of the microphone you selected. it now comes from the active microphone.
 - when your journal returned an incomplete receipt, material held on this device could be cleared before every file was confirmed. it now stays until file names, sizes, and fingerprints match.
 - the solstone app now stays active while desktop intake finishes. stopping it no longer hangs during desktop or audio cleanup, and reinstalling no longer starts a second copy.
 - Open Journal now reaches the requested page, and media starts opening without waiting for the whole file to arrive.
