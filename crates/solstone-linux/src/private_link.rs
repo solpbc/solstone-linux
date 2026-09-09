@@ -581,6 +581,23 @@ pub(crate) trait Pairer: Send + Sync {
 
 pub(crate) struct SplPairer;
 
+const MAX_PAIRING_CLIENT_LABEL_BYTES: usize = 253;
+
+fn pairing_ceremony_identity(device_label: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
+    if (1..=MAX_PAIRING_CLIENT_LABEL_BYTES).contains(&device_label.len()) {
+        fields.insert(
+            "client_label".to_owned(),
+            serde_json::Value::String(device_label.to_owned()),
+        );
+    }
+    fields.insert(
+        "platform".to_owned(),
+        serde_json::Value::String("linux".to_owned()),
+    );
+    fields
+}
+
 impl Pairer for SplPairer {
     fn pair<'a>(
         &'a self,
@@ -680,9 +697,8 @@ async fn setup_with_pairer_and_stream_with_fault<R: Read>(
             ParsedPairLink::Relay(relay_link) => Some(relay_link),
             ParsedPairLink::Direct(_) => None,
         };
-    let mut credential = pairer
-        .pair(&link, device_label, &serde_json::Map::new())
-        .await?;
+    let pairing_identity = pairing_ceremony_identity(device_label);
+    let mut credential = pairer.pair(&link, device_label, &pairing_identity).await?;
     if let Some(relay_link) = relay_pair_link {
         if credential.relay_origin.as_deref() != Some(relay_link.relay_origin.as_str()) {
             return Err(PrivateStateError::PairingFailed);
@@ -3344,6 +3360,54 @@ pub(crate) mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move { self.result.clone().ok_or(PrivateStateError::PairingFailed) })
         }
+    }
+
+    struct IdentityAssertingPairer;
+
+    impl Pairer for IdentityAssertingPairer {
+        fn pair<'a>(
+            &'a self,
+            _link: &'a str,
+            device_label: &'a str,
+            additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+        ) -> Pin<Box<dyn Future<Output = Result<Credential, PrivateStateError>> + Send + 'a>>
+        {
+            assert_eq!(device_label, "suze");
+            assert_eq!(
+                additional_fields.get("client_label"),
+                Some(&serde_json::Value::String("suze".to_owned()))
+            );
+            assert_eq!(
+                additional_fields.get("platform"),
+                Some(&serde_json::Value::String("linux".to_owned()))
+            );
+            Box::pin(async move { Ok(credential()) })
+        }
+    }
+
+    #[test]
+    fn pairing_identity_omits_only_an_invalid_client_label() {
+        let empty = pairing_ceremony_identity("");
+        assert!(!empty.contains_key("client_label"));
+        assert_eq!(empty["platform"], "linux");
+
+        let oversize = pairing_ceremony_identity(&"a".repeat(254));
+        assert!(!oversize.contains_key("client_label"));
+        assert_eq!(oversize["platform"], "linux");
+    }
+
+    #[tokio::test]
+    async fn setup_passes_hostname_and_linux_platform_as_pairing_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        setup_with_pairer(
+            &IdentityAssertingPairer,
+            temporary.path(),
+            &temporary.path().join("state"),
+            "suze",
+            std::io::Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
