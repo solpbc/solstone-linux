@@ -32,6 +32,7 @@ mod shell;
 pub mod sources;
 pub mod streams;
 pub mod subscription;
+pub mod support;
 pub mod sync;
 pub mod sync_health;
 pub mod tray;

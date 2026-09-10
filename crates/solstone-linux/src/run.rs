@@ -821,6 +821,7 @@ mod tests {
         for command in [
             TrayCommand::OpenJournal,
             TrayCommand::OpenUrl("https://example.test"),
+            TrayCommand::ReportProblem(crate::tray_model::TrayStatus::Recording),
             TrayCommand::OpenConfig,
             TrayCommand::CopyInstructions,
         ] {

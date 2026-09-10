@@ -17,6 +17,7 @@ pub enum TrayCommand {
     Resume,
     OpenJournal,
     OpenUrl(&'static str),
+    ReportProblem(crate::tray_model::TrayStatus),
     OpenConfig,
     CopyInstructions,
 }
@@ -158,6 +159,12 @@ impl Tray for KsniTray {
                     action(
                         "privacy policy",
                         TrayCommand::OpenUrl("https://solpbc.org/privacy"),
+                    )
+                    .into(),
+                    action("get help", TrayCommand::OpenUrl(crate::support::HELP_URL)).into(),
+                    action(
+                        "report a problem",
+                        TrayCommand::ReportProblem(self.model.status),
                     )
                     .into(),
                     action(
@@ -311,8 +318,10 @@ mod tests {
             TrayCommand::OpenUrl("https://solstone.app/observers"),
             TrayCommand::OpenUrl("https://github.com/solpbc/solstone-linux"),
             TrayCommand::OpenUrl("https://solpbc.org/privacy"),
+            TrayCommand::OpenUrl(crate::support::HELP_URL),
+            TrayCommand::ReportProblem(tray.model.status),
         ];
-        for (item, expected) in about.submenu[1..4].iter().zip(expected) {
+        for (item, expected) in about.submenu[1..6].iter().zip(expected) {
             if let MenuItem::Standard(value) = item {
                 (value.activate)(&mut tray);
             }

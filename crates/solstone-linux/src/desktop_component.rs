@@ -152,6 +152,10 @@ impl DesktopComponent {
             crate::tray::TrayCommand::OpenUrl(url) => {
                 open::that_detached(url).map_err(|e| e.to_string())
             }
+            crate::tray::TrayCommand::ReportProblem(status) => open::that_detached(
+                crate::support::report_url(crate::tray_model::status_name(status)),
+            )
+            .map_err(|e| e.to_string()),
             crate::tray::TrayCommand::OpenConfig => {
                 open::that_detached(self.config.config_path()).map_err(|e| e.to_string())
             }
