@@ -33,8 +33,11 @@ Your journal must already be available. If it is not, start with the
 [solstone install](https://solstone.app/install). In your journal, create a pair
 link for this device and save it as `pair-link.txt`.
 
-Install a native Debian/RPM package from the release. From a matching source
-checkout, the portable archive installer is:
+Install a native Debian or RPM package from `updates.solstone.app`. Read
+`https://updates.solstone.app/solstone-linux/release/latest` for the current
+version, then download and verify the package before installing it; `INSTALL.md`
+carries the exact commands and filenames. From a matching source checkout, the
+portable archive installer is:
 
 ```bash
 scripts/install.sh solstone-linux-<VERSION>-linux-x86_64.tar.gz

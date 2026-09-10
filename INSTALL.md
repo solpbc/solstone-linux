@@ -32,9 +32,34 @@ sudo zypper install libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins
 
 ## Install a release
 
+Releases are published to `updates.solstone.app`. Read
+`https://updates.solstone.app/solstone-linux/release/latest` for the current
+version:
+
+```bash
+curl -fsS https://updates.solstone.app/solstone-linux/release/latest
+```
+
+It prints one line, `version=<VERSION>`. There is no directory listing, so fetch
+each file by name. For that version the files are:
+
+- `solstone-linux_<VERSION>-1_amd64.deb`
+- `solstone-linux-<VERSION>-1.x86_64.rpm`
+- `solstone-linux-<VERSION>-linux-x86_64.tar.gz`
+- `solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json`
+- `solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json.minisig`
+- `SHA256SUMS`
+
 **Verify first.** Download the package you will install, the release manifest,
-and its adjacent `.minisig` file from the
-[latest release](https://github.com/solpbc/solstone-linux/releases/latest).
+and its adjacent `.minisig` file:
+
+```bash
+base="https://updates.solstone.app/solstone-linux/release/<VERSION>"
+curl -fLO "$base/<the-package-you-will-install>"
+curl -fLO "$base/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json"
+curl -fLO "$base/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json.minisig"
+```
+
 Then fetch the published key, authenticate the manifest, and check the package
 against the digest in that manifest:
 
