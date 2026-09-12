@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "ea8fa01b408fd0c602020cfd9a2508b3e0010fbeb457ffab977b350781878e72",
+  "cargo_lock_sha256": "3ea3692e0cbfe451a7494e55ae34758d7dd5acc26fbc46bd4c45d78351e9ebc5",
   "notices_sha256": "86dbf6226bf443b235f6dc195a7e2e5c2523bcd5b50bfce3b6ae52a720366252",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux",
@@ -4886,7 +4886,7 @@
     {
       "name": "spl-core",
       "version": "0.1.0",
-      "source": "git+https://github.com/solpbc/spl-rust?rev=b124a4dd2e5f6c6a210ec07675a384a3f614b234#b124a4dd2e5f6c6a210ec07675a384a3f614b234",
+      "source": "git+https://github.com/solpbc/spl-rust?rev=2095b7bf62830cf10a5b042c528955945307e964#2095b7bf62830cf10a5b042c528955945307e964",
       "license": "AGPL-3.0-only",
       "members": [
         {
@@ -4901,7 +4901,7 @@
     {
       "name": "spl-home",
       "version": "0.1.0",
-      "source": "git+https://github.com/solpbc/spl-rust?rev=b124a4dd2e5f6c6a210ec07675a384a3f614b234#b124a4dd2e5f6c6a210ec07675a384a3f614b234",
+      "source": "git+https://github.com/solpbc/spl-rust?rev=2095b7bf62830cf10a5b042c528955945307e964#2095b7bf62830cf10a5b042c528955945307e964",
       "license": "AGPL-3.0-only",
       "members": [
         {
@@ -4916,7 +4916,7 @@
     {
       "name": "spl-transport",
       "version": "0.1.0",
-      "source": "git+https://github.com/solpbc/spl-rust?rev=b124a4dd2e5f6c6a210ec07675a384a3f614b234#b124a4dd2e5f6c6a210ec07675a384a3f614b234",
+      "source": "git+https://github.com/solpbc/spl-rust?rev=2095b7bf62830cf10a5b042c528955945307e964#2095b7bf62830cf10a5b042c528955945307e964",
       "license": "AGPL-3.0-only",
       "members": [
         {
