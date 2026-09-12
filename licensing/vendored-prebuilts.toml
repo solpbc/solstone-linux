@@ -1,6 +1,17 @@
 # solstone-linux vendored prebuilts allowlist
 # Schema: solstone-linux.vendored-prebuilts.v1
-# Note: Detection and policy accounting only, not a licence determination for these objects.
+#
+# This list is detection only. It is not a licence determination.
+# cargo deny, cargo metadata, and RUST_DEPENDENCY_NOTICES.txt reproduce crate
+# license files; they cannot stand in for the primary license text of a
+# vendored prebuilt binary (.lib, .a, .dll, .so, .dylib, .o, .obj, weights).
+# A crate SPDX field is visibility, not that determination.
+# A row is detection, not clearance. Absent primary text is a CLO
+# determination, never already-understood.
+#
+# Scan: non-test members whose suffix is .lib, .a, .dll, .so, .dylib, .o,
+# .obj, or a common weight suffix, from the same solstone-linux non-dev
+# closure as the notices index.
 
 schema = "solstone-linux.vendored-prebuilts.v1"
 
@@ -8,3 +19,5 @@ schema = "solstone-linux.vendored-prebuilts.v1"
 name = "ring"
 version = "0.17.14"
 suffixes = [".o"]
+# primary license files in crate: LICENSE, LICENSE-BoringSSL, LICENSE-other-bits
+# (reproduced in RUST_DEPENDENCY_NOTICES.txt). pregenerated assembler objects.
