@@ -3,9 +3,10 @@
 
 use clap::{Args, Parser, Subcommand};
 use rust_release_manifest::{
-    AuditRequest, Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE, ProcessEnvironment,
-    ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, RepoRoot, SPL_PIN_OK_MESSAGE, audit_packages,
-    classify_release_dir, create_candidate, emit_lane_handoff, emit_proof_handoff, prove_candidate,
+    AuditRequest, DependencyNoticesPaths, Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE,
+    ProcessEnvironment, ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, RepoRoot, SPL_PIN_OK_MESSAGE,
+    audit_packages, check_dependency_notices, classify_release_dir, create_candidate,
+    emit_lane_handoff, emit_proof_handoff, generate_dependency_notices, prove_candidate,
     publish_transparency, recover_candidate, resign_transparency_pointer, run_audit,
     sign_release_manifest, validate_spl_pin, verify_manifest_mode, verify_release_signature,
 };
@@ -70,6 +71,16 @@ enum Command {
         #[command(subcommand)]
         command: TransparencyCommand,
     },
+    Notices {
+        #[command(subcommand)]
+        command: NoticesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum NoticesCommand {
+    Generate,
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -291,6 +302,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             TransparencyCommand::Publish { release_dir } => publish_transparency(&release_dir)?,
             TransparencyCommand::ResignPointer => resign_transparency_pointer()?,
         },
+        Command::Notices { command } => {
+            let root = RepoRoot::resolve()?;
+            let paths = DependencyNoticesPaths::from_workspace_root(root.path());
+            match command {
+                NoticesCommand::Generate => {
+                    generate_dependency_notices(&paths)?;
+                    println!("Rust dependency notices generated successfully.");
+                }
+                NoticesCommand::Check => {
+                    check_dependency_notices(&paths)?;
+                    println!("Rust dependency notices verified successfully.");
+                }
+            }
+        }
     }
     Ok(())
 }

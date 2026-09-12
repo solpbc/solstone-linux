@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- generated Rust dependency notices (`RUST_DEPENDENCY_NOTICES.txt`) and verification tooling reproducing third-party crate licenses for all statically linked dependencies across package releases.
+
 ## [2.0.0] - 2026-09-08
 
 ### Added

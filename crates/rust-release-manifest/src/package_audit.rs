@@ -23,6 +23,7 @@ use xz2::read::XzDecoder;
 
 const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 const INSTALL_NOTES: &[u8] = include_bytes!("../../../packaging/INSTALL-NOTES");
+const RUST_DEPENDENCY_NOTICES: &[u8] = include_bytes!("../../../RUST_DEPENDENCY_NOTICES.txt");
 pub(crate) const DEB_COPYRIGHT: &[u8] = concat!(
     "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n",
     "Upstream-Name: solstone-linux\n",
@@ -58,6 +59,7 @@ pub(crate) enum PayloadRole {
     Executable,
     License,
     InstallNotes,
+    DependencyNotices,
     Icon,
 }
 
@@ -69,7 +71,7 @@ pub(crate) struct PayloadAuthority {
     pub(crate) role: PayloadRole,
 }
 
-pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 18] = [
+pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 19] = [
     PayloadAuthority {
         source: "target/release/solstone-linux",
         installed: "/usr/bin/solstone-linux",
@@ -87,6 +89,12 @@ pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 18] = [
         installed: "/usr/share/doc/solstone-linux/INSTALL-NOTES",
         mode: 0o644,
         role: PayloadRole::InstallNotes,
+    },
+    PayloadAuthority {
+        source: "RUST_DEPENDENCY_NOTICES.txt",
+        installed: "/usr/share/doc/solstone-linux/RUST_DEPENDENCY_NOTICES.txt",
+        mode: 0o644,
+        role: PayloadRole::DependencyNotices,
     },
     icon(
         "contrib/icons/hicolor/16x16/apps/solstone-observer.png",
@@ -782,6 +790,7 @@ fn expected_path(format: Format, authority: PayloadAuthority) -> String {
             PayloadRole::Executable => "bin/solstone-linux".to_owned(),
             PayloadRole::License => "LICENSE".to_owned(),
             PayloadRole::InstallNotes => "INSTALL-NOTES".to_owned(),
+            PayloadRole::DependencyNotices => "RUST_DEPENDENCY_NOTICES.txt".to_owned(),
             PayloadRole::Icon => authority
                 .source
                 .strip_prefix("contrib/icons/")
@@ -851,6 +860,12 @@ fn inspect_payload(
         }
         match authority.role {
             PayloadRole::Executable => executable = Some(member.bytes),
+            PayloadRole::DependencyNotices => {
+                if member.bytes != RUST_DEPENDENCY_NOTICES {
+                    return Err(audit_error(path, "DivergentPayload", "notices", &expected));
+                }
+                nonbinary.insert(authority.source.to_owned(), digest(&member.bytes));
+            }
             PayloadRole::InstallNotes => {
                 let notes = std::str::from_utf8(&member.bytes)
                     .map_err(|_| audit_error(path, "StaleInstallNotes", "non-utf8", &expected))?;
@@ -1054,6 +1069,7 @@ mod tests {
                     PayloadRole::Executable => crate::elf64::pinned_elf64_for_test(),
                     PayloadRole::InstallNotes => INSTALL_NOTES.to_vec(),
                     PayloadRole::License => b"license\n".to_vec(),
+                    PayloadRole::DependencyNotices => RUST_DEPENDENCY_NOTICES.to_vec(),
                     PayloadRole::Icon => authority.source.as_bytes().to_vec(),
                 };
                 Member {
@@ -1282,6 +1298,7 @@ mod tests {
     fn missing_notes_and_executable_are_rejected_in_all_formats() {
         for (role, member) in [
             (PayloadRole::InstallNotes, "missing"),
+            (PayloadRole::DependencyNotices, "missing"),
             (PayloadRole::Executable, "missing"),
         ] {
             for format in [Format::Tar, Format::Deb, Format::Rpm] {
@@ -1295,6 +1312,21 @@ mod tests {
                 let error = inspect_payload(artifact(format), format, members).unwrap_err();
                 exact(format, "PayloadClosure", member, &expected, error);
             }
+        }
+    }
+
+    #[test]
+    fn substitute_notices_bytes_are_rejected_in_all_formats() {
+        for format in [Format::Tar, Format::Deb, Format::Rpm] {
+            let mut members = fixture_members(format);
+            let notices = members
+                .iter_mut()
+                .find(|member| member.path.ends_with("RUST_DEPENDENCY_NOTICES.txt"))
+                .unwrap();
+            notices.bytes = b"different notices\n".to_vec();
+            let member = notices.path.clone();
+            let error = inspect_payload(artifact(format), format, members).unwrap_err();
+            exact(format, "DivergentPayload", "notices", &member, error);
         }
     }
 

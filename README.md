@@ -52,7 +52,7 @@ tarball. If you downloaded only the tarball, obtain `scripts/install.sh` from
 the matching release source, or extract it and manually copy `bin/solstone-linux`
 to a directory on `PATH` and `share/icons/hicolor` beneath the same prefix.
 
-The archive includes `packaging/INSTALL-NOTES`, the canonical runtime-dependency list. See `INSTALL.md` for package installation, tray notes, and troubleshooting.
+The archive includes `packaging/INSTALL-NOTES`, the canonical runtime-dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-party crate license texts. See `INSTALL.md` for package installation, tray notes, and troubleshooting.
 
 Pairing is the only setup path. The pair link comes from your journal. A journal
 on the same machine connects through the same private network path as any other journal;

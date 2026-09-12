@@ -42,6 +42,7 @@ RUN cargo build --locked --release -p solstone-linux -p rust-release-manifest \
     && install -D -m 0755 target/release/solstone-linux "/release-tree/${ROOT}/bin/solstone-linux" \
     && install -D -m 0644 LICENSE "/release-tree/${ROOT}/LICENSE" \
     && install -D -m 0644 packaging/INSTALL-NOTES "/release-tree/${ROOT}/INSTALL-NOTES" \
+    && install -D -m 0644 RUST_DEPENDENCY_NOTICES.txt "/release-tree/${ROOT}/RUST_DEPENDENCY_NOTICES.txt" \
     && mkdir -p "/release-tree/${ROOT}/share/icons" /release \
     && cp -R contrib/icons/hicolor "/release-tree/${ROOT}/share/icons/hicolor" \
     && tar -C /release-tree -czf "/release/${ROOT}.tar.gz" "$ROOT" \
@@ -77,8 +78,8 @@ RUN actual="$(cargo deb --version)" \
         | LC_ALL=C sort -z \
         | xargs -0 -r md5sum -- > DEBIAN/md5sums \
     && md5_count="$(wc -l < DEBIAN/md5sums)" \
-    && { test "${md5_count}" -eq 19 \
-        || { echo "error: Debian md5 inventory mismatch: expected 19 payloads, actual ${md5_count:-unavailable}" >&2; \
+    && { test "${md5_count}" -eq 20 \
+        || { echo "error: Debian md5 inventory mismatch: expected 20 payloads, actual ${md5_count:-unavailable}" >&2; \
              echo "repair: align the sealing bound with package assets and generated copyright" >&2; exit 1; }; } \
     && chmod 0644 DEBIAN/md5sums \
     && dpkg-deb --root-owner-group -Zxz -z9 --build "$DEB_ROOT" "${DEB}.sealed" >/dev/null \

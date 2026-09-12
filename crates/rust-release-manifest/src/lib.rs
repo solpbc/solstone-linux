@@ -31,6 +31,8 @@ pub use audit::*;
 pub use package_audit::audit_packages;
 mod spl_pin;
 pub use spl_pin::validate_spl_pin;
+mod dependency_notices;
+pub use dependency_notices::*;
 mod transaction;
 pub use transaction::*;
 mod transparency;
@@ -3499,6 +3501,8 @@ mod audit_tests;
 mod boundary_tests;
 #[cfg(test)]
 mod candidate_tests;
+#[cfg(test)]
+mod dependency_notices_tests;
 #[cfg(test)]
 mod proof_tests;
 #[cfg(test)]

@@ -124,6 +124,7 @@ for REQUIRED in \
   "$TOP/bin/solstone-linux" \
   "$TOP/LICENSE" \
   "$TOP/INSTALL-NOTES" \
+  "$TOP/RUST_DEPENDENCY_NOTICES.txt" \
   "$TOP/share/icons/hicolor/scalable/apps/solstone-observer.svg"; do
   if ! grep -Fxq "$REQUIRED" <<< "$CONTENTS"; then
     echo "error: archive is missing $REQUIRED" >&2
@@ -165,6 +166,7 @@ mkdir -p \
 install -m 0755 "$SOURCE/bin/solstone-linux" "$PREFIX/bin/solstone-linux"
 install -m 0644 "$SOURCE/LICENSE" "$PREFIX/share/doc/solstone-linux/LICENSE"
 install -m 0644 "$SOURCE/INSTALL-NOTES" "$PREFIX/share/doc/solstone-linux/INSTALL-NOTES"
+install -m 0644 "$SOURCE/RUST_DEPENDENCY_NOTICES.txt" "$PREFIX/share/doc/solstone-linux/RUST_DEPENDENCY_NOTICES.txt"
 while IFS= read -r -d '' ICON; do
   RELATIVE_ICON=${ICON#"$SOURCE/share/icons/hicolor/"}
   install -D -m 0644 "$ICON" "$PREFIX/share/icons/hicolor/$RELATIVE_ICON"

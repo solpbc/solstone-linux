@@ -68,6 +68,9 @@ fn committed_asset_set() -> BTreeSet<PathBuf> {
     let mut paths = BTreeSet::from([
         root.join("LICENSE").canonicalize().unwrap(),
         root.join("packaging/INSTALL-NOTES").canonicalize().unwrap(),
+        root.join("RUST_DEPENDENCY_NOTICES.txt")
+            .canonicalize()
+            .unwrap(),
     ]);
     collect_files(&root.join("contrib/icons/hicolor"), &mut paths);
     paths
@@ -179,12 +182,16 @@ fn container_context_excludes_host_outputs() {
 fn package_assets_exist_and_match() {
     let (_, member) = metadata();
     let expected = committed_asset_set();
-    assert_eq!(expected.len(), 17, "LICENSE + INSTALL-NOTES + 15 icons");
+    assert_eq!(
+        expected.len(),
+        18,
+        "LICENSE + INSTALL-NOTES + RUST_DEPENDENCY_NOTICES.txt + 15 icons"
+    );
 
     let deb = deb_assets(&member);
     let rpm = rpm_assets(&member);
-    assert_eq!(deb.len(), 18);
-    assert_eq!(rpm.len(), 18);
+    assert_eq!(deb.len(), 19);
+    assert_eq!(rpm.len(), 19);
     assert_eq!(deb[0].0, "target/release/solstone-linux");
     assert_eq!(rpm[0].0, "target/release/solstone-linux");
     assert_eq!(deb[0].2, "755");
@@ -223,8 +230,8 @@ fn debian_sealing_enumerates_every_installed_payload() {
     let (_, member) = metadata();
     let payload_count = deb_assets(&member).len() + 1;
     assert_eq!(
-        payload_count, 19,
-        "18 declared assets + generated copyright"
+        payload_count, 20,
+        "19 declared assets + generated copyright"
     );
 
     let containerfile =
@@ -260,6 +267,11 @@ fn release_fixture(temp: &Path) -> PathBuf {
     fs::copy(
         workspace_root().join("packaging/INSTALL-NOTES"),
         root.join("INSTALL-NOTES"),
+    )
+    .unwrap();
+    fs::copy(
+        workspace_root().join("RUST_DEPENDENCY_NOTICES.txt"),
+        root.join("RUST_DEPENDENCY_NOTICES.txt"),
     )
     .unwrap();
     copy_tree(
@@ -467,6 +479,16 @@ fn installer_installs_archive_into_prefix() {
             .join("share/doc/solstone-linux/INSTALL-NOTES")
             .is_file()
     );
+    let notices_path = prefix.join("share/doc/solstone-linux/RUST_DEPENDENCY_NOTICES.txt");
+    assert!(notices_path.is_file());
+    assert_eq!(
+        fs::read(&notices_path).unwrap(),
+        fs::read(workspace_root().join("RUST_DEPENDENCY_NOTICES.txt")).unwrap()
+    );
+    assert_eq!(
+        fs::metadata(&notices_path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
 }
 
 // AC: a real install merges its icons into the shared hicolor theme without
@@ -502,4 +524,62 @@ fn installer_preserves_foreign_hicolor_files() {
             .is_file()
     );
     assert!(hicolor.join("48x48/apps/solstone-observer.png").is_file());
+}
+
+#[test]
+fn installer_rejects_archive_missing_dependency_notices() {
+    let temp = tempfile::tempdir().unwrap();
+    let root_name = format!("solstone-linux-{VERSION}-linux-x86_64");
+    let root = temp.path().join(&root_name);
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::write(root.join("bin/solstone-linux"), b"fixture-binary\n").unwrap();
+    fs::set_permissions(
+        root.join("bin/solstone-linux"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::copy(workspace_root().join("LICENSE"), root.join("LICENSE")).unwrap();
+    fs::copy(
+        workspace_root().join("packaging/INSTALL-NOTES"),
+        root.join("INSTALL-NOTES"),
+    )
+    .unwrap();
+    // Omit RUST_DEPENDENCY_NOTICES.txt
+    copy_tree(
+        &workspace_root().join("contrib/icons/hicolor"),
+        &root.join("share/icons/hicolor"),
+    );
+
+    let archive = temp.path().join(format!("{root_name}.tar.gz"));
+    let status = Command::new("tar")
+        .args(["-czf"])
+        .arg(&archive)
+        .arg(&root_name)
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let home = temp.path().join("home");
+    let prefix = temp.path().join("prefix");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&prefix).unwrap();
+    let os_release = temp.path().join("os-release");
+    write_os_release(&os_release);
+
+    let before = snapshot(temp.path());
+
+    let output = installer_command(&archive, &os_release)
+        .args(["--prefix"])
+        .arg(&prefix)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("archive is missing") && stderr.contains("RUST_DEPENDENCY_NOTICES.txt"),
+        "expected missing notice error, actual: {stderr}"
+    );
+    assert_eq!(snapshot(temp.path()), before);
 }

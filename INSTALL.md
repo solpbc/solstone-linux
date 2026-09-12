@@ -114,7 +114,7 @@ beneath the same installation prefix before running the service and setup
 commands.
 
 The archive includes `INSTALL-NOTES`, which is the canonical cross-distribution
-runtime dependency list. Native packages install the same binary and icon set.
+runtime dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-party crate license texts. Native packages install the same binary, icon set, and documentation files under `/usr/share/doc/solstone-linux/` (or `$PREFIX/share/doc/solstone-linux/`).
 The service command writes the systemd user unit and desktop autostart entry,
 enables the unit, and starts the solstone app.
 

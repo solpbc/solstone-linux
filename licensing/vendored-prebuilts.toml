@@ -1,0 +1,10 @@
+# solstone-linux vendored prebuilts allowlist
+# Schema: solstone-linux.vendored-prebuilts.v1
+# Note: Detection and policy accounting only, not a licence determination for these objects.
+
+schema = "solstone-linux.vendored-prebuilts.v1"
+
+[[package]]
+name = "ring"
+version = "0.17.14"
+suffixes = [".o"]

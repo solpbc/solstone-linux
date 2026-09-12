@@ -396,7 +396,7 @@ fn package_payload_authority_matches_both_manifest_dialects() {
         .collect::<Vec<_>>();
     assert_eq!(deb, rpm);
     assert_eq!(deb, expected);
-    assert_eq!(expected.len(), 18);
+    assert_eq!(expected.len(), 19);
 }
 
 fn audit_fixture_bytes(
@@ -409,6 +409,9 @@ fn audit_fixture_bytes(
             include_bytes!("../../../packaging/INSTALL-NOTES").to_vec()
         }
         crate::package_audit::PayloadRole::License => b"audit fixture license\n".to_vec(),
+        crate::package_audit::PayloadRole::DependencyNotices => {
+            include_bytes!("../../../RUST_DEPENDENCY_NOTICES.txt").to_vec()
+        }
         crate::package_audit::PayloadRole::Icon => {
             format!("audit fixture {}\n", authority.source).into_bytes()
         }
@@ -437,6 +440,9 @@ fn audit_tar_with_payload(
             crate::package_audit::PayloadRole::Executable => "bin/solstone-linux".to_owned(),
             crate::package_audit::PayloadRole::License => "LICENSE".to_owned(),
             crate::package_audit::PayloadRole::InstallNotes => "INSTALL-NOTES".to_owned(),
+            crate::package_audit::PayloadRole::DependencyNotices => {
+                "RUST_DEPENDENCY_NOTICES.txt".to_owned()
+            }
             crate::package_audit::PayloadRole::Icon => format!(
                 "share/icons/{}",
                 authority.source.strip_prefix("contrib/icons/").unwrap()
@@ -773,6 +779,14 @@ fn package_audit_real_artifacts_cover_payload_rejection_matrix() {
             "StaleInstallNotes",
             "--server-url",
         ),
+        Mutation::Replace(
+            PayloadRole::DependencyNotices,
+            b"different notices".to_vec(),
+            0o644,
+            "DivergentPayload",
+            "notices",
+        ),
+        Mutation::Omit(PayloadRole::DependencyNotices),
         Mutation::Omit(PayloadRole::InstallNotes),
         Mutation::Omit(PayloadRole::Executable),
     ];
@@ -800,6 +814,9 @@ fn package_audit_real_artifacts_cover_payload_rejection_matrix() {
                             PayloadRole::Executable => "bin/solstone-linux".to_owned(),
                             PayloadRole::License => "LICENSE".to_owned(),
                             PayloadRole::InstallNotes => "INSTALL-NOTES".to_owned(),
+                            PayloadRole::DependencyNotices => {
+                                "RUST_DEPENDENCY_NOTICES.txt".to_owned()
+                            }
                             PayloadRole::Icon => authority
                                 .source
                                 .strip_prefix("contrib/icons/")
@@ -821,6 +838,9 @@ fn package_audit_real_artifacts_cover_payload_rejection_matrix() {
                             PayloadRole::Executable => "bin/solstone-linux".to_owned(),
                             PayloadRole::License => "LICENSE".to_owned(),
                             PayloadRole::InstallNotes => "INSTALL-NOTES".to_owned(),
+                            PayloadRole::DependencyNotices => {
+                                "RUST_DEPENDENCY_NOTICES.txt".to_owned()
+                            }
                             PayloadRole::Icon => unreachable!(),
                         },
                         _ => authority.installed.trim_start_matches('/').to_owned(),
