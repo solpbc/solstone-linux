@@ -899,6 +899,220 @@ mod tests {
         }
     }
 
+    struct TestVideo;
+    impl crate::observer::VideoCapture for TestVideo {
+        fn start(
+            &mut self,
+            _directory: &std::path::Path,
+            _framerate: i64,
+            _draw_cursor: bool,
+        ) -> Result<Vec<crate::observer::VideoStream>, String> {
+            Ok(vec![])
+        }
+        fn stop(&mut self) -> Result<Vec<crate::observer::StoppedStream>, String> {
+            Ok(vec![])
+        }
+        fn is_healthy(&self) -> bool {
+            true
+        }
+    }
+
+    struct TestAudio;
+    impl crate::observer::AudioCapture for TestAudio {
+        fn drain(&mut self) -> crate::chunking::DrainedChunk {
+            crate::chunking::StereoAccumulator::default().drain()
+        }
+        fn audio_available(&self) -> bool {
+            true
+        }
+        fn fatal_error(&self) -> Option<String> {
+            None
+        }
+        fn stop(&mut self) {}
+    }
+
+    struct TestActivity;
+    impl crate::observer::ActivityProbe for TestActivity {
+        fn probe(&mut self) -> Result<crate::observer::ActivityState, String> {
+            Ok(crate::observer::ActivityState::default())
+        }
+    }
+
+    struct TestMute;
+    impl crate::observer::MuteProbe for TestMute {
+        fn probe_muted(&mut self) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    struct TestWriter;
+    impl crate::observer::AudioWriter for TestWriter {
+        fn write(
+            &mut self,
+            _frames: &[f32],
+            _plan: &crate::encoding::AudioOutputPlan,
+            _directory: &std::path::Path,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct TestEventSink;
+    impl crate::observer::EventSink for TestEventSink {
+        fn segment_completed(&mut self, _event: crate::observer::SegmentCompletedEvent) {}
+    }
+
+    #[derive(Clone)]
+    struct TestClock(f64);
+    impl crate::observer::Clock for TestClock {
+        fn wall_seconds(&self) -> f64 {
+            self.0
+        }
+        fn monotonic_seconds(&self) -> f64 {
+            self.0
+        }
+    }
+
+    struct TestStats;
+    impl crate::observer::CaptureStatsSource for TestStats {
+        fn snapshot(
+            &mut self,
+            _root: &std::path::Path,
+            _today: &str,
+        ) -> crate::capture_stats::CaptureStats {
+            crate::capture_stats::CaptureStats {
+                captures_today: 0,
+                total_size_mb: 0,
+            }
+        }
+    }
+
+    #[test]
+    fn tray_menu_actions_drive_observer_pause_and_resume_transitions() {
+        use ksni::Tray;
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let commands = CommandSender::new(cmd_tx);
+
+        let initial_snapshot = StateSnapshot {
+            mode: Mode::Idle,
+            paused: false,
+            segment_open: false,
+            captures_today: 0,
+            total_size_mb: 0,
+            pause_until: None,
+            segment_start_mono: None,
+            process_start_mono: 42.0,
+        };
+        let health = crate::sync_health::derive_health(
+            &crate::sync_health::SyncFacts::default(),
+            0.0,
+            600.0,
+        );
+        let mut tray = crate::tray::KsniTray {
+            model: crate::tray_model::build_with_open_journal(
+                &initial_snapshot,
+                300,
+                42.0,
+                &health,
+                true,
+            ),
+            commands: commands.tray_sender(),
+        };
+
+        let (states, receiver) = WatchStateSink::channel(initial_snapshot);
+        let backends = crate::observer::Backends {
+            video: TestVideo,
+            audio: TestAudio,
+            activity: TestActivity,
+            mute: TestMute,
+            writer: TestWriter,
+            events: TestEventSink,
+            clock: TestClock(42.0),
+            stats: TestStats,
+            states,
+        };
+        let mut observer = Observer::new(Config::default(), backends);
+        let open_journal = crate::private_link::OpenJournalAccess::default();
+
+        let menu_items = tray.menu();
+        let pause_submenu = menu_items
+            .into_iter()
+            .find_map(|item| match item {
+                ksni::menu::MenuItem::SubMenu(sub) if sub.label == "pause" => Some(sub),
+                _ => None,
+            })
+            .expect("pause submenu exists");
+
+        // 1. 15 minutes -> Pause(900)
+        let item_15m = match &pause_submenu.submenu[0] {
+            ksni::menu::MenuItem::Standard(item) => item,
+            _ => panic!("expected standard item"),
+        };
+        (item_15m.activate)(&mut tray);
+        let cmd = cmd_rx.recv().unwrap();
+        assert_eq!(cmd, TrayCommand::Pause(900));
+        apply_command(&mut observer, cmd, &open_journal);
+        let published = receiver.borrow().clone();
+        assert!(published.paused);
+        assert_eq!(published.pause_until, Some(942.0));
+
+        // 2. 30 minutes -> Pause(1800)
+        let item_30m = match &pause_submenu.submenu[1] {
+            ksni::menu::MenuItem::Standard(item) => item,
+            _ => panic!("expected standard item"),
+        };
+        (item_30m.activate)(&mut tray);
+        let cmd = cmd_rx.recv().unwrap();
+        assert_eq!(cmd, TrayCommand::Pause(1800));
+        apply_command(&mut observer, cmd, &open_journal);
+        let published = receiver.borrow().clone();
+        assert!(published.paused);
+        assert_eq!(published.pause_until, Some(1842.0));
+
+        // 3. 1 hour -> Pause(3600)
+        let item_1h = match &pause_submenu.submenu[2] {
+            ksni::menu::MenuItem::Standard(item) => item,
+            _ => panic!("expected standard item"),
+        };
+        (item_1h.activate)(&mut tray);
+        let cmd = cmd_rx.recv().unwrap();
+        assert_eq!(cmd, TrayCommand::Pause(3600));
+        apply_command(&mut observer, cmd, &open_journal);
+        let published = receiver.borrow().clone();
+        assert!(published.paused);
+        assert_eq!(published.pause_until, Some(3642.0));
+
+        // 4. until I resume -> PauseIndefinite
+        let item_indefinite = match &pause_submenu.submenu[3] {
+            ksni::menu::MenuItem::Standard(item) => item,
+            _ => panic!("expected standard item"),
+        };
+        (item_indefinite.activate)(&mut tray);
+        let cmd = cmd_rx.recv().unwrap();
+        assert_eq!(cmd, TrayCommand::PauseIndefinite);
+        apply_command(&mut observer, cmd, &open_journal);
+        let published = receiver.borrow().clone();
+        assert!(published.paused);
+        assert_eq!(published.pause_until, None);
+
+        // 5. resume -> Resume
+        let menu_items = tray.menu();
+        let resume_item = menu_items
+            .into_iter()
+            .find_map(|item| match item {
+                ksni::menu::MenuItem::Standard(item) if item.label == "resume" => Some(item),
+                _ => None,
+            })
+            .expect("resume item exists");
+        (resume_item.activate)(&mut tray);
+        let cmd = cmd_rx.recv().unwrap();
+        assert_eq!(cmd, TrayCommand::Resume);
+        apply_command(&mut observer, cmd, &open_journal);
+        let published = receiver.borrow().clone();
+        assert!(!published.paused);
+        assert_eq!(published.pause_until, None);
+    }
+
     // AC: 4 — absolute deadlines advance without drift and skip catch-up storms.
     #[test]
     fn tick_deadline_advances_absolutely_and_skips_storms() {

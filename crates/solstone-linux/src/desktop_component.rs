@@ -105,23 +105,7 @@ impl DesktopComponent {
             }
         }
     }
-    pub fn setup(
-        &self,
-        mut register: impl FnMut() -> bool,
-        mut wait: impl FnMut(std::time::Duration),
-    ) -> bool {
-        for attempt in 0..3 {
-            if register() {
-                return true;
-            }
-            if attempt < 2 {
-                tracing::info!("SNI watcher retry {}/2...", attempt + 1);
-                wait(std::time::Duration::from_secs(1));
-            }
-        }
-        tracing::info!("No StatusNotifierWatcher available");
-        false
-    }
+
     pub async fn watch_until_lost(
         &self,
         mut receiver: tokio::sync::watch::Receiver<StateSnapshot>,
@@ -217,23 +201,7 @@ mod tests {
         );
         assert_eq!(d.config.config_path(), c.config_path());
     }
-    #[test]
-    fn setup_retries_three_times() {
-        let d = DesktopComponent::new(Config::default());
-        let mut calls = 0;
-        let mut waits = 0;
-        assert!(!d.setup(
-            || {
-                calls += 1;
-                false
-            },
-            |duration| {
-                assert_eq!(duration, std::time::Duration::from_secs(1));
-                waits += 1
-            }
-        ));
-        assert_eq!((calls, waits), (3, 2));
-    }
+
     #[test]
     fn public_links_remain_distinct_from_open_journal() {
         let component = DesktopComponent::new(Config::default());

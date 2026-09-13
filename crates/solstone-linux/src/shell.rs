@@ -277,43 +277,30 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         &initial_health,
         inputs.open_journal.available(),
     );
-    let mut tray_handle = None;
-    let registered = component.setup(
-        || {
-            let tray = KsniTray {
-                model: initial_model.clone(),
-                commands: inputs.commands.tray_sender(),
-            };
-            match runtime.block_on(tray.spawn()) {
-                Ok(handle) => {
-                    tray_handle = Some(handle);
-                    true
-                }
-                Err(error) => {
-                    tracing::debug!(%error, "Failed to register status notifier item");
-                    false
-                }
-            }
-        },
-        std::thread::sleep,
-    );
-
-    let (render_task, apply_task) = if registered {
-        let handle = tray_handle.expect("successful tray registration stores a handle");
-        let (models, model_receiver) = watch::channel(initial_model);
-        let render_task = tokio::spawn(run_tray_renderer(
-            component,
-            inputs.tray_receiver,
-            models,
-            inputs.config.segment_interval,
-            inputs.clock,
-            tray_health,
-            inputs.open_journal,
-        ));
-        let apply_task = tokio::spawn(run_tray_applier(handle, model_receiver, shutdown_rx));
-        (Some(render_task), Some(apply_task))
-    } else {
-        (None, None)
+    let tray = KsniTray {
+        model: initial_model.clone(),
+        commands: inputs.commands.tray_sender(),
+    };
+    let (render_task, apply_task) = match runtime.block_on(tray.assume_sni_available(true).spawn())
+    {
+        Ok(handle) => {
+            let (models, model_receiver) = watch::channel(initial_model);
+            let render_task = tokio::spawn(run_tray_renderer(
+                component,
+                inputs.tray_receiver,
+                models,
+                inputs.config.segment_interval,
+                inputs.clock,
+                tray_health,
+                inputs.open_journal,
+            ));
+            let apply_task = tokio::spawn(run_tray_applier(handle, model_receiver, shutdown_rx));
+            (Some(render_task), Some(apply_task))
+        }
+        Err(error) => {
+            tracing::debug!(%error, "Failed to register status notifier item");
+            (None, None)
+        }
     };
 
     DesktopShell {
@@ -678,20 +665,177 @@ mod tests {
         assert_eq!(receiver.recv().unwrap(), TrayCommand::PauseIndefinite);
     }
 
-    // AC: 5 — the required registration policy exhausts three attempts and returns tray-less.
     #[test]
-    fn trayless_setup_retries_three_times() {
-        let component = DesktopComponent::new(Config::default());
-        let mut attempts = 0;
-        let mut waits = 0;
-        assert!(!component.setup(
-            || {
-                attempts += 1;
-                false
-            },
-            |_| waits += 1,
-        ));
-        assert_eq!((attempts, waits), (3, 2));
+    fn production_start_requests_assume_sni_available_exactly_once() {
+        use syn::visit::Visit;
+
+        struct ReturnVisitor {
+            has_return: bool,
+        }
+        impl<'ast> Visit<'ast> for ReturnVisitor {
+            fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
+                self.has_return = true;
+            }
+        }
+
+        struct StartInspector {
+            in_start: bool,
+            start_assume_sni_count: usize,
+            total_assume_sni_count: usize,
+            spawn_method_calls_in_start: Vec<syn::ExprMethodCall>,
+            signal_task_seen_before_tray_match: bool,
+            tray_match_seen: bool,
+            err_arm_assigns_none_tuple_without_return: bool,
+        }
+
+        impl<'ast> Visit<'ast> for StartInspector {
+            fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+                let was_in_start = self.in_start;
+                if node.sig.ident == "start" {
+                    self.in_start = true;
+                    let mut saw_signal = false;
+                    for stmt in &node.block.stmts {
+                        if let syn::Stmt::Local(local) = stmt {
+                            let pat_is_signal = match &local.pat {
+                                syn::Pat::Ident(id) => id.ident == "signal_task",
+                                _ => false,
+                            };
+                            if pat_is_signal {
+                                saw_signal = true;
+                            }
+                            if let Some(syn::Expr::Match(expr_match)) =
+                                local.init.as_ref().map(|init| init.expr.as_ref())
+                            {
+                                self.tray_match_seen = true;
+                                if saw_signal {
+                                    self.signal_task_seen_before_tray_match = true;
+                                }
+                                for arm in &expr_match.arms {
+                                    let is_err = match &arm.pat {
+                                        syn::Pat::TupleStruct(pts) => pts
+                                            .path
+                                            .segments
+                                            .last()
+                                            .is_some_and(|seg| seg.ident == "Err"),
+                                        _ => false,
+                                    };
+                                    if is_err {
+                                        let mut ret_vis = ReturnVisitor { has_return: false };
+                                        ret_vis.visit_expr(&arm.body);
+                                        let assigns_none_tuple = match arm.body.as_ref() {
+                                            syn::Expr::Block(block) => {
+                                                match block.block.stmts.last() {
+                                                    Some(syn::Stmt::Expr(
+                                                        syn::Expr::Tuple(tup),
+                                                        None,
+                                                    )) => {
+                                                        tup.elems.len() == 2
+                                                            && tup.elems.iter().all(|elem| {
+                                                                match elem {
+                                                                    syn::Expr::Path(p) => {
+                                                                        p.path.is_ident("None")
+                                                                    }
+                                                                    _ => false,
+                                                                }
+                                                            })
+                                                    }
+                                                    _ => false,
+                                                }
+                                            }
+                                            syn::Expr::Tuple(tup) => {
+                                                tup.elems.len() == 2
+                                                    && tup.elems.iter().all(|elem| match elem {
+                                                        syn::Expr::Path(p) => {
+                                                            p.path.is_ident("None")
+                                                        }
+                                                        _ => false,
+                                                    })
+                                            }
+                                            _ => false,
+                                        };
+                                        if assigns_none_tuple && !ret_vis.has_return {
+                                            self.err_arm_assigns_none_tuple_without_return = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::visit::visit_item_fn(self, node);
+                self.in_start = was_in_start;
+            }
+
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "assume_sni_available" {
+                    self.total_assume_sni_count += 1;
+                    if self.in_start {
+                        self.start_assume_sni_count += 1;
+                        assert_eq!(node.args.len(), 1, "assume_sni_available must take 1 arg");
+                        if let syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Bool(lit_bool),
+                            ..
+                        }) = &node.args[0]
+                        {
+                            assert!(lit_bool.value, "assume_sni_available argument must be true");
+                        } else {
+                            panic!("expected literal bool true argument");
+                        }
+                    }
+                } else if self.in_start && node.method == "spawn" {
+                    self.spawn_method_calls_in_start.push(node.clone());
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+
+        let syntax: syn::File = syn::parse_str(include_str!("shell.rs")).unwrap();
+        let mut inspector = StartInspector {
+            in_start: false,
+            start_assume_sni_count: 0,
+            total_assume_sni_count: 0,
+            spawn_method_calls_in_start: Vec::new(),
+            signal_task_seen_before_tray_match: false,
+            tray_match_seen: false,
+            err_arm_assigns_none_tuple_without_return: false,
+        };
+        inspector.visit_file(&syntax);
+
+        assert_eq!(
+            inspector.start_assume_sni_count, 1,
+            "shell::start must call assume_sni_available(true) exactly once"
+        );
+        assert_eq!(
+            inspector.total_assume_sni_count, 1,
+            "assume_sni_available must only be called from production start"
+        );
+        assert_eq!(
+            inspector.spawn_method_calls_in_start.len(),
+            1,
+            "start must contain exactly 1 method .spawn() call for the tray"
+        );
+        let spawn_call = &inspector.spawn_method_calls_in_start[0];
+        match spawn_call.receiver.as_ref() {
+            syn::Expr::MethodCall(recv_call) => {
+                assert_eq!(
+                    recv_call.method, "assume_sni_available",
+                    "tray .spawn() must have receiver assume_sni_available, bare spawn is forbidden"
+                );
+            }
+            _ => panic!("bare .spawn() on tray without assume_sni_available is forbidden"),
+        }
+        assert!(
+            inspector.signal_task_seen_before_tray_match,
+            "signal_task must start before the tray spawn match"
+        );
+        assert!(
+            inspector.tray_match_seen,
+            "tray registration match must be present"
+        );
+        assert!(
+            inspector.err_arm_assigns_none_tuple_without_return,
+            "tray spawn Err arm must assign (None, None) and not return from start"
+        );
     }
 
     // AC: 6 — only the exact name-owning value is stashed and handed to the object-server path.

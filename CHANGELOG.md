@@ -6,6 +6,11 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- hand-edited settings and other config entries now stay in config.json when you use the settings command or reconnect the app.
+- the tray now appears when the desktop starts after the solstone app, and returns after your desktop shell or system tray restarts.
+
 ## [2.0.1] - 2026-09-13
 
 ### Added

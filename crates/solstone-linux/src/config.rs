@@ -8,16 +8,14 @@ use std::{
     env, fs, io,
     os::unix::fs::PermissionsExt,
     path::{Component, PathBuf},
-    sync::{
-        Arc, Mutex, MutexGuard, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     thread,
     time::{Duration, Instant},
 };
 
 use crate::private_file::{
-    DurableWriteFault, NoWriteFault, atomic_write_bytes_with_fault, ensure_private_directory,
+    DurableWriteFault, NoWriteFault, PrivateFileError, atomic_write_bytes_guarded,
+    ensure_private_directory, open_regular_readonly,
 };
 
 pub const DEFAULT_SYNC_STALE_THRESHOLD: i64 = 600;
@@ -25,7 +23,7 @@ const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_micros(100);
 static CONFIG_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
-static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub(crate) const RETIRED_CONFIG_KEYS: [&str; 3] = ["server_url", "key", "chat_bridge_enabled"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -258,7 +256,7 @@ fn load_resolved_config(mut config: Config) -> LoadedConfig {
         return LoadedConfig { config, warnings };
     };
     let mut values = values.clone();
-    for legacy in ["server_url", "key", "chat_bridge_enabled"] {
+    for legacy in RETIRED_CONFIG_KEYS {
         values.remove(legacy);
     }
     let values = &values;
@@ -334,36 +332,197 @@ fn acquire_config_write_lock(lock: &Mutex<()>) -> io::Result<MutexGuard<'_, ()>>
     }
 }
 
-fn write_config(config: &Config) -> io::Result<()> {
-    config.ensure_dirs()?;
-    let path = config.config_path();
-    let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), sequence));
-    let mut text = serde_json::to_string_pretty(config).map_err(io::Error::other)?;
-    text.push('\n');
-    fs::write(&temporary, text)?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-    fs::rename(temporary, path)
+enum ConfigOverlay<'a> {
+    Settings(&'a Config),
+    Stream(&'a str),
+    Sanitize,
 }
 
-fn write_link_config(
+fn write_config_merge(
     paths: &ConfigPaths,
-    stream: Option<&str>,
+    overlay: ConfigOverlay<'_>,
     fault: &dyn DurableWriteFault,
 ) -> io::Result<Config> {
     let resolved = resolve_config_paths(paths);
     let lock = config_write_lock(&resolved)?;
     let _guard = acquire_config_write_lock(&lock)?;
-    let mut config = load_resolved_config(resolved).config;
-    if let Some(stream) = stream {
-        config.stream = stream.to_owned();
+    let path = resolved.config_path();
+    ensure_private_directory(&resolved.config_dir).map_err(io::Error::other)?;
+
+    let (merge_basis, mut map) = match open_regular_readonly(&path) {
+        Ok(mut file) => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let Some(map) = value.as_object() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Config is not a JSON object",
+                ));
+            };
+            (Some(bytes), map.clone())
+        }
+        Err(PrivateFileError::Io {
+            kind: io::ErrorKind::NotFound,
+            ..
+        }) => (None, Map::new()),
+        Err(err) => {
+            return Err(io::Error::other(err));
+        }
+    };
+
+    for retired in RETIRED_CONFIG_KEYS {
+        map.remove(retired);
     }
-    ensure_private_directory(&config.config_dir).map_err(io::Error::other)?;
-    let mut bytes = serde_json::to_vec_pretty(&config).map_err(io::Error::other)?;
+
+    let mut warnings = Vec::new();
+    let mut stream = if merge_basis.is_some() {
+        load_string(&map, "stream", &mut warnings)
+    } else {
+        String::new()
+    };
+    let mut segment_interval = if merge_basis.is_some() {
+        load_int(&map, "segment_interval", 300, &mut warnings)
+    } else {
+        300
+    };
+    let mut sync_retry_delays = if merge_basis.is_some() {
+        load_int_list(
+            &map,
+            "sync_retry_delays",
+            &DEFAULT_RETRY_DELAYS,
+            &mut warnings,
+        )
+    } else {
+        DEFAULT_RETRY_DELAYS.to_vec()
+    };
+    let mut sync_max_retries = if merge_basis.is_some() {
+        load_int(&map, "sync_max_retries", 10, &mut warnings)
+    } else {
+        10
+    };
+    let mut sync_stale_threshold = if merge_basis.is_some() {
+        load_int(
+            &map,
+            "sync_stale_threshold",
+            DEFAULT_SYNC_STALE_THRESHOLD,
+            &mut warnings,
+        )
+    } else {
+        DEFAULT_SYNC_STALE_THRESHOLD
+    };
+    let mut cache_retention_days = if merge_basis.is_some() {
+        load_int(&map, "cache_retention_days", 7, &mut warnings)
+    } else {
+        7
+    };
+    let mut capture_framerate = if merge_basis.is_some() {
+        load_int(&map, "capture_framerate", 1, &mut warnings).clamp(1, 10)
+    } else {
+        1
+    };
+    let mut draw_cursor = if merge_basis.is_some() {
+        json_truthy(map.get("draw_cursor"), true)
+    } else {
+        true
+    };
+    let mut start_paused = if merge_basis.is_some() {
+        json_truthy(map.get("start_paused"), false)
+    } else {
+        false
+    };
+
+    match overlay {
+        ConfigOverlay::Settings(snapshot) => {
+            capture_framerate = snapshot.capture_framerate.clamp(1, 10);
+            draw_cursor = snapshot.draw_cursor;
+            start_paused = snapshot.start_paused;
+            segment_interval = snapshot.segment_interval;
+            cache_retention_days = snapshot.cache_retention_days;
+            if merge_basis.is_none() {
+                stream = snapshot.stream.clone();
+                sync_retry_delays = snapshot.sync_retry_delays.clone();
+                sync_max_retries = snapshot.sync_max_retries;
+                sync_stale_threshold = snapshot.sync_stale_threshold;
+            }
+        }
+        ConfigOverlay::Stream(new_stream) => {
+            stream = new_stream.to_owned();
+        }
+        ConfigOverlay::Sanitize => {}
+    }
+
+    let returned_config = Config {
+        stream: stream.clone(),
+        segment_interval,
+        sync_retry_delays: sync_retry_delays.clone(),
+        sync_max_retries,
+        sync_stale_threshold,
+        cache_retention_days,
+        capture_framerate,
+        draw_cursor,
+        start_paused,
+        base_dir: resolved.base_dir.clone(),
+        config_dir: resolved.config_dir.clone(),
+    };
+
+    let mut bytes = if merge_basis.is_none() {
+        serde_json::to_vec_pretty(&returned_config).map_err(io::Error::other)?
+    } else {
+        map.insert("stream".into(), Value::String(stream));
+        map.insert(
+            "segment_interval".into(),
+            Value::Number(segment_interval.into()),
+        );
+        map.insert(
+            "sync_retry_delays".into(),
+            Value::Array(sync_retry_delays.into_iter().map(Value::from).collect()),
+        );
+        map.insert(
+            "sync_max_retries".into(),
+            Value::Number(sync_max_retries.into()),
+        );
+        map.insert(
+            "sync_stale_threshold".into(),
+            Value::Number(sync_stale_threshold.into()),
+        );
+        map.insert(
+            "cache_retention_days".into(),
+            Value::Number(cache_retention_days.into()),
+        );
+        map.insert(
+            "capture_framerate".into(),
+            Value::Number(capture_framerate.into()),
+        );
+        map.insert("draw_cursor".into(), Value::Bool(draw_cursor));
+        map.insert("start_paused".into(), Value::Bool(start_paused));
+        serde_json::to_vec_pretty(&map).map_err(io::Error::other)?
+    };
     bytes.push(b'\n');
-    atomic_write_bytes_with_fault(&config.config_path(), &bytes, fault)
-        .map_err(io::Error::other)?;
-    Ok(config)
+
+    let is_current = || match &merge_basis {
+        None => matches!(
+            open_regular_readonly(&path),
+            Err(PrivateFileError::Io {
+                kind: io::ErrorKind::NotFound,
+                ..
+            })
+        ),
+        Some(basis_bytes) => match open_regular_readonly(&path) {
+            Ok(mut file) => {
+                use std::io::Read;
+                let mut current = Vec::new();
+                file.read_to_end(&mut current).is_ok() && current == *basis_bytes
+            }
+            _ => false,
+        },
+    };
+
+    atomic_write_bytes_guarded(&path, &bytes, fault, &is_current).map_err(io::Error::other)?;
+
+    Ok(returned_config)
 }
 
 pub(crate) fn sanitize_link_authority(paths: &ConfigPaths) -> io::Result<Config> {
@@ -374,7 +533,7 @@ pub(crate) fn sanitize_link_authority_with_fault(
     paths: &ConfigPaths,
     fault: &dyn DurableWriteFault,
 ) -> io::Result<Config> {
-    write_link_config(paths, None, fault)
+    write_config_merge(paths, ConfigOverlay::Sanitize, fault)
 }
 
 pub(crate) fn save_linked_stream(paths: &ConfigPaths, stream: &str) -> io::Result<Config> {
@@ -386,30 +545,26 @@ pub(crate) fn save_linked_stream_with_fault(
     stream: &str,
     fault: &dyn DurableWriteFault,
 ) -> io::Result<Config> {
-    write_link_config(paths, Some(stream), fault)
+    write_config_merge(paths, ConfigOverlay::Stream(stream), fault)
 }
 
-fn save_config_inner(paths: &ConfigPaths, source: Option<&Config>) -> io::Result<()> {
-    let resolved = resolve_config_paths(paths);
-    let lock = config_write_lock(&resolved)?;
-    let _guard = acquire_config_write_lock(&lock)?;
-    let mut merged = source
-        .cloned()
-        .unwrap_or_else(|| load_resolved_config(resolved.clone()).config);
-    if merged.config_path().exists() {
-        merged.stream = load_resolved_config(resolved).config.stream;
-    }
-    write_config(&merged)
-}
-
-pub fn save_config(config: &Config) -> io::Result<()> {
-    save_config_inner(
+pub(crate) fn save_config_with_fault(
+    config: &Config,
+    fault: &dyn DurableWriteFault,
+) -> io::Result<()> {
+    write_config_merge(
         &ConfigPaths {
             base_dir: Some(config.base_dir.clone()),
             config_dir: Some(config.config_dir.clone()),
         },
-        Some(config),
+        ConfigOverlay::Settings(config),
+        fault,
     )
+    .map(|_| ())
+}
+
+pub fn save_config(config: &Config) -> io::Result<()> {
+    save_config_with_fault(config, &NoWriteFault)
 }
 
 fn migrate(config: &Config) -> io::Result<()> {
@@ -441,7 +596,6 @@ mod tests {
     use crate::private_file::DurableWriteStage;
     use serde_json::json;
     use std::{
-        collections::BTreeSet,
         os::unix::fs::{MetadataExt, symlink},
         process::Command,
         thread,
@@ -979,29 +1133,402 @@ mod tests {
         assert_eq!(warning_fields(&x), vec![Some("stream")]);
         assert!(x.warnings[0].message.contains("stream=7"));
     }
-    // AC: save schema is exact and unknown keys are dropped.
+    // AC: unknown top-level keys round-trip as equal serde_json::Value through all writers.
     #[test]
-    fn exact_keys_and_unknown_drop() {
+    fn unknown_keys_preserved_through_all_writers() {
+        let nested_value = json!({
+            "custom_scalar": "some-value",
+            "custom_number": 42,
+            "custom_bool": true,
+            "custom_null": null,
+            "custom_array": [1, "two", {"three": 3}],
+            "custom_map": {
+                "nested_a": "alpha",
+                "nested_b": [true, false]
+            }
+        });
+
+        // 1. save_config
+        let t1 = tempfile::tempdir().unwrap();
+        let mut initial_map1 = nested_value.as_object().unwrap().clone();
+        initial_map1.insert("stream".into(), json!("initial-stream"));
+        write(t1.path(), Value::Object(initial_map1));
+        let mut c1 = load(t1.path()).config;
+        c1.cache_retention_days = 14;
+        save_config(&c1).unwrap();
+        let v1: Value =
+            serde_json::from_str(&fs::read_to_string(c1.config_path()).unwrap()).unwrap();
+        assert_eq!(v1["cache_retention_days"], 14);
+        assert_eq!(v1["stream"], "initial-stream");
+        for (k, v) in nested_value.as_object().unwrap() {
+            assert_eq!(&v1[k], v, "save_config preserved key {k}");
+        }
+
+        // 2. save_linked_stream
+        let t2 = tempfile::tempdir().unwrap();
+        let mut initial_map2 = nested_value.as_object().unwrap().clone();
+        initial_map2.insert("segment_interval".into(), json!(600));
+        write(t2.path(), Value::Object(initial_map2));
+        let paths2 = paths(t2.path());
+        save_linked_stream(&paths2, "linked-stream").unwrap();
+        let v2: Value =
+            serde_json::from_str(&fs::read_to_string(t2.path().join("cfg/config.json")).unwrap())
+                .unwrap();
+        assert_eq!(v2["stream"], "linked-stream");
+        assert_eq!(v2["segment_interval"], 600);
+        for (k, v) in nested_value.as_object().unwrap() {
+            assert_eq!(&v2[k], v, "save_linked_stream preserved key {k}");
+        }
+
+        // 3. sanitize_link_authority
+        let t3 = tempfile::tempdir().unwrap();
+        let mut initial_map3 = nested_value.as_object().unwrap().clone();
+        initial_map3.insert("server_url".into(), json!("https://legacy.test"));
+        initial_map3.insert("key".into(), json!("secret-key"));
+        initial_map3.insert("chat_bridge_enabled".into(), json!(true));
+        write(t3.path(), Value::Object(initial_map3));
+        let paths3 = paths(t3.path());
+        let res3 = sanitize_link_authority(&paths3).unwrap();
+        let v3: Value =
+            serde_json::from_str(&fs::read_to_string(res3.config_path()).unwrap()).unwrap();
+        assert!(v3.get("server_url").is_none());
+        assert!(v3.get("key").is_none());
+        assert!(v3.get("chat_bridge_enabled").is_none());
+        for (k, v) in nested_value.as_object().unwrap() {
+            assert_eq!(&v3[k], v, "sanitize_link_authority preserved key {k}");
+        }
+    }
+
+    // AC: migrate preserves arbitrary unknown content byte-for-byte.
+    #[test]
+    fn migration_preserves_unknown_bytes_verbatim() {
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"unknown":1}));
-        let c = load(t.path()).config;
-        save_config(&c).unwrap();
-        let v: Value = serde_json::from_str(&fs::read_to_string(c.config_path()).unwrap()).unwrap();
-        let keys: BTreeSet<_> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(
-            keys,
-            BTreeSet::from([
-                "stream",
-                "segment_interval",
-                "sync_retry_delays",
-                "sync_max_retries",
-                "sync_stale_threshold",
-                "cache_retention_days",
-                "capture_framerate",
-                "draw_cursor",
-                "start_paused"
-            ])
-        );
+        let old = t.path().join("config");
+        fs::create_dir(&old).unwrap();
+        let legacy_bytes =
+            b"{\n  \"unknown_sentinel\": \"PRESERVE-ME\",\n  \"nested\": [1, 2, 3]\n}\n";
+        fs::write(old.join("config.json"), legacy_bytes).unwrap();
+        let paths = ConfigPaths {
+            base_dir: Some(t.path().into()),
+            config_dir: Some(t.path().join("cfg")),
+        };
+        let loaded = load_config(paths);
+        let dest_bytes = fs::read(loaded.config.config_path()).unwrap();
+        assert_eq!(dest_bytes, legacy_bytes);
+    }
+
+    // AC: settings save overlays only prompted fields and preserves concurrent valid disk fields & unknowns.
+    #[test]
+    fn settings_merge_preserves_unprompted_fields_and_unknowns() {
+        let t = tempfile::tempdir().unwrap();
+        let config_paths = paths(t.path());
+        let initial = Config {
+            base_dir: t.path().into(),
+            config_dir: t.path().join("cfg"),
+            cache_retention_days: 7,
+            segment_interval: 300,
+            ..Config::default()
+        };
+        save_config(&initial).unwrap();
+        save_linked_stream(&config_paths, "desktop-stream-1").unwrap();
+
+        // Stale snapshot captured by CLI settings prompt
+        let mut snapshot = load_config(config_paths.clone()).config;
+
+        // Concurrent background or external edit on disk
+        let disk_path = t.path().join("cfg/config.json");
+        let mut disk_val: Value =
+            serde_json::from_str(&fs::read_to_string(&disk_path).unwrap()).unwrap();
+        disk_val["stream"] = json!("desktop-stream-2");
+        disk_val["sync_retry_delays"] = json!([10, 20]);
+        disk_val["sync_max_retries"] = json!(25);
+        disk_val["sync_stale_threshold"] = json!(1200);
+        disk_val["custom_plugin_field"] = json!({"active": true});
+        fs::write(&disk_path, serde_json::to_string_pretty(&disk_val).unwrap()).unwrap();
+
+        // Snapshot applies 5 prompted fields:
+        snapshot.capture_framerate = 5;
+        snapshot.draw_cursor = false;
+        snapshot.start_paused = true;
+        snapshot.segment_interval = 600;
+        snapshot.cache_retention_days = 30;
+
+        // Stale snapshot has old stream "desktop-stream-1", old delays, etc.
+        save_config(&snapshot).unwrap();
+
+        let saved_val: Value =
+            serde_json::from_str(&fs::read_to_string(&disk_path).unwrap()).unwrap();
+        // 5 prompted fields win
+        assert_eq!(saved_val["capture_framerate"], 5);
+        assert_eq!(saved_val["draw_cursor"], false);
+        assert_eq!(saved_val["start_paused"], true);
+        assert_eq!(saved_val["segment_interval"], 600);
+        assert_eq!(saved_val["cache_retention_days"], 30);
+
+        // Disk unprompted fields & unknowns win
+        assert_eq!(saved_val["stream"], "desktop-stream-2");
+        assert_eq!(saved_val["sync_retry_delays"], json!([10, 20]));
+        assert_eq!(saved_val["sync_max_retries"], 25);
+        assert_eq!(saved_val["sync_stale_threshold"], 1200);
+        assert_eq!(saved_val["custom_plugin_field"], json!({"active": true}));
+    }
+
+    struct ModeGuard(PathBuf, u32);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(self.1));
+        }
+    }
+
+    #[test]
+    fn fail_closed_on_corrupt_non_object_symlink_directory_and_unreadable_destinations() {
+        // 1. Corrupt JSON
+        let t1 = tempfile::tempdir().unwrap();
+        let path1 = t1.path().join("cfg/config.json");
+        fs::create_dir_all(t1.path().join("cfg")).unwrap();
+        fs::write(&path1, b"not json content").unwrap();
+        let c1 = Config {
+            base_dir: t1.path().into(),
+            config_dir: t1.path().join("cfg"),
+            ..Config::default()
+        };
+        assert!(save_config(&c1).is_err());
+        assert_eq!(fs::read(&path1).unwrap(), b"not json content");
+        assert!(save_linked_stream(&paths(t1.path()), "stream").is_err());
+        assert_eq!(fs::read(&path1).unwrap(), b"not json content");
+        assert!(sanitize_link_authority(&paths(t1.path())).is_err());
+        assert_eq!(fs::read(&path1).unwrap(), b"not json content");
+
+        // 2. Non-object JSON
+        let t2 = tempfile::tempdir().unwrap();
+        let path2 = t2.path().join("cfg/config.json");
+        fs::create_dir_all(t2.path().join("cfg")).unwrap();
+        fs::write(&path2, b"[\"not\", \"an\", \"object\"]").unwrap();
+        let c2 = Config {
+            base_dir: t2.path().into(),
+            config_dir: t2.path().join("cfg"),
+            ..Config::default()
+        };
+        assert!(save_config(&c2).is_err());
+        assert_eq!(fs::read(&path2).unwrap(), b"[\"not\", \"an\", \"object\"]");
+        assert!(save_linked_stream(&paths(t2.path()), "stream").is_err());
+        assert_eq!(fs::read(&path2).unwrap(), b"[\"not\", \"an\", \"object\"]");
+        assert!(sanitize_link_authority(&paths(t2.path())).is_err());
+        assert_eq!(fs::read(&path2).unwrap(), b"[\"not\", \"an\", \"object\"]");
+
+        // 3. Symlink destination
+        let t3 = tempfile::tempdir().unwrap();
+        let config_dir3 = t3.path().join("cfg");
+        fs::create_dir_all(&config_dir3).unwrap();
+        let referent3 = t3.path().join("referent.json");
+        fs::write(&referent3, br#"{"stream":"external"}"#).unwrap();
+        symlink(&referent3, config_dir3.join("config.json")).unwrap();
+        let c3 = Config {
+            base_dir: t3.path().into(),
+            config_dir: config_dir3.clone(),
+            ..Config::default()
+        };
+        assert!(save_config(&c3).is_err());
+        assert_eq!(fs::read(&referent3).unwrap(), br#"{"stream":"external"}"#);
+        assert!(save_linked_stream(&paths(t3.path()), "stream").is_err());
+        assert_eq!(fs::read(&referent3).unwrap(), br#"{"stream":"external"}"#);
+        assert!(sanitize_link_authority(&paths(t3.path())).is_err());
+        assert_eq!(fs::read(&referent3).unwrap(), br#"{"stream":"external"}"#);
+
+        // 4. Directory destination (wrong kind)
+        let t4 = tempfile::tempdir().unwrap();
+        let dir_path4 = t4.path().join("cfg/config.json");
+        fs::create_dir_all(&dir_path4).unwrap();
+        let c4 = Config {
+            base_dir: t4.path().into(),
+            config_dir: t4.path().join("cfg"),
+            ..Config::default()
+        };
+        assert!(save_config(&c4).is_err());
+        assert!(dir_path4.is_dir());
+        assert!(save_linked_stream(&paths(t4.path()), "stream").is_err());
+        assert!(dir_path4.is_dir());
+        assert!(sanitize_link_authority(&paths(t4.path())).is_err());
+        assert!(dir_path4.is_dir());
+
+        // 5. Unreadable regular file destination (chmod 000)
+        // If the test runs with euid 0 (root), mode 000 might still allow read access;
+        // if save_config / link writers error (non-root), assert original bytes remain untouched.
+        let t5 = tempfile::tempdir().unwrap();
+        let unreadable_path5 = t5.path().join("cfg/config.json");
+        fs::create_dir_all(t5.path().join("cfg")).unwrap();
+        let initial_bytes = br#"{"stream":"unreadable-origin"}"#;
+        fs::write(&unreadable_path5, initial_bytes).unwrap();
+        fs::set_permissions(&unreadable_path5, fs::Permissions::from_mode(0o000)).unwrap();
+        let _guard = ModeGuard(unreadable_path5.clone(), 0o600);
+        let c5 = Config {
+            base_dir: t5.path().into(),
+            config_dir: t5.path().join("cfg"),
+            ..Config::default()
+        };
+        if save_config(&c5).is_err() {
+            let _ = fs::set_permissions(&unreadable_path5, fs::Permissions::from_mode(0o600));
+            assert_eq!(fs::read(&unreadable_path5).unwrap(), initial_bytes);
+        }
+    }
+
+    struct InjectExternalEditFault {
+        path: PathBuf,
+        bytes_to_write: Vec<u8>,
+    }
+
+    impl DurableWriteFault for InjectExternalEditFault {
+        fn before(&self, stage: DurableWriteStage) -> Result<(), io::Error> {
+            if stage == DurableWriteStage::Rename {
+                fs::write(&self.path, &self.bytes_to_write)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn currency_guard_rejects_concurrent_modifications() {
+        // Case A: dest existed and was replaced concurrently
+        let t_a = tempfile::tempdir().unwrap();
+        let config_a = Config {
+            base_dir: t_a.path().into(),
+            config_dir: t_a.path().join("cfg"),
+            ..Config::default()
+        };
+        save_config(&config_a).unwrap();
+        let path_a = config_a.config_path();
+        let external_bytes_a = b"{\n  \"stream\": \"external-racing-write\"\n}\n".to_vec();
+        let fault_a = InjectExternalEditFault {
+            path: path_a.clone(),
+            bytes_to_write: external_bytes_a.clone(),
+        };
+        let mut modified_config_a = config_a.clone();
+        modified_config_a.cache_retention_days = 99;
+        let res_a = save_config_with_fault(&modified_config_a, &fault_a);
+        assert!(res_a.is_err());
+        assert_eq!(fs::read(&path_a).unwrap(), external_bytes_a);
+
+        // Case B: dest was missing and was created concurrently
+        let t_b = tempfile::tempdir().unwrap();
+        let config_b = Config {
+            base_dir: t_b.path().into(),
+            config_dir: t_b.path().join("cfg"),
+            ..Config::default()
+        };
+        let path_b = config_b.config_path();
+        let external_bytes_b = b"{\n  \"stream\": \"created-while-missing\"\n}\n".to_vec();
+        let fault_b = InjectExternalEditFault {
+            path: path_b.clone(),
+            bytes_to_write: external_bytes_b.clone(),
+        };
+        let res_b = save_linked_stream_with_fault(&paths(t_b.path()), "stream-b", &fault_b);
+        assert!(res_b.is_err());
+        assert_eq!(fs::read(&path_b).unwrap(), external_bytes_b);
+    }
+
+    #[test]
+    fn mixed_fixture_strips_retired_keys_and_preserves_unknowns_without_diagnostic_leak() {
+        let fixture = json!({
+            "server_url": "https://legacy-auth.test/sentinel",
+            "key": "SUPER-SECRET-LEGACY-KEY-SENTINEL",
+            "chat_bridge_enabled": "LEGACY-CHAT-SENTINEL",
+            "ordinary_unknown": "PRESERVED-ORDINARY-SENTINEL",
+            "stream": "mixed-stream"
+        });
+
+        // 1. save_config
+        {
+            let t = tempfile::tempdir().unwrap();
+            write(t.path(), fixture.clone());
+            let paths = paths(t.path());
+            let loaded = load_config(paths);
+            let debug_loaded = format!("{:?}", loaded.config);
+            assert!(!debug_loaded.contains("SUPER-SECRET-LEGACY-KEY-SENTINEL"));
+            assert!(!debug_loaded.contains("https://legacy-auth.test/sentinel"));
+            assert!(!debug_loaded.contains("LEGACY-CHAT-SENTINEL"));
+            assert!(!debug_loaded.contains("PRESERVED-ORDINARY-SENTINEL"));
+
+            save_config(&loaded.config).unwrap();
+            let debug_saved = format!("{:?}", loaded.config);
+            assert!(!debug_saved.contains("PRESERVED-ORDINARY-SENTINEL"));
+
+            let disk_text = fs::read_to_string(loaded.config.config_path()).unwrap();
+            assert!(!disk_text.contains("SUPER-SECRET-LEGACY-KEY-SENTINEL"));
+            assert!(!disk_text.contains("https://legacy-auth.test/sentinel"));
+            assert!(!disk_text.contains("LEGACY-CHAT-SENTINEL"));
+            assert!(disk_text.contains("PRESERVED-ORDINARY-SENTINEL"));
+
+            let disk_val: Value = serde_json::from_str(&disk_text).unwrap();
+            assert!(disk_val.get("server_url").is_none());
+            assert!(disk_val.get("key").is_none());
+            assert!(disk_val.get("chat_bridge_enabled").is_none());
+            assert_eq!(disk_val["ordinary_unknown"], "PRESERVED-ORDINARY-SENTINEL");
+        }
+
+        // 2. save_linked_stream
+        {
+            let t = tempfile::tempdir().unwrap();
+            write(t.path(), fixture.clone());
+            let paths = paths(t.path());
+            let saved = save_linked_stream(&paths, "new-stream-name").unwrap();
+            let debug_saved = format!("{:?}", saved);
+            assert!(!debug_saved.contains("SUPER-SECRET-LEGACY-KEY-SENTINEL"));
+            assert!(!debug_saved.contains("https://legacy-auth.test/sentinel"));
+            assert!(!debug_saved.contains("LEGACY-CHAT-SENTINEL"));
+            assert!(!debug_saved.contains("PRESERVED-ORDINARY-SENTINEL"));
+
+            let disk_text = fs::read_to_string(saved.config_path()).unwrap();
+            assert!(!disk_text.contains("SUPER-SECRET-LEGACY-KEY-SENTINEL"));
+            assert!(!disk_text.contains("https://legacy-auth.test/sentinel"));
+            assert!(!disk_text.contains("LEGACY-CHAT-SENTINEL"));
+            assert!(disk_text.contains("PRESERVED-ORDINARY-SENTINEL"));
+
+            let disk_val: Value = serde_json::from_str(&disk_text).unwrap();
+            assert!(disk_val.get("server_url").is_none());
+            assert!(disk_val.get("key").is_none());
+            assert!(disk_val.get("chat_bridge_enabled").is_none());
+            assert_eq!(disk_val["stream"], "new-stream-name");
+            assert_eq!(disk_val["ordinary_unknown"], "PRESERVED-ORDINARY-SENTINEL");
+        }
+
+        // 3. sanitize_link_authority
+        {
+            let t = tempfile::tempdir().unwrap();
+            write(t.path(), fixture.clone());
+            let paths = paths(t.path());
+            let saved = sanitize_link_authority(&paths).unwrap();
+            let debug_saved = format!("{:?}", saved);
+            assert!(!debug_saved.contains("SUPER-SECRET-LEGACY-KEY-SENTINEL"));
+            assert!(!debug_saved.contains("https://legacy-auth.test/sentinel"));
+            assert!(!debug_saved.contains("LEGACY-CHAT-SENTINEL"));
+            assert!(!debug_saved.contains("PRESERVED-ORDINARY-SENTINEL"));
+
+            let disk_text = fs::read_to_string(saved.config_path()).unwrap();
+            assert!(!disk_text.contains("SUPER-SECRET-LEGACY-KEY-SENTINEL"));
+            assert!(!disk_text.contains("https://legacy-auth.test/sentinel"));
+            assert!(!disk_text.contains("LEGACY-CHAT-SENTINEL"));
+            assert!(disk_text.contains("PRESERVED-ORDINARY-SENTINEL"));
+
+            let disk_val: Value = serde_json::from_str(&disk_text).unwrap();
+            assert!(disk_val.get("server_url").is_none());
+            assert!(disk_val.get("key").is_none());
+            assert!(disk_val.get("chat_bridge_enabled").is_none());
+            assert_eq!(disk_val["ordinary_unknown"], "PRESERVED-ORDINARY-SENTINEL");
+        }
+
+        // 4. Writer Err Display strings omit sentinels
+        {
+            let t = tempfile::tempdir().unwrap();
+            let corrupt_bytes = b"not json content";
+            let cfg_path = t.path().join("cfg/config.json");
+            fs::create_dir_all(t.path().join("cfg")).unwrap();
+            fs::write(&cfg_path, corrupt_bytes).unwrap();
+            let paths = paths(t.path());
+            let err = sanitize_link_authority(&paths).unwrap_err();
+            let err_display = format!("{err}");
+            assert!(!err_display.contains("SUPER-SECRET-LEGACY-KEY-SENTINEL"));
+            assert!(!err_display.contains("PRESERVED-ORDINARY-SENTINEL"));
+        }
     }
     // AC: temp suffix replaces .json and no temp remains after atomic rename.
     #[test]

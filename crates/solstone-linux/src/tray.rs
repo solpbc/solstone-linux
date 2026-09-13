@@ -563,6 +563,12 @@ mod tests {
         assert_eq!(bytes.as_slice(), generated::OFFLINE);
         assert_ne!(bytes.as_slice(), generated::HEALTHY);
     }
+
+    #[test]
+    fn watcher_offline_returns_true_for_service_survival() {
+        let test_tray = tray();
+        assert!(test_tray.watcher_offline(ksni::OfflineReason::No));
+    }
 }
 
 // Python tray provenance (35/35):
