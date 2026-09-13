@@ -6,9 +6,16 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-13
+
 ### Added
 
-- generated Rust dependency notices (`RUST_DEPENDENCY_NOTICES.txt`) and verification tooling reproducing third-party crate licenses for all statically linked dependencies across package releases.
+- "report a problem" in the tray now opens a support page with the app version, linux version, and current status filled in.
+
+### Changed
+
+- release install instructions now start at `updates.solstone.app`, with the package and its verification files at the same sol pbc release origin.
+- the tray now uses the held-dash mark while intake is paused.
 
 ## [2.0.0] - 2026-09-08
 
