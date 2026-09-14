@@ -4111,8 +4111,9 @@ mod tests {
         // Allow detached task to complete
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            if let Some(loaded) =
-                crate::sync_health::load_paired_journal_version(&config.state_dir())
+            let loaded = crate::sync_health::load_paired_journal_version(&config.state_dir());
+            if let Some(loaded) = loaded
+                && link_facts.snapshot().journal_version_observed
             {
                 let identity_key = crate::private_link::journal_identity_key(&credential);
                 assert_eq!(loaded.identity_key, identity_key);

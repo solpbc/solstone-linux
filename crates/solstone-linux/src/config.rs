@@ -347,7 +347,12 @@ fn write_config_merge(
     let lock = config_write_lock(&resolved)?;
     let _guard = acquire_config_write_lock(&lock)?;
     let path = resolved.config_path();
-    ensure_private_directory(&resolved.config_dir).map_err(io::Error::other)?;
+    migrate_locked(&resolved)?;
+    if matches!(&overlay, ConfigOverlay::Settings(_)) {
+        resolved.ensure_dirs()?;
+    } else {
+        ensure_private_directory(&resolved.config_dir).map_err(io::Error::other)?;
+    }
 
     let (merge_basis, mut map) = match open_regular_readonly(&path) {
         Ok(mut file) => {
@@ -568,6 +573,16 @@ pub fn save_config(config: &Config) -> io::Result<()> {
 }
 
 fn migrate(config: &Config) -> io::Result<()> {
+    let lock = config_write_lock(config)?;
+    let _guard = acquire_config_write_lock(&lock)?;
+    migrate_locked(config)
+}
+
+fn migrate_locked(config: &Config) -> io::Result<()> {
+    migrate_locked_with_hook(config, || {})
+}
+
+fn migrate_locked_with_hook(config: &Config, before_copy: impl FnOnce()) -> io::Result<()> {
     let old_dir = config.base_dir.join("config");
     if config.config_dir == old_dir || config.config_path().exists() {
         return Ok(());
@@ -577,6 +592,7 @@ fn migrate(config: &Config) -> io::Result<()> {
         return Ok(());
     }
     fs::create_dir_all(&config.config_dir)?;
+    before_copy();
     fs::copy(&old_config, config.config_path())?;
     fs::set_permissions(config.config_path(), fs::Permissions::from_mode(0o600))?;
     let old_token = old_dir.join("restore_token");
@@ -591,13 +607,20 @@ fn migrate(config: &Config) -> io::Result<()> {
 }
 
 #[cfg(test)]
+fn migrate_with_hook(config: &Config, before_copy: impl FnOnce()) -> io::Result<()> {
+    let lock = config_write_lock(config)?;
+    let _guard = acquire_config_write_lock(&lock)?;
+    migrate_locked_with_hook(config, before_copy)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::private_file::DurableWriteStage;
     use serde_json::json;
     use std::{
         os::unix::fs::{MetadataExt, symlink},
-        process::Command,
+        sync::mpsc,
         thread,
         time::Duration,
     };
@@ -1627,10 +1650,10 @@ mod tests {
         let legacy_dir = first_base.join("config");
         fs::create_dir_all(&legacy_dir).unwrap();
         let legacy_config = legacy_dir.join("config.json");
-        let status = Command::new("mkfifo").arg(&legacy_config).status().unwrap();
-        assert!(status.success());
+        fs::write(&legacy_config, b"{\n  \"stream\": \"legacy\"\n}\n").unwrap();
 
         let first_paths = config_paths(first_base, config_dir.clone());
+        let first_config = resolve_config_paths(&first_paths);
         let second_base = temp.path().join("second-data");
         let second_paths = config_paths(second_base.clone(), alternate_config_dir.clone());
         let second_config = Config {
@@ -1640,15 +1663,17 @@ mod tests {
             ..Config::default()
         };
 
-        let first = thread::spawn(move || save_linked_stream(&first_paths, "migrate-first"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !config_dir.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "migration should create the destination directory before opening the FIFO"
-            );
-            thread::yield_now();
-        }
+        let (migration_ready_tx, migration_ready_rx) = mpsc::channel();
+        let (migration_release_tx, migration_release_rx) = mpsc::channel();
+        let first = thread::spawn(move || {
+            migrate_with_hook(&first_config, || {
+                migration_ready_tx.send(()).unwrap();
+                migration_release_rx.recv().unwrap();
+            })
+        });
+        migration_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("migration should pause while holding destination admission");
         let primary_metadata = fs::metadata(&config_dir).unwrap();
         let alternate_metadata = fs::metadata(&alternate_config_dir).unwrap();
         assert_eq!(
@@ -1658,17 +1683,11 @@ mod tests {
         let absent_before_second = !config_dir.join("config.json").exists();
         let second_result = save_config(&second_config);
         let absent_after_second = !config_dir.join("config.json").exists();
-        drop(
-            fs::OpenOptions::new()
-                .write(true)
-                .open(legacy_config)
-                .unwrap(),
-        );
+        migration_release_tx.send(()).unwrap();
         let first_result = first.join().unwrap();
 
-        // A replacement-only lock leaves A's load/migrate outside admission, so B succeeds
-        // here instead of timing out; B never reads the migration FIFO, so the test fails rather
-        // than hangs.
+        // A replacement-only lock leaves A's migrate outside admission, so B succeeds here
+        // instead of timing out and writes the destination before A's copy resumes.
         assert!(absent_before_second);
         assert_config_write_timeout(second_result);
         assert!(absent_after_second);
@@ -1676,7 +1695,7 @@ mod tests {
 
         save_config(&second_config).unwrap();
         let saved = load_config(second_paths).config;
-        assert_eq!(saved.stream, "migrate-first");
+        assert_eq!(saved.stream, "legacy");
         assert_eq!(saved.cache_retention_days, 44);
     }
 
