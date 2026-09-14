@@ -4109,22 +4109,21 @@ mod tests {
         let link_facts = client.link_facts();
 
         // Allow detached task to complete
+        let mut observed = None;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let loaded = crate::sync_health::load_paired_journal_version(&config.state_dir());
             if let Some(loaded) = loaded
                 && link_facts.snapshot().journal_version_observed
             {
-                let identity_key = crate::private_link::journal_identity_key(&credential);
-                assert_eq!(loaded.identity_key, identity_key);
-                assert_eq!(loaded.version, "1.4.0");
-                if link_facts.snapshot().journal_version_observed {
-                    break;
-                }
+                observed = Some(loaded);
+                break;
             }
         }
-        assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());
-        assert!(link_facts.snapshot().journal_version_observed);
+        let loaded = observed.expect("journal version and in-memory fact should both publish");
+        let identity_key = crate::private_link::journal_identity_key(&credential);
+        assert_eq!(loaded.identity_key, identity_key);
+        assert_eq!(loaded.version, "1.4.0");
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
@@ -4194,19 +4193,21 @@ mod tests {
         // Capability is installed later (e.g. session established) -> republish triggers exactly 1 fetch
         client.install_capability(server.capability());
 
+        let mut observed = None;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            if let Some(loaded) =
-                crate::sync_health::load_paired_journal_version(&config.state_dir())
+            let loaded = crate::sync_health::load_paired_journal_version(&config.state_dir());
+            if let Some(loaded) = loaded
+                && link_facts.snapshot().journal_version_observed
             {
-                let identity_key = crate::private_link::journal_identity_key(&credential);
-                assert_eq!(loaded.identity_key, identity_key);
-                assert_eq!(loaded.version, "1.5.0");
+                observed = Some(loaded);
                 break;
             }
         }
-        assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_some());
-        assert!(link_facts.snapshot().journal_version_observed);
+        let loaded = observed.expect("journal version and in-memory fact should both publish");
+        let identity_key = crate::private_link::journal_identity_key(&credential);
+        assert_eq!(loaded.identity_key, identity_key);
+        assert_eq!(loaded.version, "1.5.0");
 
         // Duplicate event in generation 1 does not re-fetch
         link_facts.publish_with_generation(crate::private_link::LinkFact::ObserverRegistered, 1);
