@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-09-14
+
 ### Fixed
 
 - hand-edited settings and other config entries now stay in config.json when you use the settings command or reconnect the app.
