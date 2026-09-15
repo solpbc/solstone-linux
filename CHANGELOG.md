@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-09-15
+
 ### Added
 
 - `solstone-linux panel-icon` sets up the GNOME panel icon — the tray icon, where pause and resume live. if the extension is not on your machine yet, GNOME asks you to confirm and turns it on in your current session.
@@ -14,7 +16,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
-- `doctor` reported the GNOME panel icon extension as working when it was installed but switched off, which is the state a fresh install leaves it in. it now tells installed, switched on, and actually showing apart.
+- `doctor` reported the GNOME panel icon extension as working when it was installed but switched off, which is the state a fresh install leaves it in. it now reports installed, switched on, and showing separately.
 
 ## [2.0.2] - 2026-09-14
 
