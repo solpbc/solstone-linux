@@ -217,15 +217,13 @@ Without a panel icon the solstone app keeps working normally, and everything you
 with it still reaches your journal. Pause and resume stay reachable from a terminal:
 
 ```bash
-DEST="--session --dest org.solpbc.solstone.Observer1 \
-  --object-path /org/solpbc/solstone/Observer1"
-# pause until you resume
-gdbus call $DEST --method org.solpbc.solstone.Observer1.Pause 0
-# pause for 30 minutes (any positive number of seconds)
-gdbus call $DEST --method org.solpbc.solstone.Observer1.Pause 1800
-# resume
-gdbus call $DEST --method org.solpbc.solstone.Observer1.Resume
+solstone-linux pause               # until you resume
+solstone-linux pause --minutes 30  # ends on its own
+solstone-linux resume
 ```
+
+These are the same controls the panel icon menu uses, so they work whether or not a panel
+icon is there. They also work over SSH, as long as you are signed in as the same user.
 
 ## Historical note: version 0.4.5
 

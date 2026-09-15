@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Linux desktop observer that experiences screen and audio along with its owner"
+description = "the solstone app for linux: what you share goes into your journal"
 homepage = "https://solstone.app"
 repository = "https://github.com/solpbc/solstone-linux"
 
@@ -64,7 +64,7 @@ toml = "1"
 maintainer = "sol pbc <jer@solpbc.org>"
 copyright = "2026 sol pbc"
 license-file = ["../../LICENSE", "0"]
-extended-description = "A standalone Linux desktop observer that experiences screen and audio along with its owner and syncs segments to their solstone journal."
+extended-description = "the solstone app for linux. it takes in the screen and audio you share with it, and all of it goes into your journal."
 depends = "$auto"
 # GNOME shows no panel icon without an AppIndicator extension, so `solstone-linux
 # panel-icon` sets one up on request. The distribution's own package is the other route.

@@ -4,7 +4,7 @@ Development guidelines for solstone-linux, a standalone Linux desktop observer.
 
 ## Project Overview
 
-solstone-linux is a companion app that runs alongside the main [solstone](https://solstone.app) journal. It is one of the owner's observers — it experiences screen and audio along with the owner on a Linux desktop using PipeWire and GStreamer, stores segments locally, and syncs them to your solstone journal. It runs as a systemd user service on GNOME Wayland sessions.
+solstone-linux is a companion app that runs alongside the main [solstone](https://solstone.app) journal. It takes in the screen and audio the owner shares with it on a Linux desktop using PipeWire and GStreamer, holds segments on the device, and all of it goes into the owner's journal. It runs as a systemd user service on GNOME Wayland sessions.
 
 This is **not** part of the solstone monorepo. It is a standalone Rust package with its own native release lifecycle.
 
@@ -145,7 +145,7 @@ the tests hold.
 
 ## Brand canon
 
-- **Use co-experience language in branded prose.** In README, INSTALL, onboarding text, settings copy, and error messages, describe solstone-linux as something that experiences screen and audio along with the owner. Never describe it as watching, recording, monitoring, or tracking the owner.
+- **Owner-facing prose says what the app takes in, and lands the journal in the same breath.** In README, INSTALL, onboarding text, settings copy, error messages and package metadata, write "the solstone app takes in what you share with it, and all of it goes into your journal". ⛔ Never describe it as watching, recording, monitoring or tracking the owner. ⛔ **And never as an *observer*, never as *experiencing* anything, and never as *sending* or *syncing* the material** — conveyance and custody verbs belong to the journal, not to the app, and "observer"/"experiences" were retired from owner-facing copy in 2026. ⛔ It is "your journal", never "your solstone journal".
 - **Keep code language in code-only contexts.** Internal architecture terms such as `Capture loop`, the capture pipeline, module names, and data-path names are canon-permitted here and must not be renamed just to match branded prose.
 
 ## License

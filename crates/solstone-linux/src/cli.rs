@@ -64,6 +64,16 @@ enum Commands {
         about = "set up the GNOME panel icon, where pause and resume live"
     )]
     PanelIcon,
+    #[command(about = "pause intake")]
+    Pause {
+        #[arg(
+            long,
+            help = "How many minutes to pause for (default: until you resume)"
+        )]
+        minutes: Option<u64>,
+    },
+    #[command(about = "resume intake")]
+    Resume,
 }
 
 struct SystemRunner;
@@ -215,6 +225,12 @@ pub fn run() -> i32 {
         Commands::Settings => cmd_settings(ConfigPaths::default(), &mut ConsolePrompt),
         Commands::Status => cmd_status(ConfigPaths::default(), &SystemRunner, &mut io::stdout()),
         Commands::PanelIcon => cmd_panel_icon(&mut io::stdout(), &mut io::stderr()),
+        Commands::Pause { minutes } => cmd_control(
+            Control::Pause(minutes),
+            &mut io::stdout(),
+            &mut io::stderr(),
+        ),
+        Commands::Resume => cmd_control(Control::Resume, &mut io::stdout(), &mut io::stderr()),
         Commands::Doctor => crate::doctor::run_doctor(
             &mut crate::doctor::RealDoctor::new(&SystemRunner),
             &mut io::stdout(),
@@ -238,6 +254,49 @@ pub fn run() -> i32 {
 
 struct SetupOptions {
     stream_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Control {
+    Pause(Option<u64>),
+    Resume,
+}
+
+/// Pause and resume from a terminal.
+///
+/// This is the control an owner has when no panel icon can be reached at all -- no
+/// StatusNotifier host, a desktop that blocks extension installs, or a headless box.
+/// It drives the same Observer1 methods the panel icon menu does.
+fn cmd_control(control: Control, output: &mut dyn Write, errors: &mut dyn Write) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = write_line(errors, format!("could not start: {error}"));
+            return 1;
+        }
+    };
+    runtime.block_on(async {
+        let connection = match zbus::Connection::session().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = write_line(
+                    errors,
+                    format!("no session bus, so the solstone app cannot be reached: {error}"),
+                );
+                return 1;
+            }
+        };
+        let outcome = match control {
+            Control::Pause(minutes) => crate::panel_icon::pause(&connection, minutes).await,
+            Control::Resume => crate::panel_icon::resume(&connection).await,
+        };
+        let (message, code) = crate::panel_icon::control_result(&outcome);
+        let _ = write_line(if code == 0 { output } else { errors }, message);
+        code
+    })
 }
 
 /// The path an owner can always reach, including where the in-app offer cannot run --
@@ -796,12 +855,31 @@ mod tests {
                 "install-service",
                 "uninstall-service",
                 "status",
-                "panel-icon"
+                "panel-icon",
+                "pause",
+                "resume"
             ]
         );
     }
 
     // AC: the panel-icon command's own help text is owner-visible and voice-gated.
+    // AC: the control commands name what they pause. ⛔ Not "the solstone app" — the
+    // process keeps running and must, in order to receive Resume.
+    #[test]
+    fn control_help_surface_names_intake_not_the_app() {
+        let command = Args::command();
+        for (name, expected) in [("pause", "pause intake"), ("resume", "resume intake")] {
+            let about = command
+                .find_subcommand(name)
+                .unwrap()
+                .get_about()
+                .unwrap()
+                .to_string();
+            assert_eq!(about, expected);
+            assert!(!about.contains("the solstone app"), "{name}");
+        }
+    }
+
     #[test]
     fn panel_icon_help_surface() {
         let command = Args::command();

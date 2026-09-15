@@ -8,13 +8,14 @@ and this project adheres to Semantic Versioning.
 
 ### Added
 
-- `solstone-linux panel-icon` sets up the GNOME panel icon — the tray icon, where pause and resume live. if the extension is not on your machine yet, GNOME asks you to confirm and turns it on in your current session.
+- `solstone-linux panel-icon` sets up the GNOME panel icon, where pause and resume live. if the extension is not on your machine yet, GNOME asks you to confirm and turns it on in your current session.
 - while the panel icon is missing on GNOME, the solstone app offers to set it up, once per run. "don't ask again" stops it for good.
+- `solstone-linux pause` and `solstone-linux resume` work from a terminal, so pause is reachable on a desktop with no panel icon at all. `pause` on its own lasts until you resume; `pause --minutes 30` ends on its own.
 - installing the rpm on a GNOME machine now brings the extension with it. log out and back in once, then run `solstone-linux panel-icon` to finish.
 
 ### Fixed
 
-- `doctor` reported the GNOME panel icon extension as working when it was installed but switched off, which is the state a fresh install leaves it in. it now tells installed, switched on, and actually showing apart.
+- `solstone-linux doctor` reported the GNOME panel icon extension as working when it was installed but switched off, which is the state a fresh install leaves it in. it now reports installed, switched on, and showing as three separate states.
 
 ## [2.0.2] - 2026-09-14
 

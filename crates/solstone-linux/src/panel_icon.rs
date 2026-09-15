@@ -368,6 +368,114 @@ pub fn command_result(outcome: &SetupOutcome) -> (String, i32) {
     }
 }
 
+/// Owner-visible results of `solstone-linux pause` / `resume`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControlOutcome {
+    Paused(Option<u64>),
+    Resumed,
+    NotRunning,
+    Failed(String),
+}
+
+/// What the control commands print, and the exit code with it.
+///
+/// ⛔ "not running" is not framed as a fault: the app being stopped is an ordinary state
+/// and the message says so plainly. ⚠ It still exits non-zero and prints on stderr,
+/// because the action the owner asked for did not happen — reporting a state is not the
+/// same as succeeding at it.
+pub fn control_result(outcome: &ControlOutcome) -> (String, i32) {
+    match outcome {
+        ControlOutcome::Paused(None) => (
+            "paused. run solstone-linux resume when you want it back.".into(),
+            0,
+        ),
+        // ⚠ `minute(s)` rather than a bare plural: `--minutes 1` is a valid input and
+        // "1 minutes" is the kind of thing an owner notices. Matches the crate's own
+        // idiom ("{} incomplete segment(s)").
+        ControlOutcome::Paused(Some(minutes)) => (
+            format!("paused for {minutes} minute(s). run solstone-linux resume to end it sooner."),
+            0,
+        ),
+        ControlOutcome::Resumed => ("resumed.".into(), 0),
+        // ⛔ No "check it with: solstone-linux status" — that command only reports
+        // running state when systemctl is on PATH, so the pointer would promise an
+        // answer it may not print.
+        ControlOutcome::NotRunning => (
+            "the solstone app is not running, so there is nothing to pause or resume.".into(),
+            1,
+        ),
+        ControlOutcome::Failed(reason) => {
+            (format!("could not reach the solstone app: {reason}"), 1)
+        }
+    }
+}
+
+async fn observer_proxy(connection: &Connection) -> Result<zbus::Proxy<'_>, String> {
+    zbus::Proxy::new(
+        connection,
+        crate::desktop_component::OBSERVER_BUS_NAME,
+        OBSERVER_PATH,
+        crate::desktop_component::OBSERVER_BUS_NAME,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+const OBSERVER_PATH: &str = "/org/solpbc/solstone/Observer1";
+
+/// Ask the running app to pause. `minutes` of `None` means until the owner resumes.
+///
+/// ⚠ The wire argument is seconds as `i32`, and any value at or below zero means
+/// indefinitely — so a minutes value is converted here rather than at the call site,
+/// where a zero would silently become "forever".
+pub async fn pause(connection: &Connection, minutes: Option<u64>) -> ControlOutcome {
+    if !name_has_owner(connection, crate::desktop_component::OBSERVER_BUS_NAME)
+        .await
+        .unwrap_or(false)
+    {
+        return ControlOutcome::NotRunning;
+    }
+    let seconds = pause_seconds(minutes);
+    let proxy = match observer_proxy(connection).await {
+        Ok(proxy) => proxy,
+        Err(error) => return ControlOutcome::Failed(error),
+    };
+    match proxy.call::<_, _, String>("Pause", &(seconds)).await {
+        Ok(_) => ControlOutcome::Paused(minutes),
+        Err(error) => ControlOutcome::Failed(error.to_string()),
+    }
+}
+
+/// Convert a minutes request into the wire's seconds, saturating rather than wrapping.
+///
+/// ⛔ A value that overflowed `i32` would land at or below zero and pause forever, which
+/// is the opposite of asking for a long finite pause.
+pub fn pause_seconds(minutes: Option<u64>) -> i32 {
+    match minutes {
+        None => 0,
+        Some(0) => 0,
+        Some(value) => value.saturating_mul(60).try_into().unwrap_or(i32::MAX),
+    }
+}
+
+/// Ask the running app to resume.
+pub async fn resume(connection: &Connection) -> ControlOutcome {
+    if !name_has_owner(connection, crate::desktop_component::OBSERVER_BUS_NAME)
+        .await
+        .unwrap_or(false)
+    {
+        return ControlOutcome::NotRunning;
+    }
+    let proxy = match observer_proxy(connection).await {
+        Ok(proxy) => proxy,
+        Err(error) => return ControlOutcome::Failed(error),
+    };
+    match proxy.call::<_, _, String>("Resume", &()).await {
+        Ok(_) => ControlOutcome::Resumed,
+        Err(error) => ControlOutcome::Failed(error.to_string()),
+    }
+}
+
 async fn name_has_owner(connection: &Connection, name: &str) -> Result<bool, String> {
     let proxy = zbus::fdo::DBusProxy::new(connection)
         .await
@@ -800,6 +908,96 @@ mod tests {
             ("enabled", OwnedValue::from(true)),
         ]);
         assert_eq!(extension_state_from_info(&errored), ExtensionState::Present);
+    }
+
+    #[test]
+    fn minutes_become_seconds_and_never_wrap_into_pause_forever() {
+        // Any value at or below zero means indefinitely on the wire, so an overflowing
+        // minutes request must saturate rather than wrap into the opposite meaning.
+        assert_eq!(pause_seconds(None), 0);
+        assert_eq!(pause_seconds(Some(0)), 0);
+        assert_eq!(pause_seconds(Some(30)), 1800);
+        assert_eq!(pause_seconds(Some(1)), 60);
+        assert_eq!(pause_seconds(Some(u64::MAX)), i32::MAX);
+        // ⚠ u64::MAX alone does NOT discriminate saturating from wrapping here: both
+        // land outside i32 and fall through to the same clamp, so that assertion passes
+        // for the wrong reason. This value is the one that tells them apart — under
+        // wrapping arithmetic minutes * 60 lands exactly on 1800, so an absurd request
+        // would be accepted as an ordinary half-hour pause.
+        assert_eq!(pause_seconds(Some(4_611_686_018_427_387_934)), i32::MAX);
+        // the first minutes value whose seconds exceed i32
+        assert_eq!(pause_seconds(Some(35_791_395)), i32::MAX);
+        for minutes in [1_u64, 15, 30, 60, 1440, 100_000] {
+            assert!(
+                pause_seconds(Some(minutes)) > 0,
+                "{minutes} must stay finite"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stopped_app_is_reported_as_a_state_not_a_fault() {
+        let (message, code) = control_result(&ControlOutcome::NotRunning);
+        assert_eq!(code, 1);
+        assert!(message.contains("not running"));
+        // ⛔ Must not point at `solstone-linux status`: it reports running state only
+        // when systemctl is on PATH, so the pointer would promise an answer it may not
+        // print.
+        assert!(!message.contains("solstone-linux status"));
+        // ⛔ never blames the owner or implies breakage
+        for forbidden in ["error", "failed", "invalid", "you must"] {
+            assert!(!message.to_lowercase().contains(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn control_results_are_distinct_and_only_success_exits_zero() {
+        let outcomes = [
+            ControlOutcome::Paused(None),
+            ControlOutcome::Paused(Some(30)),
+            ControlOutcome::Resumed,
+            ControlOutcome::NotRunning,
+            ControlOutcome::Failed("bus went away".into()),
+        ];
+        let rendered: Vec<(String, i32)> = outcomes.iter().map(control_result).collect();
+        let codes: Vec<i32> = rendered.iter().map(|(_, c)| *c).collect();
+        assert_eq!(codes, [0, 0, 0, 1, 1]);
+        let mut messages: Vec<&str> = rendered.iter().map(|(m, _)| m.as_str()).collect();
+        let total = messages.len();
+        messages.sort_unstable();
+        messages.dedup();
+        assert_eq!(messages.len(), total, "each result must be distinguishable");
+        // a finite pause states its length; an indefinite one must not invent one
+        assert!(
+            control_result(&ControlOutcome::Paused(Some(30)))
+                .0
+                .contains("30 minute")
+        );
+        assert!(
+            !control_result(&ControlOutcome::Paused(None))
+                .0
+                .contains("minute")
+        );
+        // ⚠ 1 is a valid input, and "1 minutes" is the kind of thing an owner notices.
+        assert!(
+            control_result(&ControlOutcome::Paused(Some(1)))
+                .0
+                .contains("1 minute(s)")
+        );
+        for minutes in [1_u64, 2, 30] {
+            assert!(
+                !control_result(&ControlOutcome::Paused(Some(minutes)))
+                    .0
+                    .contains(&format!("{minutes} minutes")),
+                "{minutes}"
+            );
+        }
+        // the underlying reason is carried, never swallowed
+        assert!(
+            control_result(&ControlOutcome::Failed("bus went away".into()))
+                .0
+                .contains("bus went away")
+        );
     }
 
     #[test]
