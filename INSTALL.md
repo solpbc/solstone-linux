@@ -174,9 +174,58 @@ solstone-linux status
 
 Activity detection uses screen-lock and power-save signals to notice when you step away. GNOME provides both signals; KDE Wayland provides screen lock; X11 can also provide DPMS power save. Where neither signal is available, the solstone app on linux still takes in what you share and that material goes into your journal, but activity-based segment boundaries do not trigger.
 
-The tray uses the StatusNotifierItem D-Bus protocol. KDE supports it directly.
-GNOME requires an AppIndicator extension; without an SNI host, the solstone app continues
-normally without a tray icon.
+### The panel icon
+
+The panel icon is the tray icon on KDE and an icon in the top panel on GNOME. It is
+where pause and resume live. It uses the StatusNotifierItem D-Bus protocol: KDE supports
+that directly, GNOME does not, and GNOME needs the AppIndicator extension before an icon
+can appear at all.
+
+On GNOME, run:
+
+```bash
+solstone-linux panel-icon
+```
+
+What happens next depends on whether the extension is already on your machine.
+
+If it is not, GNOME asks you to confirm, then installs the AppIndicator extension from
+extensions.gnome.org and turns it on in your current session. There is no logout. The
+solstone app picks up the panel icon within a few seconds.
+
+If you installed the rpm, the extension came with it and is already on disk — GNOME has
+not loaded it yet. Log out and back in once, then run the command again to turn it on.
+
+Either way, `solstone-linux doctor` reports what it found.
+
+If the command cannot reach extensions.gnome.org, or your desktop does not allow
+extensions to be installed, install your distribution's package instead, then log out and
+back in, then run the command again:
+
+```bash
+sudo dnf install gnome-shell-extension-appindicator   # Fedora
+# log out and back in
+solstone-linux panel-icon
+```
+
+While the panel icon is missing, the solstone app offers to set it up once per run.
+"don't ask again" writes `"panel_icon_offer": false` into
+`~/.config/solstone-linux/config.json`. Set it back to `true` there and restart the app
+to see the offer again.
+
+Without a panel icon the solstone app keeps working normally, and everything you share
+with it still reaches your journal. Pause and resume stay reachable from a terminal:
+
+```bash
+DEST="--session --dest org.solpbc.solstone.Observer1 \
+  --object-path /org/solpbc/solstone/Observer1"
+# pause until you resume
+gdbus call $DEST --method org.solpbc.solstone.Observer1.Pause 0
+# pause for 30 minutes (any positive number of seconds)
+gdbus call $DEST --method org.solpbc.solstone.Observer1.Pause 1800
+# resume
+gdbus call $DEST --method org.solpbc.solstone.Observer1.Resume
+```
 
 ## Historical note: version 0.4.5
 

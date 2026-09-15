@@ -66,6 +66,18 @@ copyright = "2026 sol pbc"
 license-file = ["../../LICENSE", "0"]
 extended-description = "A standalone Linux desktop observer that experiences screen and audio along with its owner and syncs segments to their solstone journal."
 depends = "$auto"
+# GNOME shows no panel icon without an AppIndicator extension, so `solstone-linux
+# panel-icon` sets one up on request. The distribution's own package is the other route.
+#
+# ⛔ Deliberately `suggests`, not `recommends`, and NOT the conditional the RPM side uses.
+# Debian's dependency grammar (Policy 7.1) has no conditional operator -- no `if`, no
+# boolean -- so "only when gnome-shell is installed" is not expressible here at all, and
+# cargo-deb writes whatever string it is given straight into `control` without validating
+# it. A plain `recommends` would be honoured by apt's default `Install-Recommends "1"`,
+# and this package hard-`Depends: gnome-shell`, so it would pull GNOME Shell onto KDE and
+# headless installs. `suggests` is ignored by default (`Install-Suggests "0"`), which
+# records the relationship without imposing it.
+suggests = "gnome-shell-extension-appindicator"
 section = "utils"
 priority = "optional"
 assets = [
@@ -116,3 +128,14 @@ assets = [
     { source = "contrib/icons/hicolor/scalable/status/solstone-attention.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-attention.svg", mode = "644" },
     { source = "contrib/icons/hicolor/scalable/status/solstone-offline.svg", dest = "/usr/share/icons/hicolor/scalable/status/solstone-offline.svg", mode = "644" },
 ]
+
+# On rpm the conditional IS expressible, so it is used: dnf and zypper honour weak
+# dependencies by default, and `if` makes the recommendation apply only where GNOME Shell
+# is already installed. ⛔ Never `requires` -- that would drag gnome-shell onto KDE and
+# headless installs and make a cosmetic dependency fatal.
+#
+# ⚠ The package alone does not deliver a panel icon: it needs a session restart and then
+# an explicit enable, which is exactly what `solstone-linux panel-icon` does. This makes
+# the bits present, not the icon visible.
+[package.metadata.generate-rpm.recommends]
+"(gnome-shell-extension-appindicator if gnome-shell)" = ""

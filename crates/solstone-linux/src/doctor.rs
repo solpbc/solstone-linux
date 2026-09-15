@@ -11,8 +11,9 @@ use crate::{
     audio::pulse,
     capture_stats::{compute_quarantine_stats, format_quarantine_line},
     config::{Config, ConfigPaths, load_config},
+    panel_icon::PanelIconReadiness,
     private_link::{PrivateStateLock, PrivateStateLockLiveness},
-    session_env::{Output, Runner},
+    session_env::Runner,
     sync_health::{SyncHealth, derive_health, load_facts_with_liveness},
     video::{
         gstreamer::ensure_initialized,
@@ -81,7 +82,7 @@ pub trait DoctorChecks {
     fn gstreamer(&mut self) -> CheckResult;
     fn x11(&mut self) -> CheckResult;
     fn systemd(&mut self) -> CheckResult;
-    fn appindicator(&mut self) -> CheckResult;
+    fn panel_icon(&mut self) -> CheckResult;
     fn sync_health(&mut self) -> CheckResult;
     fn quarantine(&mut self) -> Option<String>;
 }
@@ -94,7 +95,7 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
         "gstreamer",
         "x11 capture",
         "systemd --user",
-        "appindicator ext (soft)",
+        "panel icon",
         "sync health",
     ];
     let functions: [fn(&mut dyn DoctorChecks) -> CheckResult; 8] = [
@@ -104,7 +105,7 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
         |v| v.gstreamer(),
         |v| v.x11(),
         |v| v.systemd(),
-        |v| v.appindicator(),
+        |v| v.panel_icon(),
         |v| v.sync_health(),
     ];
     let mut failures = 0;
@@ -197,20 +198,40 @@ fn portal_result(result: Result<bool, String>, x11: bool) -> CheckResult {
     }
 }
 
-fn appindicator_result(desktop: &str, output: Option<&Output>) -> CheckResult {
-    if !desktop.contains("GNOME") {
-        return CheckResult::ok(
-            "appindicator ext (soft)",
-            "not applicable (non-GNOME desktop)",
-        );
-    }
-    match output {
-        Some(value) if value.success && value.stdout.to_lowercase().contains("appindicator") => {
-            CheckResult::ok("appindicator ext (soft)", "appindicator extension present")
+// Three GNOME answers where there used to be two. The old check read the installed
+// extension list and called any match `ok`; the trace that produced this split found an
+// installed extension sitting disabled behind exactly that `ok`, with no panel icon and
+// no reachable pause control.
+fn panel_icon_result(readiness: PanelIconReadiness) -> CheckResult {
+    match readiness {
+        PanelIconReadiness::Available => {
+            CheckResult::ok("panel icon", "this desktop can show the panel icon")
         }
-        _ => CheckResult::warn(
-            "appindicator ext (soft)",
-            "install gnome-shell-extension-appindicator",
+        PanelIconReadiness::NotApplicable => CheckResult::ok(
+            "panel icon",
+            "not applicable (no GNOME Shell on the session bus)",
+        ),
+        // ⛔ Never `ok`. This is "the probe could not answer", and reporting that as
+        // "not applicable" turns a broken instrument into a green line.
+        PanelIconReadiness::Unknown => CheckResult::warn(
+            "panel icon",
+            "could not reach the session bus to check the panel icon",
+        ),
+        PanelIconReadiness::ExtensionActiveNoHost => CheckResult::warn(
+            "panel icon",
+            "the GNOME extension is on but no panel icon yet; log out and back in if it stays",
+        ),
+        PanelIconReadiness::ExtensionOff => CheckResult::warn(
+            "panel icon",
+            "the GNOME extension is installed but off; run solstone-linux panel-icon",
+        ),
+        PanelIconReadiness::ExtensionNeedsRelogin => CheckResult::warn(
+            "panel icon",
+            "the panel icon extension is installed; log out and back in to finish",
+        ),
+        PanelIconReadiness::ExtensionMissing => CheckResult::warn(
+            "panel icon",
+            "GNOME needs an extension; run solstone-linux panel-icon",
         ),
     }
 }
@@ -424,14 +445,31 @@ impl DoctorChecks for RealDoctor<'_> {
             Err(error) => Err(error.to_string()),
         })
     }
-    fn appindicator(&mut self) -> CheckResult {
-        let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        let output = self.runner.which("gnome-extensions").and_then(|program| {
-            self.runner
-                .run(&program, &["list"], Duration::from_secs(5), &HashMap::new())
-                .ok()
-        });
-        appindicator_result(&desktop, output.as_ref())
+    fn panel_icon(&mut self) -> CheckResult {
+        // The same live watcher probe the running app reads, so `doctor` and the product
+        // cannot disagree about whether a panel icon is reachable.
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(value) => value,
+            Err(error) => {
+                // The runtime never started, so no bus was ever contacted. Say that.
+                return CheckResult::warn(
+                    "panel icon",
+                    format!("could not start the probe: {error}"),
+                );
+            }
+        };
+        panel_icon_result(runtime.block_on(async {
+            match zbus::Connection::session().await {
+                Ok(connection) => crate::panel_icon::probe(&connection).await,
+                Err(error) => {
+                    tracing::debug!(%error, "No session bus for the panel icon probe");
+                    PanelIconReadiness::Unknown
+                }
+            }
+        }))
     }
     fn sync_health(&mut self) -> CheckResult {
         let config = self.config().clone();
@@ -472,7 +510,7 @@ mod tests {
                 "gstreamer",
                 "x11 capture",
                 "systemd --user",
-                "appindicator ext (soft)",
+                "panel icon",
                 "sync health",
             ];
             Self {
@@ -510,7 +548,7 @@ mod tests {
         fn systemd(&mut self) -> CheckResult {
             self.take()
         }
-        fn appindicator(&mut self) -> CheckResult {
+        fn panel_icon(&mut self) -> CheckResult {
             self.take()
         }
         fn sync_health(&mut self) -> CheckResult {
@@ -736,20 +774,87 @@ mod tests {
         .await;
         assert_eq!(result, Err(()));
     }
-    // tests/test_doctor.py::test_appindicator_non_gnome_is_ok_not_applicable
-    // AC: GNOME AppIndicator presence and absence exercise both soft-check outcomes.
+    // AC: the panel-icon check reports installed, enabled and live-watcher separately,
+    // and splits "installed" again where only a session restart can finish the job.
     #[test]
-    fn appindicator_warn_and_ok_matrix() {
-        let present = Output {
-            success: true,
-            stdout: "ubuntu-appindicators@ubuntu.com".into(),
-        };
-        assert_eq!(appindicator_result("KDE", None).severity, Severity::Ok);
+    fn panel_icon_reports_seven_distinct_answers() {
+        let answers = [
+            PanelIconReadiness::Available,
+            PanelIconReadiness::NotApplicable,
+            PanelIconReadiness::Unknown,
+            PanelIconReadiness::ExtensionActiveNoHost,
+            PanelIconReadiness::ExtensionOff,
+            PanelIconReadiness::ExtensionNeedsRelogin,
+            PanelIconReadiness::ExtensionMissing,
+        ]
+        .map(panel_icon_result);
         assert_eq!(
-            appindicator_result("GNOME", Some(&present)).severity,
-            Severity::Ok
+            answers.clone().map(|answer| answer.severity),
+            [
+                Severity::Ok,
+                Severity::Ok,
+                Severity::Warn,
+                Severity::Warn,
+                Severity::Warn,
+                Severity::Warn,
+                Severity::Warn
+            ]
         );
-        assert_eq!(appindicator_result("GNOME", None).severity, Severity::Warn);
+        let details: Vec<&str> = answers
+            .iter()
+            .map(|answer| answer.detail.as_str())
+            .collect();
+        let mut unique = details.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            details.len(),
+            "each answer must be distinguishable from the others"
+        );
+        assert!(answers.iter().all(|answer| answer.name == "panel icon"));
+    }
+
+    // AC: never `ok` for an installed-but-disabled extension. This was the false green
+    // the old check produced, so it gets its own assertion rather than riding in the
+    // matrix above.
+    // AC: a probe that could not answer is never a green line. This is the other
+    // direction of the same defect the check exists to fix.
+    #[test]
+    fn a_probe_that_could_not_answer_is_never_reported_ok() {
+        let answer = panel_icon_result(PanelIconReadiness::Unknown);
+        assert_eq!(answer.severity, Severity::Warn);
+        assert_ne!(
+            answer.detail,
+            panel_icon_result(PanelIconReadiness::NotApplicable).detail,
+            "a wedged bus must not read as a non-GNOME desktop"
+        );
+    }
+
+    #[test]
+    fn an_installed_but_disabled_extension_is_never_reported_ok() {
+        let answer = panel_icon_result(PanelIconReadiness::ExtensionOff);
+        assert_eq!(answer.severity, Severity::Warn);
+        assert_ne!(answer.severity, Severity::Ok);
+        assert!(answer.detail.contains("off"));
+    }
+
+    // AC: every answer fits doctor's own report layout.
+    #[test]
+    fn panel_icon_answers_fit_the_report_layout() {
+        for readiness in [
+            PanelIconReadiness::Available,
+            PanelIconReadiness::NotApplicable,
+            PanelIconReadiness::Unknown,
+            PanelIconReadiness::ExtensionActiveNoHost,
+            PanelIconReadiness::ExtensionOff,
+            PanelIconReadiness::ExtensionNeedsRelogin,
+            PanelIconReadiness::ExtensionMissing,
+        ] {
+            let answer = panel_icon_result(readiness);
+            assert!(answer.name.len() <= 28, "{readiness:?} name");
+            assert!(answer.detail.len() <= 80, "{readiness:?} detail");
+        }
     }
     // tests/test_doctor.py::test_check_sync_health_update_needed
     // AC: sync health covers connected, warning, and failing doctor surfaces.
@@ -819,7 +924,7 @@ mod tests {
             fn systemd(&mut self) -> CheckResult {
                 self.0.take()
             }
-            fn appindicator(&mut self) -> CheckResult {
+            fn panel_icon(&mut self) -> CheckResult {
                 self.0.take()
             }
             fn sync_health(&mut self) -> CheckResult {

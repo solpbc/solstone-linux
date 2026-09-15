@@ -150,6 +150,7 @@ pub(crate) struct ShellInputs {
 pub(crate) struct DesktopShell {
     render_task: Option<JoinHandle<()>>,
     apply_task: Option<JoinHandle<()>>,
+    panel_icon_task: Option<JoinHandle<()>>,
     signal_task: JoinHandle<()>,
     shutdown: watch::Sender<bool>,
     connection: Option<Connection>,
@@ -294,7 +295,11 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
                 tray_health,
                 inputs.open_journal,
             ));
-            let apply_task = tokio::spawn(run_tray_applier(handle, model_receiver, shutdown_rx));
+            let apply_task = tokio::spawn(run_tray_applier(
+                handle,
+                model_receiver,
+                shutdown_rx.clone(),
+            ));
             (Some(render_task), Some(apply_task))
         }
         Err(error) => {
@@ -303,9 +308,23 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         }
     };
 
+    // The tray spawns with `assume_sni_available(true)` above, which is the right
+    // resilient behaviour and needs no probe to decide. What the probe decides is whether
+    // the owner is told anything, and that is a live question for the whole run rather
+    // than a startup one — an owner who turns the extension on mid-session gets the panel
+    // icon back without restarting the app, and must not then be offered a fix for it.
+    let panel_icon_task = inputs.connection.as_ref().map(|connection| {
+        tokio::spawn(run_panel_icon_offer(
+            connection.clone(),
+            inputs.config.clone(),
+            shutdown_rx.clone(),
+        ))
+    });
+
     DesktopShell {
         render_task,
         apply_task,
+        panel_icon_task,
         signal_task,
         shutdown,
         connection: inputs.connection,
@@ -366,6 +385,116 @@ async fn run_tray_applier(
         }
     }
     handle.shutdown().await;
+}
+
+async fn run_panel_icon_offer(
+    connection: Connection,
+    config: Config,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    use crate::panel_icon::{OfferGate, PROBE_INTERVAL};
+
+    let mut gate = OfferGate::default();
+    let started = std::time::Instant::now();
+    let mut cadence = tokio::time::interval(PROBE_INTERVAL);
+    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cadence.tick() => {
+                let readiness = crate::panel_icon::probe(&connection).await;
+                // Re-read the dismissal from disk each pass rather than caching it, so an
+                // owner who edits config.json by hand is obeyed without a restart. The
+                // config file is the store; this only reads it.
+                let offer_enabled =
+                    crate::config::panel_icon_offer_enabled(&config_paths(&config));
+                let now = started.elapsed().as_secs_f64();
+                if gate.observe(readiness, offer_enabled, now) {
+                    present_panel_icon_offer(&connection, &config).await;
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn config_paths(config: &Config) -> crate::config::ConfigPaths {
+    crate::config::ConfigPaths {
+        base_dir: Some(config.base_dir.clone()),
+        config_dir: Some(config.config_dir.clone()),
+    }
+}
+
+async fn present_panel_icon_offer(connection: &Connection, config: &Config) {
+    use crate::panel_icon::{OFFER_ACTION_DISMISS, OFFER_ACTION_LATER, OFFER_ACTION_SET_UP};
+
+    let handle = match notify_rust::Notification::new()
+        .appname("solstone")
+        .summary(crate::panel_icon::OFFER_SUMMARY)
+        .body(crate::panel_icon::OFFER_BODY)
+        .action(OFFER_ACTION_SET_UP, crate::panel_icon::OFFER_LABEL_SET_UP)
+        .action(OFFER_ACTION_LATER, crate::panel_icon::OFFER_LABEL_LATER)
+        .action(OFFER_ACTION_DISMISS, crate::panel_icon::OFFER_LABEL_DISMISS)
+        .timeout(notify_rust::Timeout::Never)
+        .show_async()
+        .await
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            tracing::debug!(%error, "Could not show the panel icon offer");
+            return;
+        }
+    };
+    let chosen: Mutex<Option<String>> = Mutex::new(None);
+    handle
+        .wait_for_action_async(|response| {
+            if let notify_rust::NotificationResponse::Action(action) = response
+                && let Ok(mut slot) = chosen.lock()
+            {
+                *slot = Some(action.clone());
+            }
+        })
+        .await;
+    let chosen = chosen
+        .into_inner()
+        .unwrap_or_else(|error| error.into_inner());
+    match chosen.as_deref() {
+        Some(OFFER_ACTION_SET_UP) => {
+            // ⛔ Not the readiness the offer was raised with. The notification can sit
+            // unanswered for hours, and an owner who turned the extension on by hand in
+            // the meantime must not be handed GNOME's install dialog for it.
+            let readiness = crate::panel_icon::probe(connection).await;
+            let outcome = crate::panel_icon::set_up(connection, readiness).await;
+            if let Some(body) = crate::panel_icon::offer_result_body(&outcome)
+                && let Err(error) = notify_rust::Notification::new()
+                    .appname("solstone")
+                    .summary(crate::panel_icon::OFFER_SUMMARY)
+                    .body(&body)
+                    .show_async()
+                    .await
+            {
+                tracing::debug!(%error, "Could not show the panel icon result");
+            }
+        }
+        Some(OFFER_ACTION_DISMISS) => {
+            let paths = config_paths(config);
+            let written = tokio::task::spawn_blocking(move || {
+                crate::config::set_panel_icon_offer(&paths, false)
+            })
+            .await;
+            match written {
+                Ok(Ok(_)) => tracing::info!("Panel icon offer dismissed for good"),
+                Ok(Err(error)) => tracing::warn!(%error, "Could not record the dismissal"),
+                Err(error) => tracing::warn!(%error, "Dismissal writer did not run"),
+            }
+        }
+        // "not now" and a plain close are the same thing: nothing is written, and the
+        // gate has already spent this run's single offer.
+        _ => {}
+    }
 }
 
 async fn run_shell_state<S: ComponentSignalSink>(
@@ -434,6 +563,12 @@ impl DesktopShell {
         if let Some(task) = &self.render_task {
             task.abort();
         }
+        // The offer task can be parked indefinitely inside a notification the owner has
+        // not answered, or inside GNOME's own install confirmation. Neither returns to
+        // the shutdown select, so it is aborted rather than waited on.
+        if let Some(task) = &self.panel_icon_task {
+            task.abort();
+        }
         let removal = async {
             if self.interface_served
                 && let Some(connection) = &self.connection
@@ -448,11 +583,12 @@ impl DesktopShell {
                 Ok(())
             }
         };
-        // Three tasks can each consume two bounds (join, then post-abort join), and interface
-        // removal consumes one: total worst case is seven times `timeout`.
+        // Four tasks can each consume two bounds (join, then post-abort join), and
+        // interface removal consumes one: total worst case is nine times `timeout`.
         finish_shutdown(
             self.render_task.take(),
             self.apply_task.take(),
+            self.panel_icon_task.take(),
             Some(self.signal_task),
             removal,
             timeout,
@@ -464,6 +600,7 @@ impl DesktopShell {
 async fn finish_shutdown<F>(
     render_task: Option<JoinHandle<()>>,
     apply_task: Option<JoinHandle<()>>,
+    panel_icon_task: Option<JoinHandle<()>>,
     signal_task: Option<JoinHandle<()>>,
     removal: F,
     timeout: Duration,
@@ -472,6 +609,7 @@ async fn finish_shutdown<F>(
 {
     stop_task("tray renderer", render_task, timeout).await;
     stop_task("tray applier", apply_task, timeout).await;
+    stop_task("panel icon offer", panel_icon_task, timeout).await;
     stop_task("desktop signal", signal_task, timeout).await;
     match tokio::time::timeout(timeout, removal).await {
         Ok(Ok(())) => {}
@@ -878,7 +1016,15 @@ mod tests {
             std::future::pending::<Result<(), String>>().await
         };
         let started = tokio::time::Instant::now();
-        finish_shutdown(Some(task), None, None, removal, Duration::from_millis(5)).await;
+        finish_shutdown(
+            Some(task),
+            None,
+            None,
+            None,
+            removal,
+            Duration::from_millis(5),
+        )
+        .await;
         assert!(removal_started.load(Ordering::Acquire));
         assert!(started.elapsed() < Duration::from_secs(1));
     }

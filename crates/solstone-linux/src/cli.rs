@@ -59,6 +59,11 @@ enum Commands {
     UninstallService,
     #[command(about = "show status")]
     Status,
+    #[command(
+        name = "panel-icon",
+        about = "set up the GNOME panel icon, where pause and resume live"
+    )]
+    PanelIcon,
 }
 
 struct SystemRunner;
@@ -209,6 +214,7 @@ pub fn run() -> i32 {
         ),
         Commands::Settings => cmd_settings(ConfigPaths::default(), &mut ConsolePrompt),
         Commands::Status => cmd_status(ConfigPaths::default(), &SystemRunner, &mut io::stdout()),
+        Commands::PanelIcon => cmd_panel_icon(&mut io::stdout(), &mut io::stderr()),
         Commands::Doctor => crate::doctor::run_doctor(
             &mut crate::doctor::RealDoctor::new(&SystemRunner),
             &mut io::stdout(),
@@ -232,6 +238,39 @@ pub fn run() -> i32 {
 
 struct SetupOptions {
     stream_name: Option<String>,
+}
+
+/// The path an owner can always reach, including where the in-app offer cannot run --
+/// dismissed, no notification daemon, or a managed desktop that blocks the offer.
+fn cmd_panel_icon(output: &mut dyn Write, errors: &mut dyn Write) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = write_line(errors, format!("could not start: {error}"));
+            return 1;
+        }
+    };
+    runtime.block_on(async {
+        let connection = match zbus::Connection::session().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = write_line(
+                    errors,
+                    format!("no session bus, so there is no desktop to set up: {error}"),
+                );
+                return 1;
+            }
+        };
+        let readiness = crate::panel_icon::probe(&connection).await;
+        let _ = write_line(output, crate::panel_icon::command_preamble(readiness));
+        let outcome = crate::panel_icon::set_up(&connection, readiness).await;
+        let (message, code) = crate::panel_icon::command_result(&outcome);
+        let _ = write_line(if code == 0 { output } else { errors }, message);
+        code
+    })
 }
 
 fn write_line(output: &mut dyn Write, value: impl std::fmt::Display) -> io::Result<()> {
@@ -756,8 +795,20 @@ mod tests {
                 "settings",
                 "install-service",
                 "uninstall-service",
-                "status"
+                "status",
+                "panel-icon"
             ]
+        );
+    }
+
+    // AC: the panel-icon command's own help text is owner-visible and voice-gated.
+    #[test]
+    fn panel_icon_help_surface() {
+        let command = Args::command();
+        let panel_icon = command.find_subcommand("panel-icon").unwrap();
+        assert_eq!(
+            panel_icon.get_about().unwrap().to_string(),
+            "set up the GNOME panel icon, where pause and resume live"
         );
     }
     // AC: run help pins its interval option and exact help text.

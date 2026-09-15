@@ -36,6 +36,9 @@ pub struct Config {
     pub capture_framerate: i64,
     pub draw_cursor: bool,
     pub start_paused: bool,
+    /// Whether the running app may offer to set up the GNOME panel icon. The owner
+    /// turns this off from the offer itself, or by hand like every other key.
+    pub panel_icon_offer: bool,
     #[serde(skip)]
     pub base_dir: PathBuf,
     #[serde(skip)]
@@ -65,6 +68,7 @@ impl Default for Config {
             capture_framerate: 1,
             draw_cursor: true,
             start_paused: false,
+            panel_icon_offer: true,
             base_dir: home.join(".local/share/solstone-linux"),
             config_dir: config_dir_for(home, env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)),
         }
@@ -279,6 +283,7 @@ fn load_resolved_config(mut config: Config) -> LoadedConfig {
     config.capture_framerate = load_int(values, "capture_framerate", 1, &mut warnings).clamp(1, 10);
     config.draw_cursor = json_truthy(values.get("draw_cursor"), true);
     config.start_paused = json_truthy(values.get("start_paused"), false);
+    config.panel_icon_offer = json_truthy(values.get("panel_icon_offer"), true);
     LoadedConfig { config, warnings }
 }
 
@@ -335,6 +340,10 @@ fn acquire_config_write_lock(lock: &Mutex<()>) -> io::Result<MutexGuard<'_, ()>>
 enum ConfigOverlay<'a> {
     Settings(&'a Config),
     Stream(&'a str),
+    /// One key, written from the running app. Deliberately narrow: the daemon holds an
+    /// in-memory config that may be older than a hand edit, so it must never write its
+    /// whole settings snapshot back over the file.
+    PanelIconOffer(bool),
     Sanitize,
 }
 
@@ -438,12 +447,18 @@ fn write_config_merge(
     } else {
         false
     };
+    let mut panel_icon_offer = if merge_basis.is_some() {
+        json_truthy(map.get("panel_icon_offer"), true)
+    } else {
+        true
+    };
 
     match overlay {
         ConfigOverlay::Settings(snapshot) => {
             capture_framerate = snapshot.capture_framerate.clamp(1, 10);
             draw_cursor = snapshot.draw_cursor;
             start_paused = snapshot.start_paused;
+            panel_icon_offer = snapshot.panel_icon_offer;
             segment_interval = snapshot.segment_interval;
             cache_retention_days = snapshot.cache_retention_days;
             if merge_basis.is_none() {
@@ -455,6 +470,9 @@ fn write_config_merge(
         }
         ConfigOverlay::Stream(new_stream) => {
             stream = new_stream.to_owned();
+        }
+        ConfigOverlay::PanelIconOffer(value) => {
+            panel_icon_offer = value;
         }
         ConfigOverlay::Sanitize => {}
     }
@@ -469,6 +487,7 @@ fn write_config_merge(
         capture_framerate,
         draw_cursor,
         start_paused,
+        panel_icon_offer,
         base_dir: resolved.base_dir.clone(),
         config_dir: resolved.config_dir.clone(),
     };
@@ -503,6 +522,7 @@ fn write_config_merge(
         );
         map.insert("draw_cursor".into(), Value::Bool(draw_cursor));
         map.insert("start_paused".into(), Value::Bool(start_paused));
+        map.insert("panel_icon_offer".into(), Value::Bool(panel_icon_offer));
         serde_json::to_vec_pretty(&map).map_err(io::Error::other)?
     };
     bytes.push(b'\n');
@@ -570,6 +590,33 @@ pub(crate) fn save_config_with_fault(
 
 pub fn save_config(config: &Config) -> io::Result<()> {
     save_config_with_fault(config, &NoWriteFault)
+}
+
+/// Read the panel-icon offer preference and nothing else.
+///
+/// ⛔ Deliberately not `load_config`: that path runs legacy migration and takes the
+/// config write lock, and the running app re-reads this every probe. A pure read cannot
+/// contend with a settings write and cannot migrate anything as a side effect of a poll.
+/// Absent, unreadable or malformed all mean the same thing here -- leave the offer on.
+pub fn panel_icon_offer_enabled(paths: &ConfigPaths) -> bool {
+    let resolved = resolve_config_paths(paths);
+    let Ok(text) = fs::read_to_string(resolved.config_path()) else {
+        return true;
+    };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|map| json_truthy(map.get("panel_icon_offer"), true))
+        })
+        .unwrap_or(true)
+}
+
+/// Persist the panel-icon offer preference alone, leaving every other key -- modelled,
+/// unmodelled or hand-added -- exactly as the file has it.
+pub fn set_panel_icon_offer(paths: &ConfigPaths, value: bool) -> io::Result<Config> {
+    write_config_merge(paths, ConfigOverlay::PanelIconOffer(value), &NoWriteFault)
 }
 
 fn migrate(config: &Config) -> io::Result<()> {
@@ -1051,6 +1098,109 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         assert!(round_trip(t.path(), |c| c.start_paused = true).start_paused);
     }
+    #[test]
+    fn panel_icon_offer_defaults_on_and_round_trips() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(Config::default().panel_icon_offer);
+        assert!(!round_trip(t.path(), |c| c.panel_icon_offer = false).panel_icon_offer);
+    }
+
+    #[test]
+    fn panel_icon_offer_defaults_on_for_a_config_written_before_it_existed() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), json!({"stream": "old"}));
+        assert!(load(t.path()).config.panel_icon_offer);
+    }
+
+    #[test]
+    fn the_narrow_panel_icon_writer_touches_only_its_own_key() {
+        // The running app writes this key while an owner may have hand-edited the file.
+        // Everything else in it -- modelled and unmodelled alike -- has to survive.
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            json!({
+                "stream": "linked-stream",
+                "segment_interval": 900,
+                "draw_cursor": false,
+                "hand_added_key": {"kept": [1, 2]},
+            }),
+        );
+        let returned = set_panel_icon_offer(&paths(t.path()), false).unwrap();
+        assert!(!returned.panel_icon_offer);
+
+        let text = fs::read_to_string(t.path().join("cfg/config.json")).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["panel_icon_offer"], json!(false));
+        assert_eq!(value["stream"], json!("linked-stream"));
+        assert_eq!(value["segment_interval"], json!(900));
+        assert_eq!(value["draw_cursor"], json!(false));
+        assert_eq!(value["hand_added_key"], json!({"kept": [1, 2]}));
+
+        let reloaded = load(t.path()).config;
+        assert!(!reloaded.panel_icon_offer);
+        assert_eq!(reloaded.segment_interval, 900);
+        assert!(!reloaded.draw_cursor);
+
+        // ...and turning it back on by hand is the documented way back.
+        assert!(
+            set_panel_icon_offer(&paths(t.path()), true)
+                .unwrap()
+                .panel_icon_offer
+        );
+        assert!(load(t.path()).config.panel_icon_offer);
+    }
+
+    #[test]
+    fn the_offer_read_is_pure_and_defaults_on_for_anything_it_cannot_parse() {
+        let t = tempfile::tempdir().unwrap();
+        // no file at all
+        assert!(panel_icon_offer_enabled(&paths(t.path())));
+        // present and true
+        write(t.path(), json!({"panel_icon_offer": true}));
+        assert!(panel_icon_offer_enabled(&paths(t.path())));
+        // present and false
+        write(t.path(), json!({"panel_icon_offer": false}));
+        assert!(!panel_icon_offer_enabled(&paths(t.path())));
+        // malformed, and the wrong type, both leave the offer on rather than silencing it
+        fs::write(t.path().join("cfg/config.json"), "{not json").unwrap();
+        assert!(panel_icon_offer_enabled(&paths(t.path())));
+        write(t.path(), json!({"panel_icon_offer": "nonsense"}));
+        assert!(panel_icon_offer_enabled(&paths(t.path())));
+    }
+
+    #[test]
+    fn the_offer_read_never_creates_or_migrates_anything() {
+        // It runs on every probe in the live app, so it must not be a writer.
+        let t = tempfile::tempdir().unwrap();
+        let legacy = t.path().join("config");
+        fs::create_dir(&legacy).unwrap();
+        fs::write(legacy.join("config.json"), r#"{"stream":"legacy"}"#).unwrap();
+
+        assert!(panel_icon_offer_enabled(&paths(t.path())));
+
+        // load_config would have migrated this; the narrow read must leave it alone.
+        assert!(!t.path().join("cfg/config.json").exists());
+        assert!(legacy.join("config.json").exists());
+    }
+
+    #[test]
+    fn a_stale_in_memory_config_cannot_undo_a_hand_edit_through_the_narrow_writer() {
+        // The daemon loads once at start. If the owner then edits config.json, the offer
+        // dismissal must not carry the daemon's stale view of the other keys back.
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), json!({"segment_interval": 300}));
+        let stale = load(t.path()).config;
+        assert_eq!(stale.segment_interval, 300);
+
+        write(t.path(), json!({"segment_interval": 1200}));
+        set_panel_icon_offer(&paths(t.path()), false).unwrap();
+
+        let reloaded = load(t.path()).config;
+        assert_eq!(reloaded.segment_interval, 1200);
+        assert!(!reloaded.panel_icon_offer);
+    }
+
     // tests/test_config.py::test_start_paused_defaults_on_old_config
     #[test]
     fn old_paused_default() {
@@ -1095,13 +1245,13 @@ mod tests {
         assert_eq!(x.config.capture_framerate, 4);
         assert!(old.exists());
     }
-    // AC: all nine persisted defaults.
+    // AC: all ten persisted defaults.
     #[test]
     fn all_defaults() {
         let c = Config::default();
         assert_eq!(
             serde_json::to_value(c).unwrap(),
-            json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"cache_retention_days":7,"capture_framerate":1,"draw_cursor":true,"start_paused":false})
+            json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"cache_retention_days":7,"capture_framerate":1,"draw_cursor":true,"start_paused":false,"panel_icon_offer":true})
         );
     }
     // AC: numeric coercion rejects bool and truncates floats, including list elements.
@@ -1806,7 +1956,8 @@ mod tests {
                 "  \"cache_retention_days\": 7,\n",
                 "  \"capture_framerate\": 1,\n",
                 "  \"draw_cursor\": true,\n",
-                "  \"start_paused\": false\n",
+                "  \"start_paused\": false,\n",
+                "  \"panel_icon_offer\": true\n",
                 "}\n"
             )
         );

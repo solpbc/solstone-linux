@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod encoding;
 pub mod matching;
 pub mod observer;
+pub mod panel_icon;
 pub mod pipeline;
 pub mod positions;
 mod private_file;

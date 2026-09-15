@@ -114,9 +114,10 @@ Shipping system packages:
 - glibc 2.35 or newer
 - libpulse and a PulseAudio-compatible server such as PipeWire Pulse
 - GStreamer 1.0 core, base, good, PipeWire, and X11 plugins
-- PipeWire and xdg-desktop-portal with ScreenCast support for Wayland capture
+- PipeWire and xdg-desktop-portal with ScreenCast support for Wayland screen frames
 - xdg-utils for opening links
-- a desktop notification service; an SNI host is optional for the tray icon
+- a desktop notification service; a StatusNotifier host is what shows the panel icon.
+  KDE has one. On GNOME, run `solstone-linux panel-icon` after installing this package
 
 ## Data Paths
 

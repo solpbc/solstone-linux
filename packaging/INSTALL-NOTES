@@ -1,6 +1,6 @@
 solstone-linux Rust release install notes
 
-This package contains sol for Linux and its canonical icons. It intentionally
+This package contains the solstone app for linux and its canonical icons. It intentionally
 does not install a systemd unit: service ownership
 belongs to the optional `solstone-linux install-service` command.
 
@@ -9,9 +9,10 @@ Runtime requirements:
 - glibc 2.35 or newer
 - libpulse and a PulseAudio-compatible server (PipeWire Pulse is supported)
 - GStreamer 1.0 core, base, good, PipeWire, and X11 plugins
-- PipeWire and xdg-desktop-portal with ScreenCast support for Wayland capture
+- PipeWire and xdg-desktop-portal with ScreenCast support for Wayland screen frames
 - xdg-utils for opening links
-- a desktop notification service; an SNI host is optional for the tray icon
+- a desktop notification service; a StatusNotifier host is what shows the panel icon.
+  KDE has one. On GNOME, run `solstone-linux panel-icon` after installing this package
 
 Typical package families:
 
@@ -29,7 +30,7 @@ Typical package families:
   gst-plugin-pipewire, pipewire-pulse, xdg-desktop-portal, xdg-utils
 
 Create a pair link for this device in your journal, save it as
-`pair-link.txt`, then pair and start sol:
+`pair-link.txt`, then pair and start the solstone app:
 
 ```bash
 solstone-linux install-service
@@ -40,10 +41,11 @@ systemctl --user start solstone-linux
 
 Pairing is the only setup path, including when your journal is on this machine.
 There is no URL, key, local installation of the journal or Python, or direct
-fallback to configure. Sol can capture while unpaired or offline and saves
-segments locally.
+fallback to configure. The solstone app takes in what you share with it while
+unpaired or offline, holding segments on this device until they reach your
+journal.
 
-Setup and runtime share one private-state lock. Stop sol before pairing. If sol
-is running, setup exits before consuming input and leaves capture, config, and
-private state unchanged. Use the same stop, setup, start sequence when an
-upgrade requires a new pair link.
+Setup and runtime share one private-state lock. Stop the solstone app before
+pairing. If it is running, setup exits before consuming input and leaves intake,
+config, and private state unchanged. Use the same stop, setup, start sequence
+when an upgrade requires a new pair link.
