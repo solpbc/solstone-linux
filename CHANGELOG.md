@@ -35,7 +35,7 @@ and this project adheres to Semantic Versioning.
 - release install instructions now start at `updates.solstone.app`, with the package and its verification files at the same sol pbc release origin.
 - the tray now uses the held-dash mark while intake is paused.
 
-## [2.0.0] - 2026-09-08
+## [2.0.0] - 2026-09-10
 
 ### Added
 
