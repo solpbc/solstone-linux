@@ -10,6 +10,42 @@ use std::sync::OnceLock;
 
 static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
 
+// `git archive` against the real checkout can transiently fail under a
+// concurrent git operation on the same clone (an index/ref lock held by a
+// sibling `git commit`/`fetch`/`gc`) -- normal in this org's shared-clone
+// model, not a rare edge case. The prior version fed `output().unwrap()`'s
+// `.stdout` straight into the tar unpacker with no status check: a failed,
+// empty-stdout run produced a silently empty/corrupt fixture that every
+// test drawing on `fixture()` then built on, surfacing as unrelated
+// downstream assertion failures (hash/fork mismatches, missing files) with
+// no diagnostic pointing back at the real cause. Retry a few times before
+// treating it as a real failure, and fail loudly with the captured stderr
+// when retries are exhausted rather than ever using unchecked stdout.
+fn archive_head_with_retry(source: &Path) -> Vec<u8> {
+    archive_head_with_attempts(source, 5)
+}
+
+fn archive_head_with_attempts(source: &Path, attempts: u32) -> Vec<u8> {
+    let mut last_stderr = String::new();
+    for attempt in 1..=attempts {
+        let output = Command::new("git")
+            .args(["archive", "--format=tar", "HEAD"])
+            .current_dir(source)
+            .output()
+            .unwrap();
+        if output.status.success() && !output.stdout.is_empty() {
+            return output.stdout;
+        }
+        last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if attempt < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(200 * attempt as u64));
+        }
+    }
+    panic!(
+        "git archive --format=tar HEAD failed in {source:?} after {attempts} attempts: {last_stderr}"
+    );
+}
+
 fn normalize_fixture_workspace_version(path: &Path) {
     let manifest = fs::read_to_string(path).unwrap();
     let mut section = "";
@@ -151,14 +187,7 @@ pub(super) fn fixture() -> TestRepo {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let archive = ARCHIVE.get_or_init(|| {
-        Command::new("git")
-            .args(["archive", "--format=tar", "HEAD"])
-            .current_dir(&source)
-            .output()
-            .unwrap()
-            .stdout
-    });
+    let archive = ARCHIVE.get_or_init(|| archive_head_with_retry(&source));
     let temp = tempfile::tempdir().unwrap();
     Archive::new(Cursor::new(archive))
         .unpack(temp.path())
@@ -207,6 +236,28 @@ pub(super) fn fixture() -> TestRepo {
         cargo_deny_version,
         exceptions,
     }
+}
+
+#[test]
+fn archive_head_with_retry_returns_real_tar_bytes() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let bytes = archive_head_with_attempts(&source, 1);
+    assert!(!bytes.is_empty());
+    // A `ustar` ("tar magic") string sits at offset 257 in a POSIX tar
+    // header -- assert real archive framing, not just nonempty stdout.
+    assert_eq!(&bytes[257..262], b"ustar");
+}
+
+#[test]
+fn archive_head_with_retry_fails_loudly_rather_than_returning_bad_bytes() {
+    let not_a_repo = tempfile::tempdir().unwrap();
+    let result = std::panic::catch_unwind(|| archive_head_with_attempts(not_a_repo.path(), 1));
+    let error = *result.unwrap_err().downcast::<String>().unwrap();
+    assert!(error.contains("git archive --format=tar HEAD failed"));
+    assert!(error.contains("after 1 attempts"));
 }
 
 pub(super) fn sha256_fixture() -> TestRepo {
@@ -326,7 +377,22 @@ impl StubPath {
     }
 
     pub fn run(&self, name: &str, args: &[&str]) -> Output {
-        self.command(name).args(args).output().unwrap()
+        // See `retry_on_text_file_busy`: a freshly written+chmod'd stub can
+        // transiently fail to spawn (`ExecutableFileBusy`) under heavy
+        // concurrent test load. Retry only that exact kind -- any other
+        // spawn error is a real defect and should fail immediately.
+        let mut result = self.command(name).args(args).output();
+        for delay_ms in [20, 60, 150] {
+            if !matches!(
+                &result,
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+            ) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            result = self.command(name).args(args).output();
+        }
+        result.unwrap()
     }
 }
 
@@ -711,6 +777,26 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+// Exec'ing a file immediately after writing+chmod'ing it is a documented
+// Linux race under heavy concurrent test-thread load (fork/exec churn from
+// sibling `#[test]` threads can transiently hold the just-closed inode
+// busy) -- reproduced directly running this crate's suite at default
+// parallelism, never in isolation. The write is already correct; only a
+// fresh executable's first invocation needs this tolerance, so it stays
+// confined to the test helpers that immediately run what they just wrote,
+// rather than changing production exec behavior in `candidate.rs`.
+fn retry_on_text_file_busy<T>(mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut last = attempt();
+    for delay_ms in [20, 60, 150] {
+        if !matches!(&last, Err(error) if error.to_string().contains("Text file busy")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        last = attempt();
+    }
+    last
+}
+
 pub(super) fn process_bin(
     cargo_body: &str,
     podman_body: Option<&str>,
@@ -728,9 +814,11 @@ pub(super) fn process_bin(
 fn container_build_failure_reports_sanitized_container_stderr() {
     let script = "#!/bin/sh\nprintf 'error: Rust compiler mismatch:\\texpected 1.97.1 x86_64-unknown-linux-gnu, actual different\\001\\n' >&2\nexit 1\n";
     let (_bin, processes) = process_bin("#!/bin/sh\nexit 97\n", Some(script));
-    let error = run_success_owned(&processes, Path::new("."), "podman", &["build".to_owned()])
-        .unwrap_err()
-        .to_string();
+    let error = retry_on_text_file_busy(|| {
+        run_success_owned(&processes, Path::new("."), "podman", &["build".to_owned()])
+    })
+    .unwrap_err()
+    .to_string();
     assert!(error.contains(
         "stderr: error: Rust compiler mismatch: expected 1.97.1 x86_64-unknown-linux-gnu, actual different\\x01"
     ));
@@ -766,7 +854,9 @@ fn command_first_line_validates_only_retained_identity() {
         &accepted,
         "#!/bin/sh\nprintf '%s\\n' 'gzip 1.10' 'license: https://example.invalid/license'\n",
     );
-    let value = command_first_line(accepted.to_str().unwrap(), &["--version"]).unwrap();
+    let value =
+        retry_on_text_file_busy(|| command_first_line(accepted.to_str().unwrap(), &["--version"]))
+            .unwrap();
     assert_eq!(value, "gzip 1.10");
     assert!(!value.contains("https://"));
 
@@ -775,7 +865,10 @@ fn command_first_line_validates_only_retained_identity() {
         &rejected,
         "#!/bin/sh\nprintf '%s\\n' 'gzip https://example.invalid/license' 'discarded text'\n",
     );
-    assert!(command_first_line(rejected.to_str().unwrap(), &["--version"]).is_err());
+    assert!(
+        retry_on_text_file_busy(|| command_first_line(rejected.to_str().unwrap(), &["--version"]))
+            .is_err()
+    );
 }
 
 pub(super) fn git_repo() -> tempfile::TempDir {
@@ -856,9 +949,27 @@ pub(super) fn current_time() -> String {
 }
 
 fn cargo_deny_fixture_prerequisite(cargo: &Path) -> Result<()> {
-    let actual = Command::new(cargo)
-        .args(["deny", "--version"])
-        .output()
+    // A freshly written+chmod'd fixture script can transiently fail to
+    // spawn (`ExecutableFileBusy`) under heavy concurrent test load (see
+    // `retry_on_text_file_busy` above) -- `.output().ok()` collapsed every
+    // spawn error, transient or genuine, into the same "unavailable"
+    // sentinel, so the transient case was indistinguishable from a real
+    // missing binary and unretryable from outside this function. Retry
+    // only that exact kind; a genuinely absent `cargo` fails with
+    // `NotFound` identically on every attempt, so this changes nothing for
+    // that (already-tested) case.
+    let mut spawned = Command::new(cargo).args(["deny", "--version"]).output();
+    for delay_ms in [20, 60, 150] {
+        if !matches!(
+            &spawned,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        spawned = Command::new(cargo).args(["deny", "--version"]).output();
+    }
+    let actual = spawned
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
