@@ -26,6 +26,7 @@ use spl_transport::{
     client::{DialedCarrier, TokenPersistHook, TransportClient},
     journal_bridge::{
         BridgePolicy, CapabilityGate, CarrierOpener, JournalBridgeConfig, JournalBridgeHandle,
+        JournalBridgeStatusReader,
     },
 };
 
@@ -1446,6 +1447,7 @@ struct PrivateLinkCapabilityInner {
     optional_client: reqwest::Client,
     optional_origin: Url,
     state_lock: std::sync::Weak<PrivateStateLock>,
+    bridge_status: [JournalBridgeStatusReader; 2],
 }
 
 #[derive(Clone)]
@@ -1458,6 +1460,20 @@ impl PrivateLinkCapability {
         self.inner.opener.facts.clone()
     }
 
+    /// A bridge stops dialing once the journal refuses this device with access
+    /// denied, or once other refusals reach the bridge's bound. Its local answer
+    /// is then always 502, which is a refusal of this device, not an outage.
+    fn bridge_stopped(&self) -> bool {
+        self.inner
+            .bridge_status
+            .iter()
+            .any(|reader| reader.status().terminal_reason.is_some())
+    }
+
+    fn refused_gateway(&self, status: StatusCode) -> bool {
+        status == StatusCode::BAD_GATEWAY && self.bridge_stopped()
+    }
+
     pub(crate) async fn send_optional(
         &self,
         builder: RequestBuilder,
@@ -1466,7 +1482,7 @@ impl PrivateLinkCapability {
         match builder.timeout(timeout).send().await {
             Ok(response) => {
                 let status = response.status();
-                if status == StatusCode::FORBIDDEN {
+                if status == StatusCode::FORBIDDEN || self.refused_gateway(status) {
                     return LinkOutcome::Forbidden;
                 }
                 if status.is_client_error() {
@@ -1598,7 +1614,7 @@ impl PrivateLinkCapability {
         match builder.timeout(timeout).send().await {
             Ok(response) => {
                 let status = response.status();
-                if status == StatusCode::FORBIDDEN {
+                if status == StatusCode::FORBIDDEN || self.refused_gateway(status) {
                     return LinkOutcome::Forbidden;
                 }
                 if status.is_client_error() {
@@ -2582,6 +2598,10 @@ impl PrivateLinkSession {
                 optional_client: self.optional_client.clone(),
                 optional_origin: self.optional_origin.clone(),
                 state_lock: Arc::downgrade(&self._state_lock),
+                bridge_status: [
+                    self.handle.status_reader(),
+                    self.optional_handle.status_reader(),
+                ],
             }),
         }
     }

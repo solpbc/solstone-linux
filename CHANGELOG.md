@@ -10,6 +10,11 @@ and this project adheres to Semantic Versioning.
 
 - `solstone-linux pause` and `solstone-linux resume` work from a terminal, so pause is reachable on a desktop with no panel icon at all. `pause` on its own lasts until you resume; `pause --minutes 30` ends on its own.
 
+### Fixed
+
+- when this computer's saved pairing stops working, sync now shows "pair again" instead of staying offline. when your journal is only unreachable, sync still shows offline while the app keeps trying.
+- a picture, recording or video from your journal that stopped arriving partway could show or play as if it were complete, and stay that way for up to five minutes. it now fails to load, and opening it again fetches it again.
+
 ## [2.0.3] - 2026-09-15
 
 ### Added

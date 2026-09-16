@@ -6,7 +6,7 @@ use std::{
     io,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
 };
 
@@ -15,9 +15,14 @@ use rcgen::{
     PKCS_ECDSA_P256_SHA256,
 };
 use rustls::{
-    RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    server::WebPkiClientVerifier,
+    CertificateError, DigitallySignedStruct, DistinguishedName, OtherError, RootCertStore,
+    ServerConfig, SignatureScheme,
+    client::danger::HandshakeSignatureValid,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime},
+    server::{
+        WebPkiClientVerifier,
+        danger::{ClientCertVerified, ClientCertVerifier},
+    },
 };
 use spl_core::{
     frame::{
@@ -75,6 +80,7 @@ struct PeerState {
     request_credit_changed: Arc<Notify>,
     max_request_staged: Arc<AtomicUsize>,
     request_staged_changed: Arc<Notify>,
+    refusal_alert: Arc<AtomicU8>,
 }
 
 pub(crate) struct PrivateLinkPeer {
@@ -86,7 +92,9 @@ pub(crate) struct PrivateLinkPeer {
 impl PrivateLinkPeer {
     pub(crate) async fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let (credential, acceptor) = credential_and_acceptor(listener.local_addr().unwrap().port());
+        let refusal_alert = Arc::new(AtomicU8::new(0));
+        let (credential, acceptor) =
+            credential_and_acceptor(listener.local_addr().unwrap().port(), refusal_alert.clone());
         let state = PeerState {
             routes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             responses: Arc::new(Mutex::new(VecDeque::new())),
@@ -98,6 +106,7 @@ impl PrivateLinkPeer {
             request_credit_changed: Arc::new(Notify::new()),
             max_request_staged: Arc::new(AtomicUsize::new(0)),
             request_staged_changed: Arc::new(Notify::new()),
+            refusal_alert,
         };
         let task_state = state.clone();
         let task = tokio::spawn(async move {
@@ -256,9 +265,73 @@ impl PrivateLinkPeer {
         self.task.abort();
         let _ = self.task.await;
     }
+
+    /// Refuse every later client certificate after the TLS 1.3 handshake, the way a journal
+    /// does: 49 (access denied), 46 (certificate unknown) or 48 (unknown CA, any other code).
+    pub(crate) fn refuse_handshakes_with_alert(&self, description: u8) {
+        self.state
+            .refusal_alert
+            .store(description, Ordering::SeqCst);
+    }
 }
 
-fn credential_and_acceptor(port: u16) -> (Credential, TlsAcceptor) {
+/// A journal-like client verifier: the real chain check, then an optional refusal.
+#[derive(Debug)]
+struct RefusingVerifier {
+    inner: Arc<dyn ClientCertVerifier>,
+    refusal: Arc<AtomicU8>,
+}
+
+impl ClientCertVerifier for RefusingVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let verified = self
+            .inner
+            .verify_client_cert(end_entity, intermediates, now)?;
+        let error = match self.refusal.load(Ordering::SeqCst) {
+            0 => return Ok(verified),
+            49 => CertificateError::ApplicationVerificationFailure,
+            46 => CertificateError::Other(OtherError(Arc::new(io::Error::other(
+                "authorization unreadable",
+            )))),
+            48 => CertificateError::UnknownIssuer,
+            other => panic!("unsupported refusal alert {other}"),
+        };
+        Err(rustls::Error::InvalidCertificate(error))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+fn credential_and_acceptor(port: u16, refusal: Arc<AtomicU8>) -> (Credential, TlsAcceptor) {
     let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -289,7 +362,10 @@ fn credential_and_acceptor(port: u16) -> (Credential, TlsAcceptor) {
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()
             .unwrap()
-            .with_client_cert_verifier(verifier)
+            .with_client_cert_verifier(Arc::new(RefusingVerifier {
+                inner: verifier,
+                refusal,
+            }))
             .with_single_cert(
                 vec![CertificateDer::from(server.der().to_vec()), ca_der.clone()],
                 PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der())),

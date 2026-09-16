@@ -1693,6 +1693,43 @@ mod tests {
     async fn listing_403_latches_revoked() {
         assert_403_latches("listing").await;
     }
+    // Protocol: SPL session § 7. Falsified by treating the bridge's local 502 as an outage
+    // after it stopped for access denied: the device never reaches "pair again".
+    #[tokio::test]
+    async fn only_an_access_denied_handshake_latches_revocation() {
+        for (alert, revoked) in [(49, true), (46, false), (48, false)] {
+            let legacy = MockServer::new(vec![]).await;
+            let peer = PrivateLinkPeer::start().await;
+            peer.refuse_handshakes_with_alert(alert);
+            let temp = TempDir::new().unwrap();
+            let config = Config {
+                stream: "host-a".into(),
+                ..config(&legacy, &temp)
+            };
+            let session =
+                start_private_link_session(&config.config_dir, peer.credential(), "host-a")
+                    .await
+                    .unwrap();
+            let client = UploadClient::new(
+                &config,
+                session.capability(),
+                Arc::new(MutableClock::new(0.0, 0.0)),
+            );
+            let error = client.fetch_day_custody("20260101").await.error_type;
+            let expected = if revoked {
+                ErrorType::Auth
+            } else {
+                ErrorType::Transient
+            };
+            assert_eq!(error, Some(expected), "alert {alert}");
+            assert_eq!(client.is_revoked(), revoked, "alert {alert}");
+            assert!(legacy.requests().is_empty());
+            drop(client);
+            session.shutdown().await.unwrap();
+            peer.shutdown().await;
+        }
+    }
+
     #[tokio::test]
     async fn carrier_failure_does_not_latch_revocation() {
         let default_trap = OpportunisticDefaultListenerTrap::bind();
