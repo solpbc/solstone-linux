@@ -2353,6 +2353,19 @@ mod tests {
         }
 
         let snapshot = client.link_facts().snapshot();
+        let unknown_journals_json: Vec<serde_json::Value> = snapshot
+            .unknown_journals
+            .iter()
+            .map(|uj| serde_json::json!({ "address": uj.address, "jid": uj.jid }))
+            .collect();
+        let unknown_spoken_marks_json: Vec<serde_json::Value> = snapshot
+            .unknown_spoken_marks
+            .iter()
+            .map(|m| match m {
+                Some(s) => serde_json::Value::String(s.clone()),
+                None => serde_json::Value::Null,
+            })
+            .collect();
         let expected = serde_json::json!({
             "pairing_required": snapshot.pairing_required,
             "private_state_invalid": snapshot.private_state_invalid,
@@ -2364,6 +2377,10 @@ mod tests {
             "terminal_revocation": snapshot.terminal_revocation,
             "token_persistence_failure": snapshot.token_persistence_failure,
             "journal_version_observed": snapshot.journal_version_observed,
+            "unknown_journals": unknown_journals_json,
+            "paired_jid": snapshot.paired_jid,
+            "unknown_spoken_marks": unknown_spoken_marks_json,
+            "paired_spoken_mark": snapshot.paired_spoken_mark,
         });
         let persisted: serde_json::Value = serde_json::from_slice(
             &fs::read(crate::sync_health::sync_health_path(&config.state_dir())).unwrap(),
@@ -2379,7 +2396,12 @@ mod tests {
                 .iter()
                 .filter(|(key, _)| !matches!(
                     key.as_str(),
-                    "journal_version_observed" | "transport_unavailable"
+                    "journal_version_observed"
+                        | "transport_unavailable"
+                        | "unknown_journals"
+                        | "paired_jid"
+                        | "unknown_spoken_marks"
+                        | "paired_spoken_mark"
                 ))
                 .all(|(_, value)| value.as_bool() == Some(true))
         );
@@ -4212,6 +4234,102 @@ mod tests {
         // Duplicate event in generation 1 does not re-fetch
         link_facts.publish_with_generation(crate::private_link::LinkFact::ObserverRegistered, 1);
         tokio::time::sleep(Duration::from_millis(50)).await;
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_journal_sighting_persists_and_drives_overlay_surfaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let server = MockServer::new(Vec::new()).await;
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 100.0,
+        });
+        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
+            &config,
+            &server.url,
+            Arc::clone(&clock),
+        ));
+        let service = SyncService::start_with_epoch(
+            config.clone(),
+            Arc::clone(&client),
+            Arc::clone(&clock),
+            Some(ProcessEpoch::for_test(10)),
+        );
+        let link_facts = client.link_facts();
+
+        let decode_hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+
+        let spki_hex = "3059301306072a8648ce3d020106082a8648ce3d03010703420004471c3e758c4904285bba7e53118ed0f524adeb0757d25bd2f8e7b0d76dfa714cdd520f7aca8a8b917acc37f51de8f0c9bbe3ad858382e702dc25a12d09f7a858";
+        let jid = spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex)).unwrap();
+        let spki_hex_paired = "3059301306072a8648ce3d020106082a8648ce3d030107034200047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1";
+        let paired_jid =
+            spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex_paired)).unwrap();
+
+        link_facts.set_paired_jid(Some(paired_jid));
+        link_facts.publish(crate::private_link::LinkFact::TransportUnavailable);
+        link_facts.note_unknown_journals(vec![spl_transport::UnknownJournal {
+            address: Some("192.168.1.100:5015".into()),
+            jid: Some(jid),
+        }]);
+
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &fs::read(crate::sync_health::sync_health_path(&config.state_dir())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted["link"]["unknown_journals"][0]["address"],
+            "192.168.1.100:5015"
+        );
+
+        let lock = crate::private_link::PrivateStateLock::acquire(&config.config_dir).unwrap();
+        let facts = crate::sync_health::load_facts_with_liveness(
+            &config.state_dir(),
+            crate::private_link::PrivateStateLockLiveness::LiveOwner,
+        );
+        let health = crate::sync_health::derive_health(&facts, 1000.0, 600.0);
+        assert_eq!(
+            health.state,
+            crate::sync_health::HealthState::TransportUnavailable
+        );
+        assert!(
+            health
+                .tooltip
+                .contains("unknown journal seen at 192.168.1.100:5015")
+        );
+        assert!(
+            health
+                .cli
+                .contains("Unknown journal seen at 192.168.1.100:5015:")
+        );
+        assert!(
+            health
+                .cli
+                .contains("blue, purple · liquefy·smock  (claimed, not verified)")
+        );
+        assert!(health.cli.contains("pink, cyan · distrust·chokehold"));
+        drop(lock);
+
+        // Clears when unknown journals is cleared
+        link_facts.note_unknown_journals(Vec::new());
+        let facts_after = crate::sync_health::load_facts_with_liveness(
+            &config.state_dir(),
+            crate::private_link::PrivateStateLockLiveness::LiveOwner,
+        );
+        let health_after = crate::sync_health::derive_health(&facts_after, 1000.0, 600.0);
+        assert!(!health_after.tooltip.contains("unknown journal"));
+        assert!(!health_after.cli.contains("Unknown journal"));
+
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 }

@@ -455,7 +455,7 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
         ("progress", progress.to_owned()),
         ("sync_ts", format_ts(facts.last_successful_sync)),
     ]);
-    SyncHealth {
+    let mut health = SyncHealth {
         state,
         header_recording: fill(surface.header_recording, &values),
         header_idle: fill(surface.header_idle, &values),
@@ -477,7 +477,65 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
         .to_owned(),
         last_success_age: facts.last_successful_sync.map(|value| now - value),
         progress: facts.progress.clone(),
+    };
+    apply_unknown_journal_overlay(&mut health, &link);
+    health
+}
+
+fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) {
+    if link.unknown_journals.is_empty() {
+        return;
     }
+
+    let mut tooltip_lines = Vec::new();
+    let mut detail_blocks = Vec::new();
+
+    let paired_spoken = link.paired_spoken_mark.as_deref();
+
+    for (index, sighting) in link.unknown_journals.iter().enumerate() {
+        let sighting_spoken = link
+            .unknown_spoken_marks
+            .get(index)
+            .and_then(|m| m.as_deref());
+        let what_answered = if let Some(spoken) = sighting_spoken {
+            format!("{spoken}  (claimed, not verified)")
+        } else {
+            "no identity presented".to_owned()
+        };
+
+        let your_journal = if let Some(paired) = paired_spoken {
+            paired.to_owned()
+        } else {
+            "no mark available".to_owned()
+        };
+
+        if let Some(address) = &sighting.address {
+            tooltip_lines.push(format!("unknown journal seen at {address}"));
+            detail_blocks.push(format!(
+                "Unknown journal seen at {address}:\n  what answered:  {what_answered}\n  your journal:   {your_journal}\n  if you recently reset your journal, pair it again."
+            ));
+        } else {
+            tooltip_lines.push("unknown journal seen through the relay".to_owned());
+            detail_blocks.push(format!(
+                "Unknown journal seen through the relay:\n  what answered:  {what_answered}\n  your journal:   {your_journal}\n  this is weaker evidence than a direct connection."
+            ));
+        }
+    }
+
+    for line in tooltip_lines {
+        health.tooltip.push('\n');
+        health.tooltip.push_str(&line);
+    }
+
+    let detail_text = detail_blocks.join("\n\n");
+    health.cli.push_str("\n\n");
+    health.cli.push_str(&detail_text);
+    health.doctor_detail.push_str("\n\n");
+    health.doctor_detail.push_str(&detail_text);
+    health.accessible_recording.push_str("\n\n");
+    health.accessible_recording.push_str(&detail_text);
+    health.accessible_idle.push_str("\n\n");
+    health.accessible_idle.push_str(&detail_text);
 }
 
 pub fn sync_health_path(state_dir: &Path) -> PathBuf {
@@ -523,6 +581,79 @@ pub(crate) fn load_link_facts(
             .and_then(Value::as_bool)
             .ok_or(HealthLoadError::MalformedLink)
     };
+    let unknown_journals = link
+        .get("unknown_journals")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|val| spl_transport::UnknownJournal {
+                    address: val
+                        .get("address")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    jid: val
+                        .get("jid")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let paired_jid = link
+        .get("paired_jid")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+
+    let (unknown_spoken_marks, paired_spoken_mark) = if unknown_journals.is_empty() {
+        (Vec::new(), None)
+    } else {
+        let loaded_unknown_spoken: Option<Vec<Option<String>>> = link
+            .get("unknown_spoken_marks")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|val| val.as_str().map(ToOwned::to_owned))
+                    .collect()
+            });
+        let loaded_paired_spoken: Option<String> = link
+            .get("paired_spoken_mark")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+
+        let unknown_marks = if let Some(loaded) = loaded_unknown_spoken {
+            if loaded.len() == unknown_journals.len() {
+                loaded
+            } else {
+                unknown_journals
+                    .iter()
+                    .map(|item| {
+                        item.jid
+                            .as_deref()
+                            .and_then(crate::private_link::format_spoken_mark)
+                    })
+                    .collect()
+            }
+        } else {
+            unknown_journals
+                .iter()
+                .map(|item| {
+                    item.jid
+                        .as_deref()
+                        .and_then(crate::private_link::format_spoken_mark)
+                })
+                .collect()
+        };
+
+        let paired_mark = if loaded_paired_spoken.is_some() {
+            loaded_paired_spoken
+        } else {
+            paired_jid
+                .as_deref()
+                .and_then(crate::private_link::format_spoken_mark)
+        };
+
+        (unknown_marks, paired_mark)
+    };
     Ok(Some(LinkFactState {
         pairing_required: boolean("pairing_required")?,
         private_state_invalid: boolean("private_state_invalid")?,
@@ -536,6 +667,10 @@ pub(crate) fn load_link_facts(
         journal_version_observed: boolean("journal_version_observed")?,
         dial_generation: 0,
         optional_dial: false,
+        unknown_journals,
+        paired_jid,
+        unknown_spoken_marks,
+        paired_spoken_mark,
     }))
 }
 
@@ -582,6 +717,24 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
         .as_ref()
         .zip(facts.link_epoch.as_ref())
         .map(|(link, _)| {
+            let unknown_journals_json: Vec<Value> = link
+                .unknown_journals
+                .iter()
+                .map(|uj| {
+                    json!({
+                        "address": uj.address,
+                        "jid": uj.jid,
+                    })
+                })
+                .collect();
+            let unknown_spoken_marks_json: Vec<Value> = link
+                .unknown_spoken_marks
+                .iter()
+                .map(|mark| match mark {
+                    Some(m) => Value::String(m.clone()),
+                    None => Value::Null,
+                })
+                .collect();
             json!({
                 "pairing_required": link.pairing_required,
                 "private_state_invalid": link.private_state_invalid,
@@ -593,6 +746,10 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
                 "terminal_revocation": link.terminal_revocation,
                 "token_persistence_failure": link.token_persistence_failure,
                 "journal_version_observed": link.journal_version_observed,
+                "unknown_journals": unknown_journals_json,
+                "paired_jid": link.paired_jid,
+                "unknown_spoken_marks": unknown_spoken_marks_json,
+                "paired_spoken_mark": link.paired_spoken_mark,
             })
         });
     let mut text = serde_json::to_string(&json!({
@@ -1101,6 +1258,7 @@ mod tests {
             journal_version_observed: true,
             dial_generation: 0,
             optional_dial: false,
+            ..Default::default()
         };
         let conflicting_cases = [
             (all.clone(), HealthState::UnsafeLinkState),
@@ -1302,5 +1460,205 @@ mod tests {
         // Corrupt file falls back to None
         fs::write(paired_journal_path(temp.path()), "not-json").unwrap();
         assert_eq!(load_paired_journal_version(temp.path()), None);
+    }
+
+    fn decode_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn unknown_journal_overlay_formats_address_sighting_with_mark() {
+        let spki_hex = "3059301306072a8648ce3d020106082a8648ce3d03010703420004471c3e758c4904285bba7e53118ed0f524adeb0757d25bd2f8e7b0d76dfa714cdd520f7aca8a8b917acc37f51de8f0c9bbe3ad858382e702dc25a12d09f7a858";
+        let jid = spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex)).unwrap();
+        let spki_hex_paired = "3059301306072a8648ce3d020106082a8648ce3d030107034200047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1";
+        let paired_jid =
+            spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex_paired)).unwrap();
+
+        let facts = SyncFacts {
+            link: Some(LinkFactState {
+                transport_unavailable: true,
+                unknown_journals: vec![spl_transport::UnknownJournal {
+                    address: Some("192.168.1.50:5015".into()),
+                    jid: Some(jid),
+                }],
+                paired_jid: Some(paired_jid),
+                unknown_spoken_marks: vec![Some("blue, purple · liquefy·smock".into())],
+                paired_spoken_mark: Some("pink, cyan · distrust·chokehold".into()),
+                ..Default::default()
+            }),
+            ..SyncFacts::default()
+        };
+
+        let health = derive_health(&facts, 1000.0, 600.0);
+        assert_eq!(health.state, HealthState::TransportUnavailable);
+        assert_eq!(health.sni_status, "NeedsAttention");
+        assert_eq!(health.dbus, "transport-unavailable");
+        assert_eq!(health.icon, "offline");
+        assert!(
+            health
+                .tooltip
+                .contains("unknown journal seen at 192.168.1.50:5015")
+        );
+
+        let expected_block = "\
+Unknown journal seen at 192.168.1.50:5015:
+  what answered:  blue, purple · liquefy·smock  (claimed, not verified)
+  your journal:   pink, cyan · distrust·chokehold
+  if you recently reset your journal, pair it again.";
+
+        assert!(health.cli.ends_with(expected_block));
+        assert!(health.doctor_detail.ends_with(expected_block));
+        assert!(health.accessible_recording.ends_with(expected_block));
+        assert!(health.accessible_idle.ends_with(expected_block));
+    }
+
+    #[test]
+    fn unknown_journal_overlay_formats_relay_sighting() {
+        let spki_hex = "3059301306072a8648ce3d020106082a8648ce3d03010703420004471c3e758c4904285bba7e53118ed0f524adeb0757d25bd2f8e7b0d76dfa714cdd520f7aca8a8b917acc37f51de8f0c9bbe3ad858382e702dc25a12d09f7a858";
+        let jid = spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex)).unwrap();
+        let spki_hex_paired = "3059301306072a8648ce3d020106082a8648ce3d030107034200047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1";
+        let paired_jid =
+            spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex_paired)).unwrap();
+
+        let facts = SyncFacts {
+            link: Some(LinkFactState {
+                transport_unavailable: true,
+                unknown_journals: vec![spl_transport::UnknownJournal {
+                    address: None,
+                    jid: Some(jid),
+                }],
+                paired_jid: Some(paired_jid),
+                unknown_spoken_marks: vec![Some("blue, purple · liquefy·smock".into())],
+                paired_spoken_mark: Some("pink, cyan · distrust·chokehold".into()),
+                ..Default::default()
+            }),
+            ..SyncFacts::default()
+        };
+
+        let health = derive_health(&facts, 1000.0, 600.0);
+        assert_eq!(health.state, HealthState::TransportUnavailable);
+        assert!(
+            health
+                .tooltip
+                .contains("unknown journal seen through the relay")
+        );
+
+        let expected_block = "\
+Unknown journal seen through the relay:
+  what answered:  blue, purple · liquefy·smock  (claimed, not verified)
+  your journal:   pink, cyan · distrust·chokehold
+  this is weaker evidence than a direct connection.";
+
+        assert!(health.cli.ends_with(expected_block));
+        assert!(health.doctor_detail.ends_with(expected_block));
+    }
+
+    #[test]
+    fn unknown_journal_overlay_formats_no_identity_presented() {
+        let spki_hex_paired = "3059301306072a8648ce3d020106082a8648ce3d030107034200047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1";
+        let paired_jid =
+            spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex_paired)).unwrap();
+
+        let facts = SyncFacts {
+            link: Some(LinkFactState {
+                transport_unavailable: true,
+                unknown_journals: vec![spl_transport::UnknownJournal {
+                    address: Some("127.0.0.1:5015".into()),
+                    jid: None,
+                }],
+                paired_jid: Some(paired_jid),
+                unknown_spoken_marks: vec![None],
+                paired_spoken_mark: Some("pink, cyan · distrust·chokehold".into()),
+                ..Default::default()
+            }),
+            ..SyncFacts::default()
+        };
+
+        let health = derive_health(&facts, 1000.0, 600.0);
+        assert_eq!(health.state, HealthState::TransportUnavailable);
+        assert!(
+            health
+                .tooltip
+                .contains("unknown journal seen at 127.0.0.1:5015")
+        );
+
+        let expected_block = "\
+Unknown journal seen at 127.0.0.1:5015:
+  what answered:  no identity presented
+  your journal:   pink, cyan · distrust·chokehold
+  if you recently reset your journal, pair it again.";
+
+        assert!(health.cli.ends_with(expected_block));
+        assert!(!health.cli.contains("claimed, not verified"));
+    }
+
+    #[test]
+    fn save_and_load_facts_preserves_unknown_journals_and_paired_jid() {
+        let temp = tempfile::tempdir().unwrap();
+        let facts = SyncFacts {
+            link: Some(LinkFactState {
+                carrier_proven: true,
+                observer_registered: true,
+                unknown_journals: vec![spl_transport::UnknownJournal {
+                    address: Some("127.0.0.1:5015".into()),
+                    jid: Some("test-jid".into()),
+                }],
+                paired_jid: Some("paired-jid".into()),
+                ..Default::default()
+            }),
+            link_epoch: Some(ProcessEpoch::for_test(1)),
+            ..SyncFacts::default()
+        };
+        save_facts(temp.path(), &facts).unwrap();
+
+        let liveness = PrivateStateLockLiveness::LiveOwner;
+        let text = fs::read_to_string(sync_health_path(temp.path())).unwrap();
+        let Value::Object(data) = serde_json::from_str(&text).unwrap() else {
+            panic!("expected json object");
+        };
+        let loaded_link = load_link_facts(&data, liveness).unwrap().unwrap();
+        assert_eq!(
+            loaded_link.unknown_journals,
+            facts.link.unwrap().unknown_journals
+        );
+        assert_eq!(loaded_link.paired_jid, Some("paired-jid".to_owned()));
+    }
+
+    #[test]
+    fn load_link_facts_backward_compatible_with_missing_unknown_journals() {
+        let epoch = ProcessEpoch::for_test(1);
+        let data: Map<String, Value> = serde_json::from_str(&format!(
+            r#"{{
+            "schema_version": 2,
+            "link_epoch": "{}",
+            "link": {{
+                "pairing_required": false,
+                "private_state_invalid": false,
+                "config_sanitation_failed": false,
+                "listener_ready": true,
+                "carrier_proven": false,
+                "observer_registered": false,
+                "transport_unavailable": false,
+                "terminal_revocation": false,
+                "token_persistence_failure": false,
+                "journal_version_observed": false,
+                "paired_jid": "some-paired-jid"
+            }}
+        }}"#,
+            epoch.as_str()
+        ))
+        .unwrap();
+
+        let loaded = load_link_facts(&data, PrivateStateLockLiveness::LiveOwner)
+            .unwrap()
+            .unwrap();
+        assert!(loaded.listener_ready);
+        assert!(loaded.unknown_journals.is_empty());
+        assert_eq!(loaded.paired_jid, Some("some-paired-jid".to_owned()));
+        assert!(loaded.unknown_spoken_marks.is_empty());
+        assert_eq!(loaded.paired_spoken_mark, None);
     }
 }

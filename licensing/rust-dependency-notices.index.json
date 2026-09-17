@@ -1,11 +1,11 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "e3a7399cce995ce167e472b3a42a9d46ee7d6397fb84f2f96d6b092131065670",
-  "notices_sha256": "86dbf6226bf443b235f6dc195a7e2e5c2523bcd5b50bfce3b6ae52a720366252",
+  "cargo_lock_sha256": "f4fcd567248d2ccef3caab603b37ed0e44da9597bf51987bea5053b9ef160ac1",
+  "notices_sha256": "9543d6d2b62c2ccc21bf900f7a84a151c9e9e0126e9e5b5d3a96ca123fb98682",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux",
   "filter_platform": "x86_64-unknown-linux-gnu",
-  "external_package_count": 316,
+  "external_package_count": 319,
   "packages": [
     {
       "name": "adler2",
@@ -15,15 +15,15 @@
       "members": [
         {
           "sha256": "861399f8c21c042b110517e76dc6b63a2b334276c8cf17412fc3c8908ca8dc17",
-          "start": 458836,
-          "end": 459501,
+          "start": 459919,
+          "end": 460584,
           "origin": "crate-archive",
           "path": "LICENSE-0BSD"
         },
         {
           "sha256": "8ada45cd9f843acf64e4722ae262c622a2b3b3007c7310ef36ac1061a30f6adb",
-          "start": 472973,
-          "end": 483833,
+          "start": 474056,
+          "end": 484916,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -51,8 +51,8 @@
         },
         {
           "sha256": "36516aefdc84c5d5a1e7485425913a22dbda69eb1930c5e84d6ae4972b5194b9",
-          "start": 204095,
-          "end": 205141,
+          "start": 205178,
+          "end": 206224,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -66,15 +66,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -88,15 +88,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -110,15 +110,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -132,15 +132,37 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
+          "origin": "crate-archive",
+          "path": "LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "argon2",
+      "version": "0.5.3",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "license": "MIT OR Apache-2.0",
+      "members": [
+        {
+          "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+          "start": 559232,
+          "end": 570081,
+          "origin": "crate-archive",
+          "path": "LICENSE-APACHE"
+        },
+        {
+          "sha256": "33f702959c0ea91c08b21b65cf1f08b6c122ec9e6db0b5db784a7b367d942330",
+          "start": 193304,
+          "end": 194386,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -169,15 +191,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "4da95ec4ecb65b738d470b7d762894ad9c97da93e6cbfb18b570fc2c96f4b871",
-          "start": 266136,
-          "end": 267207,
+          "start": 267219,
+          "end": 268290,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -191,8 +213,8 @@
       "members": [
         {
           "sha256": "ae26bc7b1bc91fb8648f6a298decbb1a77090a56c9d04e2c23b8365e5f54acb5",
-          "start": 580893,
-          "end": 581967,
+          "start": 583098,
+          "end": 584172,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -206,15 +228,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
-          "start": 531737,
-          "end": 532797,
+          "start": 533942,
+          "end": 535002,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -228,15 +250,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
-          "start": 531737,
-          "end": 532797,
+          "start": 533942,
+          "end": 535002,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -250,15 +272,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "committed-override",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
-          "start": 531737,
-          "end": 532797,
+          "start": 533942,
+          "end": 535002,
           "origin": "committed-override",
           "path": "LICENSE-MIT"
         }
@@ -272,8 +294,8 @@
       "members": [
         {
           "sha256": "e4705ddab847449a2cdcb3c88b005ea10330aa249d9148ca2eef9c84c5d29895",
-          "start": 705335,
-          "end": 716092,
+          "start": 708732,
+          "end": 719489,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -294,8 +316,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -316,8 +338,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -338,8 +360,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -360,8 +382,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -382,8 +404,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -404,8 +426,8 @@
       "members": [
         {
           "sha256": "769f80b5bcb42ed0af4e4d2fd74e1ac9bf843cb80c5a29219d1ef3544428a6bb",
-          "start": 393693,
-          "end": 404539,
+          "start": 394776,
+          "end": 405622,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -426,8 +448,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -448,8 +470,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -470,8 +492,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -492,8 +514,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -506,8 +528,8 @@
         },
         {
           "sha256": "6226d0632e2e1a80c23597e964da9812ae193c535fe058154afb034e94167aa5",
-          "start": 329792,
-          "end": 331641,
+          "start": 330875,
+          "end": 332724,
           "origin": "crate-archive",
           "path": "LICENSE-THIRD-PARTY"
         }
@@ -521,8 +543,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -543,8 +565,8 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -565,8 +587,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -587,8 +609,8 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -609,15 +631,37 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
-          "start": 341366,
-          "end": 342437,
+          "start": 342449,
+          "end": 343520,
+          "origin": "crate-archive",
+          "path": "LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "name": "blake2",
+      "version": "0.10.6",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "license": "MIT OR Apache-2.0",
+      "members": [
+        {
+          "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+          "start": 559232,
+          "end": 570081,
+          "origin": "crate-archive",
+          "path": "LICENSE-APACHE"
+        },
+        {
+          "sha256": "9c768944eb4a0422ca2efc25ea9fb2fb9e7fbd3fdb04e86b87366339cb7466db",
+          "start": 517598,
+          "end": 518719,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -631,15 +675,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "d5c22aa3118d240e877ad41c5d9fa232f9c77d757d4aac0c2f943afc0a95e0ef",
-          "start": 681364,
-          "end": 682446,
+          "start": 683569,
+          "end": 684651,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -653,8 +697,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -675,22 +719,22 @@
       "members": [
         {
           "sha256": "e3ba223bb1423f0aad8c3dfce0fe3148db48926d41e6fbc3afbbf5ff9e1c89cb",
-          "start": 694936,
-          "end": 705334,
+          "start": 698333,
+          "end": 708731,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "9df9ba60a11af705f2e451b53762686e615d86f76b169cf075c3237730dbd7e2",
-          "start": 527866,
-          "end": 528976,
+          "start": 530071,
+          "end": 531181,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         },
         {
           "sha256": "84b34dd7608f7fb9b17bd588a6bf392bf7de504e2716f024a77d89f1b145a151",
-          "start": 456498,
-          "end": 457349,
+          "start": 457581,
+          "end": 458432,
           "origin": "crate-archive",
           "path": "LICENSE-ZLIB"
         }
@@ -704,8 +748,8 @@
       "members": [
         {
           "sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42",
-          "start": 239701,
-          "end": 240756,
+          "start": 240784,
+          "end": 241839,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -719,15 +763,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
-          "start": 216845,
-          "end": 217902,
+          "start": 217928,
+          "end": 218985,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -741,8 +785,8 @@
       "members": [
         {
           "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
-          "start": 426278,
-          "end": 437128,
+          "start": 427361,
+          "end": 438211,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -763,15 +807,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
-          "start": 216845,
-          "end": 217902,
+          "start": 217928,
+          "end": 218985,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -785,8 +829,8 @@
       "members": [
         {
           "sha256": "946c9835d8034d24404f8cfec5f4654cee5dad17e944afc3d06d742cf2882831",
-          "start": 503755,
-          "end": 516062,
+          "start": 504838,
+          "end": 517145,
           "origin": "crate-archive",
           "path": "LICENSE.txt"
         }
@@ -800,15 +844,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -822,15 +866,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -844,15 +888,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -866,15 +910,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -888,8 +932,8 @@
       "members": [
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "license"
         }
@@ -903,15 +947,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
-          "start": 216845,
-          "end": 217902,
+          "start": 217928,
+          "end": 218985,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -925,15 +969,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -947,8 +991,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -969,15 +1013,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "bada9e7ed8dc00d63502053c455d7c8d7575dfb7e8277a2a832531844d900682",
-          "start": 604461,
-          "end": 605543,
+          "start": 606666,
+          "end": 607748,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -998,8 +1042,8 @@
         },
         {
           "sha256": "f28420c1906af38be726cd7842798f0194b27c41d6051c0d1e9ee348b8a4a0ea",
-          "start": 737474,
-          "end": 738565,
+          "start": 740871,
+          "end": 741962,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1013,15 +1057,15 @@
       "members": [
         {
           "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
-          "start": 587611,
-          "end": 598968,
+          "start": 589816,
+          "end": 601173,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "afb11426e09da40a1ae4f8fa17ddcc6b6a52d14df04c29bc5bcd06eb8730624d",
-          "start": 583051,
-          "end": 584108,
+          "start": 585256,
+          "end": 586313,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1035,15 +1079,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "ae9baa7beea910273c2f384c2a6b721fb7bd02bda3436074a1072e4ee689f985",
-          "start": 581968,
-          "end": 583050,
+          "start": 584173,
+          "end": 585255,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1057,15 +1101,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "61d383b05b87d78f94d2937e2580cce47226d17823c0430fbcad09596537efcf",
-          "start": 327626,
-          "end": 328723,
+          "start": 328709,
+          "end": 329806,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1079,15 +1123,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "5734ed989dfca1f625b40281ee9f4530f91b2411ec01cb748223e7eb87e201ab",
-          "start": 285072,
-          "end": 286171,
+          "start": 286155,
+          "end": 287254,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1101,15 +1145,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "90c503b61dee04e1449c323ec34c229dfb68d7adcb96c7e140ee55f70fce2d8e",
-          "start": 499974,
-          "end": 501051,
+          "start": 501057,
+          "end": 502134,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1123,15 +1167,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "3521672491a3479422d5fe1aca6645dd2984090f85da6e5205abfb18fb7a6897",
-          "start": 193304,
-          "end": 194369,
+          "start": 194387,
+          "end": 195452,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1145,8 +1189,8 @@
       "members": [
         {
           "sha256": "b68ad1a3367b825447089e1f8d6829b97f47a89eb78d2f4ebaef4672f5606186",
-          "start": 600108,
-          "end": 601229,
+          "start": 602313,
+          "end": 603434,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -1160,15 +1204,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5",
-          "start": 586038,
-          "end": 587110,
+          "start": 588243,
+          "end": 589315,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1182,15 +1226,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "ad64fcb9589f162720f3cc5010ad76ca6ad3764e11861f9192c489df176bb71d",
-          "start": 579810,
-          "end": 580892,
+          "start": 582015,
+          "end": 583097,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1204,15 +1248,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
-          "start": 531737,
-          "end": 532797,
+          "start": 533942,
+          "end": 535002,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1226,8 +1270,8 @@
       "members": [
         {
           "sha256": "edd65bdd88957a205c47d53fa499eed8865a70320f0f03f6391668cb304ea376",
-          "start": 722814,
-          "end": 734163,
+          "start": 726211,
+          "end": 737560,
           "origin": "crate-archive",
           "path": "LICENSE-Apache"
         },
@@ -1248,15 +1292,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba",
-          "start": 530040,
-          "end": 531097,
+          "start": 532245,
+          "end": 533302,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1270,8 +1314,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1299,8 +1343,8 @@
         },
         {
           "sha256": "aa893340d14b9844625be6a50ac644169a01b52f0211cbf81b09e1874c8cd81d",
-          "start": 567877,
-          "end": 568959,
+          "start": 570082,
+          "end": 571164,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1314,15 +1358,15 @@
       "members": [
         {
           "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
-          "start": 426278,
-          "end": 437128,
+          "start": 427361,
+          "end": 438211,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "fb252fecf98d9af8f1d9201c5860319a514f5a8a24700dc84fc6ea287a7a4958",
-          "start": 747066,
-          "end": 748139,
+          "start": 750463,
+          "end": 751536,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1336,15 +1380,15 @@
       "members": [
         {
           "sha256": "78779d420019e6b4630376af8e86b6b335ee8a2f89ede6e0411e0469a326aaa4",
-          "start": 406051,
-          "end": 416897,
+          "start": 407134,
+          "end": 417980,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "bdebaf9156a298f8fdab56dd26cb5144673de522d80f4c0d88e0039145f147f9",
-          "start": 605544,
-          "end": 606614,
+          "start": 607749,
+          "end": 608819,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1358,15 +1402,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "7576269ea71f767b99297934c0b2367532690f8c4badc695edf8e04ab6a1e545",
-          "start": 392649,
-          "end": 393692,
+          "start": 393732,
+          "end": 394775,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1380,15 +1424,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "d27687b51f2874822c1530976b7e837eac4f308d94bf3dd42047011b7d437b47",
-          "start": 677717,
-          "end": 678787,
+          "start": 679922,
+          "end": 680992,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1417,8 +1461,8 @@
       "members": [
         {
           "sha256": "41ba8a366e4129d0b7551f8b98211f59635b2e30c0a3c7845e828e2a7ce42064",
-          "start": 222311,
-          "end": 232026,
+          "start": 223394,
+          "end": 233109,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1439,15 +1483,15 @@
       "members": [
         {
           "sha256": "68d7c3ae5b131ec533fb33a9fd63753eb82fac77d7597bb5058a5af07adf9f06",
-          "start": 343533,
-          "end": 353229,
+          "start": 344616,
+          "end": 354312,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "d13669f0eaff9b7015bff0d8637297213b53d9f239826636c07a15633acf7052",
-          "start": 675079,
-          "end": 676133,
+          "start": 677284,
+          "end": 678338,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1461,15 +1505,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "7365cc8878a1d7ce155a58c4ca09c3d7a6be413efa5334a80ea842912b669349",
-          "start": 379080,
-          "end": 380129,
+          "start": 380163,
+          "end": 381212,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1483,15 +1527,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "8764a597675778ddfd4e25f81b08a05dbcf089ac05662df7613fe67f150e3aa2",
-          "start": 459502,
-          "end": 460556,
+          "start": 460585,
+          "end": 461639,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1505,22 +1549,22 @@
       "members": [
         {
           "sha256": "ec82b96487e9e778ee610c7ab245162464782cfa1f555c2299333f8dbe5c036a",
-          "start": 721442,
-          "end": 721763,
+          "start": 724839,
+          "end": 725160,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3",
-          "start": 328724,
-          "end": 329791,
+          "start": 329807,
+          "end": 330874,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1534,8 +1578,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1556,8 +1600,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1578,8 +1622,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1607,8 +1651,8 @@
         },
         {
           "sha256": "c77a4cf9da729987d0fe7ccd811e3bd27393914ddf3d23467c18cc22954513b3",
-          "start": 644897,
-          "end": 645933,
+          "start": 647102,
+          "end": 648138,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1622,15 +1666,15 @@
       "members": [
         {
           "sha256": "3708458dee7f359ac6c9c5558023ed481be87e5372c43ebd7f2ca7ad23c12026",
-          "start": 205142,
-          "end": 215990,
+          "start": 206225,
+          "end": 217073,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "8d0c1d1d4b2bebf5b9211f0e883d5a482b7808f3ed31320da14ddee95811f4ef",
-          "start": 498897,
-          "end": 499973,
+          "start": 499980,
+          "end": 501056,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1644,15 +1688,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
-          "start": 216845,
-          "end": 217902,
+          "start": 217928,
+          "end": 218985,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1666,8 +1710,8 @@
       "members": [
         {
           "sha256": "e339134e53732f093f68ef00bcec3687ebf964ef8c6c812f31e74099c07d3f49",
-          "start": 693854,
-          "end": 694935,
+          "start": 697251,
+          "end": 698332,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -1681,8 +1725,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1703,8 +1747,8 @@
       "members": [
         {
           "sha256": "40be1e77825d7e49485a2e43d89bed29dfff29f8f529e71d3c683656021f0d08",
-          "start": 220021,
-          "end": 221096,
+          "start": 221104,
+          "end": 222179,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -1718,8 +1762,8 @@
       "members": [
         {
           "sha256": "b1181a40b2a7b25cf66fd01481713bc1005df082c53ef73e851e55071b102744",
-          "start": 584109,
-          "end": 584965,
+          "start": 586314,
+          "end": 587170,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -1733,8 +1777,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1762,8 +1806,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1784,8 +1828,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1806,8 +1850,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1828,8 +1872,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1843,8 +1887,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -1857,8 +1901,8 @@
         },
         {
           "sha256": "6226d0632e2e1a80c23597e964da9812ae193c535fe058154afb034e94167aa5",
-          "start": 329792,
-          "end": 331641,
+          "start": 330875,
+          "end": 332724,
           "origin": "crate-archive",
           "path": "LICENSE-THIRD-PARTY"
         }
@@ -1879,8 +1923,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1901,8 +1945,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1923,8 +1967,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1945,8 +1989,8 @@
         },
         {
           "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
-          "start": 342438,
-          "end": 343532,
+          "start": 343521,
+          "end": 344615,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -1960,8 +2004,8 @@
       "members": [
         {
           "sha256": "c09aae9d3c77b531f56351a9947bc7446511d6b025b3255312d3e3442a9a7583",
-          "start": 606615,
-          "end": 607722,
+          "start": 608820,
+          "end": 609927,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -1975,8 +2019,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -1990,15 +2034,15 @@
       "members": [
         {
           "sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf",
-          "start": 568960,
-          "end": 579809,
+          "start": 571165,
+          "end": 582014,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "42fa16951ce7f24b5a467a40e5b449a1d41e662f97ca779864f053f39e097737",
-          "start": 234169,
-          "end": 235299,
+          "start": 235252,
+          "end": 236382,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2012,8 +2056,8 @@
       "members": [
         {
           "sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf",
-          "start": 568960,
-          "end": 579809,
+          "start": 571165,
+          "end": 582014,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2034,15 +2078,15 @@
       "members": [
         {
           "sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf",
-          "start": 568960,
-          "end": 579809,
+          "start": 571165,
+          "end": 582014,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "523a42c25d245dde9c015f882cec7f4555aad883382a6cf19b4b7d9b2cd5419b",
-          "start": 282312,
-          "end": 283442,
+          "start": 283395,
+          "end": 284525,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2056,8 +2100,8 @@
       "members": [
         {
           "sha256": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb",
-          "start": 497872,
-          "end": 498896,
+          "start": 498955,
+          "end": 499979,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2071,15 +2115,15 @@
       "members": [
         {
           "sha256": "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d",
-          "start": 684580,
-          "end": 685231,
+          "start": 686785,
+          "end": 687436,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb",
-          "start": 497872,
-          "end": 498896,
+          "start": 498955,
+          "end": 499979,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2093,15 +2137,15 @@
       "members": [
         {
           "sha256": "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d",
-          "start": 684580,
-          "end": 685231,
+          "start": 686785,
+          "end": 687436,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb",
-          "start": 497872,
-          "end": 498896,
+          "start": 498955,
+          "end": 499979,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2115,8 +2159,8 @@
       "members": [
         {
           "sha256": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb",
-          "start": 497872,
-          "end": 498896,
+          "start": 498955,
+          "end": 499979,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2130,8 +2174,8 @@
       "members": [
         {
           "sha256": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb",
-          "start": 497872,
-          "end": 498896,
+          "start": 498955,
+          "end": 499979,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2145,15 +2189,15 @@
       "members": [
         {
           "sha256": "7429802d3e67e3308471b91fbea341e484c4e0a23d0fb230a8636c38184cec79",
-          "start": 381199,
-          "end": 381814,
+          "start": 382282,
+          "end": 382897,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2181,8 +2225,8 @@
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2225,15 +2269,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2",
-          "start": 749234,
-          "end": 750294,
+          "start": 752631,
+          "end": 753691,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2247,15 +2291,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0",
-          "start": 419956,
-          "end": 421027,
+          "start": 421039,
+          "end": 422110,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2269,15 +2313,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "f7bdb3426d045cd50efd4953026e3eb5a83d0199f458a075602611b9344da5b9",
-          "start": 743944,
-          "end": 745069,
+          "start": 747341,
+          "end": 748466,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2291,15 +2335,15 @@
       "members": [
         {
           "sha256": "59013a5c8d3a19c26a457579105915a5d51bb0c09d579f8cdedf12e4203c3018",
-          "start": 287258,
-          "end": 298106,
+          "start": 288341,
+          "end": 299189,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "d288f9c9b4590446ec18c22ead8f8b5a12a3d4025b68f62dc9015063eb9cca69",
-          "start": 678788,
-          "end": 679896,
+          "start": 680993,
+          "end": 682101,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2313,15 +2357,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba",
-          "start": 530040,
-          "end": 531097,
+          "start": 532245,
+          "end": 533302,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2335,15 +2379,15 @@
       "members": [
         {
           "sha256": "8bb1b50b0e5c9399ae33bd35fab2769010fa6c14e8860c729a52295d84896b7a",
-          "start": 484897,
-          "end": 495732,
+          "start": 485980,
+          "end": 496815,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "dc91f8200e4b2a1f9261035d4c18c33c246911a6c0f7b543d75347e61b249cff",
-          "start": 687255,
-          "end": 688314,
+          "start": 689460,
+          "end": 690519,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2387,15 +2431,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "391a5396cec6230bfabd4ef4eb2350eb895bc5efce377a2218f5702ed020d3e3",
-          "start": 217903,
-          "end": 218966,
+          "start": 218986,
+          "end": 220049,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2409,15 +2453,15 @@
       "members": [
         {
           "sha256": "4d10fe5f3aa176b05b229a248866bad70b834c173f1252a814ff4748d8a13837",
-          "start": 255880,
-          "end": 266135,
+          "start": 256963,
+          "end": 267218,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "934887691e05d69d7c86ad3f2c360980fa30c15b035e351f3c9865e99da4debc",
-          "start": 502703,
-          "end": 503754,
+          "start": 503786,
+          "end": 504837,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2446,8 +2490,8 @@
       "members": [
         {
           "sha256": "9e0a97848ea543aef745c98e84fde696a9a3e0735538f6daefdd3cb1942effc1",
-          "start": 528977,
-          "end": 530039,
+          "start": 531182,
+          "end": 532244,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2461,15 +2505,15 @@
       "members": [
         {
           "sha256": "696759d65dfe558ff7d9f031c76db19ec5c0767470fb67c4e8d990820d1e99c9",
-          "start": 353230,
-          "end": 364062,
+          "start": 354313,
+          "end": 365145,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "da28ccc6b158fc2d8cccc74e99794b1cff1d29bd7bbeb019442fcf0c04c6cad9",
-          "start": 683520,
-          "end": 684579,
+          "start": 685725,
+          "end": 686784,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2483,8 +2527,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2498,8 +2542,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2513,8 +2557,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2528,8 +2572,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2543,8 +2587,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2558,8 +2602,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2573,8 +2617,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2588,15 +2632,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5",
-          "start": 586038,
-          "end": 587110,
+          "start": 588243,
+          "end": 589315,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2610,15 +2654,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "8b43ce8accd61e9d370b5ca9e9c4f953279b5c239926c62315b40e24df51b726",
-          "start": 483834,
-          "end": 484896,
+          "start": 484917,
+          "end": 485979,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2632,8 +2676,8 @@
       "members": [
         {
           "sha256": "436637bd4909fde7e14c899e9ff2cdd440b5968df12d431f1651f11db19bc2ef",
-          "start": 235300,
-          "end": 236385,
+          "start": 236383,
+          "end": 237468,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2647,15 +2691,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "ecc269ef87fd38a1d98e30bfac9ba964a9dbd9315c3770fed98d4d7cb5882055",
-          "start": 721764,
-          "end": 722813,
+          "start": 725161,
+          "end": 726210,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2669,15 +2713,15 @@
       "members": [
         {
           "sha256": "87d9feb9238c6bd8e0024fc4733b06cff036f89f36d93b7df1c8a0549bbb7a5b",
-          "start": 460557,
-          "end": 471909,
+          "start": 461640,
+          "end": 472992,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "47dc9ff29128ddfb4d6a0435383c9f89120bc374dbcc1dd00b933a0b28aa7865",
-          "start": 252657,
-          "end": 253719,
+          "start": 253740,
+          "end": 254802,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2691,8 +2735,8 @@
       "members": [
         {
           "sha256": "7377e48a67377f0baa9ccee6425e125eb7b96d5b8e706f4c99479ca4ffa21b77",
-          "start": 380130,
-          "end": 381198,
+          "start": 381213,
+          "end": 382281,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2706,8 +2750,8 @@
       "members": [
         {
           "sha256": "7377e48a67377f0baa9ccee6425e125eb7b96d5b8e706f4c99479ca4ffa21b77",
-          "start": 380130,
-          "end": 381198,
+          "start": 381213,
+          "end": 382281,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -2721,15 +2765,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2743,15 +2787,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "7576269ea71f767b99297934c0b2367532690f8c4badc695edf8e04ab6a1e545",
-          "start": 392649,
-          "end": 393692,
+          "start": 393732,
+          "end": 394775,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2765,8 +2809,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2787,15 +2831,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
-          "start": 216845,
-          "end": 217902,
+          "start": 217928,
+          "end": 218985,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2809,8 +2853,8 @@
       "members": [
         {
           "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
-          "start": 422867,
-          "end": 424078,
+          "start": 423950,
+          "end": 425161,
           "origin": "committed-override",
           "path": "UNLICENSE"
         }
@@ -2824,15 +2868,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -2846,8 +2890,8 @@
       "members": [
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2868,8 +2912,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2890,8 +2934,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2912,43 +2956,43 @@
       "members": [
         {
           "sha256": "85b7daebe41ecc11f8cfd5fce1f654a73fdadec09f89fd61a9e0b2e3409865eb",
-          "start": 457350,
-          "end": 458835,
+          "start": 458433,
+          "end": 459918,
           "origin": "crate-archive",
           "path": "LICENSE"
         },
         {
           "sha256": "c5d2b95c2538d2e41d8eedd9ecc750cd5fee085c7bb2bc3e2f95f4e59cc0b10d",
-          "start": 610582,
-          "end": 633536,
+          "start": 612787,
+          "end": 635741,
           "origin": "crate-archive",
           "path": "flac/COPYING.FDL"
         },
         {
           "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
-          "start": 437129,
-          "end": 455221,
+          "start": 438212,
+          "end": 456304,
           "origin": "crate-archive",
           "path": "flac/COPYING.GPL"
         },
         {
           "sha256": "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a",
-          "start": 300131,
-          "end": 326567,
+          "start": 301214,
+          "end": 327650,
           "origin": "crate-archive",
           "path": "flac/COPYING.LGPL"
         },
         {
           "sha256": "7866ee98760fc1f0156b4fe6bf530257e02be487ab3fd94e2b63799dd32d6b2c",
-          "start": 404541,
-          "end": 406050,
+          "start": 405624,
+          "end": 407133,
           "origin": "crate-archive",
           "path": "flac/COPYING.Xiph"
         },
         {
           "sha256": "d2ab5758336489da61c12cc5bb757da5339c4ae9001f9bb0562b4370249af814",
-          "start": 679897,
-          "end": 681363,
+          "start": 682102,
+          "end": 683568,
           "origin": "crate-archive",
           "path": "ogg/COPYING"
         }
@@ -2962,8 +3006,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -2984,8 +3028,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3013,8 +3057,8 @@
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3042,8 +3086,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -3057,15 +3101,15 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "7dc1552e88f49132cb358b1b962fc5e79fa42d70bcbb88c526d33e45b8e98036",
-          "start": 421804,
-          "end": 422866,
+          "start": 422887,
+          "end": 423949,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3079,15 +3123,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
-          "start": 341366,
-          "end": 342437,
+          "start": 342449,
+          "end": 343520,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3123,15 +3167,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "df9cfd06d8a44d9a671eadd39ffd97f166481da015a30f45dfd27886209c5922",
-          "start": 688315,
-          "end": 689373,
+          "start": 690520,
+          "end": 691578,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3145,8 +3189,8 @@
       "members": [
         {
           "sha256": "816000f9c28f7005d931c77636eb79fa7020071eb0f6e6a995515dfccd3559cb",
-          "start": 425172,
-          "end": 426277,
+          "start": 426255,
+          "end": 427360,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -3160,8 +3204,8 @@
       "members": [
         {
           "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
-          "start": 426278,
-          "end": 437128,
+          "start": 427361,
+          "end": 438211,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3174,8 +3218,8 @@
         },
         {
           "sha256": "dbe1fff0fb1314b6af94f161511406275cf01c5a32441fbf24528a57a051d599",
-          "start": 685251,
-          "end": 687254,
+          "start": 687456,
+          "end": 689459,
           "origin": "crate-archive",
           "path": "LICENSE.md"
         }
@@ -3189,8 +3233,8 @@
       "members": [
         {
           "sha256": "4108245a1f2df9d4e94df8abed5b4ba0759bb2f9b40a6b939f1be141077ae50b",
-          "start": 221097,
-          "end": 222310,
+          "start": 222180,
+          "end": 223393,
           "origin": "crate-archive",
           "path": "LICENSE"
         },
@@ -3203,8 +3247,8 @@
         },
         {
           "sha256": "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d",
-          "start": 416898,
-          "end": 418110,
+          "start": 417981,
+          "end": 419193,
           "origin": "crate-archive",
           "path": "LICENSE-MIT.md"
         },
@@ -3240,8 +3284,8 @@
       "members": [
         {
           "sha256": "c524732311819f888ce57b1b56148feaa6e9b1705fcb158e7e5d71554ccf39ed",
-          "start": 609467,
-          "end": 610581,
+          "start": 611672,
+          "end": 612786,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -3255,8 +3299,8 @@
       "members": [
         {
           "sha256": "4dbda04344456f09a7a588140455413a9ac59b6b26a1ef7cdf9c800c012d87f0",
-          "start": 267208,
-          "end": 268273,
+          "start": 268291,
+          "end": 269356,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -3270,15 +3314,15 @@
       "members": [
         {
           "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
-          "start": 587611,
-          "end": 598968,
+          "start": 589816,
+          "end": 601173,
           "origin": "crate-archive",
           "path": "LICENSE-Apache"
         },
         {
           "sha256": "d848c165548bd3f33419b71c3c3bb7cacec620d93383483393410688cba68431",
-          "start": 682447,
-          "end": 683519,
+          "start": 684652,
+          "end": 685724,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3307,15 +3351,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
-          "start": 341366,
-          "end": 342437,
+          "start": 342449,
+          "end": 343520,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3336,8 +3380,8 @@
         },
         {
           "sha256": "e2e245f2b566d0bfafb0f6a04c16b82d710c4e6e7d799e39bb4ef6e541b85b98",
-          "start": 692803,
-          "end": 693853,
+          "start": 696200,
+          "end": 697250,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3351,15 +3395,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
-          "start": 341366,
-          "end": 342437,
+          "start": 342449,
+          "end": 343520,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3373,15 +3417,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
-          "start": 341366,
-          "end": 342437,
+          "start": 342449,
+          "end": 343520,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3395,15 +3439,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
-          "start": 341366,
-          "end": 342437,
+          "start": 342449,
+          "end": 343520,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3417,15 +3461,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
-          "start": 341366,
-          "end": 342437,
+          "start": 342449,
+          "end": 343520,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3439,15 +3483,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
-          "start": 531737,
-          "end": 532797,
+          "start": 533942,
+          "end": 535002,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3461,8 +3505,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3483,8 +3527,8 @@
       "members": [
         {
           "sha256": "e63690624d604aa626c3c62b6ead1a9f4a916d2260ac8132022acbafe2556045",
-          "start": 717146,
-          "end": 718261,
+          "start": 720543,
+          "end": 721658,
           "origin": "crate-archive",
           "path": "LICENSE.md"
         }
@@ -3498,8 +3542,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3520,8 +3564,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3542,8 +3586,8 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3564,8 +3608,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3578,10 +3622,32 @@
         },
         {
           "sha256": "9a6d7a3c1b8edcc706c4b6c37f8dae9a77f02c7f9051df603f975db136b55419",
-          "start": 516063,
-          "end": 516514,
+          "start": 517146,
+          "end": 517597,
           "origin": "crate-archive",
           "path": "LICENSE-THIRD-PARTY"
+        }
+      ]
+    },
+    {
+      "name": "password-hash",
+      "version": "0.5.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "license": "MIT OR Apache-2.0",
+      "members": [
+        {
+          "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+          "start": 559232,
+          "end": 570081,
+          "origin": "crate-archive",
+          "path": "LICENSE-APACHE"
+        },
+        {
+          "sha256": "233b95ccbf90dc67e32f3e8995c489f6312d9191ebd141a931c3b684f1e3be6d",
+          "start": 127385,
+          "end": 128455,
+          "origin": "crate-archive",
+          "path": "LICENSE-MIT"
         }
       ]
     },
@@ -3593,8 +3659,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3615,8 +3681,8 @@
       "members": [
         {
           "sha256": "b7c76ff4466a3aeb6a7d903e81b651335e97d64ecb857e2ee9812a36c6fd1acf",
-          "start": 601230,
-          "end": 602315,
+          "start": 603435,
+          "end": 604520,
           "origin": "crate-archive",
           "path": "LICENSE.md"
         }
@@ -3630,15 +3696,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5",
-          "start": 586038,
-          "end": 587110,
+          "start": 588243,
+          "end": 589315,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3652,8 +3718,8 @@
       "members": [
         {
           "sha256": "f71452d91682fdae0ca948b18cfed53a953d1237740dd80371c76a5c1c7bbe91",
-          "start": 742882,
-          "end": 743943,
+          "start": 746279,
+          "end": 747340,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -3689,8 +3755,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3711,15 +3777,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "ad64fcb9589f162720f3cc5010ad76ca6ad3764e11861f9192c489df176bb71d",
-          "start": 579810,
-          "end": 580892,
+          "start": 582015,
+          "end": 583097,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3733,15 +3799,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
-          "start": 216845,
-          "end": 217902,
+          "start": 217928,
+          "end": 218985,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3755,15 +3821,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "eaf40297c75da471f7cda1f3458e8d91b4b2ec866e609527a13acfa93b638652",
-          "start": 719335,
-          "end": 720383,
+          "start": 722732,
+          "end": 723780,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3777,8 +3843,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3799,8 +3865,8 @@
       "members": [
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3821,8 +3887,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -3865,8 +3931,8 @@
         },
         {
           "sha256": "4cada0bd02ea3692eee6f16400d86c6508bbd3bafb2b65fed0419f36d4f83e8f",
-          "start": 254803,
-          "end": 255879,
+          "start": 255886,
+          "end": 256962,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -3880,8 +3946,8 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3902,8 +3968,8 @@
       "members": [
         {
           "sha256": "8ada45cd9f843acf64e4722ae262c622a2b3b3007c7310ef36ac1061a30f6adb",
-          "start": 472973,
-          "end": 483833,
+          "start": 474056,
+          "end": 484916,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3924,8 +3990,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -3946,15 +4012,15 @@
       "members": [
         {
           "sha256": "7b25e06666d3797292dbb4b1c3f5ba509ebe02fce102e1dca7ca81dd3cbfbeb7",
-          "start": 418881,
-          "end": 419955,
+          "start": 419964,
+          "end": 421038,
           "origin": "crate-archive",
           "path": "LICENSE"
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         }
@@ -3968,15 +4034,15 @@
       "members": [
         {
           "sha256": "f09adf500d35265ee63ef552f8e61487e09ee549da66eaf0ec7924e3ad7cf14b",
-          "start": 734896,
-          "end": 735970,
+          "start": 738293,
+          "end": 739367,
           "origin": "crate-archive",
           "path": "LICENSE"
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         }
@@ -3990,8 +4056,8 @@
       "members": [
         {
           "sha256": "5b2c207dcf571267ebe0bbdd5bf321f561ddc22ff597e7b363e96f4539507a29",
-          "start": 298108,
-          "end": 299213,
+          "start": 299191,
+          "end": 300296,
           "origin": "crate-archive",
           "path": "LICENSE-MIT.md"
         }
@@ -4005,8 +4071,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4027,15 +4093,15 @@
       "members": [
         {
           "sha256": "90eb64f0279b0d9432accfa6023ff803bc4965212383697eee27a0f426d5f8d5",
-          "start": 501052,
-          "end": 501621,
+          "start": 502135,
+          "end": 502704,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "35242e7a83f69875e6edeff02291e688c97caafe2f8902e4e19b49d3e78b4cab",
-          "start": 194370,
-          "end": 204094,
+          "start": 195453,
+          "end": 205177,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4056,15 +4122,15 @@
       "members": [
         {
           "sha256": "90eb64f0279b0d9432accfa6023ff803bc4965212383697eee27a0f426d5f8d5",
-          "start": 501052,
-          "end": 501621,
+          "start": 502135,
+          "end": 502704,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "35242e7a83f69875e6edeff02291e688c97caafe2f8902e4e19b49d3e78b4cab",
-          "start": 194370,
-          "end": 204094,
+          "start": 195453,
+          "end": 205177,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4085,15 +4151,15 @@
       "members": [
         {
           "sha256": "90eb64f0279b0d9432accfa6023ff803bc4965212383697eee27a0f426d5f8d5",
-          "start": 501052,
-          "end": 501621,
+          "start": 502135,
+          "end": 502704,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "6df43f6f4b5d4587f3d8d71e45532c688fd168afa5fe89d571cb32fa09c4ef51",
-          "start": 365628,
-          "end": 375910,
+          "start": 366711,
+          "end": 376993,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4114,15 +4180,15 @@
       "members": [
         {
           "sha256": "90eb64f0279b0d9432accfa6023ff803bc4965212383697eee27a0f426d5f8d5",
-          "start": 501052,
-          "end": 501621,
+          "start": 502135,
+          "end": 502704,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "6df43f6f4b5d4587f3d8d71e45532c688fd168afa5fe89d571cb32fa09c4ef51",
-          "start": 365628,
-          "end": 375910,
+          "start": 366711,
+          "end": 376993,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4158,15 +4224,15 @@
       "members": [
         {
           "sha256": "751963a8b88c0e3a9f27e98933079fbcf09b9998b2c13ac49c2e4d58444520d6",
-          "start": 381815,
-          "end": 392648,
+          "start": 382898,
+          "end": 393731,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "47d4e1803702728e03d30f8a848ae2249ba274bbd9f8443e803f7924d83cd371",
-          "start": 251593,
-          "end": 252656,
+          "start": 252676,
+          "end": 253739,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4180,15 +4246,15 @@
       "members": [
         {
           "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
-          "start": 544710,
-          "end": 554883,
+          "start": 546915,
+          "end": 557088,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "f5d934dc281b44e0003ee461ac740b18b6629a454decd872c774d34e4ee0b21d",
-          "start": 741824,
-          "end": 742881,
+          "start": 745221,
+          "end": 746278,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4202,8 +4268,8 @@
       "members": [
         {
           "sha256": "457b464bc0fba8a3d67d2458569104f5611869f0c1563a1a12d9c51a0bca9261",
-          "start": 238637,
-          "end": 239700,
+          "start": 239720,
+          "end": 240783,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -4217,8 +4283,8 @@
       "members": [
         {
           "sha256": "b3d734001a94efff3579978d953391aa7115f877657d25eb54037a43875d078a",
-          "start": 587111,
-          "end": 587610,
+          "start": 589316,
+          "end": 589815,
           "origin": "crate-archive",
           "path": "LICENSE"
         },
@@ -4231,29 +4297,29 @@
         },
         {
           "sha256": "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f",
-          "start": 734164,
-          "end": 734895,
+          "start": 737561,
+          "end": 738292,
           "origin": "crate-archive",
           "path": "LICENSE-other-bits"
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "src/polyfill/once_cell/LICENSE-APACHE"
         },
         {
           "sha256": "6ee2ed6c77710de911761acd5fc1ad1da00f476beb1a7ef27e78c2d1858deafc",
-          "start": 375911,
-          "end": 376933,
+          "start": 376994,
+          "end": 378016,
           "origin": "crate-archive",
           "path": "src/polyfill/once_cell/LICENSE-MIT"
         },
         {
           "sha256": "9eacbcb81be660840c714a560a9d65ba07913db98dd4baf969f78dd499fdd60f",
-          "start": 531098,
-          "end": 531736,
+          "start": 533303,
+          "end": 533941,
           "origin": "crate-archive",
           "path": "third_party/fiat/LICENSE"
         }
@@ -4267,15 +4333,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "fffe218c1e349e1d482a05677f2ce850502f88298174d77f6ac7c04821db7899",
-          "start": 750295,
-          "end": 751378,
+          "start": 753692,
+          "end": 754775,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4289,15 +4355,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
-          "start": 531737,
-          "end": 532797,
+          "start": 533942,
+          "end": 535002,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4311,15 +4377,15 @@
       "members": [
         {
           "sha256": "377c2e7c53250cc5905c0b0532d35973392af16ffb9596a41d99d202cf3617c9",
-          "start": 215991,
-          "end": 216844,
+          "start": 217074,
+          "end": 217927,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4347,22 +4413,22 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "7cfafc877eccc46c0e346ccbaa5c51bb6b894d2b818e617d970211e232785ad4",
-          "start": 421028,
-          "end": 421803,
+          "start": 422111,
+          "end": 422886,
           "origin": "crate-archive",
           "path": "LICENSE-ISC"
         },
         {
           "sha256": "709e3175b4212f7b13aa93971c9f62ff8c69ec45ad8c6532a7e0c41d7a7d6f8c",
-          "start": 377997,
-          "end": 379079,
+          "start": 379080,
+          "end": 380162,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4376,15 +4442,15 @@
       "members": [
         {
           "sha256": "45fd05c4865e7c350b98ad7ac50e1b15462d49af4a91e9b0c9dd933dc9a69742",
-          "start": 240757,
-          "end": 251592,
+          "start": 241840,
+          "end": 252675,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "9117d922e667125508dde62b02c1f57ed22f5ad21eb536aa2e2d99e1c796e639",
-          "start": 501622,
-          "end": 502702,
+          "start": 502705,
+          "end": 503785,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4398,8 +4464,8 @@
       "members": [
         {
           "sha256": "5b698ca13897be3afdb7174256fa1574f8c6892b8bea1a66dd6469d3fe27885a",
-          "start": 299214,
-          "end": 300130,
+          "start": 300297,
+          "end": 301213,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -4413,15 +4479,15 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
-          "start": 649468,
-          "end": 650806,
+          "start": 651673,
+          "end": 653011,
           "origin": "crate-archive",
           "path": "LICENSE-BOOST"
         }
@@ -4435,15 +4501,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "56340c5acb4a9359ab88df277780ef29b9388587ebdb43460ad19dc783f75a54",
-          "start": 284010,
-          "end": 285071,
+          "start": 285093,
+          "end": 286154,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4457,15 +4523,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "4a883ecc3bb1010faed542bf63d53e530fea5e5e12cf676aed588784298ba929",
-          "start": 253720,
-          "end": 254802,
+          "start": 254803,
+          "end": 255885,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4479,8 +4545,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4501,8 +4567,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4523,8 +4589,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4545,8 +4611,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4567,8 +4633,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4589,15 +4655,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4611,15 +4677,15 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b9eb266294324f672cbe945fe8f2e32f85024f0d61a1a7d14382cdde0ac44769",
-          "start": 603402,
-          "end": 604460,
+          "start": 605607,
+          "end": 606665,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4633,15 +4699,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b4eb00df6e2a4d22518fcaa6a2b4646f249b3a3c9814509b22bd2091f1392ff1",
-          "start": 598969,
-          "end": 600107,
+          "start": 601174,
+          "end": 602312,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4655,15 +4721,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b4eb00df6e2a4d22518fcaa6a2b4646f249b3a3c9814509b22bd2091f1392ff1",
-          "start": 598969,
-          "end": 600107,
+          "start": 601174,
+          "end": 602312,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4677,8 +4743,8 @@
       "members": [
         {
           "sha256": "eafbfa606bc005ed7fd2f623d65af17ffe4ef7c017221ac14405bf4140771ea9",
-          "start": 720384,
-          "end": 721441,
+          "start": 723781,
+          "end": 724838,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -4692,15 +4758,15 @@
       "members": [
         {
           "sha256": "553fffcd9b1cb158bc3e9edc35da85ca5c3b3d7d2e61c883ebcfa8a65814b583",
-          "start": 283443,
-          "end": 284009,
+          "start": 284526,
+          "end": 285092,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "4455bf75a91154108304cb283e0fea9948c14f13e20d60887cf2552449dea3b1",
-          "start": 237544,
-          "end": 238636,
+          "start": 238627,
+          "end": 239719,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4714,15 +4780,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "503558bfefe66ca15e4e3f7955b3cb0ec87fd52f29bf24b336af7bd00e946d5c",
-          "start": 269338,
-          "end": 270406,
+          "start": 270421,
+          "end": 271489,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4736,15 +4802,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b3470648aff02beb36d7a53240fc9260ed80ed93bd43bace6b67d7ef7336ee33",
-          "start": 584967,
-          "end": 586037,
+          "start": 587172,
+          "end": 588242,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4758,8 +4824,8 @@
       "members": [
         {
           "sha256": "42a35170233e83e18856792e748de4c1ce4a63b2afce9a370c89ef3fe23f9f2d",
-          "start": 233090,
-          "end": 234168,
+          "start": 234173,
+          "end": 235251,
           "origin": "crate-archive",
           "path": "LICENSE.md"
         }
@@ -4773,8 +4839,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4795,8 +4861,8 @@
       "members": [
         {
           "sha256": "c962ee4d1d05ddc138b202b2540219ebc57893fcf97b364852094a9a94ce1365",
-          "start": 647031,
-          "end": 647312,
+          "start": 649236,
+          "end": 649517,
           "origin": "crate-archive",
           "path": "COPYING"
         }
@@ -4810,8 +4876,8 @@
       "members": [
         {
           "sha256": "8ce0830173fdac609dfb4ea603fdc002c2f4af0dc9b1a005653f5da9cf534b18",
-          "start": 496816,
-          "end": 497871,
+          "start": 497899,
+          "end": 498954,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -4825,8 +4891,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -4847,15 +4913,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
-          "start": 216845,
-          "end": 217902,
+          "start": 217928,
+          "end": 218985,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4869,15 +4935,15 @@
       "members": [
         {
           "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
-          "start": 557027,
-          "end": 567876,
+          "start": 559232,
+          "end": 570081,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "c995204cc6bad2ed67dd41f7d89bb9f1a9d48e0edd745732b30640d7912089a4",
-          "start": 647313,
-          "end": 648395,
+          "start": 649518,
+          "end": 650600,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4886,22 +4952,22 @@
     {
       "name": "spl-core",
       "version": "0.1.0",
-      "source": "git+https://github.com/solpbc/spl-rust?rev=fb82d70cd60eac83a5633d12511a4a8a102e26dd#fb82d70cd60eac83a5633d12511a4a8a102e26dd",
+      "source": "git+https://github.com/solpbc/spl-rust?rev=06ee67ffb54208b3bdfd60aa666b7eec8e281df1#06ee67ffb54208b3bdfd60aa666b7eec8e281df1",
       "license": "AGPL-3.0-only",
       "members": [
         {
-          "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
-          "start": 58398,
-          "end": 92921,
-          "origin": "committed-override",
-          "path": "LICENSE"
+          "sha256": "e14071c7b7a16d742419ad7f408700719bda2d1f99538f5c3da312d7e772cd22",
+          "start": 691579,
+          "end": 692770,
+          "origin": "crate-archive",
+          "path": "assets/mark_assets/NOTICE.md"
         }
       ]
     },
     {
       "name": "spl-home",
       "version": "0.1.0",
-      "source": "git+https://github.com/solpbc/spl-rust?rev=fb82d70cd60eac83a5633d12511a4a8a102e26dd#fb82d70cd60eac83a5633d12511a4a8a102e26dd",
+      "source": "git+https://github.com/solpbc/spl-rust?rev=06ee67ffb54208b3bdfd60aa666b7eec8e281df1#06ee67ffb54208b3bdfd60aa666b7eec8e281df1",
       "license": "AGPL-3.0-only",
       "members": [
         {
@@ -4916,7 +4982,7 @@
     {
       "name": "spl-transport",
       "version": "0.1.0",
-      "source": "git+https://github.com/solpbc/spl-rust?rev=fb82d70cd60eac83a5633d12511a4a8a102e26dd#fb82d70cd60eac83a5633d12511a4a8a102e26dd",
+      "source": "git+https://github.com/solpbc/spl-rust?rev=06ee67ffb54208b3bdfd60aa666b7eec8e281df1#06ee67ffb54208b3bdfd60aa666b7eec8e281df1",
       "license": "AGPL-3.0-only",
       "members": [
         {
@@ -4936,15 +5002,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "5e05b024f653a5ce199e77cbbbd42fb5553562ec714b819421ed0c3e552a75d7",
-          "start": 326568,
-          "end": 327624,
+          "start": 327651,
+          "end": 328707,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -4958,15 +5024,15 @@
       "members": [
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "ea084a2373ebc1f0902c09266e7bf25a05ab3814c1805bb017ffa7308f90c061",
-          "start": 718262,
-          "end": 719334,
+          "start": 721659,
+          "end": 722731,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5010,8 +5076,8 @@
       "members": [
         {
           "sha256": "d1fc1bc0d155df60b2e7705b6b2ae02a05c96f948e1cec6e2fb86360b09f346b",
-          "start": 676134,
-          "end": 677716,
+          "start": 678339,
+          "end": 679921,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5025,15 +5091,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "f3c9fe731c701ed77fd5fbaac573872af04dc5869385eb9bd5e3c73c42713814",
-          "start": 740762,
-          "end": 741823,
+          "start": 744159,
+          "end": 745220,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5047,8 +5113,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5099,8 +5165,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5136,8 +5202,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5158,8 +5224,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5180,8 +5246,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5202,8 +5268,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5224,15 +5290,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5",
-          "start": 648396,
-          "end": 649467,
+          "start": 650601,
+          "end": 651672,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5312,8 +5378,8 @@
       "members": [
         {
           "sha256": "6d41e05f1d54fe726997cb0334ec539f1dff50600b1d5d90462ec2b392770ced",
-          "start": 364063,
-          "end": 365627,
+          "start": 365146,
+          "end": 366710,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5327,8 +5393,8 @@
       "members": [
         {
           "sha256": "6d41e05f1d54fe726997cb0334ec539f1dff50600b1d5d90462ec2b392770ced",
-          "start": 364063,
-          "end": 365627,
+          "start": 365146,
+          "end": 366710,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5342,8 +5408,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5387,15 +5453,15 @@
       "members": [
         {
           "sha256": "cc117d90b498b32b11a886f279b359da16a73c3b01efbb2f5cc004b20262334e",
-          "start": 651831,
-          "end": 662663,
+          "start": 654036,
+          "end": 664868,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "e20fa2b8e0a2565f24a792b94b4bf4b6c2b9d36f781d8a9516e218a036e6677a",
-          "start": 689374,
-          "end": 690430,
+          "start": 692771,
+          "end": 693827,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5409,8 +5475,8 @@
       "members": [
         {
           "sha256": "fdd55e2b2da854b0fbdc1e607df7c2ba1e1ebf91ecb77c515511ebeef972bc8f",
-          "start": 748140,
-          "end": 749233,
+          "start": 751537,
+          "end": 752630,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5439,15 +5505,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5461,15 +5527,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5483,15 +5549,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5505,15 +5571,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5527,15 +5593,15 @@
       "members": [
         {
           "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
-          "start": 633538,
-          "end": 644896,
+          "start": 635743,
+          "end": 647101,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
-          "start": 376934,
-          "end": 377996,
+          "start": 378017,
+          "end": 379079,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5549,8 +5615,8 @@
       "members": [
         {
           "sha256": "4249c8e6c5ebb85f97c77e6457c6fafc1066406eb8f1ef61e796fbdc5ff18482",
-          "start": 232027,
-          "end": 233089,
+          "start": 233110,
+          "end": 234172,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5564,8 +5630,8 @@
       "members": [
         {
           "sha256": "5049cf464977eff4b4fcfa7988d84e74116956a3eb9d5f1d451b3f828f945233",
-          "start": 270407,
-          "end": 271474,
+          "start": 271490,
+          "end": 272557,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5579,8 +5645,8 @@
       "members": [
         {
           "sha256": "4249c8e6c5ebb85f97c77e6457c6fafc1066406eb8f1ef61e796fbdc5ff18482",
-          "start": 232027,
-          "end": 233089,
+          "start": 233110,
+          "end": 234172,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5594,8 +5660,8 @@
       "members": [
         {
           "sha256": "4249c8e6c5ebb85f97c77e6457c6fafc1066406eb8f1ef61e796fbdc5ff18482",
-          "start": 232027,
-          "end": 233089,
+          "start": 233110,
+          "end": 234172,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5609,8 +5675,8 @@
       "members": [
         {
           "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1",
-          "start": 471910,
-          "end": 472972,
+          "start": 472993,
+          "end": 474055,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5624,8 +5690,8 @@
       "members": [
         {
           "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1",
-          "start": 471910,
-          "end": 472972,
+          "start": 472993,
+          "end": 474055,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5639,15 +5705,15 @@
       "members": [
         {
           "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1",
-          "start": 471910,
-          "end": 472972,
+          "start": 472993,
+          "end": 474055,
           "origin": "crate-archive",
           "path": "LICENSE"
         },
         {
           "sha256": "58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79",
-          "start": 286172,
-          "end": 287257,
+          "start": 287255,
+          "end": 288340,
           "origin": "crate-archive",
           "path": "src/spin/LICENSE"
         }
@@ -5661,8 +5727,8 @@
       "members": [
         {
           "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1",
-          "start": 471910,
-          "end": 472972,
+          "start": 472993,
+          "end": 474055,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5676,8 +5742,8 @@
       "members": [
         {
           "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1",
-          "start": 471910,
-          "end": 472972,
+          "start": 472993,
+          "end": 474055,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5691,8 +5757,8 @@
       "members": [
         {
           "sha256": "c816a0749cdc6bf062a5111c159723de51b2bfac66a1dac2655abd9e6b1583eb",
-          "start": 645934,
-          "end": 647030,
+          "start": 648139,
+          "end": 649235,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5706,15 +5772,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "7fea0ee51a4ca5d5cea7464135fd55e8b09caf3a61da3d451ac8a22af95c033f",
-          "start": 424079,
-          "end": 425171,
+          "start": 425162,
+          "end": 426254,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5728,22 +5794,22 @@
       "members": [
         {
           "sha256": "db11fec9946737df39ca3898d9cd8c10ec6f6c3a884a6802b0ad0b81b4e8f23a",
-          "start": 685232,
-          "end": 685249,
+          "start": 687437,
+          "end": 687454,
           "origin": "crate-archive",
           "path": "LICENSE"
         },
         {
           "sha256": "516b24e051bf5630880ebbd55c40a25ce9552ebaf8970a53e8976eb70e522406",
-          "start": 271475,
-          "end": 282310,
+          "start": 272558,
+          "end": 283393,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a825bd853ab71619a4923d7b4311221427848070ff44d990da39b0b274c1683f",
-          "start": 555943,
-          "end": 557026,
+          "start": 558148,
+          "end": 559231,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5757,15 +5823,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "4f6bd11a0f17fe5b085ace1daaedb7b002a08316850dd9577c246c6a68a68e8c",
-          "start": 268274,
-          "end": 269337,
+          "start": 269357,
+          "end": 270420,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5779,8 +5845,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5793,8 +5859,8 @@
         },
         {
           "sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1",
-          "start": 745070,
-          "end": 747065,
+          "start": 748467,
+          "end": 750462,
           "origin": "crate-archive",
           "path": "LICENSE-UNICODE"
         }
@@ -5808,8 +5874,8 @@
       "members": [
         {
           "sha256": "7abd9b6960dcf7d4d0a48606a5b71bfe37d472db68d70637f3a58a56785f1621",
-          "start": 418111,
-          "end": 418880,
+          "start": 419194,
+          "end": 419963,
           "origin": "crate-archive",
           "path": "LICENSE.txt"
         }
@@ -5823,15 +5889,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5",
-          "start": 586038,
-          "end": 587110,
+          "start": 588243,
+          "end": 589315,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5845,15 +5911,15 @@
       "members": [
         {
           "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
-          "start": 544710,
-          "end": 554883,
+          "start": 546915,
+          "end": 557088,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "f5d934dc281b44e0003ee461ac740b18b6629a454decd872c774d34e4ee0b21d",
-          "start": 741824,
-          "end": 742881,
+          "start": 745221,
+          "end": 746278,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5867,8 +5933,8 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
@@ -5889,22 +5955,22 @@
       "members": [
         {
           "sha256": "c30152c94a6d75e021adbc52b3a52470366a46edb917e17deae3259251af244c",
-          "start": 607724,
-          "end": 609466,
+          "start": 609929,
+          "end": 611671,
           "origin": "crate-archive",
           "path": "COPYRIGHT"
         },
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "3fa4ca83dcc9237839b1bdeb2e6d16bdfb5ec0c5ce42b24694d8bbf0dcbef72c",
-          "start": 218967,
-          "end": 220020,
+          "start": 220050,
+          "end": 221103,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5918,15 +5984,15 @@
       "members": [
         {
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "start": 331642,
-          "end": 341365,
+          "start": 332725,
+          "end": 342448,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "e4c9b06fa850cb9b540a5e400e9f6394cf15efcf4098144de477d1d3dae10150",
-          "start": 716093,
-          "end": 717145,
+          "start": 719490,
+          "end": 720542,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5940,15 +6006,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "436bc5a105d8e57dcd8778730f3754f7bf39c14d2f530e4cde4bd2d17a83ec3d",
-          "start": 236386,
-          "end": 237543,
+          "start": 237469,
+          "end": 238626,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5962,8 +6028,8 @@
       "members": [
         {
           "sha256": "cedfcc7ace1639adb054bd4a19b6f8585ccb2429a60b4bf51bfeb0601058c22c",
-          "start": 662664,
-          "end": 663719,
+          "start": 664869,
+          "end": 665924,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -5977,15 +6043,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "b7e650f3fce5c53249d1cdc608b54df156a97edd636cf9d23498d0cfe7aec63e",
-          "start": 602316,
-          "end": 603401,
+          "start": 604521,
+          "end": 605606,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -5999,8 +6065,8 @@
       "members": [
         {
           "sha256": "a65f5d0a945d267751344c95665945b90c030ea107faf5c85d518929886187da",
-          "start": 543646,
-          "end": 544709,
+          "start": 545851,
+          "end": 546914,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6051,8 +6117,8 @@
         },
         {
           "sha256": "f1a2b233e8a9a71c40f4aa885be08a0842ac85bb8588703c1dd7e6e6502e3124",
-          "start": 735971,
-          "end": 737473,
+          "start": 739368,
+          "end": 740870,
           "origin": "crate-archive",
           "path": "protocols/COPYING"
         }
@@ -6096,8 +6162,8 @@
       "members": [
         {
           "sha256": "e271993808fec50ab29350b39539cdec611a9103f827e0aa26d61da70e2d33f8",
-          "start": 690431,
-          "end": 692802,
+          "start": 693828,
+          "end": 696199,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6111,8 +6177,8 @@
       "members": [
         {
           "sha256": "cb5aedb296c5246d1f22e9099f925a65146f9f0d6b4eebba97fd27a6cdbbab2d",
-          "start": 650807,
-          "end": 651830,
+          "start": 653012,
+          "end": 654035,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -6126,8 +6192,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6141,15 +6207,15 @@
       "members": [
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a72561f47c1f665535930f606739d9098a6186802d5e2e8ec491faf00f4add5b",
-          "start": 554884,
-          "end": 555942,
+          "start": 557089,
+          "end": 558147,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -6163,15 +6229,15 @@
       "members": [
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a72561f47c1f665535930f606739d9098a6186802d5e2e8ec491faf00f4add5b",
-          "start": 554884,
-          "end": 555942,
+          "start": 557089,
+          "end": 558147,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -6185,15 +6251,15 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
-          "start": 531737,
-          "end": 532797,
+          "start": 533942,
+          "end": 535002,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -6222,8 +6288,8 @@
       "members": [
         {
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "start": 532798,
-          "end": 543645,
+          "start": 535003,
+          "end": 545850,
           "origin": "committed-override",
           "path": "LICENSE-APACHE"
         },
@@ -6244,8 +6310,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6259,8 +6325,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6319,15 +6385,15 @@
       "members": [
         {
           "sha256": "9d185ac6703c4b0453974c0d85e9eee43e6941009296bb1f5eb0b54e2329e9f3",
-          "start": 516515,
-          "end": 527865,
+          "start": 518720,
+          "end": 530070,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "83c1763356e822adde0a2cae748d938a73fdc263849ccff6b27776dff213bd32",
-          "start": 455222,
-          "end": 456497,
+          "start": 456305,
+          "end": 457580,
           "origin": "crate-archive",
           "path": "LICENSE-BSD"
         },
@@ -6348,8 +6414,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6363,8 +6429,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6378,15 +6444,15 @@
       "members": [
         {
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "start": 663720,
-          "end": 675078,
+          "start": 665925,
+          "end": 677283,
           "origin": "crate-archive",
           "path": "LICENSE-APACHE"
         },
         {
           "sha256": "8c7516d4b27b1e495be5e38b612298b63de48d05f49cdac94f70f3cd70f8864b",
-          "start": 495733,
-          "end": 496815,
+          "start": 496816,
+          "end": 497898,
           "origin": "crate-archive",
           "path": "LICENSE-MIT"
         }
@@ -6400,8 +6466,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6415,8 +6481,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }
@@ -6430,8 +6496,8 @@
       "members": [
         {
           "sha256": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2",
-          "start": 738566,
-          "end": 740761,
+          "start": 741963,
+          "end": 744158,
           "origin": "crate-archive",
           "path": "LICENSE"
         }

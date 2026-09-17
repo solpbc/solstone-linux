@@ -9,6 +9,7 @@ and this project adheres to Semantic Versioning.
 ### Added
 
 - `solstone-linux pause` and `solstone-linux resume` work from a terminal, so pause is reachable on a desktop with no panel icon at all. `pause` on its own lasts until you resume; `pause --minutes 30` ends on its own.
+- if something other than your journal answers where it's expected, you'll see it right away — with a way to compare what answered against your journal's own mark.
 
 ### Fixed
 

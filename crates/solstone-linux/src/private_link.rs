@@ -879,6 +879,19 @@ pub(crate) struct LinkFactState {
     pub(crate) journal_version_observed: bool,
     pub(crate) dial_generation: u64,
     pub(crate) optional_dial: bool,
+    pub(crate) unknown_journals: Vec<spl_transport::UnknownJournal>,
+    pub(crate) paired_jid: Option<String>,
+    pub(crate) unknown_spoken_marks: Vec<Option<String>>,
+    pub(crate) paired_spoken_mark: Option<String>,
+}
+
+pub(crate) fn format_spoken_mark(jid: &str) -> Option<String> {
+    let mark = spl_core::mark::mark_from_jid(jid).ok()?;
+    let spec = mark.to_render_spec();
+    Some(format!(
+        "{}, {} · {}·{}",
+        spec.icon1.color.name, spec.icon2.color.name, spec.words[0], spec.words[1]
+    ))
 }
 
 impl LinkFacts {
@@ -1011,6 +1024,31 @@ impl LinkFacts {
         self.persist();
     }
 
+    pub(crate) fn set_paired_jid(&self, jid: Option<String>) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.paired_jid == jid {
+            return;
+        }
+        state.paired_spoken_mark = jid.as_deref().and_then(format_spoken_mark);
+        state.paired_jid = jid;
+        drop(state);
+        self.persist();
+    }
+
+    pub(crate) fn note_unknown_journals(&self, unknown: Vec<spl_transport::UnknownJournal>) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.unknown_journals == unknown {
+            return;
+        }
+        state.unknown_spoken_marks = unknown
+            .iter()
+            .map(|item| item.jid.as_deref().and_then(format_spoken_mark))
+            .collect();
+        state.unknown_journals = unknown;
+        drop(state);
+        self.persist();
+    }
+
     pub(crate) fn snapshot_with_epoch(&self) -> (LinkFactState, u64) {
         let state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
         (
@@ -1107,6 +1145,31 @@ impl PrivateLinkOpener {
         self.relay_incarnation.fetch_add(1, Ordering::AcqRel);
     }
 
+    pub(crate) fn unknown_journals(&self) -> Vec<spl_transport::UnknownJournal> {
+        let mut combined = self
+            .lan_transport
+            .as_ref()
+            .map(|c| c.unknown_journals())
+            .unwrap_or_default();
+        if let Some(relay) = self
+            .relay_transport
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            let relay_journals = relay.unknown_journals();
+            for item in relay_journals {
+                if !combined
+                    .iter()
+                    .any(|c| c.address == item.address && c.jid == item.jid)
+                {
+                    combined.push(item);
+                }
+            }
+        }
+        combined
+    }
+
     async fn admit_dial<T>(
         &self,
         dial: impl Future<Output = Result<T, TransportError>>,
@@ -1181,7 +1244,7 @@ impl PrivateLinkOpener {
         Box::pin(async move {
             let association = self.facts.association_epoch();
             self.facts.begin_journal_dial();
-            let (carrier, relay_dial_incarnation) = self
+            let dial_result = self
                 .admit_dial(async {
                     let mut lan_error = None;
                     let has_relay = self
@@ -1244,7 +1307,9 @@ impl PrivateLinkOpener {
                     }
                     Err(lan_error.unwrap_or(TransportError::NoEndpoint))
                 })
-                .await?;
+                .await;
+            self.facts.note_unknown_journals(self.unknown_journals());
+            let (carrier, relay_dial_incarnation) = dial_result?;
 
             if let Some(dial_incarnation) = relay_dial_incarnation
                 && (self.transport_unavailable.load(Ordering::Acquire)
@@ -1309,7 +1374,7 @@ fn streams_journal_response(request: &RequestHead) -> bool {
 pub(crate) struct PrivateLinkSession {
     client: reqwest::Client,
     origin: Url,
-    opener: Arc<PrivateLinkOpener>,
+    pub(crate) opener: Arc<PrivateLinkOpener>,
     handle: JournalBridgeHandle,
     optional_handle: JournalBridgeHandle,
     optional_client: reqwest::Client,
@@ -2731,6 +2796,7 @@ async fn start_private_link_session_inner(
     };
     let config_root = state_lock.root().to_path_buf();
     let facts = options.shared_facts.unwrap_or_default();
+    facts.set_paired_jid(Some(credential.instance_id.clone()));
     let paths = private_config_paths(&config_root);
     let sanitized = match sanitize_link_authority(&paths) {
         Ok(config) => config,
@@ -6378,5 +6444,54 @@ pub(crate) mod tests {
         assert!(!session.opener.facts.snapshot().observer_registered);
         session.shutdown().await.unwrap();
         peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn opener_records_unknown_journal_sighting_against_impostor_peer() {
+        let impostor_peer = PrivateLinkPeer::start().await;
+        let paired_peer = PrivateLinkPeer::start().await;
+        let mut credential = paired_peer.credential();
+        credential.endpoints = impostor_peer.credential().endpoints;
+
+        let decode_hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let spki_hex_paired = "3059301306072a8648ce3d020106082a8648ce3d030107034200047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1";
+        let paired_jid =
+            spl_core::relay_window::jid_from_spki(&decode_hex(spki_hex_paired)).unwrap();
+        credential.instance_id = paired_jid.clone();
+
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), credential, "stream")
+            .await
+            .unwrap();
+
+        assert!(session.opener.dial_carrier().await.is_err());
+
+        let sightings = session.opener.unknown_journals();
+        assert_eq!(sightings.len(), 1);
+        let sighting = &sightings[0];
+        assert!(sighting.address.is_some());
+        assert!(sighting.jid.is_some());
+
+        let facts_snapshot = session.opener.facts.snapshot();
+        assert_eq!(facts_snapshot.unknown_journals, sightings);
+        assert_eq!(
+            facts_snapshot.paired_jid.as_deref(),
+            Some(paired_jid.as_str())
+        );
+        assert_eq!(facts_snapshot.unknown_spoken_marks.len(), 1);
+        assert!(facts_snapshot.unknown_spoken_marks[0].is_some());
+        assert_eq!(
+            facts_snapshot.paired_spoken_mark.as_deref(),
+            Some("pink, cyan · distrust·chokehold")
+        );
+
+        session.shutdown().await.unwrap();
+        impostor_peer.shutdown().await;
+        paired_peer.shutdown().await;
     }
 }
