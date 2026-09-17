@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-09-16
+
 ### Added
 
 - `solstone-linux pause` and `solstone-linux resume` work from a terminal, so pause is reachable on a desktop with no panel icon at all. `pause` on its own lasts until you resume; `pause --minutes 30` ends on its own.
