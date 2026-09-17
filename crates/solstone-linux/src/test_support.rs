@@ -22,6 +22,7 @@ use std::{
     io,
     net::TcpListener as StdTcpListener,
     pin::Pin,
+    process::Output,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -38,6 +39,45 @@ use tokio::{
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub(crate) const PROGRESS_BOUND: Duration = Duration::from_secs(30);
+
+pub(crate) fn retry_on_executable_file_busy<T>(
+    mut attempt: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut last = attempt();
+    for delay_ms in [20, 60, 150] {
+        if !matches!(
+            &last,
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy
+        ) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        last = attempt();
+    }
+    last
+}
+
+pub(crate) fn retry_on_text_file_busy_output(
+    mut attempt: impl FnMut() -> io::Result<Output>,
+) -> io::Result<Output> {
+    let mut last = attempt();
+    for delay_ms in [20, 60, 150] {
+        let retry = match &last {
+            Err(error) => error.kind() == io::ErrorKind::ExecutableFileBusy,
+            Ok(output) => {
+                !output.status.success()
+                    && (String::from_utf8_lossy(&output.stdout).contains("Text file busy")
+                        || String::from_utf8_lossy(&output.stderr).contains("Text file busy"))
+            }
+        };
+        if !retry {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        last = attempt();
+    }
+    last
+}
 
 struct RestorePausedClock;
 

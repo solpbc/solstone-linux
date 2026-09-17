@@ -2,6 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use crate::release_rail_tests::{command_path, read_toml, workspace_root};
+use crate::test_support::{retry_on_executable_file_busy, retry_on_text_file_busy_output};
 use std::{
     collections::HashMap,
     fs,
@@ -442,14 +443,16 @@ fn make_with_fake_cargo(version: Option<&str>) -> Output {
     );
     fs::write(&cargo, body).unwrap();
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
-    Command::new(command_path("make"))
-        .arg("--no-print-directory")
-        .arg("check-cargo-deny")
-        .current_dir(workspace_root())
-        .env("CARGO_HOME", temp.path())
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-        .output()
-        .unwrap()
+    retry_on_text_file_busy_output(|| {
+        Command::new(command_path("make"))
+            .arg("--no-print-directory")
+            .arg("check-cargo-deny")
+            .current_dir(workspace_root())
+            .env("CARGO_HOME", temp.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+    })
+    .unwrap()
 }
 
 fn combined_output(output: &Output) -> String {
@@ -581,13 +584,15 @@ fn direct_generate_rpm_path_stub_records_exact_offline_argv() {
     let path = format!("{}:/usr/bin:/bin", temp.path().display());
     for args in [&["--version"][..], &["-p", "crates/solstone-linux"][..]] {
         assert!(
-            Command::new("cargo-generate-rpm")
-                .args(args)
-                .env("PATH", &path)
-                .env("CARGO_NET_OFFLINE", "true")
-                .status()
-                .unwrap()
-                .success()
+            retry_on_executable_file_busy(|| {
+                Command::new("cargo-generate-rpm")
+                    .args(args)
+                    .env("PATH", &path)
+                    .env("CARGO_NET_OFFLINE", "true")
+                    .status()
+            })
+            .unwrap()
+            .success()
         );
     }
     assert_eq!(

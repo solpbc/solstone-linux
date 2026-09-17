@@ -377,22 +377,7 @@ impl StubPath {
     }
 
     pub fn run(&self, name: &str, args: &[&str]) -> Output {
-        // See `retry_on_text_file_busy`: a freshly written+chmod'd stub can
-        // transiently fail to spawn (`ExecutableFileBusy`) under heavy
-        // concurrent test load. Retry only that exact kind -- any other
-        // spawn error is a real defect and should fail immediately.
-        let mut result = self.command(name).args(args).output();
-        for delay_ms in [20, 60, 150] {
-            if !matches!(
-                &result,
-                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy
-            ) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            result = self.command(name).args(args).output();
-        }
-        result.unwrap()
+        retry_on_executable_file_busy(|| self.command(name).args(args).output()).unwrap()
     }
 }
 
@@ -785,7 +770,24 @@ fn executable(path: &Path, body: &str) {
 // fresh executable's first invocation needs this tolerance, so it stays
 // confined to the test helpers that immediately run what they just wrote,
 // rather than changing production exec behavior in `candidate.rs`.
-fn retry_on_text_file_busy<T>(mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+pub(super) fn retry_on_executable_file_busy<T>(
+    mut attempt: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut last = attempt();
+    for delay_ms in [20, 60, 150] {
+        if !matches!(
+            &last,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        last = attempt();
+    }
+    last
+}
+
+pub(super) fn retry_on_text_file_busy<T>(mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
     let mut last = attempt();
     for delay_ms in [20, 60, 150] {
         if !matches!(&last, Err(error) if error.to_string().contains("Text file busy")) {
@@ -958,17 +960,8 @@ fn cargo_deny_fixture_prerequisite(cargo: &Path) -> Result<()> {
     // only that exact kind; a genuinely absent `cargo` fails with
     // `NotFound` identically on every attempt, so this changes nothing for
     // that (already-tested) case.
-    let mut spawned = Command::new(cargo).args(["deny", "--version"]).output();
-    for delay_ms in [20, 60, 150] {
-        if !matches!(
-            &spawned,
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy
-        ) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        spawned = Command::new(cargo).args(["deny", "--version"]).output();
-    }
+    let spawned =
+        retry_on_executable_file_busy(|| Command::new(cargo).args(["deny", "--version"]).output());
     let actual = spawned
         .ok()
         .filter(|output| output.status.success())

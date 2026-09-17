@@ -1089,8 +1089,10 @@ fn status_and_recovery_reject_every_retained_binding_mutation() {
             let tripwire = tripwire_dir.path().join("proof-run");
             let (_bin, processes) = proof_processes(&tripwire);
             assert!(
-                prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes)
-                    .is_err()
+                crate::candidate_tests::retry_on_text_file_busy(|| {
+                    prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes)
+                })
+                .is_err()
             );
             assert_eq!(
                 directory_digest_map(&fixture.repo.root.path().join("dist")),
@@ -1364,12 +1366,14 @@ fn proof_runner_protocol_distinguishes_entry_and_handoff_failures() {
         let program = root.path().join(name);
         fs::write(&program, body).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-        let error = run_proof_runner(
-            &ProcessEnvironment::default(),
-            root.path(),
-            program.to_str().unwrap(),
-            &[],
-        )
+        let error = crate::candidate_tests::retry_on_text_file_busy(|| {
+            run_proof_runner(
+                &ProcessEnvironment::default(),
+                root.path(),
+                program.to_str().unwrap(),
+                &[],
+            )
+        })
         .unwrap_err()
         .to_string();
         assert!(error.contains(expected), "{error}");
@@ -1382,12 +1386,14 @@ fn proof_runner_protocol_distinguishes_entry_and_handoff_failures() {
     )
     .unwrap();
     fs::set_permissions(&success, fs::Permissions::from_mode(0o755)).unwrap();
-    run_proof_runner(
-        &ProcessEnvironment::default(),
-        root.path(),
-        success.to_str().unwrap(),
-        &[],
-    )
+    crate::candidate_tests::retry_on_text_file_busy(|| {
+        run_proof_runner(
+            &ProcessEnvironment::default(),
+            root.path(),
+            success.to_str().unwrap(),
+            &[],
+        )
+    })
     .unwrap();
 }
 
@@ -1421,14 +1427,16 @@ fn proof_runner_path_rejects_symlink_directory_and_non_executable_before_podman(
         let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
         let image = proof_image_identity(&policy.proof_debian);
         assert!(
-            produce_or_retain_proof(&ProofRequest {
-                root: &fixture.repo.root,
-                ledger: &fixture.ledger,
-                ledger_bytes: &fixture.ledger_bytes,
-                platform: "debian-amd64",
-                image: &image,
-                engine: ContainerEngine::Podman,
-                processes: &processes,
+            crate::candidate_tests::retry_on_text_file_busy(|| {
+                produce_or_retain_proof(&ProofRequest {
+                    root: &fixture.repo.root,
+                    ledger: &fixture.ledger,
+                    ledger_bytes: &fixture.ledger_bytes,
+                    platform: "debian-amd64",
+                    image: &image,
+                    engine: ContainerEngine::Podman,
+                    processes: &processes,
+                })
             })
             .is_err(),
             "accepted {case} runner"
@@ -1481,14 +1489,16 @@ printf '%s\n' '{marker}' >&2
             "tar-x86_64" => &policy.proof_tar,
             _ => unreachable!(),
         });
-        produce_or_retain_proof(&ProofRequest {
-            root: &fixture.repo.root,
-            ledger: &fixture.ledger,
-            ledger_bytes: &fixture.ledger_bytes,
-            platform,
-            image: &image,
-            engine: ContainerEngine::Podman,
-            processes: &processes,
+        crate::candidate_tests::retry_on_text_file_busy(|| {
+            produce_or_retain_proof(&ProofRequest {
+                root: &fixture.repo.root,
+                ledger: &fixture.ledger,
+                ledger_bytes: &fixture.ledger_bytes,
+                platform,
+                image: &image,
+                engine: ContainerEngine::Podman,
+                processes: &processes,
+            })
         })
         .unwrap();
         let args = fs::read_to_string(record).unwrap();
@@ -1542,7 +1552,12 @@ fn prove_candidate_validates_all_existing_proofs_before_any_write() {
     let tripwire_dir = tempfile::tempdir().unwrap();
     let tripwire = tripwire_dir.path().join("container-run");
     let (_bin, processes) = proof_processes(&tripwire);
-    assert!(prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes).is_err());
+    assert!(
+        crate::candidate_tests::retry_on_text_file_busy(|| {
+            prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes)
+        })
+        .is_err()
+    );
     assert_eq!(
         directory_digest_map(&fixture.repo.root.path().join("dist")),
         before
@@ -1563,7 +1578,12 @@ fn prove_candidate_rejects_source_change_before_proof_writes() {
     let tripwire_dir = tempfile::tempdir().unwrap();
     let tripwire = tripwire_dir.path().join("container-run");
     let (_bin, processes) = proof_processes(&tripwire);
-    assert!(prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes).is_err());
+    assert!(
+        crate::candidate_tests::retry_on_text_file_busy(|| {
+            prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes)
+        })
+        .is_err()
+    );
     assert_eq!(
         directory_digest_map(&fixture.repo.root.path().join("dist")),
         before
@@ -1599,7 +1619,12 @@ fn prove_candidate_rejects_source_change_during_first_proof_run() {
         &fixture.repo.root.path().join("Cargo.lock"),
         &tripwire,
     );
-    assert!(prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes).is_err());
+    assert!(
+        crate::candidate_tests::retry_on_text_file_busy(|| {
+            prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes)
+        })
+        .is_err()
+    );
     assert!(proofs.join("debian-amd64.json").exists());
     for (id, bytes) in ["rpm-x86_64", "tar-x86_64"]
         .into_iter()
@@ -1648,12 +1673,19 @@ fn prove_resume_preserves_payload_ledger_and_first_proof_without_rebuild() {
     let tripwire = tripwire_dir.path().join("build");
     let (_first_bin, first) =
         proof_output_processes(templates.path(), Some("rpm-x86_64"), &tripwire);
-    assert!(prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &first).is_err());
+    assert!(
+        crate::candidate_tests::retry_on_text_file_busy(|| {
+            prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &first)
+        })
+        .is_err()
+    );
     let first_proof = fs::read(proofs.join("debian-amd64.json")).unwrap();
     assert!(!proofs.join("rpm-x86_64.json").exists());
     let (_second_bin, second) = proof_output_processes(templates.path(), None, &tripwire);
-    let status =
-        prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &second).unwrap();
+    let status = crate::candidate_tests::retry_on_text_file_busy(|| {
+        prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &second)
+    })
+    .unwrap();
     assert_eq!(status.status, "candidate-proven");
     assert_eq!(
         fs::read(proofs.join("debian-amd64.json")).unwrap(),
@@ -1801,7 +1833,10 @@ fn docker_identity_is_normalized_and_retained_validation_is_provider_neutral() {
     fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
     let processes = ProcessEnvironment::with_path(bin.path().as_os_str());
     assert_eq!(
-        observe_container_engine(&processes, ContainerEngine::Docker).unwrap(),
+        crate::candidate_tests::retry_on_text_file_busy(|| {
+            observe_container_engine(&processes, ContainerEngine::Docker)
+        })
+        .unwrap(),
         "docker 27.5.1"
     );
 
@@ -2182,9 +2217,11 @@ exit 94
     }
     let processes = ProcessEnvironment::with_path(stubs.path().as_os_str());
     if divergent.is_some() {
-        let error = create_candidate(&repo.root, &repo.commit, &descriptor, &processes)
-            .unwrap_err()
-            .to_string();
+        let error = crate::candidate_tests::retry_on_text_file_busy(|| {
+            create_candidate(&repo.root, &repo.commit, &descriptor, &processes)
+        })
+        .unwrap_err()
+        .to_string();
         assert!(
             error.contains("class=DivergentExecutable"),
             "unexpected creation error: {error}"
@@ -2209,9 +2246,10 @@ exit 94
                 .join("dist/.rust-release-candidate-staging/foreign");
             fs::create_dir_all(&sibling).unwrap();
             fs::write(sibling.join("canary"), b"foreign").unwrap();
-            let error =
+            let error = crate::candidate_tests::retry_on_text_file_busy(|| {
                 create_candidate(&failed.root, &failed.commit, &failed_descriptor, &processes)
-                    .unwrap_err();
+            })
+            .unwrap_err();
             assert!(!error.to_string().contains("candidate-proven"));
             assert!(
                 !failed.root.path().join("dist/rust").exists(),
@@ -2250,8 +2288,10 @@ exit 94
             .join("dist/.rust-release-candidate-staging/foreign");
         fs::create_dir_all(&sibling).unwrap();
         fs::write(sibling.join("canary"), b"foreign").unwrap();
-        let error = create_candidate(&failed.root, &failed.commit, &failed_descriptor, &processes)
-            .unwrap_err();
+        let error = crate::candidate_tests::retry_on_text_file_busy(|| {
+            create_candidate(&failed.root, &failed.commit, &failed_descriptor, &processes)
+        })
+        .unwrap_err();
         assert!(!error.to_string().contains("candidate-proven"));
         assert!(!failed.root.path().join("dist/rust").exists(), "{class}");
         assert!(
@@ -2269,7 +2309,10 @@ exit 94
             fs::remove_file(db.path().join("DIRTY")).unwrap();
         }
     }
-    let status = create_candidate(&repo.root, &repo.commit, &descriptor, &processes).unwrap();
+    let status = crate::candidate_tests::retry_on_text_file_busy(|| {
+        create_candidate(&repo.root, &repo.commit, &descriptor, &processes)
+    })
+    .unwrap();
     assert_eq!(status.status, "candidate-proven");
     assert!(!forbidden.exists());
     let (ledger, bytes) = read_ledger(&repo.root, "1.0.0").unwrap();

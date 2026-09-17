@@ -123,12 +123,14 @@ fn reserved_path_catalog_drives_production_command_confinement_matrix() {
                 } else {
                     replace_with_symlink(&repo.root.path().join(relative), external.path());
                 }
-                create_candidate(
-                    &repo.root,
-                    &repo.commit,
-                    Path::new("unused-advisory-descriptor"),
-                    &ProcessEnvironment::default(),
-                )
+                candidate_tests::retry_on_text_file_busy(|| {
+                    create_candidate(
+                        &repo.root,
+                        &repo.commit,
+                        Path::new("unused-advisory-descriptor"),
+                        &ProcessEnvironment::default(),
+                    )
+                })
                 .unwrap_err()
             }
             ReservedPathAction::Status => {
@@ -178,8 +180,10 @@ fn reserved_path_catalog_drives_production_command_confinement_matrix() {
                     } else {
                         proof_tests::proof_processes(&tripwire)
                     };
-                prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes)
-                    .unwrap_err()
+                candidate_tests::retry_on_text_file_busy(|| {
+                    prove_candidate(&fixture.repo.root, "1.0.0", &fixture.descriptor, &processes)
+                })
+                .unwrap_err()
             }
             ReservedPathAction::Unreachable(reason) => {
                 assert!(!reason.is_empty());
