@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-09-18
+
 ### Added
 
 - `setup` now shows your journal's mark once pairing succeeds, so you can check it matches what your journal shows.
