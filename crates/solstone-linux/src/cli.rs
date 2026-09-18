@@ -7,7 +7,8 @@ use crate::{
     },
     config::{Config, ConfigPaths, load_config, sanitize_link_authority, save_config},
     private_link::{
-        PrivateStateError, PrivateStateLock, PrivateStateLockLiveness, setup_with_stream,
+        PrivateStateError, PrivateStateLock, PrivateStateLockLiveness, format_spoken_mark,
+        load_credential, setup_with_stream,
     },
     session_env::{self, Output, Runner},
     streams::stream_name,
@@ -369,27 +370,50 @@ fn cmd_setup(
             return 1;
         }
     };
-    render_setup_result(
-        runtime.block_on(setup_with_stream(
-            &config_root,
-            &state_dir,
-            &host,
-            stream.as_deref(),
-            input,
-        )),
-        output,
-        errors,
-    )
+    let result = runtime.block_on(setup_with_stream(
+        &config_root,
+        &state_dir,
+        &host,
+        stream.as_deref(),
+        input,
+    ));
+    let spoken_mark = paired_spoken_mark_after_setup(result.is_ok(), &config_root);
+    render_setup_result(result, spoken_mark, output, errors)
+}
+
+/// The newly paired journal's spoken-form mark, read back from the credential
+/// setup just persisted. `None` on setup failure or if the mark cannot be
+/// computed — callers must never block the success message on this.
+fn paired_spoken_mark_after_setup(
+    setup_succeeded: bool,
+    config_root: &std::path::Path,
+) -> Option<String> {
+    if !setup_succeeded {
+        return None;
+    }
+    load_credential(config_root)
+        .ok()
+        .flatten()
+        .and_then(|credential| format_spoken_mark(&credential.instance_id))
 }
 
 fn render_setup_result(
     result: Result<(), PrivateStateError>,
+    spoken_mark: Option<String>,
     output: &mut dyn Write,
     errors: &mut dyn Write,
 ) -> i32 {
     match result {
         Ok(()) => {
             let _ = write_line(output, "the solstone app can now connect to your journal.");
+            if let Some(mark) = spoken_mark {
+                let _ = write_line(
+                    output,
+                    format!(
+                        "your journal's mark: {mark} — check it matches what your journal shows."
+                    ),
+                );
+            }
             0
         }
         Err(PrivateStateError::PairInputInvalid) => {
@@ -452,7 +476,8 @@ pub(crate) async fn dispatch_setup_with_pairer_for_test<R: Read>(
         input,
     )
     .await;
-    render_setup_result(result, output, errors)
+    let spoken_mark = paired_spoken_mark_after_setup(result.is_ok(), config_root);
+    render_setup_result(result, spoken_mark, output, errors)
 }
 
 trait PromptIo {
@@ -1683,5 +1708,71 @@ mod tests {
 
         // After successful pairing, paired_journal.json MUST have been deleted
         assert!(crate::sync_health::load_paired_journal_version(&config.state_dir()).is_none());
+    }
+
+    #[tokio::test]
+    async fn setup_pairing_prints_the_paired_journals_spoken_mark() {
+        use spl_transport::credential::Credential;
+
+        let t = tempfile::tempdir().unwrap();
+        let config = status_config(&t);
+        let cred = Credential {
+            instance_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+            ca_fp_prefix: vec![0xaa, 0xbb],
+            endpoints: vec![],
+            local_endpoints: None,
+            client_cert_pem: String::new(),
+            client_key_pem: String::new(),
+            ca_chain_pem: vec![],
+            home_label: "home".into(),
+            home_attestation: None,
+            relay_origin: None,
+            device_token: None,
+            device_token_expires_at: None,
+        };
+        let expected_mark = crate::private_link::format_spoken_mark(&cred.instance_id)
+            .expect("test jid must resolve to a mark");
+
+        struct DirectPairer(Credential);
+        impl crate::private_link::Pairer for DirectPairer {
+            fn pair<'a>(
+                &'a self,
+                _link: &'a str,
+                _device_label: &'a str,
+                _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                spl_transport::credential::Credential,
+                                crate::private_link::PrivateStateError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move { Ok(self.0.clone()) })
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status = dispatch_setup_with_pairer_for_test(
+            &DirectPairer(cred.clone()),
+            &config.config_dir,
+            &config.state_dir(),
+            "desktop",
+            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(status, 0);
+
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(
+            out_str.contains(&expected_mark),
+            "setup success output should include the paired journal's spoken mark: {out_str}"
+        );
     }
 }
