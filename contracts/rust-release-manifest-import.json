@@ -1,6 +1,6 @@
 {
   "schema_id": "https://solpbc.org/schemas/rust-release-manifest/v1.json",
-  "schema_sha256": "d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c",
+  "schema_sha256": "45e12a73062eededbe4d47b1101425eeca7be03f55dbc75ce087f477ae3a8a72",
   "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
   "schema_version": 1,
   "schema_path": "rust-release-manifest.schema.json",

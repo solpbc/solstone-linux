@@ -135,7 +135,7 @@ check-package-audit: rust-preflight
 
 check-rust-release-manifest: rust-preflight
 	@echo "Rust release manifest schema: 1"
-	@echo "Rust release manifest schema SHA-256: d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c"
+	@echo "Rust release manifest schema SHA-256: 45e12a73062eededbe4d47b1101425eeca7be03f55dbc75ce087f477ae3a8a72"
 	@echo "Rust release candidate ledger schema: 1"
 	@echo "Rust release candidate ledger schema SHA-256: 4b387f19d8018752c6d016a4c0c74343ed80d2b64a3ff9480aa75b04fa66882d"
 	@echo "Rust release candidate proof schema: 1"

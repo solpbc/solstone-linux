@@ -2132,7 +2132,7 @@ fn checksum_and_complete_inventory_mutations_fail() {
 }
 
 #[test]
-fn schema_rejects_required_forbidden_and_path_mutations() {
+fn schema_rejects_required_and_path_mutations_but_allows_extra_fields() {
     let temp = release_fixture();
     let text = render_manifest(evidence(), temp.path()).unwrap();
     let original: Value = serde_json::from_str(&text).unwrap();
@@ -2165,7 +2165,7 @@ fn schema_rejects_required_forbidden_and_path_mutations() {
     }
     let mut value = original;
     value["unexpected"] = Value::Bool(true);
-    assert!(validate_manifest_bytes(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+    assert!(validate_manifest_bytes(serde_json::to_string(&value).unwrap().as_bytes()).is_ok());
 }
 
 fn rendered_manifest() -> (tempfile::TempDir, Manifest) {

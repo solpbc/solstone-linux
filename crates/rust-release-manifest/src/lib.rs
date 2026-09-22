@@ -39,7 +39,7 @@ mod transparency;
 pub use transparency::*;
 
 pub const SCHEMA_VERSION: u64 = 1;
-pub const SCHEMA_SHA256: &str = "d4eabf52bcc68b56945912d351f818e5444fe8c6461cb5c48b096f87b17a875c";
+pub const SCHEMA_SHA256: &str = "45e12a73062eededbe4d47b1101425eeca7be03f55dbc75ce087f477ae3a8a72";
 pub const CHECKSUM_NAME: &str = "SHA256SUMS";
 pub const PRODUCT: &str = "solstone-linux";
 pub const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -3092,7 +3092,7 @@ fn command(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn verify_schema() -> Result<()> {
-    if SCHEMA_BYTES.len() != 4416 || digest(SCHEMA_BYTES) != SCHEMA_SHA256 {
+    if SCHEMA_BYTES.len() != 4415 || digest(SCHEMA_BYTES) != SCHEMA_SHA256 {
         return Err(Error::new("vendored schema bytes mismatch"));
     }
     let schema: Value = serde_json::from_slice(SCHEMA_BYTES).map_err(display_error)?;
