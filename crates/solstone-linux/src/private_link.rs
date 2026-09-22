@@ -3508,6 +3508,22 @@ pub(crate) mod tests {
         ));
     }
 
+    #[test]
+    fn shared_pairlink_parser_admits_public_ipv4_direct_candidates() {
+        let mut blob = vec![0x04, 0x01, 192, 0, 2, 42];
+        blob.extend_from_slice(&7657_u16.to_be_bytes());
+        blob.extend_from_slice(&[0x11; 16]);
+        blob.extend_from_slice(&[0x22; 16]);
+
+        let direct = match pairlink::parse_blob(&blob).unwrap() {
+            ParsedPairLink::Direct(direct) => direct,
+            ParsedPairLink::Relay(_) => panic!("public IPv4 direct candidate parsed as relay"),
+        };
+        assert_eq!(direct.candidates.len(), 1);
+        assert_eq!(direct.candidates[0].host, "192.0.2.42");
+        assert_eq!(direct.candidates[0].port, 7657);
+    }
+
     #[tokio::test]
     async fn pair_link_form_controls_persisted_carrier_candidates() {
         let direct_temp = tempfile::tempdir().unwrap();
