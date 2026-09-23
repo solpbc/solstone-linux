@@ -18,7 +18,7 @@ use std::{
 #[cfg(test)]
 use reqwest::Method;
 use reqwest::{RequestBuilder, StatusCode, Url, multipart};
-use spl_core::bridge::{BridgeNames, RequestHead, RequestHeaderPolicy};
+use spl_core::bridge::{BridgeNames, RequestHead};
 use spl_core::pairlink::{self, ParsedPairLink};
 use spl_transport::credential::Credential;
 use spl_transport::{
@@ -2873,22 +2873,6 @@ async fn start_private_link_session_inner(
         stream_response: Arc::new(streams_journal_response),
         local_response: Arc::new(|_, _| None),
         attribution_headers: Arc::new(|_| Vec::new()),
-        request_headers: RequestHeaderPolicy::Allow(
-            [
-                "accept",
-                "accept-language",
-                "content-type",
-                "cache-control",
-                "if-none-match",
-                "if-modified-since",
-                "range",
-                "user-agent",
-                ROUTE_CLASS_MARKER_HEADER_NAME,
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        ),
         max_request_body_bytes: MAX_REQUEST_BODY_BYTES as usize,
     };
     // This private bridge gives optional requests an actual dial source. The pinned
@@ -4418,22 +4402,35 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn caller_reserved_auth_headers_are_rejected_before_dial() {
+    async fn capability_is_the_admission_check_and_reserved_caller_headers_are_stripped() {
         let peer = PrivateLinkPeer::start().await;
         let (_temp, session) = start_keyless_peer_session(&peer).await;
+        peer.set_route("/stripped", 200, b"{}".to_vec());
+        // A request holding the capability is this app's own code: reserved
+        // headers it sets are stripped on the way through, never refused.
         for (name, value) in [
             (OBSERVER_HEADER_NAME, "forged"),
             (PROTOCOL_VERSION_HEADER_NAME, "2"),
             ("authorization", "Bearer forged"),
         ] {
             let response = session
-                .request(Method::GET, "/blocked")
+                .request(Method::GET, "/stripped")
                 .unwrap()
                 .header(name, value)
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+        }
+        let forwarded = peer.requests();
+        assert_eq!(forwarded.len(), 3);
+        for request in &forwarded {
+            assert!(
+                !request
+                    .headers
+                    .iter()
+                    .any(|(_, value)| value == "forged" || value == "Bearer forged")
+            );
         }
         let bare = reqwest::Client::builder()
             .no_proxy()
@@ -4452,7 +4449,11 @@ pub(crate) mod tests {
                 StatusCode::FORBIDDEN
             );
         }
-        assert!(peer.requests().is_empty());
+        assert_eq!(
+            peer.requests().len(),
+            3,
+            "a refused request never reaches the journal"
+        );
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
