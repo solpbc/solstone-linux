@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- a correction to the 2.0.6 notes: they said a pairing link could point at any address you can reach your journal at. it has to be an IPv4 address, private or public. a hostname or an IPv6 address isn't accepted.
+
 ## [2.0.6] - 2026-09-23
 
 ### Changed
