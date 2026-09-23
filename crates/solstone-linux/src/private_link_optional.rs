@@ -263,7 +263,7 @@ mod tests {
             200,
             br#"{"protocol_version":2,"status":"not_configured"}"#.to_vec(),
         );
-        peer.set_route("/app/devices/ingest/manifest", 200, b"{}".to_vec());
+        peer.set_route("/app/devices/ingest", 200, b"{}".to_vec());
         let temp = tempfile::tempdir().unwrap();
         let session = start_private_link_session(temp.path(), peer.credential(), "stream")
             .await
@@ -302,7 +302,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(peer.requests().len(), 3);
         let response = session
-            .request(reqwest::Method::POST, "/app/devices/ingest/manifest")
+            .request(reqwest::Method::POST, "/app/devices/ingest")
             .unwrap()
             .body("{}")
             .send()

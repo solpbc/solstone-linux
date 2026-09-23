@@ -17,8 +17,8 @@ use std::{
 };
 use tempfile::TempDir;
 
-const MANIFEST_SHA256: &str = "d9d2f846029fb5990ab458efaf6ac7c10ca306608088fba236dd3e5a148dc8ef";
-const AUTHORITY_COMMIT: &str = "ba16c8ca55b4151430166f0e7f9b0da2d15c6f45";
+const MANIFEST_SHA256: &str = "6a38b9be1b4e0b9d93edff7120399a5ace0f6aa8edfecaa349e4c98d8100dbe3";
+const AUTHORITY_COMMIT: &str = "b78ba9eaac8228e65c4b5a3e64d27aefd3ad47cd";
 
 const LINUX_FIXTURES: &[&str] = &[
     "declared.client.ingestUpload.status.collision",
@@ -233,7 +233,7 @@ fn assert_identities(
     vector_document: &Value,
     consumer_audit: &Value,
 ) {
-    assert_eq!(manifest["bundle_semver"], "10.0.0");
+    assert_eq!(manifest["bundle_semver"], "12.2.0");
     assert_eq!(manifest["openapi_document_version"], "1.0.0");
     assert_eq!(manifest["client_protocol_version"], 3);
     assert_eq!(manifest["supported_response_variants"], json!([3]));
@@ -264,7 +264,13 @@ fn assert_identities(
     );
     assert_eq!(
         manifest["component_closure"],
-        json!(["Error", "SegmentFile", "SegmentItem", "SegmentsEnvelope"])
+        json!([
+            "Error",
+            "FileDescriptor",
+            "SegmentFile",
+            "SegmentItem",
+            "SegmentsEnvelope"
+        ])
     );
     assert_eq!(
         fixture_document["schema"],
@@ -360,7 +366,7 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
     let expected = json!({
         "authority_repository":"https://github.com/solpbc/solstone-journal",
         "authority_commit":AUTHORITY_COMMIT,
-        "bundle_version":"10.0.0",
+        "bundle_version":"12.2.0",
         "manifest_path":"manifest.json",
         "manifest_sha256":MANIFEST_SHA256,
         "vendored_root":"vendor/observer-client-contract"
@@ -564,9 +570,7 @@ async fn assert_upload_contract(
         assert_eq!(vector["pointers"], json!(["/status"]));
         let result = upload_fixture_result(fixture).await;
         assert_upload_success_matches_decision(result.success, decision);
-        if decision["accepted"] == true {
-            assert_eq!(result.duplicate, status == "duplicate");
-        } else {
+        if decision["accepted"] != true {
             assert!(!result.success);
         }
         record(executed_fixtures, fixture_id);

@@ -785,7 +785,7 @@ fn observer_contract_gate_is_locked_offline_and_named() {
     assert!(target.contains("CARGO_NET_OFFLINE=true"));
     assert!(target.contains("$(CARGO_LOCKED) -p solstone-linux"));
     assert!(target.contains("observer_contract_tests::observer_contract_conformance"));
-    assert!(target.contains("10.0.0"));
-    assert!(target.contains("d9d2f846029fb5990ab458efaf6ac7c10ca306608088fba236dd3e5a148dc8ef"));
+    assert!(target.contains("12.2.0"));
+    assert!(target.contains("6a38b9be1b4e0b9d93edff7120399a5ace0f6aa8edfecaa349e4c98d8100dbe3"));
     assert!(makefile.contains("ci: rust-preflight check-cargo-deny check-observer-contract"));
 }

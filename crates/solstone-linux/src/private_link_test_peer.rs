@@ -158,16 +158,14 @@ impl PrivateLinkPeer {
     }
 
     pub(crate) fn enqueue_day_custody(&self, fixture: crate::test_support::DayCustodyFixture) {
-        self.state
-            .responses
-            .lock()
-            .unwrap()
-            .push_back(QueuedResponse::DayCustody(fixture));
+        let mut guard = self.state.responses.lock().unwrap();
+        guard.retain(|q| match q {
+            QueuedResponse::DayCustody(existing) => existing.day != fixture.day,
+            QueuedResponse::Static(_) => true,
+        });
+        guard.push_back(QueuedResponse::DayCustody(fixture));
     }
 
-    pub(crate) fn enqueue_manifest_probe(&self, status: u16, body: impl Into<Vec<u8>>) {
-        self.enqueue_response(status, body);
-    }
     pub(crate) fn enqueue_gated_response(
         &self,
         status: u16,
@@ -399,8 +397,6 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
     let mut outbound: HashMap<u32, OutboundResponse> = HashMap::new();
     let mut gated: HashMap<u32, PeerResponse> = HashMap::new();
     let mut pending_request_credit: HashMap<u32, usize> = HashMap::new();
-    let mut day_manifests = VecDeque::new();
-    let mut segment_lists = VecDeque::new();
     let mut buffer = [0; 16 * 1024];
     loop {
         let count = tokio::select! {
@@ -474,12 +470,7 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                     state.requests.lock().unwrap().push(request.clone());
                     state.request_arrived.notify_waiters();
                 }
-                let response = next_response(
-                    state,
-                    request.as_ref(),
-                    &mut day_manifests,
-                    &mut segment_lists,
-                );
+                let response = next_response(state, request.as_ref());
                 if let Some(gate) = &response.gate {
                     gate.notified().await;
                 }
@@ -514,71 +505,162 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
     }
 }
 
-fn next_response(
-    state: &PeerState,
-    request: Option<&PeerRequest>,
-    day_manifests: &mut VecDeque<crate::test_support::DayCustodyFixture>,
-    segment_lists: &mut VecDeque<crate::test_support::DayCustodyFixture>,
-) -> PeerResponse {
+fn auto_ingest_response(request: &PeerRequest) -> PeerResponse {
+    use sha2::{Digest, Sha256};
+    let body = &request.body;
+    let mut descriptors = Vec::new();
+    let mut segment_name = "143000_1".to_string();
+
+    if let Some(content_type) = request
+        .headers
+        .iter()
+        .find(|(h, _)| h.eq_ignore_ascii_case("content-type"))
+        && let Some((_, boundary)) = content_type.1.split_once("boundary=")
+    {
+        let boundary = boundary.trim_matches('"');
+        let delimiter = format!("--{boundary}");
+        let delimiter_bytes = delimiter.as_bytes();
+        let mut cursor = 0;
+        while let Some(start_idx) = body[cursor..]
+            .windows(delimiter_bytes.len())
+            .position(|w| w == delimiter_bytes)
+        {
+            let part_start = cursor + start_idx + delimiter_bytes.len();
+            if part_start + 2 >= body.len() || &body[part_start..part_start + 2] == b"--" {
+                break;
+            }
+            let next_delim = body[part_start..]
+                .windows(delimiter_bytes.len())
+                .position(|w| w == delimiter_bytes);
+            let part_end = if let Some(pos) = next_delim {
+                let raw_end = part_start + pos;
+                if raw_end >= 2 && &body[raw_end - 2..raw_end] == b"\r\n" {
+                    raw_end - 2
+                } else {
+                    raw_end
+                }
+            } else {
+                body.len()
+            };
+
+            let part = &body[part_start..part_end];
+            if let Some(header_end_pos) = part.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header_bytes = &part[..header_end_pos];
+                let content_bytes = &part[header_end_pos + 4..];
+                let header_str = String::from_utf8_lossy(header_bytes);
+
+                if header_str.contains("name=\"envelope\"") {
+                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(content_bytes)
+                        && let Some(seg) = json.get("segment").and_then(|s| s.as_str())
+                    {
+                        segment_name = seg.to_string();
+                    }
+                } else if header_str.contains("name=\"files\"") {
+                    let filename = if let Some((_, rest)) = header_str.split_once("filename=\"") {
+                        rest.split('"').next().unwrap_or("file")
+                    } else {
+                        "file"
+                    };
+                    let size = content_bytes.len() as u64;
+                    let sha256 = format!("{:x}", Sha256::digest(content_bytes));
+                    descriptors.push(serde_json::json!({
+                        "submitted": filename,
+                        "written": filename,
+                        "size": size,
+                        "sha256": sha256,
+                        "disposition": "written"
+                    }));
+                }
+            }
+
+            cursor = part_start;
+        }
+    }
+
+    let payload = serde_json::json!({
+        "status": "ok",
+        "segment": segment_name,
+        "file_descriptors": descriptors
+    });
+    plain_response(200, payload.to_string().into_bytes())
+}
+
+fn next_response(state: &PeerState, request: Option<&PeerRequest>) -> PeerResponse {
     let Some(request) = request else {
         return pop_static_response(state);
     };
     if let Some(response) = state.routes.lock().unwrap().get(&request.path).cloned() {
         return response;
     }
-    if request.path == "/app/devices/ingest/manifest" {
-        let queued = state.responses.lock().unwrap().pop_front();
-        return match queued {
-            Some(QueuedResponse::Static(response)) => response,
-            Some(QueuedResponse::DayCustody(fixture)) => {
-                let response = fixture.response_for(crate::test_support::DayCustodyLeg::Manifest);
-                if !fixture.stops_after(crate::test_support::DayCustodyLeg::Manifest) {
-                    day_manifests.push_back(fixture);
-                }
-                plain_response(response.0, response.1)
-            }
-            None => plain_response(500, Vec::new()),
-        };
-    }
-    if request
-        .path
-        .strip_prefix("/app/devices/ingest/manifest/")
-        .is_some()
-        && let Some(fixture) = day_manifests.pop_front()
-    {
-        let response = fixture.response_for(crate::test_support::DayCustodyLeg::DayManifest);
-        if !fixture.stops_after(crate::test_support::DayCustodyLeg::DayManifest) {
-            segment_lists.push_back(fixture);
+    if let Some(day) = request.path.strip_prefix("/app/devices/ingest/segments/") {
+        let mut guard = state.responses.lock().unwrap();
+        if let Some(pos) = guard.iter().position(|q| match q {
+            QueuedResponse::DayCustody(f) => f.day == day,
+            QueuedResponse::Static(_) => false,
+        }) && let Some(QueuedResponse::DayCustody(fixture)) = guard.remove(pos)
+        {
+            let (status, body) = fixture.response();
+            return plain_response(status, body);
         }
-        return plain_response(response.0, response.1);
+        if let Some(pos) = guard
+            .iter()
+            .position(|q| matches!(q, QueuedResponse::DayCustody(_)))
+            && let Some(QueuedResponse::DayCustody(fixture)) = guard.remove(pos)
+        {
+            let (status, body) = fixture.response();
+            return plain_response(status, body);
+        }
+        if let Some(QueuedResponse::Static(response)) = guard.pop_front() {
+            return response;
+        }
+        return plain_response(404, Vec::new());
     }
-    if request
-        .path
-        .strip_prefix("/app/devices/ingest/segments/")
-        .is_some()
-        && let Some(fixture) = segment_lists.pop_front()
-    {
-        let response = fixture.response_for(crate::test_support::DayCustodyLeg::Segments);
-        return plain_response(response.0, response.1);
+    if request.path == "/app/devices/ingest" && request.method == "POST" {
+        let mut guard = state.responses.lock().unwrap();
+        if let Some(mut response) = guard.pop_front().and_then(|q| match q {
+            QueuedResponse::Static(r) => Some(r),
+            QueuedResponse::DayCustody(_) => None,
+        }) {
+            if response.status == 200
+                && let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(&response.body)
+                && let Some(obj) = val.as_object_mut()
+                && !obj.contains_key("file_descriptors")
+            {
+                let auto = auto_ingest_response(request);
+                if let Ok(auto_val) = serde_json::from_slice::<serde_json::Value>(&auto.body)
+                    && let Some(fds) = auto_val.get("file_descriptors")
+                {
+                    obj.insert("file_descriptors".to_string(), fds.clone());
+                    response.body = serde_json::to_vec(&obj).unwrap();
+                }
+            }
+            return response;
+        }
+        drop(guard);
+        return auto_ingest_response(request);
+    }
+    if request.path == "/api/system/status" {
+        let mut guard = state.responses.lock().unwrap();
+        if matches!(guard.front(), Some(QueuedResponse::Static(_)))
+            && let Some(QueuedResponse::Static(response)) = guard.pop_front()
+        {
+            return response;
+        }
+        return plain_response(
+            200,
+            serde_json::json!({"version": {"current": "1.0.0"}})
+                .to_string()
+                .into_bytes(),
+        );
     }
     if request.path == "/app/network/api/clients/self"
         || request.path == "/app/network/api/relay/access"
-        || request.path == "/api/system/status"
     {
         let mut guard = state.responses.lock().unwrap();
-        if let Some(QueuedResponse::Static(res)) = guard.front() {
-            let contains = |needle: &[u8]| res.body.windows(needle.len()).any(|w| w == needle);
-            let is_sync_payload = contains(b"day_custody_items")
-                || contains(b"day_custody_day")
-                || contains(b"\"segment\"")
-                || contains(b"\"ingest_status\"")
-                || contains(b"\"status\":\"ok\"")
-                || contains(b"\"status\": \"ok\"")
-                || contains(b"\"status\":\"quarantine\"")
-                || contains(b"\"status\": \"quarantine\"");
-            if !is_sync_payload && let Some(QueuedResponse::Static(res)) = guard.pop_front() {
-                return res;
-            }
+        if matches!(guard.front(), Some(QueuedResponse::Static(_)))
+            && let Some(QueuedResponse::Static(res)) = guard.pop_front()
+        {
+            return res;
         }
         return plain_response(404, Vec::new());
     }

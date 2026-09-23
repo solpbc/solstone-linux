@@ -51,7 +51,6 @@ const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
 const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
-#[allow(dead_code)]
 const SYSTEM_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const SYSTEM_STATUS_PATH: &str = "/api/system/status";
 pub(crate) const OBSERVER_HEADER_NAME: &str = "x-solstone-observer";
@@ -1504,6 +1503,22 @@ pub(crate) enum LinkOutcome {
     LocalRejected { status: StatusCode },
 }
 
+impl LinkOutcome {
+    pub(crate) fn status_code(&self) -> Option<u16> {
+        match self {
+            LinkOutcome::Success { status, .. } | LinkOutcome::LocalRejected { status } => {
+                Some(status.as_u16())
+            }
+            LinkOutcome::Forbidden => Some(StatusCode::FORBIDDEN.as_u16()),
+            LinkOutcome::TransportUnavailable => None,
+        }
+    }
+
+    pub(crate) fn is_transport_unavailable(&self) -> bool {
+        matches!(self, LinkOutcome::TransportUnavailable)
+    }
+}
+
 struct PrivateLinkCapabilityInner {
     client: reqwest::Client,
     origin: Url,
@@ -1697,6 +1712,38 @@ impl PrivateLinkCapability {
         }
     }
 
+    async fn send_ingest(&self, builder: RequestBuilder, timeout: Duration) -> LinkOutcome {
+        match builder.timeout(timeout).send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status == StatusCode::FORBIDDEN || self.refused_gateway(status) {
+                    return LinkOutcome::Forbidden;
+                }
+                if status == StatusCode::BAD_REQUEST {
+                    return LinkOutcome::LocalRejected { status };
+                }
+                match response.bytes().await {
+                    Ok(body) => {
+                        if status == StatusCode::OK {
+                            LinkOutcome::Success {
+                                status,
+                                body: body.to_vec(),
+                            }
+                        } else {
+                            let len = body.len().min(16384);
+                            LinkOutcome::Success {
+                                status,
+                                body: body[..len].to_vec(),
+                            }
+                        }
+                    }
+                    Err(_) => LinkOutcome::TransportUnavailable,
+                }
+            }
+            Err(_) => LinkOutcome::TransportUnavailable,
+        }
+    }
+
     fn ingest_v3_url(&self, suffix: &str) -> Result<Url, LinkOutcome> {
         confine_path(&self.inner.origin, &format!("{INGEST_PATH}{suffix}")).map_err(|_| {
             LinkOutcome::LocalRejected {
@@ -1715,50 +1762,13 @@ impl PrivateLinkCapability {
                 status: StatusCode::BAD_REQUEST,
             };
         };
-        self.send(
+        self.send_ingest(
             self.inner
                 .client
                 .post(url)
                 .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS)
                 .multipart(form),
             INGEST_TIMEOUT,
-        )
-        .await
-    }
-
-    pub(crate) async fn probe_manifest(&self) -> LinkOutcome {
-        let Ok(url) = self.ingest_v3_url("/manifest") else {
-            return LinkOutcome::LocalRejected {
-                status: StatusCode::BAD_REQUEST,
-            };
-        };
-        self.send(
-            self.inner
-                .client
-                .get(url)
-                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS),
-            LISTING_TIMEOUT,
-        )
-        .await
-    }
-
-    pub(crate) async fn manifest_day(&self, day: &str) -> LinkOutcome {
-        if !Self::validate_day(day) {
-            return LinkOutcome::LocalRejected {
-                status: StatusCode::BAD_REQUEST,
-            };
-        }
-        let Ok(url) = self.ingest_v3_url(&format!("/manifest/{day}")) else {
-            return LinkOutcome::LocalRejected {
-                status: StatusCode::BAD_REQUEST,
-            };
-        };
-        self.send(
-            self.inner
-                .client
-                .get(url)
-                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS),
-            LISTING_TIMEOUT,
         )
         .await
     }
@@ -1784,7 +1794,6 @@ impl PrivateLinkCapability {
         .await
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn system_status(&self) -> Result<Option<String>, LinkOutcome> {
         let Ok(url) = confine_path(&self.inner.origin, SYSTEM_STATUS_PATH) else {
             return Err(LinkOutcome::LocalRejected {
@@ -3309,10 +3318,7 @@ pub(crate) mod tests {
         let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
             .await
             .unwrap();
-        assert!(matches!(
-            owner.capability().probe_manifest().await,
-            LinkOutcome::Success { .. }
-        ));
+        assert!(owner.capability().system_status().await.is_ok());
         assert_eq!(peer.accepted_carriers(), 1);
         owner.shutdown().await.unwrap();
         peer.shutdown().await;
@@ -3332,10 +3338,7 @@ pub(crate) mod tests {
         let owner = start_private_link_owner(temp.path(), credential, "stream")
             .await
             .unwrap();
-        assert!(matches!(
-            owner.capability().probe_manifest().await,
-            LinkOutcome::Success { .. }
-        ));
+        assert!(owner.capability().system_status().await.is_ok());
         assert_eq!(peer.accepted_carriers(), 1);
         assert!(
             tokio::time::timeout(Duration::ZERO, relay.accept())
@@ -3538,10 +3541,7 @@ pub(crate) mod tests {
         let direct_owner = start_private_link_owner(direct_temp.path(), direct, "stream")
             .await
             .unwrap();
-        assert!(matches!(
-            direct_owner.capability().probe_manifest().await,
-            LinkOutcome::Success { .. }
-        ));
+        assert!(direct_owner.capability().system_status().await.is_ok());
         assert_eq!(
             peer.accepted_carriers(),
             1,
@@ -3755,8 +3755,8 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            owner.capability().probe_manifest().await,
-            LinkOutcome::Success { .. }
+            owner.capability().system_status().await,
+            Err(LinkOutcome::Success { .. })
         ));
         relay_reply.await.unwrap();
         assert!(
@@ -4323,9 +4323,8 @@ pub(crate) mod tests {
         let peer = PrivateLinkPeer::start().await;
         for body in [
             br#"{"status":"ok","segment":"120000_1"}"#.as_slice(),
-            br#"{"days":{"20260101":{"segments":1}}}"#.as_slice(),
-            br#"{"version":1,"day":"20260101","segments":{}}"#.as_slice(),
             br#"{"protocol_version":3,"total":0,"items":[]}"#.as_slice(),
+            br#"{"version":{"current":"1.0.0"}}"#.as_slice(),
         ] {
             peer.enqueue_response(200, body);
         }
@@ -4341,36 +4340,30 @@ pub(crate) mod tests {
             LinkOutcome::Success { .. }
         ));
         assert!(matches!(
-            capability.probe_manifest().await,
-            LinkOutcome::Success { .. }
-        ));
-        assert!(matches!(
-            capability.manifest_day("20260101").await,
-            LinkOutcome::Success { .. }
-        ));
-        assert!(matches!(
             capability.segments_day("20260101").await,
             LinkOutcome::Success { .. }
         ));
-        peer.wait_for_requests(4).await;
+        assert!(matches!(capability.system_status().await, Ok(Some(_))));
+        peer.wait_for_requests(3).await;
         for (request, (method, path)) in peer.requests().into_iter().zip([
             ("POST", "/app/devices/ingest"),
-            ("GET", "/app/devices/ingest/manifest"),
-            ("GET", "/app/devices/ingest/manifest/20260101"),
             ("GET", "/app/devices/ingest/segments/20260101"),
+            ("GET", "/api/system/status"),
         ]) {
             assert_eq!(
                 (request.method.as_str(), request.path.as_str()),
                 (method, path)
             );
-            assert_eq!(
-                request
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(PROTOCOL_VERSION_HEADER_NAME))
-                    .map(|(_, value)| value.as_str()),
-                Some("3")
-            );
+            if path != "/api/system/status" {
+                assert_eq!(
+                    request
+                        .headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(PROTOCOL_VERSION_HEADER_NAME))
+                        .map(|(_, value)| value.as_str()),
+                    Some("3")
+                );
+            }
             assert!(!request.headers.iter().any(|(name, _)| {
                 name.eq_ignore_ascii_case("authorization")
                     || name.eq_ignore_ascii_case(OBSERVER_HEADER_NAME)
@@ -5359,8 +5352,8 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            owner.capability().probe_manifest().await,
-            LinkOutcome::Success { .. }
+            owner.capability().system_status().await,
+            Err(LinkOutcome::Success { .. })
         ));
         relay.await.unwrap();
         let persisted = load_credential(temp.path()).unwrap().unwrap();

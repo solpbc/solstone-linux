@@ -2007,12 +2007,19 @@ mod tests {
                 assert_real_observer_ticks_advance();
             }
 
+            let proving_clock = Arc::new(crate::test_support::MutableClock::new(
+                SystemClock::new().wall_seconds() + 200_000.0,
+                0.0,
+            ));
             for index in 0..pending.len() {
+                proving_clock.set_wall(
+                    SystemClock::new().wall_seconds() + 200_000.0 + (index as f64) * 100_000.0,
+                );
                 peer.enqueue_day_custody(custody_listing(day, &pending[index].0));
                 cleanup_synced_day_for_composition(
                     config.clone(),
                     Arc::clone(&upload),
-                    Arc::new(SystemClock::new()),
+                    Arc::clone(&proving_clock) as Arc<dyn Clock + Send + Sync>,
                     day,
                 )
                 .await;

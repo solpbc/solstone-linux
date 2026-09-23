@@ -31,23 +31,52 @@ pub(crate) const MAX_MULTIPART_PART_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadResult {
     pub success: bool,
-    pub duplicate: bool,
     pub error_type: Option<ErrorType>,
     /// The HTTP status of the response that produced this result; `None` when there was no response.
     pub status_code: Option<u16>,
     pub stored_key: Option<String>,
+    pub file_descriptors: Option<Vec<FileDescriptor>>,
+    pub reason_code: Option<String>,
+    pub is_local_failure: bool,
 }
 
 impl UploadResult {
-    fn failure(error_type: Option<ErrorType>, status_code: Option<u16>) -> Self {
+    fn failure(
+        error_type: Option<ErrorType>,
+        status_code: Option<u16>,
+        reason_code: Option<String>,
+    ) -> Self {
         Self {
             success: false,
-            duplicate: false,
             error_type,
             status_code,
             stored_key: None,
+            file_descriptors: None,
+            reason_code,
+            is_local_failure: false,
         }
     }
+
+    fn local_failure(error_type: Option<ErrorType>, status_code: Option<u16>) -> Self {
+        Self {
+            success: false,
+            error_type,
+            status_code,
+            stored_key: None,
+            file_descriptors: None,
+            reason_code: None,
+            is_local_failure: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FileDescriptor {
+    pub submitted: String,
+    pub written: String,
+    pub size: u64,
+    pub sha256: String,
+    pub disposition: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -79,12 +108,6 @@ pub struct DayCustody {
     pub day_present: bool,
     pub items: Vec<ListingEntry>,
     pub proof_available: bool,
-    pub error_type: Option<ErrorType>,
-    pub status_code: Option<u16>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ManifestProbe {
     pub error_type: Option<ErrorType>,
     pub status_code: Option<u16>,
 }
@@ -199,22 +222,23 @@ impl UploadClient {
         files: &[PathBuf],
     ) -> UploadResult {
         if self.is_revoked() {
-            return UploadResult::failure(Some(ErrorType::Auth), None);
+            return UploadResult::failure(Some(ErrorType::Auth), None, None);
         }
         let mut last_error = None;
         let mut last_status = None;
+        let mut last_reason_code = None;
         for attempt in 0..self.inner.immediate_attempts {
             let (form, framed_length) = match build_multipart_form(day, segment, files).await {
                 Ok(form) => form,
                 Err(MultipartBuildError::NoFiles) => {
-                    return UploadResult::failure(Some(ErrorType::Client), None);
+                    return UploadResult::local_failure(Some(ErrorType::Client), None);
                 }
                 Err(MultipartBuildError::File { path, error }) => {
                     tracing::warn!(path = %path.display(), %error, "Unable to prepare upload file");
-                    return UploadResult::failure(Some(ErrorType::Client), None);
+                    return UploadResult::local_failure(Some(ErrorType::Client), None);
                 }
                 Err(MultipartBuildError::PartTooLarge | MultipartBuildError::RequestTooLarge) => {
-                    return UploadResult::failure(Some(ErrorType::Client), Some(413));
+                    return UploadResult::local_failure(Some(ErrorType::Client), Some(413));
                 }
             };
             debug_assert!(framed_length <= MAX_REQUEST_BODY_BYTES);
@@ -234,15 +258,47 @@ impl UploadClient {
                                 );
                                 last_error = Some(ErrorType::Transient);
                                 last_status = Some(StatusCode::OK.as_u16());
+                                last_reason_code = None;
                             }
                         }
                     }
-                    LinkOutcome::Success { status, .. } | LinkOutcome::LocalRejected { status } => {
+                    LinkOutcome::Success { status, body, .. } => {
+                        let reason_code =
+                            serde_json::from_slice::<Value>(&body).ok().and_then(|val| {
+                                val.get("reason_code")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            });
+                        let mut error_type = Self::classify_error(Some(status.as_u16()), false);
+                        if status == StatusCode::CONFLICT
+                            && let Some(ref code) = reason_code
+                            && (code == "pairing_identity_unavailable"
+                                || code == "foreign_stream_binding")
+                        {
+                            error_type = ErrorType::Transient;
+                        }
+                        last_error = Some(error_type);
+                        last_status = Some(status.as_u16());
+                        last_reason_code = reason_code.clone();
+                        if error_type != ErrorType::Transient || reason_code.is_some() {
+                            return UploadResult::failure(
+                                Some(error_type),
+                                Some(status.as_u16()),
+                                reason_code,
+                            );
+                        }
+                    }
+                    LinkOutcome::LocalRejected { status } => {
                         let error_type = Self::classify_error(Some(status.as_u16()), false);
                         last_error = Some(error_type);
                         last_status = Some(status.as_u16());
+                        last_reason_code = None;
                         if error_type != ErrorType::Transient {
-                            return UploadResult::failure(Some(error_type), Some(status.as_u16()));
+                            return UploadResult::failure(
+                                Some(error_type),
+                                Some(status.as_u16()),
+                                None,
+                            );
                         }
                     }
                     LinkOutcome::Forbidden => {
@@ -252,48 +308,28 @@ impl UploadClient {
                         return UploadResult::failure(
                             Some(ErrorType::Auth),
                             Some(StatusCode::FORBIDDEN.as_u16()),
+                            None,
                         );
                     }
                     LinkOutcome::TransportUnavailable => {
                         last_error = Some(ErrorType::Transient);
                         last_status = None;
+                        last_reason_code = None;
                     }
                 }
             } else {
-                return UploadResult::failure(Some(ErrorType::Transient), None);
+                return UploadResult::failure(Some(ErrorType::Transient), None, None);
             }
             if attempt + 1 < self.inner.immediate_attempts {
                 tokio::select! {
                     () = tokio::time::sleep(retry_delay(&self.inner.retry_delays, attempt)) => {}
                     () = self.inner.cancellation.cancelled() => {
-                        return UploadResult::failure(Some(ErrorType::Transient), None);
+                        return UploadResult::failure(Some(ErrorType::Transient), None, None);
                     }
                 }
             }
         }
-        UploadResult::failure(last_error, last_status)
-    }
-
-    pub async fn probe_manifest(&self) -> ManifestProbe {
-        if self.is_revoked() {
-            return probe_failure(ErrorType::Auth, None);
-        }
-        let Some(capability) = self.inner.capability() else {
-            return probe_failure(ErrorType::Transient, None);
-        };
-        match capability.probe_manifest().await {
-            LinkOutcome::Success { status, .. } if status == StatusCode::OK => ManifestProbe {
-                error_type: None,
-                status_code: Some(status.as_u16()),
-            },
-            outcome => {
-                let failure = self.read_failure(outcome, "manifest probe").await;
-                probe_failure(
-                    failure.error_type.expect("failure has an error type"),
-                    failure.status_code,
-                )
-            }
-        }
+        UploadResult::failure(last_error, last_status, last_reason_code)
     }
 
     pub async fn fetch_day_custody(&self, day: &str) -> DayCustody {
@@ -303,58 +339,6 @@ impl UploadClient {
         let Some(capability) = self.inner.capability() else {
             return custody_failure(ErrorType::Transient, None);
         };
-
-        let (manifest, _) = match self
-            .read_json(capability.probe_manifest().await, "manifest")
-            .await
-        {
-            Ok(value) => value,
-            Err(failure) => return failure,
-        };
-        let Some(days) = manifest.get("days").and_then(Value::as_object) else {
-            return custody_failure(ErrorType::Incompatible, Some(StatusCode::OK.as_u16()));
-        };
-        if !days.contains_key(day) {
-            // The manifest is authoritative for day existence. Absence is a reachable,
-            // unproven state rather than a failed read, so the segment remains upload-eligible.
-            return DayCustody {
-                day_present: false,
-                items: Vec::new(),
-                proof_available: false,
-                error_type: None,
-                status_code: Some(StatusCode::OK.as_u16()),
-            };
-        }
-
-        let (day_manifest, _) = match self
-            .read_json(capability.manifest_day(day).await, "day manifest")
-            .await
-        {
-            Ok(value) => value,
-            Err(failure) => return failure,
-        };
-        let manifest_day = day_manifest.get("day").and_then(Value::as_str);
-        let manifest_version = day_manifest.get("version").and_then(Value::as_u64);
-        if manifest_day.is_none()
-            || manifest_version.is_none()
-            || day_manifest
-                .get("segments")
-                .and_then(Value::as_object)
-                .is_none()
-        {
-            return custody_failure(ErrorType::Incompatible, Some(StatusCode::OK.as_u16()));
-        }
-        if manifest_day != Some(day) || manifest_version != Some(1) {
-            // Repo-pinned policy: the authority only exemplifies version 1, so any other
-            // version is deliberately unproven instead of being silently accepted.
-            return DayCustody {
-                day_present: true,
-                items: Vec::new(),
-                proof_available: false,
-                error_type: None,
-                status_code: Some(StatusCode::OK.as_u16()),
-            };
-        }
 
         let (segments, status_code) = match self
             .read_json(capability.segments_day(day).await, "segments")
@@ -463,31 +447,54 @@ impl Inner {
 }
 
 fn parse_upload_body(body: Value) -> UploadResult {
-    match body.get("status").and_then(Value::as_str) {
-        Some("ok" | "collision") => UploadResult {
-            success: true,
-            duplicate: false,
-            error_type: None,
-            status_code: Some(StatusCode::OK.as_u16()),
-            stored_key: body
+    let status = body.get("status").and_then(Value::as_str);
+    let file_descriptors: Option<Vec<FileDescriptor>> = body
+        .get("file_descriptors")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    match status {
+        Some("ok" | "collision") => {
+            let stored_key = body
                 .get("segment")
                 .and_then(Value::as_str)
-                .map(str::to_owned),
-        },
-        Some("duplicate") => UploadResult {
-            success: true,
-            duplicate: true,
-            error_type: None,
-            status_code: Some(StatusCode::OK.as_u16()),
-            stored_key: body
+                .map(str::to_owned);
+            UploadResult {
+                success: true,
+                error_type: None,
+                status_code: Some(StatusCode::OK.as_u16()),
+                stored_key,
+                file_descriptors,
+                reason_code: None,
+                is_local_failure: false,
+            }
+        }
+        Some("duplicate") => {
+            let stored_key = body
                 .get("existing_segment")
                 .and_then(Value::as_str)
-                .map(str::to_owned),
-        },
-        Some("failed") => {
-            UploadResult::failure(Some(ErrorType::Client), Some(StatusCode::OK.as_u16()))
+                .map(str::to_owned);
+            UploadResult {
+                success: true,
+                error_type: None,
+                status_code: Some(StatusCode::OK.as_u16()),
+                stored_key,
+                file_descriptors,
+                reason_code: None,
+                is_local_failure: false,
+            }
         }
-        _ => UploadResult::failure(Some(ErrorType::Incompatible), Some(StatusCode::OK.as_u16())),
+        Some("failed") => UploadResult::failure(
+            Some(ErrorType::Client),
+            Some(StatusCode::OK.as_u16()),
+            body.get("reason_code")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ),
+        _ => UploadResult::failure(
+            Some(ErrorType::Incompatible),
+            Some(StatusCode::OK.as_u16()),
+            None,
+        ),
     }
 }
 
@@ -639,13 +646,6 @@ fn custody_failure(error_type: ErrorType, status_code: Option<u16>) -> DayCustod
         day_present: false,
         items: Vec::new(),
         proof_available: false,
-        error_type: Some(error_type),
-        status_code,
-    }
-}
-
-fn probe_failure(error_type: ErrorType, status_code: Option<u16>) -> ManifestProbe {
-    ManifestProbe {
         error_type: Some(error_type),
         status_code,
     }
@@ -978,8 +978,8 @@ mod tests {
         assert!(!upload.is_finished());
         peer.release_request_credit();
         assert!(upload.await.unwrap().success);
-        peer.wait_for_requests(4).await;
-        assert_eq!(peer.requests().len(), 4);
+        peer.wait_for_requests(2).await;
+        assert_eq!(peer.requests().len(), 2);
         assert!(legacy.requests().is_empty());
         drop(client);
         session.shutdown().await.unwrap();
@@ -1156,20 +1156,14 @@ mod tests {
     // tests/test_upload.py::test_upload_segment_returns_stored_key
     #[tokio::test]
     async fn upload_segment_returns_stored_key() {
-        for (body, duplicate, key) in [
-            (
-                json!({"status":"ok", "segment":"120000_005"}),
-                false,
-                "120000_005",
-            ),
+        for (body, key) in [
+            (json!({"status":"ok", "segment":"120000_005"}), "120000_005"),
             (
                 json!({"status":"collision", "segment":"120000_006"}),
-                false,
                 "120000_006",
             ),
             (
                 json!({"status":"duplicate", "existing_segment":"115959_300"}),
-                true,
                 "115959_300",
             ),
         ] {
@@ -1181,7 +1175,6 @@ mod tests {
                 .upload_segment("day", "segment", &[media])
                 .await;
             assert!(result.success);
-            assert_eq!(result.duplicate, duplicate);
             assert_eq!(result.stored_key.as_deref(), Some(key));
         }
     }
@@ -1384,7 +1377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v3_custody_requires_the_complete_triad() {
+    async fn v3_custody_requires_segments_response() {
         let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
         server.enqueue_day_custody(DayCustodyFixture::new(
@@ -1399,12 +1392,11 @@ mod tests {
         assert!(result.day_present && result.proof_available);
         assert_eq!(result.items[0].key.as_deref(), Some("new"));
         let requests = server.requests();
-        assert_eq!(requests.len(), 3);
-        for request in requests {
-            assert_eq!(request.headers[OBSERVER_PROTOCOL_VERSION_HEADER], "3");
-            assert!(!request.headers.contains_key("authorization"));
-            assert!(!request.headers.contains_key("x-solstone-observer"));
-        }
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].uri, "/app/devices/ingest/segments/20260101");
+        assert_eq!(requests[0].headers[OBSERVER_PROTOCOL_VERSION_HEADER], "3");
+        assert!(!requests[0].headers.contains_key("authorization"));
+        assert!(!requests[0].headers.contains_key("x-solstone-observer"));
     }
 
     #[tokio::test]
@@ -1423,41 +1415,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v3_day_manifest_mismatch_and_version_are_unproven() {
-        for fixture in [
-            DayCustodyFixture::new("20260101", Vec::new()).with_day_manifest_day("20260102"),
-            DayCustodyFixture::new("20260101", Vec::new()).with_version(2),
-        ] {
-            let result = fetch_custody_fixture(fixture).await;
-            assert!(result.day_present);
-            assert!(!result.proof_available);
-            assert!(result.error_type.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn v3_absent_manifest_day_is_reachable_without_proof() {
-        let result = fetch_custody_fixture(DayCustodyFixture::absent("20260101")).await;
-        assert!(!result.day_present);
-        assert!(!result.proof_available);
-        assert!(result.error_type.is_none());
-        assert_eq!(result.status_code, Some(200));
-    }
-
-    #[tokio::test]
-    async fn manifest_probe_is_one_reachability_request() {
-        let server = MockServer::new(vec![]).await;
-        let temp = TempDir::new().unwrap();
-        server.enqueue_manifest_probe(200, b"not-a-manifest");
-        let result = client(&config(&server, &temp), &server.url)
-            .probe_manifest()
-            .await;
-        assert!(result.error_type.is_none());
-        assert_eq!(server.requests().len(), 1);
-        assert_eq!(server.requests()[0].uri, "/app/devices/ingest/manifest");
-    }
-
-    #[tokio::test]
     async fn v3_wrong_segments_protocol_and_malformed_legs_are_incompatible() {
         let protocol = fetch_custody_fixture(
             DayCustodyFixture::new("20260101", Vec::new()).with_segments_protocol_version(2),
@@ -1466,21 +1423,10 @@ mod tests {
         assert_eq!(protocol.error_type, Some(ErrorType::Incompatible));
 
         let malformed = fetch_custody_fixture(
-            DayCustodyFixture::new("20260101", Vec::new())
-                .with_malformed_leg(crate::test_support::DayCustodyLeg::Segments, b"not-json"),
+            DayCustodyFixture::new("20260101", Vec::new()).with_malformed(b"not-json"),
         )
         .await;
         assert_eq!(malformed.error_type, Some(ErrorType::Incompatible));
-
-        let failed = fetch_custody_fixture(
-            DayCustodyFixture::new("20260101", Vec::new()).with_http_failure(
-                crate::test_support::DayCustodyLeg::DayManifest,
-                500,
-                b"{}",
-            ),
-        )
-        .await;
-        assert_eq!(failed.error_type, Some(ErrorType::Transient));
     }
 
     #[tokio::test]
@@ -1488,8 +1434,7 @@ mod tests {
         let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();
         server.enqueue_day_custody(
-            DayCustodyFixture::new("20260101", Vec::new())
-                .with_malformed_leg(crate::test_support::DayCustodyLeg::Segments, br#"[]"#),
+            DayCustodyFixture::new("20260101", Vec::new()).with_malformed(br#"[]"#),
         );
         let result = client(&config(&server, &temp), &server.url)
             .fetch_day_custody("20260101")
@@ -1501,11 +1446,7 @@ mod tests {
                 .iter()
                 .map(|request| request.uri.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "/app/devices/ingest/manifest",
-                "/app/devices/ingest/manifest/20260101",
-                "/app/devices/ingest/segments/20260101",
-            ]
+            vec!["/app/devices/ingest/segments/20260101"]
         );
     }
 

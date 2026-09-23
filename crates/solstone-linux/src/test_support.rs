@@ -87,24 +87,15 @@ impl Drop for RestorePausedClock {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DayCustodyLeg {
-    Manifest,
-    DayManifest,
-    Segments,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct DayCustodyFixture {
-    day: String,
+    pub(crate) day: String,
     items: Vec<Value>,
     absent: bool,
-    day_manifest_day: Option<String>,
-    version: u64,
     protocol_version: u64,
     total: Option<u64>,
-    malformed: Option<(DayCustodyLeg, Vec<u8>)>,
-    failed: Option<(DayCustodyLeg, u16, Vec<u8>)>,
+    malformed: Option<Vec<u8>>,
+    failed: Option<(u16, Vec<u8>)>,
 }
 
 impl DayCustodyFixture {
@@ -114,8 +105,6 @@ impl DayCustodyFixture {
             day,
             items,
             absent: false,
-            day_manifest_day: None,
-            version: 1,
             protocol_version: 3,
             total: None,
             malformed: None,
@@ -129,16 +118,6 @@ impl DayCustodyFixture {
         fixture
     }
 
-    pub(crate) fn with_day_manifest_day(mut self, day: impl Into<String>) -> Self {
-        self.day_manifest_day = Some(day.into());
-        self
-    }
-
-    pub(crate) fn with_version(mut self, version: u64) -> Self {
-        self.version = version;
-        self
-    }
-
     pub(crate) fn with_segments_protocol_version(mut self, version: u64) -> Self {
         self.protocol_version = version;
         self
@@ -149,71 +128,42 @@ impl DayCustodyFixture {
         self
     }
 
-    pub(crate) fn with_malformed_leg(
-        mut self,
-        leg: DayCustodyLeg,
-        body: impl Into<Vec<u8>>,
-    ) -> Self {
-        self.malformed = Some((leg, body.into()));
+    pub(crate) fn with_malformed(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.malformed = Some(body.into());
         self
     }
 
-    pub(crate) fn with_http_failure(
-        mut self,
-        leg: DayCustodyLeg,
-        status: u16,
-        body: impl Into<Vec<u8>>,
-    ) -> Self {
-        self.failed = Some((leg, status, body.into()));
+    #[allow(dead_code)]
+    pub(crate) fn with_http_failure(mut self, status: u16, body: impl Into<Vec<u8>>) -> Self {
+        self.failed = Some((status, body.into()));
         self
     }
 
-    pub(crate) fn response_for(&self, leg: DayCustodyLeg) -> (u16, Vec<u8>) {
-        if let Some((failed_leg, status, bytes)) = &self.failed
-            && *failed_leg == leg
-        {
+    pub(crate) fn response(&self) -> (u16, Vec<u8>) {
+        if let Some((status, bytes)) = &self.failed {
             return (*status, bytes.clone());
         }
-        if let Some((malformed_leg, bytes)) = &self.malformed
-            && *malformed_leg == leg
-        {
+        if let Some(bytes) = &self.malformed {
             return (200, bytes.clone());
         }
-        let body = match leg {
-            DayCustodyLeg::Manifest => {
-                let mut days = serde_json::Map::new();
-                if !self.absent {
-                    days.insert(
-                        self.day.clone(),
-                        serde_json::json!({"segments": self.items.len()}),
-                    );
-                }
-                serde_json::json!({"days": days})
-            }
-            DayCustodyLeg::DayManifest => serde_json::json!({
-                "day": self.day_manifest_day.as_deref().unwrap_or(&self.day),
-                "version": self.version,
-                "segments": {},
-            }),
-            DayCustodyLeg::Segments => serde_json::json!({
-                "protocol_version": self.protocol_version,
-                "total": self.total.unwrap_or(self.items.len() as u64),
-                "items": self.items,
-            }),
-        };
+        if self.absent {
+            return (
+                404,
+                serde_json::json!({
+                    "error": "Not Found",
+                    "reason_code": "not_found",
+                    "detail": "day not found"
+                })
+                .to_string()
+                .into_bytes(),
+            );
+        }
+        let body = serde_json::json!({
+            "protocol_version": self.protocol_version,
+            "total": self.total.unwrap_or(self.items.len() as u64),
+            "items": self.items,
+        });
         (200, body.to_string().into_bytes())
-    }
-
-    pub(crate) fn stops_after(&self, leg: DayCustodyLeg) -> bool {
-        (self.absent && leg == DayCustodyLeg::Manifest)
-            || self
-                .failed
-                .as_ref()
-                .is_some_and(|(failed_leg, _, _)| *failed_leg == leg)
-            || self
-                .malformed
-                .as_ref()
-                .is_some_and(|(malformed_leg, _)| *malformed_leg == leg)
     }
 }
 
@@ -403,14 +353,16 @@ impl LinkedMockServer {
         self.peer.enqueue_response(status, body);
     }
 
-    pub(crate) fn enqueue_manifest_probe(&self, status: u16, body: impl Into<Vec<u8>>) {
-        self.peer.enqueue_manifest_probe(status, body);
-    }
-
     pub(crate) fn requests(&self) -> Vec<Received> {
+        let is_probe = |uri: &str| {
+            uri == "/app/network/api/clients/self"
+                || uri == "/app/network/api/relay/access"
+                || uri == "/api/system/status"
+        };
         self.peer
             .requests()
             .into_iter()
+            .filter(|request| !is_probe(&request.path))
             .map(|request| {
                 let mut headers = hyper::HeaderMap::new();
                 for (name, value) in request.headers {
@@ -590,10 +542,6 @@ impl MockServer {
 
     pub(crate) fn enqueue_day_custody(&self, fixture: DayCustodyFixture) {
         self.linked.enqueue_day_custody(fixture);
-    }
-
-    pub(crate) fn enqueue_manifest_probe(&self, status: u16, body: impl Into<Vec<u8>>) {
-        self.linked.enqueue_manifest_probe(status, body);
     }
 
     pub(crate) fn request_count(&self, uri_substring: &str) -> usize {

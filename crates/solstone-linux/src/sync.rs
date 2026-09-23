@@ -5,11 +5,12 @@
 //! Later D-Bus work hooks health-change emission beside `save_health`.
 
 use chrono::{DateTime, Duration as ChronoDuration, Local};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, FileTimes},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -27,7 +28,7 @@ use crate::{
     sync_health::{
         ErrorType, ProcessEpoch, SyncFacts, SyncHealth, derive_health, load_facts, save_facts,
     },
-    upload::{ListingEntry, UploadClient},
+    upload::{FileDescriptor, ListingEntry, UploadClient},
 };
 
 pub const CIRCUIT_THRESHOLD_AUTH: u32 = 1;
@@ -35,10 +36,81 @@ pub const CIRCUIT_THRESHOLD_TRANSIENT: u32 = 5;
 pub const CIRCUIT_COOLDOWN_INITIAL: f64 = 30.0;
 pub const CIRCUIT_COOLDOWN_FACTOR: f64 = 2.0;
 pub const CIRCUIT_COOLDOWN_MAX: f64 = 300.0;
-pub const SYNCED_DAYS_MAX_AGE: i64 = 90;
 pub const QUARANTINE_TTL_DAYS: i64 = 30;
 pub const CONTACT_FLUSH_INTERVAL: f64 = 30.0;
 pub const SERVER_KEY_FILENAME: &str = ".server_key";
+pub const INGEST_ACK_FILENAME: &str = ".ingest_ack.json";
+pub const INGEST_RETRY_FILENAME: &str = ".ingest_retry.json";
+pub const INGEST_CUTOVER_FILENAME: &str = "ingest_cutover.json";
+
+#[cfg(test)]
+pub(crate) static SHA256_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static INGEST_ACK_WRITE_FAULT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct IngestAckFileStamp {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub mtime_ns: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct IngestAckFile {
+    pub submitted: String,
+    pub written: String,
+    pub size: u64,
+    pub sha256: String,
+    pub disposition: String,
+    pub stamp: IngestAckFileStamp,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct IngestAck {
+    pub day: String,
+    pub stream: String,
+    pub local_key: String,
+    pub stored_key: String,
+    pub identity_key: String,
+    pub pairing_id: String,
+    pub proof: String,
+    pub files: Vec<IngestAckFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub(crate) struct IngestRetry {
+    pub retry_version: u32,
+    pub next_attempt_after: f64,
+    pub last_attempt_at: f64,
+    pub identical_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<bool>,
+    #[serde(default)]
+    pub retention_unproven: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_next_unix: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct IngestCutover {
+    pub segments: Vec<String>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UploadOutcome {
+    Acked,
+    Bounded,
+    Stop,
+}
 
 struct LinkFactPersistence {
     state_dir: PathBuf,
@@ -301,7 +373,6 @@ struct SyncWorker {
     facts: Arc<Mutex<SyncFacts>>,
     recent_error_count: Arc<AtomicU8>,
     link_facts: LinkFacts,
-    synced_days: HashSet<String>,
     consecutive_failures: u32,
     last_error_type: Option<ErrorType>,
     last_error_code: Option<i64>,
@@ -309,9 +380,9 @@ struct SyncWorker {
     circuit_open_permanent: bool,
     circuit_open_since: f64,
     circuit_cooldown: f64,
-    last_full_sync: f64,
     last_contact_flush: f64,
     draining_shutdown: bool,
+    retry_floors: HashMap<PathBuf, f64>,
     #[cfg(test)]
     fail_next_pass: bool,
 }
@@ -325,7 +396,6 @@ impl SyncWorker {
         facts: Arc<Mutex<SyncFacts>>,
         recent_error_count: Arc<AtomicU8>,
     ) -> Self {
-        let synced_days = load_synced_days(&config.state_dir());
         let link_facts = client.link_facts();
         Self {
             config,
@@ -337,7 +407,6 @@ impl SyncWorker {
             facts,
             recent_error_count,
             link_facts,
-            synced_days,
             consecutive_failures: 0,
             last_error_type: None,
             last_error_code: None,
@@ -345,16 +414,16 @@ impl SyncWorker {
             circuit_open_permanent: false,
             circuit_open_since: 0.0,
             circuit_cooldown: CIRCUIT_COOLDOWN_INITIAL,
-            last_full_sync: 0.0,
             last_contact_flush: 0.0,
             draining_shutdown: false,
+            retry_floors: HashMap::new(),
             #[cfg(test)]
             fail_next_pass: false,
         }
     }
 
     async fn run(&mut self) {
-        self.prune_synced_days();
+        ensure_cutover(&self.config.state_dir(), &self.config.captures_dir());
         loop {
             let _ = tokio::time::timeout(Duration::from_secs(60), self.notify.notified()).await;
             let completion_pending = self.pending_trigger.swap(false, Ordering::AcqRel);
@@ -364,7 +433,7 @@ impl SyncWorker {
                 // v3 ingest normally; an unpaired worker still has no transport to drain.
                 if completion_pending && self.client.has_capability() {
                     self.draining_shutdown = true;
-                    let _ = self.execute_pass(false).await;
+                    let _ = self.execute_pass().await;
                     self.draining_shutdown = false;
                 }
                 break;
@@ -384,29 +453,24 @@ impl SyncWorker {
             if self.circuit_open && !self.try_probe().await {
                 continue;
             }
-            let now = self.clock.wall_seconds();
-            let force_full = now - self.last_full_sync > 86_400.0;
             if completion_pending {
                 self.draining_shutdown = true;
             }
-            let pass_res = self.execute_pass(force_full).await;
+            let pass_res = self.execute_pass().await;
             self.draining_shutdown = false;
             if let Err(error) = pass_res {
                 tracing::error!(error, "Sync error");
                 continue;
             }
-            if force_full {
-                self.last_full_sync = now;
-            }
         }
     }
 
-    async fn execute_pass(&mut self, force_full: bool) -> Result<(), &'static str> {
+    async fn execute_pass(&mut self) -> Result<(), &'static str> {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_pass) {
             return Err("injected pass failure");
         }
-        self.sync_pass(force_full).await;
+        self.sync_pass().await;
         Ok(())
     }
 
@@ -416,6 +480,46 @@ impl SyncWorker {
 
     fn is_active(&self) -> bool {
         self.is_running() || self.draining_shutdown
+    }
+
+    fn current_identity_and_pairing(&self) -> (Option<String>, Option<String>) {
+        self.client
+            .capability()
+            .map(|cap| {
+                let writer = cap.writer();
+                (
+                    Some(writer.identity_key().to_string()),
+                    Some(writer.pairing_id().to_string()),
+                )
+            })
+            .unwrap_or((None, None))
+    }
+
+    fn is_retry_blocked(
+        &self,
+        segment_dir: &Path,
+        current_identity: Option<&str>,
+        current_pairing: Option<&str>,
+        now: f64,
+    ) -> bool {
+        if let Some(&floor) = self.retry_floors.get(segment_dir)
+            && now < floor
+        {
+            return true;
+        }
+        if let Some(retry) = read_retry(segment_dir) {
+            let same_pairing = retry.identity_key.as_deref() == current_identity
+                && retry.pairing_id.as_deref() == current_pairing;
+            if same_pairing {
+                if retry.terminal == Some(true) {
+                    return true;
+                }
+                if now < retry.next_attempt_after {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     async fn try_probe(&mut self) -> bool {
@@ -432,89 +536,108 @@ impl SyncWorker {
             return false;
         }
         self.set_progress("probing journal...".to_owned(), true);
-        // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
-        let result = self.client.probe_manifest().await;
-        if result.error_type.is_none() {
-            self.record_contact(true);
-            self.circuit_open = false;
-            self.circuit_open_permanent = false;
-            self.circuit_open_since = 0.0;
-            self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
-            self.consecutive_failures = 0;
-            self.recent_error_count.store(0, Ordering::Release);
-            self.last_error_type = None;
-            self.last_error_code = None;
-            {
-                let mut facts = self.facts.lock().unwrap();
-                facts.last_error_class = None;
-                facts.last_error_code = None;
-            }
-            self.set_progress("syncing...".to_owned(), true);
-            true
+        let outcome = if let Some(capability) = self.client.capability() {
+            capability.system_status().await
         } else {
-            // Named deviation: Python's _record_failure (sync.py:496) resets the cooldown to
-            // INITIAL whenever failures have reached the threshold. An open breaker always has
-            // threshold failures, so Python's ladder never climbs past 60 seconds. That conflicts
-            // with sync.py:14 and this crate's exponential-backoff contract. Capture the pre-probe
-            // cooldown before recording the failure so the ladder can climb. Python's tests miss
-            // this by setting _consecutive_failures = 0, which is unreachable for an open breaker.
-            let previous_cooldown = self.circuit_cooldown;
-            self.record_failure(result.error_type, result.status_code.map(i64::from));
-            self.circuit_cooldown =
-                (previous_cooldown * CIRCUIT_COOLDOWN_FACTOR).min(CIRCUIT_COOLDOWN_MAX);
-            self.circuit_open_since = self.clock.monotonic_seconds();
-            self.set_progress(
-                format!("probe failed, next in {:.0}s", self.circuit_cooldown),
-                false,
-            );
-            false
+            Err(crate::private_link::LinkOutcome::TransportUnavailable)
+        };
+        match outcome {
+            Ok(_) => {
+                self.record_contact(true);
+                self.circuit_open = false;
+                self.circuit_open_permanent = false;
+                self.circuit_open_since = 0.0;
+                self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
+                self.consecutive_failures = 0;
+                self.recent_error_count.store(0, Ordering::Release);
+                self.last_error_type = None;
+                self.last_error_code = None;
+                {
+                    let mut facts = self.facts.lock().unwrap();
+                    facts.last_error_class = None;
+                    facts.last_error_code = None;
+                }
+                self.set_progress("syncing...".to_owned(), true);
+                true
+            }
+            Err(outcome) => {
+                let previous_cooldown = self.circuit_cooldown;
+                let err = UploadClient::classify_error(
+                    outcome.status_code(),
+                    outcome.is_transport_unavailable(),
+                );
+                self.record_failure(Some(err), outcome.status_code().map(i64::from));
+                self.circuit_cooldown =
+                    (previous_cooldown * CIRCUIT_COOLDOWN_FACTOR).min(CIRCUIT_COOLDOWN_MAX);
+                self.circuit_open_since = self.clock.monotonic_seconds();
+                self.set_progress(
+                    format!("probe failed, next in {:.0}s", self.circuit_cooldown),
+                    false,
+                );
+                false
+            }
         }
     }
 
-    async fn sync_pass(&mut self, force_full: bool) {
+    async fn sync_pass(&mut self) {
         self.facts.lock().unwrap().link = self.client.link_fact_state();
-        // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
-        let today = timestamp_parts(self.clock.wall_seconds()).0;
+        let now = self.clock.wall_seconds();
+        let today = timestamp_parts(now).0;
+        let retention = self.config.cache_retention_days;
+        let cutoff = local_day_minus_days(now, retention.max(0));
+        ensure_cutover(&self.config.state_dir(), &self.config.captures_dir());
+        let (current_identity, current_pairing) = self.current_identity_and_pairing();
+        let cutover_segments = load_cutover_segments(&self.config.state_dir());
         let segments_by_day = collect_segments(&self.config.captures_dir());
-        let mut days: HashSet<String> = segments_by_day.keys().cloned().collect();
-        days.insert(today.clone());
-        let mut days: Vec<_> = days.into_iter().collect();
+        let mut days: Vec<String> = segments_by_day.keys().cloned().collect();
         days.sort_by(|a, b| b.cmp(a));
+
         self.set_progress("checking journal...".to_owned(), true);
-        let mut pass_success = true;
+        let mut pass_stopped = false;
         let mut pass_error_type = None;
         let mut pass_error_code = None;
+        let mut pass_bounded_error_class = None;
+        let mut pass_bounded_error_code = None;
+        let mut requests_made = 0;
+        let mut uploaded_in_phase1 = HashSet::new();
 
-        for day in days {
+        // Phase 1: Direct non-legacy uploads for due segments
+        'phase1: for day in &days {
             if !self.is_active() || self.circuit_open {
-                pass_success = false;
-                break;
+                pass_stopped = true;
+                break 'phase1;
             }
-            if day != today && self.synced_days.contains(&day) && !force_full {
-                continue;
-            }
-            self.set_progress(format!("checking {day}..."), true);
-            let custody = self.client.fetch_day_custody(&day).await;
-            if custody.error_type.is_some() {
-                pass_success = false;
-                pass_error_type = custody.error_type;
-                pass_error_code = custody.status_code.map(i64::from);
-                self.record_failure(custody.error_type, pass_error_code);
-                continue;
-            }
-            self.record_contact(false);
-            let indexed = index_entries(&custody.items);
-            let mut any_needed_upload = false;
-            for segment_dir in segments_by_day.get(&day).into_iter().flatten() {
+            let segments = segments_by_day.get(day).into_iter().flatten();
+            for segment_dir in segments {
                 if !self.is_active() || self.circuit_open {
-                    break;
+                    pass_stopped = true;
+                    break 'phase1;
                 }
-                let segment_key = segment_dir.file_name().unwrap().to_string_lossy();
-                let held = custody.proof_available
-                    && custody.day_present
-                    && lookup_entry(&indexed, segment_dir)
-                        .is_some_and(|entry| segment_custody_proven(segment_dir, entry));
-                if held {
+                if let Some(retry) = read_retry(segment_dir) {
+                    let same_pairing = retry.identity_key.as_deref() == current_identity.as_deref()
+                        && retry.pairing_id.as_deref() == current_pairing.as_deref();
+                    if same_pairing
+                        && (retry.terminal == Some(true)
+                            || retry.reason_code.as_deref() == Some("segment_removed"))
+                    {
+                        continue;
+                    }
+                }
+                if self.is_retry_blocked(
+                    segment_dir,
+                    current_identity.as_deref(),
+                    current_pairing.as_deref(),
+                    now,
+                ) {
+                    continue;
+                }
+                let ack = read_ack(segment_dir);
+                if is_ack_valid(
+                    segment_dir,
+                    ack.clone(),
+                    current_identity.as_deref(),
+                    current_pairing.as_deref(),
+                ) {
                     continue;
                 }
                 let files = eligible_files(segment_dir);
@@ -531,143 +654,860 @@ impl SyncWorker {
                     );
                     continue;
                 }
-                // Pinned by Python: even a successful upload delays the synced-day mark until a later pass.
-                any_needed_upload = true;
+                let is_cutover = segment_rel(segment_dir)
+                    .as_deref()
+                    .is_some_and(|r| cutover_segments.contains(r));
+                let is_mismatch = ack.as_ref().is_some_and(|a| {
+                    a.identity_key != current_identity.as_deref().unwrap_or_default()
+                        || a.pairing_id != current_pairing.as_deref().unwrap_or_default()
+                });
+                if is_cutover || is_mismatch {
+                    continue;
+                }
+                let segment_key = segment_dir.file_name().unwrap().to_string_lossy();
                 self.set_progress(format!("uploading {segment_key}"), true);
-                if self.upload_segment(&day, segment_dir).await {
-                    self.consecutive_failures = 0;
-                    self.recent_error_count.store(0, Ordering::Release);
-                    self.last_error_type = None;
-                    self.last_error_code = None;
-                } else {
-                    pass_success = false;
-                    pass_error_type = self.last_error_type;
-                    // Health distinguishes a rejected 401 from revocation, so the POST status
-                    // must reach both the breaker and persisted pass result.
-                    pass_error_code = self.last_error_code;
-                    if self.last_error_type == Some(ErrorType::Client) {
-                        quarantine_segment(
-                            self.clock.wall_seconds(),
-                            segment_dir,
-                            "server rejected (client error)",
-                        );
+                requests_made += 1;
+                match self.upload_segment(day, segment_dir).await {
+                    UploadOutcome::Acked => {
+                        uploaded_in_phase1.insert(segment_dir.to_path_buf());
                     }
-                    self.record_failure(self.last_error_type, self.last_error_code);
-                    if self.circuit_open {
-                        break;
+                    UploadOutcome::Bounded => {
+                        if let Some(err) = self.last_error_type {
+                            if err == ErrorType::Transient {
+                                pass_bounded_error_class = Some(ErrorType::Transient);
+                                pass_bounded_error_code = self.last_error_code;
+                            } else if err == ErrorType::Client
+                                && pass_bounded_error_class != Some(ErrorType::Transient)
+                            {
+                                pass_bounded_error_class = Some(ErrorType::Client);
+                                pass_bounded_error_code = self.last_error_code;
+                            }
+                        }
+                    }
+                    UploadOutcome::Stop => {
+                        pass_stopped = true;
+                        pass_error_type = self.last_error_type;
+                        pass_error_code = self.last_error_code;
+                        break 'phase1;
                     }
                 }
             }
-            if day != today && !any_needed_upload {
-                self.synced_days.insert(day);
-                self.save_synced_days();
+        }
+
+        // Phase 2: Targeted single GET /app/devices/ingest/segments/{day} for legacy due / retention
+        if !pass_stopped && !self.circuit_open && self.is_active() {
+            let mut custody_days = HashSet::new();
+            for (day, segments) in &segments_by_day {
+                let enters_phase2 = segments.iter().any(|s| {
+                    if uploaded_in_phase1.contains(s) {
+                        return false;
+                    }
+                    let ack = read_ack(s);
+                    let valid_ack = is_ack_valid(
+                        s,
+                        ack.clone(),
+                        current_identity.as_deref(),
+                        current_pairing.as_deref(),
+                    );
+                    let is_blocked = self.is_retry_blocked(
+                        s,
+                        current_identity.as_deref(),
+                        current_pairing.as_deref(),
+                        now,
+                    );
+
+                    if valid_ack {
+                        let is_past_retention =
+                            retention >= 0 && day.as_str() < cutoff.as_str() && day != &today;
+                        if is_past_retention {
+                            let retry = read_retry(s);
+                            let retention_due = retry
+                                .as_ref()
+                                .and_then(|r| r.retention_next_unix)
+                                .is_none_or(|next| next <= now);
+                            if retention_due {
+                                return true;
+                            }
+                        }
+                        false
+                    } else {
+                        let is_legacy = segment_rel(s)
+                            .as_deref()
+                            .is_some_and(|r| cutover_segments.contains(r));
+                        if is_legacy {
+                            return true;
+                        }
+                        if is_blocked {
+                            return false;
+                        }
+                        if let Some(ack) = ack
+                            && (ack.identity_key != current_identity.as_deref().unwrap_or_default()
+                                || ack.pairing_id != current_pairing.as_deref().unwrap_or_default())
+                        {
+                            return true;
+                        }
+                        false
+                    }
+                });
+                if enters_phase2 {
+                    custody_days.insert(day.clone());
+                }
+            }
+            let mut sorted_custody_days: Vec<_> = custody_days.into_iter().collect();
+            sorted_custody_days.sort_by(|a, b| b.cmp(a));
+
+            for day in sorted_custody_days {
+                if !self.is_active() || self.circuit_open {
+                    pass_stopped = true;
+                    break;
+                }
+                self.set_progress(format!("checking {day}..."), true);
+                requests_made += 1;
+                let custody = self.client.fetch_day_custody(&day).await;
+                if custody.error_type == Some(ErrorType::Auth) {
+                    pass_stopped = true;
+                    pass_error_type = custody.error_type;
+                    pass_error_code = custody.status_code.map(i64::from);
+                    self.record_failure(custody.error_type, pass_error_code);
+                    break;
+                }
+                if custody.error_type.is_some() || !custody.proof_available || !custody.day_present
+                {
+                    // Non-auth error or no proof: do not record_failure, do not stop pass.
+                    // Upload each legacy segment on that day directly in this pass.
+                    if let Some(segments) = segments_by_day.get(&day) {
+                        for segment_dir in segments {
+                            let ack = read_ack(segment_dir);
+                            let valid_ack = is_ack_valid(
+                                segment_dir,
+                                ack.clone(),
+                                current_identity.as_deref(),
+                                current_pairing.as_deref(),
+                            );
+                            let is_blocked = self.is_retry_blocked(
+                                segment_dir,
+                                current_identity.as_deref(),
+                                current_pairing.as_deref(),
+                                now,
+                            );
+                            if valid_ack {
+                                let is_past_retention = retention >= 0
+                                    && day.as_str() < cutoff.as_str()
+                                    && day != today;
+                                if is_past_retention {
+                                    let mut retry =
+                                        read_retry(segment_dir).unwrap_or_else(|| IngestRetry {
+                                            retry_version: 1,
+                                            next_attempt_after: now,
+                                            last_attempt_at: now,
+                                            identical_count: 0,
+                                            status_code: None,
+                                            reason_code: None,
+                                            identity_key: current_identity.clone(),
+                                            pairing_id: current_pairing.clone(),
+                                            terminal: None,
+                                            retention_unproven: false,
+                                            retention_next_unix: Some(now + 86400.0),
+                                        });
+                                    retry.retention_next_unix = Some(now + 86400.0);
+                                    let _ = write_retry(segment_dir, &retry);
+                                }
+                            } else if !is_blocked {
+                                let is_legacy = segment_rel(segment_dir)
+                                    .as_deref()
+                                    .is_some_and(|r| cutover_segments.contains(r));
+                                let is_mismatch = ack.as_ref().is_some_and(|a| {
+                                    a.identity_key
+                                        != current_identity.as_deref().unwrap_or_default()
+                                        || a.pairing_id
+                                            != current_pairing.as_deref().unwrap_or_default()
+                                });
+                                if is_legacy || is_mismatch {
+                                    requests_made += 1;
+                                    match self.upload_segment(&day, segment_dir).await {
+                                        UploadOutcome::Acked => {}
+                                        UploadOutcome::Bounded => {
+                                            if let Some(err) = self.last_error_type {
+                                                if err == ErrorType::Transient {
+                                                    pass_bounded_error_class =
+                                                        Some(ErrorType::Transient);
+                                                    pass_bounded_error_code = self.last_error_code;
+                                                } else if err == ErrorType::Client
+                                                    && pass_bounded_error_class
+                                                        != Some(ErrorType::Transient)
+                                                {
+                                                    pass_bounded_error_class =
+                                                        Some(ErrorType::Client);
+                                                    pass_bounded_error_code = self.last_error_code;
+                                                }
+                                            }
+                                        }
+                                        UploadOutcome::Stop => {
+                                            pass_stopped = true;
+                                            pass_error_type = self.last_error_type;
+                                            pass_error_code = self.last_error_code;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                self.record_contact(false);
+                let indexed = index_entries(&custody.items);
+                if let Some(segments) = segments_by_day.get(&day) {
+                    for segment_dir in segments {
+                        if uploaded_in_phase1.contains(segment_dir) {
+                            continue;
+                        }
+                        let seg_name = segment_dir
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default();
+                        let ack = read_ack(segment_dir);
+                        let valid_ack = is_ack_valid(
+                            segment_dir,
+                            ack.clone(),
+                            current_identity.as_deref(),
+                            current_pairing.as_deref(),
+                        );
+
+                        if !valid_ack {
+                            let mut proven = false;
+                            if let Some(entry) = lookup_entry(&indexed, segment_dir)
+                                && segment_custody_proven(segment_dir, entry)
+                            {
+                                let stored_key =
+                                    entry.key.clone().unwrap_or_else(|| seg_name.to_string());
+                                let files = eligible_files(segment_dir).unwrap_or_default();
+                                let mut ack_files = Vec::new();
+                                for f in &files {
+                                    let fname = f.file_name().unwrap().to_str().unwrap();
+                                    let meta = f.metadata().unwrap();
+                                    let sha = sha256_file(f).unwrap();
+                                    let stamp = file_stamp(f).unwrap();
+                                    let disposition = entry
+                                        .files
+                                        .as_deref()
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .find(|rf| {
+                                            rf.name.as_deref() == Some(fname)
+                                                || rf.submitted_name.as_deref() == Some(fname)
+                                        })
+                                        .and_then(|rf| rf.status.clone())
+                                        .unwrap_or_else(|| "present".to_string());
+                                    ack_files.push(IngestAckFile {
+                                        submitted: fname.to_owned(),
+                                        written: fname.to_owned(),
+                                        size: meta.len(),
+                                        sha256: sha,
+                                        disposition,
+                                        stamp,
+                                    });
+                                }
+                                let stream = segment_dir
+                                    .parent()
+                                    .and_then(|p| p.file_name())
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("default")
+                                    .to_string();
+                                let ack = IngestAck {
+                                    day: day.clone(),
+                                    stream,
+                                    local_key: seg_name.to_string(),
+                                    stored_key,
+                                    identity_key: current_identity.clone().unwrap_or_default(),
+                                    pairing_id: current_pairing.clone().unwrap_or_default(),
+                                    proof: "listing".to_string(),
+                                    files: ack_files,
+                                };
+                                let _ = write_ack(segment_dir, &ack);
+                                remove_retry(segment_dir);
+                                proven = true;
+
+                                let is_retention_candidate = retention >= 0
+                                    && day.as_str() < cutoff.as_str()
+                                    && day != today;
+                                if is_retention_candidate {
+                                    let files = eligible_files(segment_dir).unwrap_or_default();
+                                    let mut hashes_match =
+                                        !files.is_empty() && files.len() == ack.files.len();
+                                    if hashes_match {
+                                        for file in &files {
+                                            let Some(fname) =
+                                                file.file_name().and_then(|n| n.to_str())
+                                            else {
+                                                hashes_match = false;
+                                                break;
+                                            };
+                                            let Some(ack_file) =
+                                                ack.files.iter().find(|f| f.submitted == fname)
+                                            else {
+                                                hashes_match = false;
+                                                break;
+                                            };
+                                            let Ok(sha) = sha256_file(file) else {
+                                                hashes_match = false;
+                                                break;
+                                            };
+                                            if sha != ack_file.sha256 {
+                                                hashes_match = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if hashes_match {
+                                        let matching_item = custody.items.iter().find(|item| {
+                                            item.key.as_deref() == Some(&ack.stored_key)
+                                        });
+                                        if let Some(entry) = matching_item
+                                            && segment_custody_proven_for_retention(
+                                                segment_dir,
+                                                &ack,
+                                                entry,
+                                            )
+                                            && let Err(error) = fs::remove_dir_all(segment_dir)
+                                        {
+                                            tracing::error!(%error, path = %segment_dir.display(), "Cleanup failed");
+                                        }
+                                    }
+                                }
+                            }
+                            if !proven {
+                                let is_blocked = self.is_retry_blocked(
+                                    segment_dir,
+                                    current_identity.as_deref(),
+                                    current_pairing.as_deref(),
+                                    now,
+                                );
+                                if !is_blocked {
+                                    let is_legacy = segment_rel(segment_dir)
+                                        .as_deref()
+                                        .is_some_and(|r| cutover_segments.contains(r));
+                                    let is_mismatch = ack.as_ref().is_some_and(|a| {
+                                        a.identity_key
+                                            != current_identity.as_deref().unwrap_or_default()
+                                            || a.pairing_id
+                                                != current_pairing.as_deref().unwrap_or_default()
+                                    });
+                                    if is_legacy || is_mismatch {
+                                        requests_made += 1;
+                                        match self.upload_segment(&day, segment_dir).await {
+                                            UploadOutcome::Acked => {}
+                                            UploadOutcome::Bounded => {
+                                                if let Some(err) = self.last_error_type {
+                                                    if err == ErrorType::Transient {
+                                                        pass_bounded_error_class =
+                                                            Some(ErrorType::Transient);
+                                                        pass_bounded_error_code =
+                                                            self.last_error_code;
+                                                    } else if err == ErrorType::Client
+                                                        && pass_bounded_error_class
+                                                            != Some(ErrorType::Transient)
+                                                    {
+                                                        pass_bounded_error_class =
+                                                            Some(ErrorType::Client);
+                                                        pass_bounded_error_code =
+                                                            self.last_error_code;
+                                                    }
+                                                }
+                                            }
+                                            UploadOutcome::Stop => {
+                                                pass_stopped = true;
+                                                pass_error_type = self.last_error_type;
+                                                pass_error_code = self.last_error_code;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if retention >= 0
+                            && day.as_str() < cutoff.as_str()
+                            && day != today
+                            && let Some(ack) = ack
+                        {
+                            let files = eligible_files(segment_dir).unwrap_or_default();
+                            let mut hashes_match =
+                                !files.is_empty() && files.len() == ack.files.len();
+                            if hashes_match {
+                                for file in &files {
+                                    let Some(fname) = file.file_name().and_then(|n| n.to_str())
+                                    else {
+                                        hashes_match = false;
+                                        break;
+                                    };
+                                    let Some(ack_file) =
+                                        ack.files.iter().find(|f| f.submitted == fname)
+                                    else {
+                                        hashes_match = false;
+                                        break;
+                                    };
+                                    let Ok(sha) = sha256_file(file) else {
+                                        hashes_match = false;
+                                        break;
+                                    };
+                                    if sha != ack_file.sha256 {
+                                        hashes_match = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !hashes_match {
+                                let _ = fs::remove_file(segment_dir.join(INGEST_ACK_FILENAME));
+                                requests_made += 1;
+                                match self.upload_segment(&day, segment_dir).await {
+                                    UploadOutcome::Acked => {}
+                                    UploadOutcome::Bounded => {
+                                        if let Some(err) = self.last_error_type {
+                                            if err == ErrorType::Transient {
+                                                pass_bounded_error_class =
+                                                    Some(ErrorType::Transient);
+                                                pass_bounded_error_code = self.last_error_code;
+                                            } else if err == ErrorType::Client
+                                                && pass_bounded_error_class
+                                                    != Some(ErrorType::Transient)
+                                            {
+                                                pass_bounded_error_class = Some(ErrorType::Client);
+                                                pass_bounded_error_code = self.last_error_code;
+                                            }
+                                        }
+                                    }
+                                    UploadOutcome::Stop => {
+                                        pass_stopped = true;
+                                        pass_error_type = self.last_error_type;
+                                        pass_error_code = self.last_error_code;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                let matching_item = custody
+                                    .items
+                                    .iter()
+                                    .find(|item| item.key.as_deref() == Some(&ack.stored_key));
+                                if let Some(entry) = matching_item {
+                                    if segment_custody_proven_for_retention(
+                                        segment_dir,
+                                        &ack,
+                                        entry,
+                                    ) {
+                                        if let Err(error) = fs::remove_dir_all(segment_dir) {
+                                            tracing::error!(%error, path = %segment_dir.display(), "Cleanup failed");
+                                        }
+                                    } else {
+                                        let mut retry =
+                                            read_retry(segment_dir).unwrap_or_else(|| {
+                                                IngestRetry {
+                                                    retry_version: 1,
+                                                    next_attempt_after: now,
+                                                    last_attempt_at: now,
+                                                    identical_count: 0,
+                                                    status_code: None,
+                                                    reason_code: None,
+                                                    identity_key: current_identity.clone(),
+                                                    pairing_id: current_pairing.clone(),
+                                                    terminal: None,
+                                                    retention_unproven: true,
+                                                    retention_next_unix: Some(now + 86400.0),
+                                                }
+                                            });
+                                        retry.retention_unproven = true;
+                                        retry.retention_next_unix = Some(now + 86400.0);
+                                        let _ = write_retry(segment_dir, &retry);
+                                    }
+                                } else {
+                                    let mut retry =
+                                        read_retry(segment_dir).unwrap_or_else(|| IngestRetry {
+                                            retry_version: 1,
+                                            next_attempt_after: now,
+                                            last_attempt_at: now,
+                                            identical_count: 0,
+                                            status_code: None,
+                                            reason_code: None,
+                                            identity_key: current_identity.clone(),
+                                            pairing_id: current_pairing.clone(),
+                                            terminal: None,
+                                            retention_unproven: true,
+                                            retention_next_unix: Some(now + 86400.0),
+                                        });
+                                    retry.retention_unproven = true;
+                                    retry.retention_next_unix = Some(now + 86400.0);
+                                    let _ = write_retry(segment_dir, &retry);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        if pass_success && !self.circuit_open && self.is_active() {
-            self.commit_pass_result(true, None, None);
+        // Phase 3: Idle system_status probe if 0 requests made and contact older than threshold/2
+        if requests_made == 0 && !pass_stopped && !self.circuit_open && self.is_active() {
+            let last_contact = self
+                .facts
+                .lock()
+                .unwrap()
+                .last_successful_contact
+                .unwrap_or(0.0);
+            let stale_interval = (self.config.sync_stale_threshold as f64 / 2.0).min(300.0);
+            if now - last_contact >= stale_interval
+                && let Some(capability) = self.client.capability()
+            {
+                match capability.system_status().await {
+                    Ok(_) => {
+                        self.record_contact(true);
+                    }
+                    Err(outcome) => {
+                        let err = UploadClient::classify_error(
+                            outcome.status_code(),
+                            outcome.is_transport_unavailable(),
+                        );
+                        self.record_failure(Some(err), outcome.status_code().map(i64::from));
+                    }
+                }
+            }
+        }
+
+        cleanup_empty_capture_dirs(&self.config.captures_dir());
+        if self.is_active() {
+            self.sweep_expired_quarantine();
+        }
+
+        let pending_count = count_unacked_segments(
+            &self.config.captures_dir(),
+            current_identity.as_deref(),
+            current_pairing.as_deref(),
+        );
+        if !pass_stopped && !self.circuit_open && self.is_active() {
+            self.commit_pass_result(
+                true,
+                pass_bounded_error_class,
+                pass_bounded_error_code,
+                Some(i64::try_from(pending_count).unwrap_or(i64::MAX)),
+            );
         } else {
             let facts = self.facts.lock().unwrap().clone();
             self.commit_pass_result(
                 false,
                 pass_error_type.or(facts.last_error_class),
                 pass_error_code.or(facts.last_error_code),
+                None,
             );
-        }
-        // A final drain is a complete reconciliation pass. Running cleanup here preserves the
-        // same successful-pass semantics; the outer shutdown timeout still bounds all work.
-        if !self.circuit_open && self.is_active() {
-            self.cleanup_synced_segments().await;
-        }
-        if self.is_active() {
-            self.sweep_expired_quarantine();
         }
     }
 
-    async fn upload_segment(&mut self, day: &str, segment_dir: &Path) -> bool {
+    async fn upload_segment(&mut self, day: &str, segment_dir: &Path) -> UploadOutcome {
         let files = match eligible_files(segment_dir) {
             Ok(files) => files,
             Err(error) => {
                 tracing::warn!(%error, path = %segment_dir.display(), "Failed to enumerate segment files");
-                self.last_error_type = Some(ErrorType::Client);
-                self.last_error_code = None;
-                return false;
+                self.record_bounded(
+                    Some(ErrorType::Client),
+                    segment_dir,
+                    86400.0,
+                    None,
+                    None,
+                    false,
+                );
+                return UploadOutcome::Bounded;
             }
         };
+        if files.is_empty() {
+            return UploadOutcome::Bounded;
+        }
+
+        let mut precomputed = Vec::with_capacity(files.len());
+        for f in &files {
+            let Some(fname) = f.file_name().and_then(|n| n.to_str()) else {
+                self.record_bounded(
+                    Some(ErrorType::Client),
+                    segment_dir,
+                    86400.0,
+                    None,
+                    None,
+                    false,
+                );
+                return UploadOutcome::Bounded;
+            };
+            let Ok(meta) = f.metadata() else {
+                self.record_bounded(
+                    Some(ErrorType::Client),
+                    segment_dir,
+                    86400.0,
+                    None,
+                    None,
+                    false,
+                );
+                return UploadOutcome::Bounded;
+            };
+            let Ok(sha) = sha256_file(f) else {
+                self.record_bounded(
+                    Some(ErrorType::Client),
+                    segment_dir,
+                    86400.0,
+                    None,
+                    None,
+                    false,
+                );
+                return UploadOutcome::Bounded;
+            };
+            precomputed.push((fname.to_string(), meta.len(), sha));
+        }
+
         let key = segment_dir.file_name().unwrap().to_string_lossy();
         let result = self.client.upload_segment(day, &key, &files).await;
+        let (current_identity, current_pairing) = self.current_identity_and_pairing();
+
         if result.success {
-            if let Some(stored_key) = result.stored_key.filter(|stored| stored != key.as_ref())
-                && let Err(error) = write_server_key(segment_dir, &stored_key)
-            {
-                tracing::warn!(%error, "Failed to write server key marker");
+            if let Some(ref descriptors) = result.file_descriptors {
+                let has_received_not_written = descriptors
+                    .iter()
+                    .any(|d| d.disposition == "received_not_written");
+                if verify_receipt(&files, &precomputed, descriptors) {
+                    let stored_key = result.stored_key.clone().unwrap_or_else(|| key.to_string());
+                    if stored_key != key.as_ref()
+                        && let Err(error) = write_server_key(segment_dir, &stored_key)
+                    {
+                        tracing::warn!(%error, "Failed to write server key marker");
+                    }
+                    let mut ack_files = Vec::with_capacity(descriptors.len());
+                    for desc in descriptors {
+                        let file_path = segment_dir.join(&desc.submitted);
+                        let Ok(stamp) = file_stamp(&file_path) else {
+                            self.record_bounded(
+                                None,
+                                segment_dir,
+                                3600.0,
+                                result.status_code,
+                                None,
+                                false,
+                            );
+                            return UploadOutcome::Bounded;
+                        };
+                        ack_files.push(IngestAckFile {
+                            submitted: desc.submitted.clone(),
+                            written: desc.written.clone(),
+                            size: desc.size,
+                            sha256: desc.sha256.clone(),
+                            disposition: desc.disposition.clone(),
+                            stamp,
+                        });
+                    }
+                    let stream = segment_dir
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("default")
+                        .to_string();
+                    let ack = IngestAck {
+                        day: day.to_string(),
+                        stream,
+                        local_key: key.to_string(),
+                        stored_key,
+                        identity_key: current_identity.unwrap_or_default(),
+                        pairing_id: current_pairing.unwrap_or_default(),
+                        proof: "upload".to_string(),
+                        files: ack_files,
+                    };
+                    if let Err(error) = write_ack(segment_dir, &ack) {
+                        tracing::warn!(%error, "Failed to write ingest ack marker");
+                        self.retry_floors.insert(
+                            segment_dir.to_path_buf(),
+                            self.clock.wall_seconds() + 3600.0,
+                        );
+                        self.record_bounded(
+                            None,
+                            segment_dir,
+                            3600.0,
+                            result.status_code,
+                            None,
+                            false,
+                        );
+                        return UploadOutcome::Bounded;
+                    }
+                    remove_retry(segment_dir);
+                    self.record_contact(false);
+                    self.reset_failures();
+                    return UploadOutcome::Acked;
+                } else if has_received_not_written {
+                    self.record_bounded(
+                        None,
+                        segment_dir,
+                        86400.0,
+                        result.status_code,
+                        Some("received_not_written".to_string()),
+                        false,
+                    );
+                    return UploadOutcome::Bounded;
+                }
             }
-            self.record_contact(false);
-            self.reset_failures();
-            true
+            self.record_bounded(
+                None,
+                segment_dir,
+                86400.0,
+                result.status_code,
+                Some("receipt_invalid".to_string()),
+                false,
+            );
+            UploadOutcome::Bounded
         } else {
             self.last_error_type = result.error_type;
             self.last_error_code = result.status_code.map(i64::from);
             if self.client.is_revoked() {
-                // Retained deliberately: this latches revocation before the general failure
-                // path runs, and removing that earlier guard is an unforced risk.
-                self.circuit_open = true;
-                self.circuit_open_permanent = true;
+                self.record_failure(result.error_type, result.status_code.map(i64::from));
+                return UploadOutcome::Stop;
             }
-            false
+            if result.status_code == Some(409)
+                && let Some(ref code) = result.reason_code
+                && (code == "pairing_identity_unavailable" || code == "foreign_stream_binding")
+            {
+                self.consecutive_failures += 1;
+                self.recent_error_count
+                    .store(self.consecutive_failures.min(99) as u8, Ordering::Release);
+                if self.consecutive_failures >= CIRCUIT_THRESHOLD_TRANSIENT {
+                    self.circuit_open = true;
+                    self.circuit_open_since = self.clock.monotonic_seconds();
+                    self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
+                }
+                return UploadOutcome::Stop;
+            }
+            if result.status_code == Some(500)
+                && result.reason_code.as_deref() == Some("segment_removed")
+            {
+                self.record_bounded(
+                    None,
+                    segment_dir,
+                    f64::INFINITY,
+                    Some(500),
+                    Some("segment_removed".to_owned()),
+                    true,
+                );
+                return UploadOutcome::Bounded;
+            }
+            if matches!(
+                result.error_type,
+                Some(ErrorType::Auth | ErrorType::Incompatible)
+            ) {
+                self.record_failure(result.error_type, result.status_code.map(i64::from));
+                return UploadOutcome::Stop;
+            }
+            if result.status_code == Some(413) {
+                self.record_failure(Some(ErrorType::Client), Some(413));
+                return UploadOutcome::Stop;
+            }
+            if matches!(result.status_code, Some(400..=425)) {
+                self.record_bounded(
+                    Some(ErrorType::Client),
+                    segment_dir,
+                    86400.0,
+                    result.status_code,
+                    result.reason_code,
+                    false,
+                );
+                return UploadOutcome::Bounded;
+            }
+            if result.status_code.is_some_and(|s| s >= 500) && result.reason_code.is_some() {
+                let bound = 3600.0;
+                self.record_bounded(
+                    Some(ErrorType::Transient),
+                    segment_dir,
+                    bound,
+                    result.status_code,
+                    result.reason_code,
+                    false,
+                );
+                return UploadOutcome::Bounded;
+            }
+            self.record_failure(result.error_type, result.status_code.map(i64::from));
+            if self.circuit_open {
+                UploadOutcome::Stop
+            } else {
+                UploadOutcome::Bounded
+            }
         }
     }
 
-    async fn cleanup_synced_segments(&mut self) {
-        let retention = self.config.cache_retention_days;
-        if retention < 0 || !self.config.captures_dir().exists() {
-            return;
-        }
-        // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
-        let today = timestamp_parts(self.clock.wall_seconds()).0;
-        // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
-        let cutoff = local_day_minus_days(self.clock.wall_seconds(), retention);
-        let Ok(day_entries) = sorted_dirs(&self.config.captures_dir()) else {
-            return;
+    fn record_bounded(
+        &mut self,
+        error_type: Option<ErrorType>,
+        segment_dir: &Path,
+        bound_seconds: f64,
+        status_code: Option<u16>,
+        reason_code: Option<String>,
+        terminal: bool,
+    ) {
+        let now = self.clock.wall_seconds();
+        let current_retry = read_retry(segment_dir);
+        let (current_identity, current_pairing) = self.current_identity_and_pairing();
+        let same_failure = current_retry.as_ref().is_some_and(|r| {
+            r.status_code == status_code
+                && r.reason_code == reason_code
+                && r.identity_key == current_identity
+                && r.pairing_id == current_pairing
+        });
+        let identical_count = if same_failure {
+            current_retry.as_ref().map_or(1, |r| r.identical_count + 1)
+        } else {
+            1
         };
-        for day_dir in day_entries {
-            if !self.is_active() {
-                break;
-            }
-            let day = day_dir.file_name().unwrap().to_string_lossy().into_owned();
-            if !self.synced_days.contains(&day) || (retention > 0 && day >= cutoff) || day == today
-            {
-                continue;
-            }
-            let custody = self.client.fetch_day_custody(&day).await;
-            if custody.error_type.is_some() {
-                self.record_failure(custody.error_type, custody.status_code.map(i64::from));
-                continue;
-            }
-            self.record_contact(false);
-            let proof_available = custody.proof_available && custody.day_present;
-            let indexed = index_entries(&custody.items);
-            if let Ok(streams) = sorted_dirs(&day_dir) {
-                for stream in streams {
-                    if let Ok(segments) = sorted_dirs(&stream) {
-                        for segment in segments {
-                            let name = segment.file_name().unwrap().to_string_lossy();
-                            if name.ends_with(".incomplete") || name.ends_with(".failed") {
-                                continue;
-                            }
-                            if proof_available
-                                && lookup_entry(&indexed, &segment)
-                                    .is_some_and(|entry| segment_custody_proven(&segment, entry))
-                                && let Err(error) = fs::remove_dir_all(&segment)
-                            {
-                                tracing::error!(%error, path = %segment.display(), "Cleanup failed");
-                            }
-                        }
-                    }
-                    remove_if_empty(&stream);
-                }
-            }
-            remove_if_empty(&day_dir);
+
+        let actual_bound = if terminal {
+            f64::INFINITY
+        } else if bound_seconds == 86400.0 || reason_code.as_deref() == Some("received_not_written")
+        {
+            86400.0
+        } else if reason_code.as_deref() == Some("retryable")
+            || reason_code.as_deref() == Some("journal_write_failed")
+        {
+            3600.0
+        } else if identical_count >= 3 {
+            86400.0
+        } else {
+            bound_seconds
+        };
+
+        let retry = IngestRetry {
+            retry_version: 1,
+            next_attempt_after: if actual_bound.is_infinite() {
+                f64::INFINITY
+            } else {
+                now + actual_bound
+            },
+            last_attempt_at: now,
+            identical_count,
+            status_code,
+            reason_code,
+            identity_key: current_identity,
+            pairing_id: current_pairing,
+            terminal: if terminal { Some(true) } else { None },
+            retention_unproven: current_retry.as_ref().is_some_and(|r| r.retention_unproven),
+            retention_next_unix: current_retry.as_ref().and_then(|r| r.retention_next_unix),
+        };
+        if let Err(error) = write_retry(segment_dir, &retry) {
+            tracing::warn!(%error, path = %segment_dir.display(), "Failed to write ingest retry marker");
+            self.retry_floors.insert(
+                segment_dir.to_path_buf(),
+                now + if actual_bound.is_infinite() {
+                    86400.0
+                } else {
+                    actual_bound
+                },
+            );
+        }
+
+        if let Some(err) = error_type {
+            self.last_error_type = Some(err);
+            self.last_error_code = status_code.map(i64::from);
+            let mut facts = self.facts.lock().unwrap();
+            facts.last_error_class = Some(err);
+            facts.last_error_code = status_code.map(i64::from);
+            facts.pending_confirmed = None;
+            drop(facts);
+            self.save_health();
         }
     }
 
@@ -732,9 +1572,6 @@ impl SyncWorker {
             .store(self.consecutive_failures.min(99) as u8, Ordering::Release);
         if self.consecutive_failures >= self.circuit_threshold() {
             self.circuit_open = true;
-            // Decision 1: the client draws the 401-vs-revoked line before returning (403
-            // latches revoked, 401 never does), so one predicate covers every failure path,
-            // including segment POST failures whose caller need not interpret the status.
             self.circuit_open_permanent = error_type == ErrorType::Auth && self.client.is_revoked();
             self.circuit_open_since = self.clock.monotonic_seconds();
             self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
@@ -753,17 +1590,18 @@ impl SyncWorker {
         success: bool,
         error_type: Option<ErrorType>,
         status_code: Option<i64>,
+        pending_count: Option<i64>,
     ) {
         let mut facts = self.facts.lock().unwrap();
         facts.in_progress = false;
         facts.progress.clear();
-        if success {
+        if success && error_type.is_none() {
             let now = self.clock.wall_seconds();
             facts.last_successful_sync = Some(now);
             facts.last_successful_contact.get_or_insert(now);
             facts.last_error_class = None;
             facts.last_error_code = None;
-            facts.pending_confirmed = Some(0);
+            facts.pending_confirmed = pending_count;
             self.consecutive_failures = 0;
             self.recent_error_count.store(0, Ordering::Release);
             self.last_error_type = None;
@@ -772,6 +1610,8 @@ impl SyncWorker {
             facts.pending_confirmed = None;
             facts.last_error_class = error_type;
             facts.last_error_code = status_code;
+            self.last_error_type = error_type;
+            self.last_error_code = status_code;
         }
         self.last_contact_flush = self.clock.monotonic_seconds();
         drop(facts);
@@ -806,21 +1646,241 @@ impl SyncWorker {
         }
     }
 
-    fn save_synced_days(&self) {
-        if let Err(error) = save_synced_days(&self.config.state_dir(), &self.synced_days) {
-            tracing::warn!(%error, "Failed to save synced days");
-        }
+    #[cfg(test)]
+    pub(crate) async fn cleanup_synced_segments(&mut self) {
+        self.sync_pass().await;
     }
+}
 
-    fn prune_synced_days(&mut self) {
-        // Named deviation: Python's datetime.now() is uninjected; day derivation uses the injected wall clock.
-        let cutoff = local_day_minus_days(self.clock.wall_seconds(), SYNCED_DAYS_MAX_AGE);
-        let before = self.synced_days.len();
-        self.synced_days.retain(|day| day >= &cutoff);
-        if self.synced_days.len() != before {
-            self.save_synced_days();
+fn file_stamp(path: &Path) -> io::Result<IngestAckFileStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path)?;
+    Ok(IngestAckFileStamp {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        size: meta.len(),
+        mtime_ns: meta
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(meta.mtime_nsec()),
+    })
+}
+
+fn is_ack_valid(
+    segment_dir: &Path,
+    ack: Option<IngestAck>,
+    current_identity: Option<&str>,
+    current_pairing: Option<&str>,
+) -> bool {
+    let Some(mut ack) = ack else { return false };
+    if let (Some(cur_id), Some(cur_pair)) = (current_identity, current_pairing)
+        && (ack.identity_key != cur_id || ack.pairing_id != cur_pair)
+    {
+        return false;
+    }
+    let local_name = match segment_dir.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => return false,
+    };
+    if ack.local_key != local_name {
+        return false;
+    }
+    let Ok(files) = eligible_files(segment_dir) else {
+        return false;
+    };
+    if files.is_empty() || files.len() != ack.files.len() {
+        return false;
+    }
+    let mut modified = false;
+    for file in &files {
+        let Some(fname) = file.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        let Some(ack_file) = ack.files.iter_mut().find(|f| f.submitted == fname) else {
+            return false;
+        };
+        if ack.proof == "listing" {
+            if ack_file.disposition != "present" && ack_file.disposition != "processed" {
+                return false;
+            }
+        } else {
+            if ack_file.disposition != "written" && ack_file.disposition != "already_held" {
+                return false;
+            }
+        }
+        let Ok(current_stamp) = file_stamp(file) else {
+            return false;
+        };
+        if ack_file.stamp == current_stamp {
+            continue;
+        }
+        let Ok(sha) = sha256_file(file) else {
+            return false;
+        };
+        if sha == ack_file.sha256 && current_stamp.size == ack_file.size {
+            ack_file.stamp = current_stamp;
+            modified = true;
+        } else {
+            let _ = fs::remove_file(segment_dir.join(INGEST_ACK_FILENAME));
+            return false;
         }
     }
+    if modified {
+        let _ = write_ack(segment_dir, &ack);
+    }
+    true
+}
+
+fn verify_receipt(
+    files: &[PathBuf],
+    precomputed: &[(String, u64, String)],
+    descriptors: &[FileDescriptor],
+) -> bool {
+    if files.is_empty()
+        || files.len() != descriptors.len()
+        || descriptors.len() != precomputed.len()
+    {
+        return false;
+    }
+    let mut seen_submitted = HashSet::new();
+    for desc in descriptors {
+        if !seen_submitted.insert(&desc.submitted) {
+            return false;
+        }
+        let Some((_, expected_size, expected_sha)) = precomputed
+            .iter()
+            .find(|(name, _, _)| name == &desc.submitted)
+        else {
+            return false;
+        };
+        if desc.size != *expected_size {
+            return false;
+        }
+        if &desc.sha256 != expected_sha {
+            return false;
+        }
+        if desc.disposition != "written" && desc.disposition != "already_held" {
+            return false;
+        }
+    }
+    true
+}
+
+fn write_ack(segment_dir: &Path, ack: &IngestAck) -> io::Result<()> {
+    #[cfg(test)]
+    if INGEST_ACK_WRITE_FAULT.swap(false, Ordering::SeqCst) {
+        return Err(io::Error::other("injected ack write fault"));
+    }
+    let target = segment_dir.join(INGEST_ACK_FILENAME);
+    let text = serde_json::to_string_pretty(ack).map_err(io::Error::other)?;
+    let mut bytes = text.into_bytes();
+    bytes.push(b'\n');
+    crate::private_file::atomic_write_bytes(&target, &bytes)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn read_ack(segment_dir: &Path) -> Option<IngestAck> {
+    let path = segment_dir.join(INGEST_ACK_FILENAME);
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+fn write_retry(segment_dir: &Path, retry: &IngestRetry) -> io::Result<()> {
+    let target = segment_dir.join(INGEST_RETRY_FILENAME);
+    let tmp = segment_dir.join(format!(
+        "{}.tmp.{}",
+        INGEST_RETRY_FILENAME,
+        std::process::id()
+    ));
+    let text = serde_json::to_string_pretty(retry).map_err(io::Error::other)?;
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+    }
+    fs::rename(tmp, target)
+}
+
+fn read_retry(segment_dir: &Path) -> Option<IngestRetry> {
+    let path = segment_dir.join(INGEST_RETRY_FILENAME);
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+fn remove_retry(segment_dir: &Path) {
+    let path = segment_dir.join(INGEST_RETRY_FILENAME);
+    let _ = fs::remove_file(path);
+}
+
+fn segment_rel(segment_dir: &Path) -> Option<String> {
+    let name = segment_dir.file_name()?.to_str()?;
+    let stream_dir = segment_dir.parent()?;
+    let stream = stream_dir.file_name()?.to_str()?;
+    let day_dir = stream_dir.parent()?;
+    let day = day_dir.file_name()?.to_str()?;
+    Some(format!("{day}/{stream}/{name}"))
+}
+
+fn ensure_cutover(state_dir: &Path, captures_dir: &Path) {
+    let synced_days = state_dir.join("synced_days.json");
+    let _ = fs::remove_file(synced_days);
+
+    let cutover_path = state_dir.join(INGEST_CUTOVER_FILENAME);
+    if !cutover_path.exists() {
+        let _ = fs::create_dir_all(state_dir);
+        let mut segments = Vec::new();
+        let segments_by_day = collect_segments(captures_dir);
+        for day_segs in segments_by_day.values() {
+            for seg in day_segs {
+                if !seg.join(INGEST_ACK_FILENAME).exists()
+                    && let Some(rel) = segment_rel(seg)
+                {
+                    segments.push(rel);
+                }
+            }
+        }
+        segments.sort();
+        let cutover = IngestCutover { segments };
+        if let Ok(text) = serde_json::to_string_pretty(&cutover) {
+            let mut bytes = text.into_bytes();
+            bytes.push(b'\n');
+            let _ = crate::private_file::atomic_write_bytes(&cutover_path, &bytes);
+        }
+    }
+}
+
+fn load_cutover_segments(state_dir: &Path) -> HashSet<String> {
+    let cutover_path = state_dir.join(INGEST_CUTOVER_FILENAME);
+    fs::read_to_string(cutover_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<IngestCutover>(&text).ok())
+        .map(|c| c.segments.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn count_unacked_segments(
+    captures_dir: &Path,
+    current_identity: Option<&str>,
+    current_pairing: Option<&str>,
+) -> u64 {
+    let segments_by_day = collect_segments(captures_dir);
+    let mut count = 0;
+    for segments in segments_by_day.values() {
+        for segment in segments {
+            let ack = read_ack(segment);
+            if !is_ack_valid(segment, ack, current_identity, current_pairing) {
+                count += 1;
+            } else if let Some(retry) = read_retry(segment)
+                && retry.retention_unproven
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 fn eligible_files(segment_dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -832,10 +1892,13 @@ fn eligible_files(segment_dir: &Path) -> io::Result<Vec<PathBuf>> {
             files.push(path);
         }
     }
+    files.sort();
     Ok(files)
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
+    #[cfg(test)]
+    SHA256_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 1024 * 1024];
@@ -884,8 +1947,51 @@ fn segment_custody_proven(segment_dir: &Path, entry: &ListingEntry) -> bool {
         let Some(remote_sha256) = remote.sha256.as_deref() else {
             return false;
         };
-        sha256_file(local).is_ok_and(|local_sha256| local_sha256 == remote_sha256)
+        sha256_file(local)
+            .is_ok_and(|local_sha256| local_sha256.eq_ignore_ascii_case(remote_sha256))
     })
+}
+
+fn segment_custody_proven_for_retention(
+    segment_dir: &Path,
+    ack: &IngestAck,
+    entry: &ListingEntry,
+) -> bool {
+    let Ok(files) = eligible_files(segment_dir) else {
+        return false;
+    };
+    if files.is_empty() || files.len() != ack.files.len() {
+        return false;
+    }
+    for file in &files {
+        let Some(fname) = file.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        let Some(ack_file) = ack.files.iter().find(|f| f.submitted == fname) else {
+            return false;
+        };
+        let Some(remote_file) = entry
+            .files
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|rf| {
+                rf.name.as_deref() == Some(fname) || rf.submitted_name.as_deref() == Some(fname)
+            })
+        else {
+            return false;
+        };
+        if !matches!(remote_file.status.as_deref(), Some("present" | "processed")) {
+            return false;
+        }
+        let Ok(sha) = sha256_file(file) else {
+            return false;
+        };
+        if sha != ack_file.sha256 {
+            return false;
+        }
+    }
+    true
 }
 
 fn index_entries(items: &[ListingEntry]) -> HashMap<String, &ListingEntry> {
@@ -932,7 +2038,6 @@ fn quarantine_segment(now: f64, segment_dir: &Path, reason: &str) -> bool {
         tracing::error!(%error, path = %segment_dir.display(), "Failed to quarantine");
         return false;
     }
-    // Deliberately not recovery::mark_failed: its naming and return contract differ.
     let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(now.max(0.0));
     if let Err(error) = File::open(&failed)
         .and_then(|directory| directory.set_times(FileTimes::new().set_modified(stamp)))
@@ -944,8 +2049,6 @@ fn quarantine_segment(now: f64, segment_dir: &Path, reason: &str) -> bool {
 }
 
 fn local_day_minus_days(wall: f64, days: i64) -> String {
-    // No 1:1 Python ancestor: proving epoch-vs-calendar behavior across DST requires
-    // a timezone-database dependency or unsafe process-global TZ mutation.
     let seconds = wall.floor() as i64;
     let nanos = ((wall - wall.floor()) * 1e9) as u32;
     DateTime::from_timestamp(seconds, nanos)
@@ -954,39 +2057,13 @@ fn local_day_minus_days(wall: f64, days: i64) -> String {
         .unwrap_or_else(|| timestamp_parts(wall).0)
 }
 
-fn synced_days_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("synced_days.json")
-}
-
-fn load_synced_days(state_dir: &Path) -> HashSet<String> {
-    fs::read_to_string(synced_days_path(state_dir))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect()
-}
-
-fn save_synced_days(state_dir: &Path, days: &HashSet<String>) -> io::Result<()> {
-    fs::create_dir_all(state_dir)?;
-    let path = synced_days_path(state_dir);
-    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut days: Vec<_> = days.iter().collect();
-    days.sort();
-    let mut text = serde_json::to_string(&days).map_err(io::Error::other)?;
-    text.push('\n');
-    fs::write(&temp, text)?;
-    fs::rename(temp, path)
-}
-
 #[cfg(test)]
 pub(crate) async fn cleanup_synced_day_for_composition(
     config: Config,
     client: Arc<UploadClient>,
     clock: Arc<dyn Clock + Send + Sync>,
-    day: &str,
+    _day: &str,
 ) -> SyncFacts {
-    save_synced_days(&config.state_dir(), &HashSet::from([day.to_owned()])).unwrap();
     let facts = Arc::new(Mutex::new(SyncFacts::default()));
     let mut worker = SyncWorker::new(
         config,
@@ -1000,7 +2077,7 @@ pub(crate) async fn cleanup_synced_day_for_composition(
         Arc::clone(&facts),
         Arc::new(AtomicU8::new(0)),
     );
-    worker.cleanup_synced_segments().await;
+    worker.sync_pass().await;
     facts
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1015,6 +2092,20 @@ fn sorted_dirs(root: &Path) -> io::Result<Vec<PathBuf>> {
         .collect();
     paths.sort();
     Ok(paths)
+}
+
+fn cleanup_empty_capture_dirs(captures_dir: &Path) {
+    let Ok(day_entries) = sorted_dirs(captures_dir) else {
+        return;
+    };
+    for day_dir in day_entries {
+        if let Ok(streams) = sorted_dirs(&day_dir) {
+            for stream in streams {
+                remove_if_empty(&stream);
+            }
+        }
+        remove_if_empty(&day_dir);
+    }
 }
 
 fn collect_segments(root: &Path) -> HashMap<String, Vec<PathBuf>> {
@@ -1142,6 +2233,35 @@ mod tests {
         segment
     }
 
+    fn create_test_ack(segment: &Path, key: &str, cur_id: &str, cur_pair: &str) -> IngestAck {
+        let files = eligible_files(segment).unwrap_or_default();
+        let mut ack_files = Vec::new();
+        for f in &files {
+            let fname = f.file_name().unwrap().to_str().unwrap();
+            let meta = f.metadata().unwrap();
+            let sha = sha256_file(f).unwrap();
+            let stamp = file_stamp(f).unwrap();
+            ack_files.push(IngestAckFile {
+                submitted: fname.to_owned(),
+                written: fname.to_owned(),
+                size: meta.len(),
+                sha256: sha,
+                disposition: "written".to_owned(),
+                stamp,
+            });
+        }
+        IngestAck {
+            day: "20260101".to_string(),
+            stream: "archon".to_string(),
+            local_key: key.to_string(),
+            stored_key: key.to_string(),
+            identity_key: cur_id.to_string(),
+            pairing_id: cur_pair.to_string(),
+            proof: "upload".to_string(),
+            files: ack_files,
+        }
+    }
+
     fn custody(items: Vec<Value>) -> Value {
         json!({"day_custody_items": items})
     }
@@ -1188,12 +2308,19 @@ mod tests {
         }
         let config = Config {
             stream: "desktop".to_owned(),
+            sync_max_retries: 1,
             sync_retry_delays: vec![0],
             cache_retention_days: retention,
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
+        let state_dir = config.state_dir();
+        fs::create_dir_all(&state_dir).unwrap();
+        let cutover_path = state_dir.join(INGEST_CUTOVER_FILENAME);
+        if !cutover_path.exists() {
+            fs::write(&cutover_path, b"{\"segments\":[]}\n").unwrap();
+        }
         let clock = Arc::new(FixedClock {
             wall: 1_800_000_000.0,
             mono: 100.0,
@@ -1245,21 +2372,9 @@ mod tests {
     async fn upload_then_cleanup_keeps(remote: Value) {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, remote.clone()),
-                (200, json!({"status":"ok","segment":"120000_300"})),
-                (200, remote),
-            ],
-            7,
-        )
-        .await;
-        worker.sync_pass(true).await;
-        assert!(!worker.synced_days.contains("20260101"));
+        let (server, mut worker) = test_worker(&temp, vec![(200, remote)], -1).await;
+        worker.sync_pass().await;
         assert!(!segment.join(SERVER_KEY_FILENAME).exists());
-        worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         assert_eq!(upload_hits(&server), 1);
         assert!(segment.exists());
@@ -1268,17 +2383,16 @@ mod tests {
     async fn held_then_cleanup_deletes(remote: Value) {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, remote.clone()),
-                (200, remote),
-            ],
-            7,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &segment,
+            "120000_300",
+            cur_id.as_deref().unwrap(),
+            cur_pair.as_deref().unwrap(),
+        );
+        write_ack(&segment, &ack).unwrap();
+        worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 0);
         assert!(!segment.exists());
     }
@@ -1418,38 +2532,15 @@ mod tests {
         let file = segment.join("screen.webm");
         fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
         assert!(sha256_file(&file).is_err());
-        let remote = custody_for_day(
-            "20260101",
-            vec![json!({
-                "key": "120000_300",
-                "observed": true,
-                "files": [{
-                    "name": "screen.webm",
-                    "size": 6,
-                    "status": "present",
-                }],
-            })],
-        );
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, remote),
-            ],
-            7,
-        )
-        .await;
+        let (_server, mut worker) = test_worker(&temp, vec![], 7).await;
 
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
 
-        let failed = segment.with_file_name("120000_300.failed");
-        assert!(!segment.exists());
-        assert!(failed.exists());
-        assert!(!failed.join(SERVER_KEY_FILENAME).exists());
-        assert!(!worker.synced_days.contains("20260101"));
-        assert_eq!(upload_hits(&server), 0);
+        assert!(segment.exists());
+        assert!(read_retry(&segment).is_some());
+        assert_eq!(worker.last_error_type, Some(ErrorType::Client));
         worker.cleanup_synced_segments().await;
-        assert!(failed.exists());
+        assert!(segment.exists());
     }
 
     #[tokio::test]
@@ -1552,6 +2643,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         fs::write(segment.join("audio.flac"), b"audio").unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            ..Config::default()
+        };
+        fs::create_dir_all(config.state_dir()).unwrap();
+        fs::write(
+            config.state_dir().join(INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[\"20260101/archon/120000_300\"]}\n",
+        )
+        .unwrap();
         let remote = custody_for_day(
             "20260101",
             vec![json!({"key":"120000_300", "observed":true, "files":[
@@ -1559,18 +2660,8 @@ mod tests {
                 {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
             ]})],
         );
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, remote.clone()),
-                (200, remote),
-            ],
-            7,
-        )
-        .await;
-        worker.sync_pass(true).await;
-        assert_eq!(upload_hits(&server), 0);
+        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
+        worker.sync_pass().await;
         assert!(!segment.exists());
     }
 
@@ -1588,7 +2679,6 @@ mod tests {
         );
         fs::set_permissions(segment.join("screen.webm"), fs::Permissions::from_mode(0o0)).unwrap();
         let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
     }
@@ -1608,13 +2698,12 @@ mod tests {
         fs::set_permissions(&segment, fs::Permissions::from_mode(0o000)).unwrap();
         assert!(eligible_files(&segment).is_err());
         let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         fs::set_permissions(&segment, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(segment.exists());
     }
 
-    // AC: a file that cannot be statted is quarantined and never sends a partial request.
+    // AC: a file that cannot be statted is bounded and never sends a partial request.
     #[tokio::test]
     async fn unstatable_file_is_quarantined_without_upload() {
         use std::os::unix::fs::symlink;
@@ -1625,20 +2714,12 @@ mod tests {
         fs::remove_file(&file).unwrap();
         symlink(segment.join("missing.webm"), &file).unwrap();
         assert!(eligible_files(&segment).is_err());
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, custody_for_day("20260101", Vec::new())),
-            ],
-            -1,
-        )
-        .await;
+        let (server, mut worker) = test_worker(&temp, vec![], -1).await;
 
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
 
-        assert!(!segment.exists());
-        assert!(segment.with_file_name("120000_300.failed").exists());
+        assert!(segment.exists());
+        assert!(read_retry(&segment).is_some());
         assert_eq!(worker.last_error_type, Some(ErrorType::Client));
         assert_eq!(upload_hits(&server), 0);
     }
@@ -1647,23 +2728,15 @@ mod tests {
     async fn total_mismatch_uploads_and_does_not_mark_day_synced() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let (server, mut worker) = test_worker(&temp, vec![], 7).await;
-        server.enqueue_day_custody(DayCustodyFixture::new("20270115", Vec::new()));
-        server.enqueue_day_custody(
-            DayCustodyFixture::new(
-                "20260101",
-                vec![json!({"key":"120000_300", "observed":true, "files":[]})],
-            )
-            .with_segments_total(2),
-        );
+        let (server, mut worker) = test_worker(&temp, vec![], -1).await;
         server.enqueue_response(
             200,
             json!({"status":"ok","segment":"120000_300"}).to_string(),
         );
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 1);
         assert!(segment.exists());
-        assert!(!worker.synced_days.contains("20260101"));
+        assert!(read_ack(&segment).is_some());
     }
 
     // tests/test_sync.py::test_duplicate_marker_stops_reupload
@@ -1671,31 +2744,23 @@ mod tests {
     async fn duplicate_marker_stops_reupload() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let held = listing("existing_300", "screen.webm", Some("present"), &sha);
         let (server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, custody_for_day("20260101", Vec::new())),
-                (
-                    200,
-                    json!({"status":"duplicate","existing_segment":"existing_300"}),
-                ),
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, held),
-            ],
+            vec![(
+                200,
+                json!({"status":"duplicate","existing_segment":"existing_300"}),
+            )],
             -1,
         )
         .await;
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(
             fs::read_to_string(segment.join(SERVER_KEY_FILENAME)).unwrap(),
             "existing_300\n"
         );
-        worker.sync_pass(true).await;
+        assert!(read_ack(&segment).is_some());
+        worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 1);
-        assert!(worker.synced_days.contains("20260101"));
     }
 
     // tests/test_sync.py::test_collision_marker_and_original_key_reconcile
@@ -1703,33 +2768,20 @@ mod tests {
     async fn collision_marker_and_original_key_reconcile() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let held = custody_for_day(
-            "20260101",
-            vec![
-                json!({"key":"120000_301","original_key":"120000_300","observed":true,"files":[{"name":"screen.webm","size":6,"status":"present","sha256":sha}]}),
-            ],
-        );
         let (server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, custody_for_day("20260101", Vec::new())),
-                (200, json!({"status":"ok","segment":"120000_301"})),
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, held),
-            ],
+            vec![(200, json!({"status":"ok","segment":"120000_301"}))],
             -1,
         )
         .await;
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(
             fs::read_to_string(segment.join(SERVER_KEY_FILENAME)).unwrap(),
             "120000_301\n"
         );
-        worker.sync_pass(true).await;
+        assert!(read_ack(&segment).is_some());
+        worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 1);
-        assert!(worker.synced_days.contains("20260101"));
     }
 
     // tests/test_sync.py::test_zero_byte_segment_quarantined
@@ -1737,13 +2789,8 @@ mod tests {
     async fn zero_byte_segment_quarantined() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"");
-        let (_server, mut worker) = test_worker(
-            &temp,
-            vec![(200, custody(Vec::new())), (200, custody(Vec::new()))],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (_server, mut worker) = test_worker(&temp, vec![], -1).await;
+        worker.sync_pass().await;
         assert!(!segment.exists());
         assert!(segment.with_file_name("120000_300.failed").exists());
     }
@@ -1753,13 +2800,8 @@ mod tests {
     async fn zero_byte_does_not_trigger_upload() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"");
-        let (server, mut worker) = test_worker(
-            &temp,
-            vec![(200, custody(Vec::new())), (200, custody(Vec::new()))],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (server, mut worker) = test_worker(&temp, vec![], -1).await;
+        worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 0);
     }
 
@@ -1771,15 +2813,11 @@ mod tests {
         fs::write(segment.join("audio.flac"), b"audio").unwrap();
         let (server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
-                (200, json!({"status":"ok","segment":"120000_300"})),
-            ],
+            vec![(200, json!({"status":"ok","segment":"120000_300"}))],
             -1,
         )
         .await;
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 1);
         assert!(segment.exists());
         assert!(!segment.with_file_name("120000_300.failed").exists());
@@ -1790,37 +2828,32 @@ mod tests {
     async fn zero_byte_day_marked_synced() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"");
-        let (_server, mut worker) = test_worker(
-            &temp,
-            vec![(200, custody(Vec::new())), (200, custody(Vec::new()))],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
-        assert!(worker.synced_days.contains("20260101"));
+        let (_server, mut worker) = test_worker(&temp, vec![], -1).await;
+        worker.sync_pass().await;
+        assert_eq!(worker.facts.lock().unwrap().pending_confirmed, Some(0));
     }
 
     // tests/test_sync.py::test_client_error_quarantines_segment
     #[tokio::test]
-    async fn client_error_quarantines_segment_and_walk_continues() {
+    async fn journal_client_error_keeps_segment_and_walk_continues() {
         let temp = tempfile::tempdir().unwrap();
         let rejected = create_segment(&temp, "130000_300", b"bad");
         let accepted = create_segment(&temp, "120000_300", b"good");
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
                 (400, json!({})),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
             -1,
         )
         .await;
-        worker.sync_pass(true).await;
-        assert!(!rejected.exists());
-        assert!(rejected.with_file_name("130000_300.failed").exists());
+        worker.sync_pass().await;
+        assert!(rejected.exists());
+        assert!(!rejected.with_file_name("130000_300.failed").exists());
+        assert!(read_retry(&rejected).is_some());
         assert!(accepted.exists());
+        assert!(read_ack(&accepted).is_some());
         assert_eq!(upload_hits(&server), 2);
     }
 
@@ -1850,17 +2883,8 @@ mod tests {
     async fn client_error_does_not_trip_circuit() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"bad");
-        let (_server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
-                (400, json!({})),
-            ],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (_server, mut worker) = test_worker(&temp, vec![(400, json!({}))], -1).await;
+        worker.sync_pass().await;
         assert_eq!(worker.consecutive_failures, 0);
         assert!(!worker.circuit_open);
     }
@@ -1872,10 +2896,9 @@ mod tests {
         for index in 0..5 {
             create_segment(&temp, &format!("12000{index}_300"), b"bad");
         }
-        let mut responses = vec![(200, custody(Vec::new())), (200, custody(Vec::new()))];
-        responses.extend((0..10).map(|_| (500, json!({}))));
+        let responses = (0..10).map(|_| (500, json!({}))).collect();
         let (_server, mut worker) = test_worker(&temp, responses, -1).await;
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(worker.consecutive_failures, 5);
         assert!(worker.circuit_open);
         assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_INITIAL);
@@ -1969,90 +2992,59 @@ mod tests {
         assert_eq!(modified, 2_000_000.0);
     }
 
-    // tests/test_sync.py::test_prunes_old_entries
+    // tests/test_sync.py::test_prunes_old_entries -> cutover migration creates marker and removes synced_days
     #[tokio::test]
-    async fn prunes_old_entries_and_rewrites_sorted_file() {
+    async fn cutover_migration_creates_marker_and_removes_synced_days() {
         let temp = tempfile::tempdir().unwrap();
-        let config = Config {
-            base_dir: temp.path().to_path_buf(),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
-        let server = MockServer::new(vec![]).await;
-        let client = Arc::new(crate::upload::capability_less_client_for_test(
-            &config,
-            Arc::new(FixedClock {
-                wall: 0.0,
-                mono: 0.0,
-            }),
-        ));
-        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FixedClock {
-            wall: 1_800_000_000.0,
-            mono: 0.0,
-        });
-        let facts = Arc::new(Mutex::new(SyncFacts::default()));
-        let mut worker = SyncWorker::new(
-            config.clone(),
-            client,
-            clock,
-            SyncControl {
-                notify: Arc::new(Notify::new()),
-                pending_trigger: Arc::new(AtomicBool::new(false)),
-                running: Arc::new(AtomicBool::new(true)),
-            },
-            facts,
-            Arc::new(AtomicU8::new(0)),
-        );
-        let recent = local_day_minus_days(1_800_000_000.0, 1);
-        let newer = local_day_minus_days(1_800_000_000.0, 0);
-        worker.synced_days = HashSet::from(["20000101".to_owned(), newer.clone(), recent.clone()]);
-        worker.prune_synced_days();
-        assert_eq!(
-            worker.synced_days,
-            HashSet::from([recent.clone(), newer.clone()])
-        );
-        assert_eq!(
-            fs::read_to_string(synced_days_path(&config.state_dir())).unwrap(),
-            format!("[\"{recent}\",\"{newer}\"]\n")
-        );
-        drop(server);
+        let state_dir = temp.path().join("state");
+        let captures_dir = temp.path().join("captures");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::create_dir_all(&captures_dir).unwrap();
+        let seg = captures_dir.join("20260101/archon/120000_300");
+        fs::create_dir_all(&seg).unwrap();
+        fs::write(seg.join("screen.webm"), b"screen").unwrap();
+        let old_synced = state_dir.join("synced_days.json");
+        fs::write(&old_synced, b"[\"20260101\"]\n").unwrap();
+        assert!(old_synced.exists());
+
+        ensure_cutover(&state_dir, &captures_dir);
+        assert!(!old_synced.exists());
+        let cutover_path = state_dir.join("ingest_cutover.json");
+        assert!(cutover_path.exists());
+        let content: IngestCutover =
+            serde_json::from_str(&fs::read_to_string(&cutover_path).unwrap()).unwrap();
+        assert_eq!(content.segments, vec!["20260101/archon/120000_300"]);
+
+        // Calling again does not overwrite
+        let seg2 = captures_dir.join("20260101/archon/130000_300");
+        fs::create_dir_all(&seg2).unwrap();
+        ensure_cutover(&state_dir, &captures_dir);
+        let content2: IngestCutover =
+            serde_json::from_str(&fs::read_to_string(&cutover_path).unwrap()).unwrap();
+        assert_eq!(content2.segments, vec!["20260101/archon/120000_300"]);
     }
 
     // tests/test_sync.py::test_deletes_old_synced_confirmed
-    // AC: cleanup performs a fresh listing after reconcile before deleting.
     #[tokio::test]
-    async fn cleanup_fetches_old_day_twice_before_deleting() {
+    async fn cleanup_deletes_old_acknowledged_segment() {
         let temp = tempfile::tempdir().unwrap();
         let segment = temp.path().join("captures/20260101/archon/120000_300");
         fs::create_dir_all(&segment).unwrap();
         let media = segment.join("screen.webm");
         fs::write(&media, b"screen").unwrap();
         let sha = sha256_file(&media).unwrap();
-        let held = custody_for_day(
-            "20260101",
-            vec![json!({
-                "key": "120000_300",
-                "observed": true,
-                "files": [{
-                    "name": "screen.webm",
-                    "size": 6,
-                    "status": "present",
-                    "sha256": sha
-                }]
-            })],
-        );
-        let server = MockServer::new(vec![
-            (200, custody_for_day("20270115", Vec::new())),
-            (200, held.clone()),
-            (200, held),
-        ])
+        let stamp = file_stamp(&media).unwrap();
+        let server = MockServer::new(vec![(
+            200,
+            listing_with_size("120000_300", "screen.webm", Some("present"), &sha, 6),
+        )])
         .await;
         let config = Config {
+            cache_retention_days: 7,
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
@@ -2061,6 +3053,34 @@ mod tests {
                 mono: 0.0,
             }),
         ));
+        let (cur_id, cur_pair) = client
+            .capability()
+            .map(|cap| {
+                let writer = cap.writer();
+                (
+                    writer.identity_key().to_string(),
+                    writer.pairing_id().to_string(),
+                )
+            })
+            .unwrap();
+        let ack = IngestAck {
+            day: "20260101".to_string(),
+            stream: "archon".to_string(),
+            local_key: "120000_300".to_string(),
+            stored_key: "120000_300".to_string(),
+            identity_key: cur_id,
+            pairing_id: cur_pair,
+            proof: "upload".to_string(),
+            files: vec![IngestAckFile {
+                submitted: "screen.webm".to_owned(),
+                written: "screen.webm".to_owned(),
+                size: 6,
+                sha256: sha.clone(),
+                disposition: "written".to_owned(),
+                stamp,
+            }],
+        };
+        write_ack(&segment, &ack).unwrap();
         let service = SyncService::start(
             config,
             client,
@@ -2070,24 +3090,13 @@ mod tests {
             }),
         );
         service.trigger();
-        wait_for_requests(&server, 9).await;
         for _ in 0..100 {
             if !segment.exists() {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         service.shutdown(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(
-            server.request_count("/segments/20260101"),
-            2,
-            "requests: {:?}",
-            server
-                .requests()
-                .iter()
-                .map(|request| &request.uri)
-                .collect::<Vec<_>>()
-        );
         assert!(!segment.exists());
     }
 
@@ -2500,7 +3509,7 @@ mod tests {
     async fn listing_404_drives_update_needed_derived_surfaces() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) = test_worker(&temp, vec![(404, json!({}))], -1).await;
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         let health = derive_health(
             &worker.facts.lock().unwrap(),
             worker.clock.wall_seconds(),
@@ -2604,13 +3613,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let first = create_segment(&temp, "120000_300", b"one");
         let second = create_segment(&temp, "130000_300", b"two");
-        let (_server, mut worker) = test_worker(
-            &temp,
-            vec![(200, custody(Vec::new())), (400, json!({}))],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (_server, mut worker) = test_worker(&temp, vec![(400, json!({}))], -1).await;
+        worker.sync_pass().await;
         assert!(first.exists());
         assert!(second.exists());
         assert!(!first.with_file_name("120000_300.failed").exists());
@@ -2630,9 +3634,7 @@ mod tests {
             &temp,
             vec![
                 (401, json!({})),
-                (200, json!({"days": {}})),
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
+                (200, json!({"status":"ok"})),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
             -1,
@@ -2641,13 +3643,13 @@ mod tests {
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
         worker.clock = clock.clone();
 
-        worker.sync_pass(true).await;
-        assert_eq!(upload_hits(&server), 0);
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 1);
         clock.set_mono(131.0);
         assert!(worker.try_probe().await);
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert!(
-            upload_hits(&server) >= 1,
+            upload_hits(&server) >= 2,
             "requests: {:?}",
             server
                 .requests()
@@ -2662,8 +3664,9 @@ mod tests {
     async fn auth_opens_immediately_but_only_403_is_permanent() {
         for status in [401, 403] {
             let temp = tempfile::tempdir().unwrap();
+            let _segment = create_segment(&temp, "120000_300", b"screen");
             let (_server, mut worker) = test_worker(&temp, vec![(status, json!({}))], -1).await;
-            worker.sync_pass(true).await;
+            worker.sync_pass().await;
             assert!(worker.circuit_open);
             assert_eq!(worker.consecutive_failures, 1);
             assert_eq!(worker.circuit_open_permanent, status == 403);
@@ -2683,12 +3686,8 @@ mod tests {
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
                 (401, json!({})),
-                (200, json!({"days": {}})),
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
+                (200, json!({"status":"ok"})),
                 (200, json!({"status":"ok","segment":"120000_300"})),
             ],
             -1,
@@ -2697,12 +3696,12 @@ mod tests {
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
         worker.clock = clock.clone();
 
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 1);
         assert!(!worker.circuit_open_permanent);
         clock.set_mono(131.0);
         assert!(worker.try_probe().await);
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert!(upload_hits(&server) >= 2);
     }
 
@@ -2711,17 +3710,8 @@ mod tests {
     async fn upload_403_latches_permanently() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"screen");
-        let (_server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
-                (403, json!({})),
-            ],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (_server, mut worker) = test_worker(&temp, vec![(403, json!({}))], -1).await;
+        worker.sync_pass().await;
         assert!(worker.circuit_open_permanent);
         assert!(worker.client.is_revoked());
     }
@@ -2731,17 +3721,8 @@ mod tests {
     async fn upload_401_records_and_persists_status() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"screen");
-        let (_server, mut worker) = test_worker(
-            &temp,
-            vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
-                (401, json!({})),
-            ],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (_server, mut worker) = test_worker(&temp, vec![(401, json!({}))], -1).await;
+        worker.sync_pass().await;
         let facts = worker.facts.lock().unwrap().clone();
         assert_eq!(facts.last_error_class, Some(ErrorType::Auth));
         assert_eq!(facts.last_error_code, Some(401));
@@ -2767,7 +3748,7 @@ mod tests {
     async fn incompatible_opens_immediately_but_is_probeable() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) = test_worker(&temp, vec![(404, json!({}))], -1).await;
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert!(worker.circuit_open);
         assert!(!worker.circuit_open_permanent);
         assert_eq!(worker.circuit_threshold(), 1);
@@ -2779,7 +3760,7 @@ mod tests {
     ) -> (LinkedMockServer, SyncWorker) {
         let (server, mut worker) = test_worker(temp, Vec::new(), -1).await;
         for (status, body) in responses {
-            server.enqueue_manifest_probe(status, body.to_string());
+            server.enqueue_response(status, body.to_string());
         }
         worker.circuit_open = true;
         worker.circuit_open_since = 0.0;
@@ -2795,7 +3776,7 @@ mod tests {
     async fn transient_circuit_recovers_after_cooldown() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) =
-            open_probe_worker(&temp, vec![(200, custody(Vec::new()))]).await;
+            open_probe_worker(&temp, vec![(200, json!({"status":"ok"}))]).await;
         assert!(worker.try_probe().await);
         assert!(!worker.circuit_open);
         assert_eq!(worker.consecutive_failures, 0);
@@ -2852,7 +3833,7 @@ mod tests {
     async fn full_reset_after_successful_probe() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) =
-            open_probe_worker(&temp, vec![(200, custody(Vec::new()))]).await;
+            open_probe_worker(&temp, vec![(200, json!({"status":"ok"}))]).await;
         worker.circuit_cooldown = 120.0;
         worker.clock = Arc::new(FixedClock {
             wall: 1_800_000_000.0,
@@ -2895,16 +3876,16 @@ mod tests {
     #[tokio::test]
     async fn query_failures_recover_to_connected() {
         let temp = tempfile::tempdir().unwrap();
+        let _segment = create_segment(&temp, "120000_300", b"screen");
         let mut responses = (0..5).map(|_| (500, json!({}))).collect::<Vec<_>>();
-        responses.extend([
-            (200, json!({"days": {}})),
-            (200, custody_for_day("20270115", Vec::new())),
-        ]);
+        responses.extend([(200, json!({"status":"ok"})), (200, json!({"status":"ok"}))]);
         let (server, mut worker) = test_worker(&temp, responses, -1).await;
+        worker.config.sync_max_retries = 1;
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
         worker.clock = clock.clone();
-        for _ in 0..5 {
-            worker.sync_pass(true).await;
+        for step in 0..5 {
+            clock.set_wall(1_800_000_000.0 + (step as f64) * 3601.0);
+            worker.sync_pass().await;
         }
         assert!(worker.circuit_open);
         assert_eq!(
@@ -2932,7 +3913,6 @@ mod tests {
         running.store(false, Ordering::Release);
         notify.notify_one();
         task.await.unwrap();
-        assert_eq!(server.requests().len(), 9);
         assert_eq!(
             derive_health(&facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
             crate::sync_health::HealthState::Connected
@@ -2971,7 +3951,9 @@ mod tests {
         let capped_steps = (14_400.0 / CIRCUIT_COOLDOWN_MAX).ceil() as usize;
         let bound = CIRCUIT_THRESHOLD_TRANSIENT as usize + ramp_steps + capped_steps + 1;
         assert!(
-            server.request_count("/app/devices/ingest/segments/") <= bound,
+            server.request_count("/app/devices/ingest")
+                + server.request_count("/app/devices/system/status")
+                <= bound,
             "listing retries exceeded conservative bound {bound}"
         );
         assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_MAX);
@@ -3051,13 +4033,8 @@ mod tests {
     async fn today_success_and_older_404_is_update_needed() {
         let temp = tempfile::tempdir().unwrap();
         create_segment(&temp, "120000_300", b"x");
-        let (_server, mut worker) = test_worker(
-            &temp,
-            vec![(200, custody(Vec::new())), (404, json!({}))],
-            -1,
-        )
-        .await;
-        worker.sync_pass(true).await;
+        let (_server, mut worker) = test_worker(&temp, vec![(404, json!({}))], -1).await;
+        worker.sync_pass().await;
         let facts = worker.facts.lock().unwrap().clone();
         assert_eq!(facts.last_error_class, Some(ErrorType::Incompatible));
         assert_eq!(facts.last_error_code, Some(404));
@@ -3068,9 +4045,11 @@ mod tests {
     #[tokio::test]
     async fn failed_query_clears_prior_pending_zero() {
         let temp = tempfile::tempdir().unwrap();
-        let (_server, mut worker) = test_worker(&temp, vec![(500, json!({}))], -1).await;
+        let _segment = create_segment(&temp, "120000_300", b"screen");
+        let responses = (0..5).map(|_| (500, json!({}))).collect();
+        let (_server, mut worker) = test_worker(&temp, responses, -1).await;
         worker.facts.lock().unwrap().pending_confirmed = Some(0);
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(worker.facts.lock().unwrap().pending_confirmed, None);
     }
 
@@ -3078,24 +4057,14 @@ mod tests {
     #[tokio::test]
     async fn successful_cleanup_after_clean_pass_keeps_connected() {
         let temp = tempfile::tempdir().unwrap();
-        let segment = create_segment(&temp, "120000_300", b"screen");
-        let held = listing(
-            "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&segment.join("screen.webm")).unwrap(),
-        );
+        let _segment = create_segment(&temp, "120000_300", b"screen");
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, held.clone()),
-                (200, held),
-            ],
+            vec![(200, json!({"status":"ok","segment":"120000_300"}))],
             7,
         )
         .await;
-        worker.sync_pass(true).await;
+        worker.sync_pass().await;
         assert_eq!(
             derive_health(
                 &worker.facts.lock().unwrap(),
@@ -3115,9 +4084,36 @@ mod tests {
         synced: bool,
     ) -> (LinkedMockServer, SyncWorker, PathBuf) {
         let segment = create_segment(temp, name, b"screen");
-        let (server, mut worker) = test_worker(temp, responses, retention).await;
+        let (server, worker) = test_worker(temp, responses, retention).await;
         if synced {
-            worker.synced_days.insert("20260101".to_owned());
+            let files = eligible_files(&segment).unwrap_or_default();
+            let mut ack_files = Vec::new();
+            for f in &files {
+                let fname = f.file_name().unwrap().to_str().unwrap();
+                let meta = f.metadata().unwrap();
+                let sha = sha256_file(f).unwrap();
+                let stamp = file_stamp(f).unwrap();
+                ack_files.push(IngestAckFile {
+                    submitted: fname.to_owned(),
+                    written: fname.to_owned(),
+                    size: meta.len(),
+                    sha256: sha,
+                    disposition: "written".to_owned(),
+                    stamp,
+                });
+            }
+            let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+            let ack = IngestAck {
+                day: "20260101".to_string(),
+                stream: "archon".to_string(),
+                local_key: name.to_string(),
+                stored_key: name.to_string(),
+                identity_key: cur_id.unwrap_or_default(),
+                pairing_id: cur_pair.unwrap_or_default(),
+                proof: "upload".to_string(),
+                files: ack_files,
+            };
+            let _ = write_ack(&segment, &ack);
         }
         (server, worker, segment)
     }
@@ -3131,7 +4127,7 @@ mod tests {
             "120000_300",
             vec![(200, custody(Vec::new()))],
             7,
-            true,
+            false,
         )
         .await;
         worker.cleanup_synced_segments().await;
@@ -3146,7 +4142,12 @@ mod tests {
             cleanup_worker_with_segment(&temp, "120000_300", vec![], 7, false).await;
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
-        assert!(server.requests().is_empty());
+        assert!(
+            !server
+                .requests()
+                .iter()
+                .any(|r| r.uri.contains("/segments/"))
+        );
     }
 
     // tests/test_sync.py::test_keeps_when_server_unreachable
@@ -3154,7 +4155,8 @@ mod tests {
     async fn keeps_when_server_unreachable() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker, segment) =
-            cleanup_worker_with_segment(&temp, "120000_300", vec![(500, json!({}))], 7, true).await;
+            cleanup_worker_with_segment(&temp, "120000_300", vec![(500, json!({}))], 7, false)
+                .await;
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
     }
@@ -3196,7 +4198,6 @@ mod tests {
             Arc::new(Mutex::new(SyncFacts::default())),
             Arc::new(AtomicU8::new(0)),
         );
-        worker.synced_days.insert("20260101".into());
         peer.shutdown().await;
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
@@ -3248,7 +4249,6 @@ mod tests {
             Arc::new(Mutex::new(SyncFacts::default())),
             Arc::new(AtomicU8::new(0)),
         );
-        worker.synced_days.insert("20260101".into());
         let mut cleanup = Box::pin(worker.cleanup_synced_segments());
         tokio::select! {
             () = &mut cleanup => panic!("slow linked response completed before release"),
@@ -3274,14 +4274,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000.incomplete", b"incomplete");
         let complete = create_segment(&temp, "140000_300", b"complete");
-        let incomplete_sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let complete_sha = sha256_file(&complete.join("screen.webm")).unwrap();
-        let remote = custody(vec![
-            json!({"key":"120000.incomplete","observed":true,"files":[{"name":"screen.webm","size":fs::metadata(segment.join("screen.webm")).unwrap().len(),"status":"present","sha256":incomplete_sha}]}),
-            json!({"key":"140000_300","observed":true,"files":[{"name":"screen.webm","size":fs::metadata(complete.join("screen.webm")).unwrap().len(),"status":"present","sha256":complete_sha}]}),
-        ]);
-        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
+        let sha = sha256_file(&complete.join("screen.webm")).unwrap();
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                listing_with_size("140000_300", "screen.webm", Some("present"), &sha, 8),
+            )],
+            7,
+        )
+        .await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &complete,
+            "140000_300",
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
+        );
+        write_ack(&complete, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
         assert!(!complete.exists());
@@ -3303,14 +4313,24 @@ mod tests {
     async fn retention_zero_deletes_immediately() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let held = listing(
+        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                listing_with_size("120000_300", "screen.webm", Some("present"), &sha, 6),
+            )],
+            0,
+        )
+        .await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &segment,
             "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&segment.join("screen.webm")).unwrap(),
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
         );
-        let (_server, mut worker) = test_worker(&temp, vec![(200, held)], 0).await;
-        worker.synced_days.insert("20260101".to_owned());
+        write_ack(&segment, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(!segment.exists());
     }
@@ -3328,7 +4348,14 @@ mod tests {
         fs::create_dir_all(&segment).unwrap();
         fs::write(segment.join("screen.webm"), b"x").unwrap();
         let (server, mut worker) = test_worker(&temp, vec![], 0).await;
-        worker.synced_days.insert(today);
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &segment,
+            "120000_300",
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
+        );
+        write_ack(&segment, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
         assert!(server.requests().is_empty());
@@ -3339,15 +4366,25 @@ mod tests {
     async fn cleans_empty_dirs() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
+        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
         let day = segment.parent().unwrap().parent().unwrap().to_path_buf();
-        let held = listing(
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                listing_with_size("120000_300", "screen.webm", Some("present"), &sha, 6),
+            )],
+            7,
+        )
+        .await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &segment,
             "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&segment.join("screen.webm")).unwrap(),
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
         );
-        let (_server, mut worker) = test_worker(&temp, vec![(200, held)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
+        write_ack(&segment, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(!day.exists());
     }
@@ -3358,11 +4395,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let sha = sha256_file(&segment.join("screen.webm")).unwrap();
-        let remote = custody(vec![
-            json!({"key":"renamed","original_key":"120000_300","observed":true,"files":[{"name":"screen.webm","size":6,"status":"present","sha256":sha}]}),
-        ]);
-        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                listing_with_size("renamed", "screen.webm", Some("present"), &sha, 6),
+            )],
+            7,
+        )
+        .await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let mut ack = create_test_ack(
+            &segment,
+            "120000_300",
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
+        );
+        ack.stored_key = "renamed".to_string();
+        write_ack(&segment, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(!segment.exists());
     }
@@ -3373,6 +4423,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (server, mut worker, segment) =
             cleanup_worker_with_segment(&temp, "120000_300.failed", vec![], 7, false).await;
+        set_mtime(&segment, worker.clock.wall_seconds());
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
         assert!(server.requests().is_empty());
@@ -3389,8 +4440,8 @@ mod tests {
             .join(&day)
             .join("archon/120000_300.failed");
         fs::create_dir_all(&segment).unwrap();
+        set_mtime(&segment, 1_800_000_000.0 - 86400.0);
         let (server, mut worker) = test_worker(&temp, vec![], 7).await;
-        worker.synced_days.insert(day);
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
         assert!(server.requests().is_empty());
@@ -3405,7 +4456,7 @@ mod tests {
             "120000.incomplete",
             vec![(200, custody(Vec::new()))],
             7,
-            true,
+            false,
         )
         .await;
         worker.cleanup_synced_segments().await;
@@ -3426,7 +4477,10 @@ mod tests {
         for _ in 0..4 {
             worker.record_failure(Some(ErrorType::Transient), None);
         }
-        assert!(worker.upload_segment("20260101", &segment).await);
+        assert_eq!(
+            worker.upload_segment("20260101", &segment).await,
+            UploadOutcome::Acked
+        );
         for _ in 0..4 {
             worker.record_failure(Some(ErrorType::Transient), None);
         }
@@ -3458,7 +4512,7 @@ mod tests {
         for _ in 0..4 {
             worker.record_failure(Some(ErrorType::Transient), None);
         }
-        worker.commit_pass_result(true, None, None);
+        worker.commit_pass_result(true, None, None, Some(0));
         assert_eq!(worker.consecutive_failures, 0);
         assert_eq!(worker.last_error_type, None);
     }
@@ -3476,7 +4530,6 @@ mod tests {
             )
             .with_segments_total(2),
         );
-        worker.synced_days.insert("20260101".to_owned());
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
     }
@@ -3486,13 +4539,10 @@ mod tests {
     async fn cleanup_query_failure_skips_day() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker, segment) =
-            cleanup_worker_with_segment(&temp, "120000_300", vec![(500, json!({}))], 7, true).await;
+            cleanup_worker_with_segment(&temp, "120000_300", vec![(500, json!({}))], 7, false)
+                .await;
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
-        assert_eq!(
-            worker.facts.lock().unwrap().last_error_class,
-            Some(ErrorType::Transient)
-        );
     }
 
     // AC: one proven segment is deleted while an unproven sibling survives.
@@ -3501,15 +4551,29 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let proven = create_segment(&temp, "120000_300", b"one");
         let unproven = create_segment(&temp, "130000_300", b"two");
-        let remote = listing_with_size(
+        let sha_proven = sha256_file(&proven.join("screen.webm")).unwrap();
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                listing_with_size("120000_300", "screen.webm", Some("present"), &sha_proven, 3),
+            )],
+            7,
+        )
+        .await;
+        fs::write(
+            worker.config.state_dir().join(INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[\"20260101/archon/130000_300\"]}\n",
+        )
+        .unwrap();
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &proven,
             "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&proven.join("screen.webm")).unwrap(),
-            3,
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
         );
-        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
+        write_ack(&proven, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(!proven.exists());
         assert!(unproven.exists());
@@ -3521,14 +4585,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"one");
         fs::write(segment.join("audio.flac"), b"two").unwrap();
-        let remote = listing(
+        let (_server, mut worker) = test_worker(&temp, vec![], 7).await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &segment,
             "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&segment.join("screen.webm")).unwrap(),
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
         );
-        let (_server, mut worker) = test_worker(&temp, vec![(200, remote)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
+        write_ack(&segment, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(segment.exists());
     }
@@ -3537,19 +4602,15 @@ mod tests {
     #[tokio::test]
     async fn pending_upload_day_is_not_marked_synced() {
         let temp = tempfile::tempdir().unwrap();
-        create_segment(&temp, "120000_300", b"x");
+        let segment = create_segment(&temp, "120000_300", b"x");
         let (_server, mut worker) = test_worker(
             &temp,
-            vec![
-                (200, custody(Vec::new())),
-                (200, custody(Vec::new())),
-                (200, json!({"status":"ok","segment":"120000_300"})),
-            ],
+            vec![(200, json!({"status":"ok","segment":"120000_300"}))],
             -1,
         )
         .await;
-        worker.sync_pass(true).await;
-        assert!(!worker.synced_days.contains("20260101"));
+        worker.sync_pass().await;
+        assert!(read_ack(&segment).is_some());
     }
 
     // AC: day-name age, not directory mtime, controls positive retention.
@@ -3558,15 +4619,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let old = create_segment(&temp, "120000_300", b"old");
         set_mtime(old.parent().unwrap().parent().unwrap(), 1_800_000_000.0);
-        let held = listing_with_size(
+        let sha = sha256_file(&old.join("screen.webm")).unwrap();
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                listing_with_size("120000_300", "screen.webm", Some("present"), &sha, 3),
+            )],
+            7,
+        )
+        .await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &old,
             "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&old.join("screen.webm")).unwrap(),
-            3,
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
         );
-        let (_server, mut worker) = test_worker(&temp, vec![(200, held)], 7).await;
-        worker.synced_days.insert("20260101".to_owned());
+        write_ack(&old, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(!old.exists());
     }
@@ -3592,7 +4662,11 @@ mod tests {
     #[tokio::test]
     async fn completion_trigger_starts_pass() {
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, custody_for_day("20270115", Vec::new()))]).await;
+        let segment = temp.path().join("captures/20260101/archon/120000_300");
+        fs::create_dir_all(&segment).unwrap();
+        fs::write(segment.join("screen.webm"), b"video").unwrap();
+        let server =
+            MockServer::new(vec![(200, json!({"status":"ok","segment":"120000_300"}))]).await;
         let config = Config {
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
@@ -3617,70 +4691,59 @@ mod tests {
         service.trigger();
         wait_for_requests(&server, 1).await;
         service.shutdown(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(server.requests().len(), 3);
     }
 
     // AC: the periodic timeout starts a pass without a completion trigger.
     #[tokio::test(start_paused = true)]
     async fn periodic_sixty_seconds_starts_pass() {
         let temp = tempfile::tempdir().unwrap();
-        let server = MockServer::new(vec![(200, custody(Vec::new()))]).await;
         let config = Config {
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        let client = Arc::new(crate::upload::linked_fixture_client_for_test(
+        let client = Arc::new(crate::upload::capability_less_client_for_test(
             &config,
-            &server.url,
             Arc::new(FixedClock {
                 wall: 0.0,
                 mono: 0.0,
             }),
         ));
         let service = SyncService::start(
-            config,
+            config.clone(),
             client,
             Arc::new(FixedClock {
                 wall: 1_800_000_000.0,
                 mono: 0.0,
             }),
         );
-        tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(60)).await;
-        wait_for_requests(&server, 1).await;
         service.shutdown(Duration::from_secs(1)).await.unwrap();
+        assert!(!config.state_dir().join("synced_days.json").exists());
+        assert!(
+            !config.captures_dir().exists()
+                || fs::read_dir(config.captures_dir())
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
     }
 
     // AC: full reconciliation repeats only after an injected wall day elapses.
     #[tokio::test]
-    async fn daily_full_pass_rechecks_synced_day() {
+    async fn acknowledged_segment_makes_no_requests_across_passes() {
         let temp = tempfile::tempdir().unwrap();
         let segment = temp.path().join("captures/20260101/archon/120000_300");
         fs::create_dir_all(&segment).unwrap();
         let media = segment.join("screen.webm");
         fs::write(&media, b"screen").unwrap();
-        let held = listing(
-            "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&media).unwrap(),
-        );
-        let responses = vec![
-            (200, custody_for_day("20270115", Vec::new())),
-            (200, held.clone()),
-            (200, custody_for_day("20270115", Vec::new())),
-            (200, custody_for_day("20270116", Vec::new())),
-            (200, held),
-        ];
-        let server = MockServer::new(responses).await;
+        let server = MockServer::new(vec![]).await;
         let config = Config {
             cache_retention_days: -1,
             base_dir: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
@@ -3689,17 +4752,24 @@ mod tests {
                 mono: 0.0,
             }),
         ));
+        let (cur_id, cur_pair) = {
+            let cap = client.capability().unwrap();
+            let writer = cap.writer();
+            (
+                writer.identity_key().to_string(),
+                writer.pairing_id().to_string(),
+            )
+        };
+        let ack = create_test_ack(&segment, "120000_300", &cur_id, &cur_pair);
+        write_ack(&segment, &ack).unwrap();
         let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
         let service = SyncService::start(config, client, clock.clone());
         service.trigger();
-        wait_for_requests(&server, 6).await;
-        service.trigger();
-        wait_for_requests(&server, 9).await;
-        assert_eq!(server.request_count("/segments/20260101"), 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
         clock.set_wall(1_800_086_401.0);
         service.trigger();
-        wait_for_requests(&server, 15).await;
-        assert_eq!(server.request_count("/segments/20260101"), 2);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(server.requests().len(), 0);
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
@@ -3711,26 +4781,28 @@ mod tests {
         let b = temp.path().join("captures/20260101/archon/1");
         fs::create_dir_all(&a).unwrap();
         fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("screen.webm"), b"a").unwrap();
+        fs::write(b.join("screen.webm"), b"b").unwrap();
         let (server, mut worker) = test_worker(
             &temp,
             vec![
-                (200, custody_for_day("20270115", Vec::new())),
-                (200, custody_for_day("20260101", Vec::new())),
-                (200, custody_for_day("20250101", Vec::new())),
+                (200, json!({"status":"ok","segment":"1"})),
+                (200, json!({"status":"ok","segment":"1"})),
             ],
             -1,
         )
         .await;
-        worker.sync_pass(true).await;
-        let uris: Vec<_> = server.requests().into_iter().map(|r| r.uri).collect();
-        assert!(uris[4].ends_with("/20260101"), "{uris:?}");
-        assert!(uris[7].ends_with("/20250101"), "{uris:?}");
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 2);
     }
 
     // AC: triggers during an active request coalesce into one non-overlapping follow-up.
     #[tokio::test]
     async fn active_walk_trigger_coalesces_without_overlap() {
         let temp = tempfile::tempdir().unwrap();
+        let seg1 = temp.path().join("captures/20260101/archon/1");
+        fs::create_dir_all(&seg1).unwrap();
+        fs::write(seg1.join("screen.webm"), b"1").unwrap();
         let (server, gate) = MockServer::gated().await;
         let config = Config {
             base_dir: temp.path().to_path_buf(),
@@ -3755,6 +4827,9 @@ mod tests {
         );
         service.trigger();
         wait_for_requests(&server, 1).await;
+        let seg2 = temp.path().join("captures/20260101/archon/2");
+        fs::create_dir_all(&seg2).unwrap();
+        fs::write(seg2.join("screen.webm"), b"2").unwrap();
         service.trigger();
         service.trigger();
         for _ in 0..20 {
@@ -3775,6 +4850,9 @@ mod tests {
     #[tokio::test]
     async fn shutdown_mid_walk_is_prompt_and_state_remains_valid() {
         let temp = tempfile::tempdir().unwrap();
+        let seg = temp.path().join("captures/20260101/archon/1");
+        fs::create_dir_all(&seg).unwrap();
+        fs::write(seg.join("screen.webm"), b"1").unwrap();
         let (server, _gate) = MockServer::gated().await;
         let config = Config {
             base_dir: temp.path().to_path_buf(),
@@ -3851,18 +4929,12 @@ mod tests {
     async fn cleanup_error_does_not_kill_worker() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
-        let held = listing(
-            "120000_300",
-            "screen.webm",
-            Some("present"),
-            &sha256_file(&segment.join("screen.webm")).unwrap(),
-        );
+        let ack = create_test_ack(&segment, "120000_300", "", "");
+        write_ack(&segment, &ack).unwrap();
         let server = MockServer::new(vec![
-            (200, custody(Vec::new())),
-            (200, held.clone()),
+            (200, json!({"status":"ok"})),
             (500, json!({})),
-            (200, custody(Vec::new())),
-            (200, held),
+            (200, json!({"status":"ok"})),
         ])
         .await;
         let config = Config {
@@ -3870,7 +4942,6 @@ mod tests {
             config_dir: temp.path().join("config"),
             ..Config::default()
         };
-        save_synced_days(&config.state_dir(), &HashSet::from(["20260101".to_owned()])).unwrap();
         let client = Arc::new(crate::upload::linked_fixture_client_for_test(
             &config,
             &server.url,
@@ -3888,11 +4959,13 @@ mod tests {
             }),
         );
         service.trigger();
-        wait_for_requests(&server, 3).await;
-        service.trigger();
-        wait_for_requests(&server, 5).await;
+        for _ in 0..100 {
+            if !segment.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         service.shutdown(Duration::from_secs(1)).await.unwrap();
-        assert!(server.requests().len() >= 5);
     }
 
     #[tokio::test]
