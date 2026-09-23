@@ -24,7 +24,7 @@ CARGO_GENERATE_RPM_VERSION := 0.21.0
 # ceremony, not just flipping this checked-in flag.
 TRANSPARENCY_ACTIVATED ?= 0
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
-UBUNTU_STOCK_BASE := sha256:4d0600e5088ac5da5119401c70292ea3a9d9dc71f76a234ad5390c1f6a8e5669
+UBUNTU_STOCK_BASE := sha256:bf7f4568d95723d2148bb19c688526d1404ef3302ef024bc1513ad8f533d46c8
 FEDORA_STOCK_BASE := sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56
 SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/extract_changelog.sh scripts/install.sh scripts/publish-origin.sh scripts/publish-release.sh
 
