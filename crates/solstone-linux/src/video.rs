@@ -55,7 +55,7 @@ pub fn select_backend(
     BackendKind::Portal
 }
 
-// Python screencast test inventory (AC12; 32/32):
+// Python screencast test inventory (32/32):
 // tests/test_screencast.py::test_stderr_drain_consumes_flood_non_utf8_and_caps_lines
 //   retired-by-dependency: Rust uses in-process GStreamer and has no subprocess stderr drain.
 // tests/test_screencast.py::TestStreamMatching::test_position_based_matching

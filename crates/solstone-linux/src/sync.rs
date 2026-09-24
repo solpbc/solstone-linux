@@ -1992,7 +1992,7 @@ mod tests {
         }
     }
 
-    // AC: 7 — poisoned sync facts are recovered instead of killing the shell or tick loop.
+    // poisoned sync facts are recovered instead of killing the shell or tick loop.
     #[test]
     fn sampler_recovers_poisoned_facts_lock() {
         let facts = Arc::new(Mutex::new(SyncFacts {
@@ -2490,7 +2490,7 @@ mod tests {
         assert!(segment.exists());
     }
 
-    // AC: an enumeration failure cannot hide local files from cleanup proof.
+    // an enumeration failure cannot hide local files from cleanup proof.
     #[tokio::test]
     async fn unreadable_segment_directory_is_never_deleted() {
         use std::os::unix::fs::PermissionsExt;
@@ -2510,7 +2510,7 @@ mod tests {
         assert!(segment.exists());
     }
 
-    // AC: a file that cannot be statted is bounded and never sends a partial request.
+    // a file that cannot be statted is bounded and never sends a partial request.
     #[tokio::test]
     async fn unstatable_file_is_quarantined_without_upload() {
         use std::os::unix::fs::symlink;
@@ -2697,7 +2697,7 @@ mod tests {
         assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_INITIAL);
     }
 
-    // AC: a matching hash with a nonterminal status is not proof.
+    // a matching hash with a nonterminal status is not proof.
     #[test]
     fn uploading_status_is_not_proof() {
         let temp = tempfile::tempdir().unwrap();
@@ -2712,7 +2712,7 @@ mod tests {
         );
     }
 
-    // AC: processed plus exact hash is terminal proof.
+    // processed plus exact hash is terminal proof.
     #[test]
     fn processed_status_with_matching_sha_is_proof() {
         let temp = tempfile::tempdir().unwrap();
@@ -2727,7 +2727,7 @@ mod tests {
         );
     }
 
-    // AC: one unreadable eligible file poisons the segment.
+    // one unreadable eligible file poisons the segment.
     #[test]
     fn unreadable_file_poisons_segment() {
         use std::os::unix::fs::PermissionsExt;
@@ -2741,14 +2741,14 @@ mod tests {
         );
     }
 
-    // AC: zero eligible files are never proof.
+    // zero eligible files are never proof.
     #[test]
     fn empty_segment_is_not_proven_held() {
         let temp = tempfile::tempdir().unwrap();
         assert!(!segment_custody_proven(temp.path(), &entry("x", "present", "x")).unwrap());
     }
 
-    // AC: entry indexing and marker lookup cover key and original_key.
+    // entry indexing and marker lookup cover key and original_key.
     #[test]
     fn index_and_marker_lookup_cover_both_keys() {
         let temp = tempfile::tempdir().unwrap();
@@ -2766,7 +2766,7 @@ mod tests {
         assert_eq!(indexed.len(), 2);
     }
 
-    // AC: ancient capture quarantined now survives thirty more days.
+    // ancient capture quarantined now survives thirty more days.
     #[test]
     fn quarantine_stamp_resets_age() {
         let temp = tempfile::tempdir().unwrap();
@@ -3331,7 +3331,7 @@ mod tests {
             .unwrap();
     }
 
-    // AC: failed segments are kept indefinitely without server queries.
+    // failed segments are kept indefinitely without server queries.
     #[tokio::test]
     async fn failed_segments_kept_indefinitely_across_passes() {
         let temp = tempfile::tempdir().unwrap();
@@ -3347,7 +3347,7 @@ mod tests {
         assert!(server.requests().is_empty());
     }
 
-    // AC: listing-path 400 records failure and quarantines no segment.
+    // listing-path 400 records failure and quarantines no segment.
     #[tokio::test]
     async fn listing_client_error_keeps_every_segment_unquarantined() {
         let temp = tempfile::tempdir().unwrap();
@@ -3549,7 +3549,7 @@ mod tests {
         assert_eq!(worker.circuit_cooldown, 60.0);
     }
 
-    // AC: consecutive failed probes from a reachable open-breaker state climb the full ladder.
+    // consecutive failed probes from a reachable open-breaker state climb the full ladder.
     #[tokio::test]
     async fn failed_probes_climb_full_backoff_ladder() {
         let temp = tempfile::tempdir().unwrap();
@@ -3706,7 +3706,7 @@ mod tests {
         assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_MAX);
     }
 
-    // AC: sync shutdown releases the walker without retaining or cancelling the upload client.
+    // sync shutdown releases the walker without retaining or cancelling the upload client.
     #[tokio::test]
     async fn sync_shutdown_releases_client_without_cancelling_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -4157,7 +4157,7 @@ mod tests {
         assert!(segment.exists());
     }
 
-    // AC: upload success separates two runs of four transient failures.
+    // upload success separates two runs of four transient failures.
     #[tokio::test]
     async fn upload_success_resets_four_plus_four_failures() {
         let temp = tempfile::tempdir().unwrap();
@@ -4181,7 +4181,7 @@ mod tests {
         assert!(!worker.circuit_open);
     }
 
-    // AC: a successful day listing records contact without resetting failures.
+    // a successful day listing records contact without resetting failures.
     #[tokio::test]
     async fn listing_success_then_fifth_failure_opens() {
         let temp = tempfile::tempdir().unwrap();
@@ -4197,7 +4197,7 @@ mod tests {
         assert!(worker.circuit_open);
     }
 
-    // AC: successful pass commit is the third breaker reset site.
+    // successful pass commit is the third breaker reset site.
     #[tokio::test]
     async fn successful_pass_commit_resets_breaker_failures() {
         let temp = tempfile::tempdir().unwrap();
@@ -4210,7 +4210,7 @@ mod tests {
         assert_eq!(worker.last_error_type, None);
     }
 
-    // AC: an unproven v3 envelope never authorizes deletion.
+    // an unproven v3 envelope never authorizes deletion.
     #[tokio::test]
     async fn cleanup_total_mismatch_disables_deletion() {
         let temp = tempfile::tempdir().unwrap();
@@ -4232,7 +4232,7 @@ mod tests {
         assert!(segment.exists());
     }
 
-    // AC: cleanup query failure skips the entire day.
+    // cleanup query failure skips the entire day.
     #[tokio::test]
     async fn cleanup_query_failure_skips_day() {
         let temp = tempfile::tempdir().unwrap();
@@ -4247,7 +4247,7 @@ mod tests {
         assert!(segment.exists());
     }
 
-    // AC: one proven segment is deleted while an unproven sibling survives.
+    // one proven segment is deleted while an unproven sibling survives.
     #[tokio::test]
     async fn cleanup_deletes_proven_sibling_only() {
         let temp = tempfile::tempdir().unwrap();
@@ -4283,7 +4283,7 @@ mod tests {
         assert!(unproven.exists());
     }
 
-    // AC: one unproven local file keeps the whole segment.
+    // one unproven local file keeps the whole segment.
     #[tokio::test]
     async fn cleanup_unproven_file_keeps_whole_segment() {
         let temp = tempfile::tempdir().unwrap();
@@ -4309,7 +4309,7 @@ mod tests {
         assert!(segment.join("audio.flac").exists());
     }
 
-    // AC: a day with an attempted upload is not marked synced in that pass.
+    // a day with an attempted upload is not marked synced in that pass.
     #[tokio::test]
     async fn pending_upload_day_is_not_marked_synced() {
         let temp = tempfile::tempdir().unwrap();
@@ -4323,7 +4323,7 @@ mod tests {
         assert!(!segment.exists());
     }
 
-    // AC: day-name age, not directory mtime, controls positive retention.
+    // day-name age, not directory mtime, controls positive retention.
     #[tokio::test]
     async fn confirmed_segment_deleted_regardless_of_day_or_mtime() {
         let temp = tempfile::tempdir().unwrap();
@@ -4359,7 +4359,7 @@ mod tests {
         assert_eq!(load_facts(&config.state_dir()).pending_confirmed, Some(-5));
     }
 
-    // AC: a completion notification starts a pass.
+    // a completion notification starts a pass.
     #[tokio::test]
     async fn completion_trigger_starts_pass() {
         let temp = tempfile::tempdir().unwrap();
@@ -4394,7 +4394,7 @@ mod tests {
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
-    // AC: the periodic timeout starts a pass without a completion trigger.
+    // the periodic timeout starts a pass without a completion trigger.
     #[tokio::test(start_paused = true)]
     async fn periodic_sixty_seconds_starts_pass() {
         let temp = tempfile::tempdir().unwrap();
@@ -4430,7 +4430,7 @@ mod tests {
         );
     }
 
-    // AC: full reconciliation repeats only after an injected wall day elapses.
+    // full reconciliation repeats only after an injected wall day elapses.
     #[tokio::test]
     async fn acknowledged_segment_makes_no_requests_across_passes() {
         let temp = tempfile::tempdir().unwrap();
@@ -4477,7 +4477,7 @@ mod tests {
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
-    // AC: distinct days are queried newest first.
+    // distinct days are queried newest first.
     #[tokio::test]
     async fn sync_queries_distinct_days_newest_first() {
         let temp = tempfile::tempdir().unwrap();
@@ -4499,7 +4499,7 @@ mod tests {
         assert_eq!(upload_hits(&server), 2);
     }
 
-    // AC: triggers during an active request coalesce into one non-overlapping follow-up.
+    // triggers during an active request coalesce into one non-overlapping follow-up.
     #[tokio::test]
     async fn active_walk_trigger_coalesces_without_overlap() {
         let temp = tempfile::tempdir().unwrap();
@@ -4549,7 +4549,7 @@ mod tests {
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
-    // AC: shutdown cancels a blocked walk and leaves parseable facts.
+    // shutdown cancels a blocked walk and leaves parseable facts.
     #[tokio::test]
     async fn shutdown_mid_walk_is_prompt_and_state_remains_valid() {
         let temp = tempfile::tempdir().unwrap();
@@ -4586,7 +4586,7 @@ mod tests {
         assert!(serde_json::from_str::<Value>(&text).unwrap().is_object());
     }
 
-    // AC: an injected pass failure is supervised and the next trigger runs.
+    // an injected pass failure is supervised and the next trigger runs.
     #[tokio::test]
     async fn injected_pass_error_does_not_kill_worker() {
         #[derive(Clone)]
@@ -4627,7 +4627,7 @@ mod tests {
         assert_eq!(output.matches("Sync error").count(), 1);
     }
 
-    // AC: cleanup failure is contained and a later trigger still runs.
+    // cleanup failure is contained and a later trigger still runs.
     #[tokio::test]
     async fn cleanup_error_does_not_kill_worker() {
         let temp = tempfile::tempdir().unwrap();
@@ -4773,7 +4773,7 @@ mod tests {
         assert!(!output.contains("Sync error"), "{output}");
     }
 
-    // AC: a completion racing shutdown drains one walker pass before join completes.
+    // a completion racing shutdown drains one walker pass before join completes.
     #[tokio::test]
     async fn final_completion_trigger_drains_before_shutdown_returns() {
         let temp = tempfile::tempdir().unwrap();

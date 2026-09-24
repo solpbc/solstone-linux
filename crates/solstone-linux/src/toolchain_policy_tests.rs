@@ -463,7 +463,7 @@ fn combined_output(output: &Output) -> String {
     )
 }
 
-// AC: the exact committed Rust toolchain declaration is mandatory and complete.
+// the exact committed Rust toolchain declaration is mandatory and complete.
 #[test]
 fn toolchain_file_is_required() {
     let config = toolchain();
@@ -487,7 +487,7 @@ fn toolchain_file_is_required() {
     );
 }
 
-// AC: every compiler declaration is derived from the toolchain-file authority.
+// every compiler declaration is derived from the toolchain-file authority.
 #[test]
 fn compiler_declarations_match_toolchain_authority() {
     let root = workspace_root();
@@ -505,7 +505,7 @@ fn compiler_declarations_match_toolchain_authority() {
     assert_eq!(declarations, vec![expected.as_str(), expected.as_str()]);
 }
 
-// AC: dependency-resolving commands stay locked across Make, containers, and scripts.
+// dependency-resolving commands stay locked across Make, containers, and scripts.
 #[test]
 fn locked_policy_covers_nested_container_commands() {
     let (makefile, container, scripts) = policy_sources();
@@ -514,7 +514,7 @@ fn locked_policy_covers_nested_container_commands() {
     assert!(counts.nested_container > 0);
 }
 
-// AC: Make command wrappers and wrapper-carried lock flags cannot evade policy.
+// Make command wrappers and wrapper-carried lock flags cannot evade policy.
 #[test]
 fn locked_policy_resolves_make_wrappers() {
     let (makefile, container, scripts) = policy_sources();
@@ -522,7 +522,7 @@ fn locked_policy_resolves_make_wrappers() {
     assert!(counts.make_wrapper > 0);
 }
 
-// AC: unresolved command indirection is a named hard failure, never an ignored command.
+// unresolved command indirection is a named hard failure, never an ignored command.
 #[test]
 fn locked_policy_fails_closed_on_unresolved_command_wrapper() {
     let (mut makefile, container, scripts) = policy_sources();
@@ -532,7 +532,7 @@ fn locked_policy_fails_closed_on_unresolved_command_wrapper() {
     assert!(error.contains("$(SOME_UNDEFINED_CMD)"));
 }
 
-// AC: a scan containing only exempt Cargo commands cannot satisfy lock-policy coverage.
+// a scan containing only exempt Cargo commands cannot satisfy lock-policy coverage.
 #[test]
 fn locked_policy_requires_a_resolving_invocation() {
     let makefile = "CARGO := cargo\nprobe:\n\t$(CARGO) fmt\n";
@@ -602,7 +602,7 @@ fn direct_generate_rpm_path_stub_records_exact_offline_argv() {
     assert!(!tripwire.exists());
 }
 
-// AC: shell variables, Make wrappers, paths, and compound commands cannot evade inspection.
+// shell variables, Make wrappers, paths, and compound commands cannot evade inspection.
 #[test]
 fn locked_policy_recognizes_general_cargo_command_forms() {
     let (mut makefile, mut container, mut scripts) = policy_sources();
@@ -617,7 +617,7 @@ fn locked_policy_recognizes_general_cargo_command_forms() {
     scan_policy(&makefile, &container, &scripts).unwrap();
 }
 
-// AC: every workspace member inherits the workspace lint floor.
+// every workspace member inherits the workspace lint floor.
 #[test]
 fn workspace_members_inherit_workspace_lints() {
     let root = workspace_root();
@@ -632,7 +632,7 @@ fn workspace_members_inherit_workspace_lints() {
     }
 }
 
-// AC: an absent cargo-deny executable is a named hard failure, never a skip.
+// an absent cargo-deny executable is a named hard failure, never a skip.
 #[test]
 fn cargo_deny_missing_fails_loudly() {
     let output = make_with_fake_cargo(None);
@@ -640,7 +640,7 @@ fn cargo_deny_missing_fails_loudly() {
     assert!(combined_output(&output).contains("cargo-deny not found"));
 }
 
-// AC: a cargo-deny version skew is a named hard failure.
+// a cargo-deny version skew is a named hard failure.
 #[test]
 fn cargo_deny_version_skew_fails_loudly() {
     let output = make_with_fake_cargo(Some("cargo-deny 0.20.1"));
@@ -648,7 +648,7 @@ fn cargo_deny_version_skew_fails_loudly() {
     assert!(combined_output(&output).contains("cargo-deny version mismatch"));
 }
 
-// AC: dependency policy cannot regain a success-producing missing-tool branch.
+// dependency policy cannot regain a success-producing missing-tool branch.
 #[test]
 fn cargo_deny_cannot_skip_dependency_policy() {
     let makefile = fs::read_to_string(workspace_root().join("Makefile")).unwrap();
@@ -656,7 +656,7 @@ fn cargo_deny_cannot_skip_dependency_policy() {
     assert!(makefile.contains("cargo deny $(CARGO_LOCKED) --offline check licenses bans sources"));
 }
 
-// AC: ambient toolchain skew is rejected before any Cargo gate work can run.
+// ambient toolchain skew is rejected before any Cargo gate work can run.
 #[test]
 fn ambient_toolchain_override_cannot_escape_preflight() {
     let output = Command::new(command_path("make"))
@@ -672,7 +672,7 @@ fn ambient_toolchain_override_cannot_escape_preflight() {
     assert!(!text.contains("cargo clippy"));
 }
 
-// AC: package-tool mirrors equal their Makefile authorities without test literals.
+// package-tool mirrors equal their Makefile authorities without test literals.
 #[test]
 fn package_tool_versions_match_authority() {
     let root = workspace_root();
@@ -694,7 +694,7 @@ fn package_tool_versions_match_authority() {
     assert!(makefile.contains("cargo-deny $(CARGO_DENY_VERSION)"));
 }
 
-// AC: the release lanes verify the provisioned tool versions at container runtime,
+// the release lanes verify the provisioned tool versions at container runtime,
 // so those build arguments must survive into their respective final tool images.
 #[test]
 fn release_tool_images_persist_packaging_tool_version_authority() {
@@ -713,7 +713,7 @@ fn release_tool_images_persist_packaging_tool_version_authority() {
     }
 }
 
-// AC: dependency policy retains explicit wildcard and unknown-source denial.
+// dependency policy retains explicit wildcard and unknown-source denial.
 #[test]
 fn dependency_policy_denies_wildcards_and_unknown_sources() {
     let deny = read_toml(&workspace_root().join("deny.toml"));

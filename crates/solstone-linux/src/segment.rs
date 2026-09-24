@@ -58,7 +58,7 @@ mod tests {
                 .all(|byte| byte.is_ascii_digit())
         );
     }
-    // AC: duration clamps at one and at the configured ceiling.
+    // duration clamps at one and at the configured ceiling.
     #[test]
     fn duration_clamps() {
         assert_eq!(clamp_duration(0.5, 300), 1);

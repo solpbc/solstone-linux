@@ -494,7 +494,7 @@ mod tests {
             0
         );
     }
-    // AC: both duration paths and subsecond media floor at one.
+    // both duration paths and subsecond media floor at one.
     #[test]
     fn floors() {
         assert_eq!(clamp_duration(0.5, 300), 1);
@@ -506,7 +506,7 @@ mod tests {
         recover_incomplete_segments(t.path(), 300, 1000.0, &FixedMedia(0.5));
         assert!(path.with_file_name("140000_1").exists());
     }
-    // AC: failed rename quarantines that segment and scanning continues.
+    // failed rename quarantines that segment and scanning continues.
     #[test]
     fn rename_failure_continues() {
         let t = tempfile::tempdir().unwrap();
@@ -526,12 +526,12 @@ mod tests {
         assert!(first.with_file_name("120000.failed").exists());
         assert!(second.with_file_name("130000_60").exists());
     }
-    // AC: stat errors skip rather than quarantine.
+    // stat errors skip rather than quarantine.
     #[test]
     fn stat_error_skips() {
         assert!(!candidate_is_old_enough(Err(()), 1000.0));
     }
-    // AC: subdirectories count as content.
+    // subdirectories count as content.
     #[test]
     fn subdirectory_is_content() {
         let t = tempfile::tempdir().unwrap();
@@ -541,7 +541,7 @@ mod tests {
         write_segment_metadata(&path, 940.0, SegmentProgress::default());
         assert!(recover_segment(&path, 300, 1000.0, &NoMedia));
     }
-    // AC: media candidates use max duration and swallow individual failures.
+    // media candidates use max duration and swallow individual failures.
     #[test]
     fn probe_max_and_errors() {
         struct Probe;
@@ -560,7 +560,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(readable_media_duration(&paths, &Probe), Some(4.0));
     }
-    // AC: Claxon accepts case-insensitive FLAC suffixes and rejects directories.
+    // Claxon accepts case-insensitive FLAC suffixes and rejects directories.
     #[test]
     fn probe_file_filter() {
         let t = tempfile::tempdir().unwrap();
@@ -578,7 +578,7 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         assert_eq!(ClaxonMediaDurationProbe.duration(&dir), None);
     }
-    // AC: zero sample rates are rejected by the probe contract.
+    // zero sample rates are rejected by the probe contract.
     #[test]
     fn zero_rate_guard() {
         assert_eq!(stream_duration(Some(64_000), 0), None);
@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(scan_segment_progress(t.path()), (true, 0));
     }
 
-    // AC5: in-flight legacy sidecars from the previous writer still recover.
+    // in-flight legacy sidecars from the previous writer still recover.
     #[test]
     fn legacy_sidecar_reads_and_recovers() {
         const LEGACY: &[u8] = b"{\"start_timestamp\":1700000000.00000000}";

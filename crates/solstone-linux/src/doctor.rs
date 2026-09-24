@@ -601,7 +601,7 @@ mod tests {
             }
         }
     }
-    // AC: aggregation keeps warnings non-fatal and failures fatal for each warn-capable slot.
+    // aggregation keeps warnings non-fatal and failures fatal for each warn-capable slot.
     // The decision-core tests below exercise the native warning branches themselves.
     #[test]
     fn warn_capable_matrix() {
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(present.severity, Severity::Ok);
         assert_eq!(present.detail, "X11 RandR and ximagesrc available");
     }
-    // AC: X11's in-process GStreamer initialization failure names the failure and remedy.
+    // X11's in-process GStreamer initialization failure names the failure and remedy.
     #[test]
     fn x11_capture_gstreamer_initialization_failure() {
         let result = x11_result(
@@ -685,7 +685,7 @@ mod tests {
         assert!(result.detail.contains("registry unavailable"));
         assert!(result.detail.contains("install GStreamer 1.x"));
     }
-    // AC: native GStreamer decision copy covers success, ordered missing names, and init failure.
+    // native GStreamer decision copy covers success, ordered missing names, and init failure.
     #[test]
     fn gstreamer_decision_matrix() {
         let present = gstreamer_result(Ok(Vec::new()));
@@ -708,7 +708,7 @@ mod tests {
         assert!(init.detail.contains("registry unavailable"));
         assert!(init.detail.contains("install GStreamer 1.x"));
     }
-    // AC: the native Pulse decision reports both reachability outcomes with a remedy.
+    // the native Pulse decision reports both reachability outcomes with a remedy.
     #[test]
     fn pulse_decision_matrix() {
         let reachable = pulse_result(Ok(()));
@@ -724,7 +724,7 @@ mod tests {
                 .contains("start PipeWire Pulse or PulseAudio")
         );
     }
-    // AC: the native systemd decision covers success, empty output, and runner errors.
+    // the native systemd decision covers success, empty output, and runner errors.
     #[test]
     fn systemd_decision_matrix() {
         let running = systemd_result(Ok(Some("running".into())));
@@ -741,7 +741,7 @@ mod tests {
         assert!(failed.detail.contains("run inside a systemd user session"));
     }
     // tests/test_doctor.py::TestCheckX11Capture::test_no_display_no_x11_session_not_applicable
-    // AC: Python treats an empty DISPLAY value as absent.
+    // Python treats an empty DISPLAY value as absent.
     #[test]
     fn empty_display_is_absent() {
         assert_eq!(display_value(Some(String::new())), None);
@@ -774,7 +774,7 @@ mod tests {
         .await;
         assert_eq!(result, Err(()));
     }
-    // AC: the panel-icon check reports installed, enabled and live-watcher separately,
+    // the panel-icon check reports installed, enabled and live-watcher separately,
     // and splits "installed" again where only a session restart can finish the job.
     #[test]
     fn panel_icon_reports_seven_distinct_answers() {
@@ -815,10 +815,10 @@ mod tests {
         assert!(answers.iter().all(|answer| answer.name == "panel icon"));
     }
 
-    // AC: never `ok` for an installed-but-disabled extension. This was the false green
+    // never `ok` for an installed-but-disabled extension. This was the false green
     // the old check produced, so it gets its own assertion rather than riding in the
     // matrix above.
-    // AC: a probe that could not answer is never a green line. This is the other
+    // a probe that could not answer is never a green line. This is the other
     // direction of the same defect the check exists to fix.
     #[test]
     fn a_probe_that_could_not_answer_is_never_reported_ok() {
@@ -839,7 +839,7 @@ mod tests {
         assert!(answer.detail.contains("off"));
     }
 
-    // AC: every answer fits doctor's own report layout.
+    // every answer fits doctor's own report layout.
     #[test]
     fn panel_icon_answers_fit_the_report_layout() {
         for readiness in [
@@ -857,7 +857,7 @@ mod tests {
         }
     }
     // tests/test_doctor.py::test_check_sync_health_update_needed
-    // AC: sync health covers connected, warning, and failing doctor surfaces.
+    // sync health covers connected, warning, and failing doctor surfaces.
     #[test]
     fn sync_health_warn_ok_fail_matrix() {
         use crate::{

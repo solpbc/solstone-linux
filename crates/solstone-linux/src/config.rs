@@ -1218,7 +1218,7 @@ mod tests {
         assert_eq!(x.config.capture_framerate, 4);
         assert!(old.exists());
     }
-    // AC: all nine persisted defaults.
+    // all nine persisted defaults.
     #[test]
     fn all_defaults() {
         let c = Config::default();
@@ -1227,7 +1227,7 @@ mod tests {
             json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"capture_framerate":1,"draw_cursor":true,"start_paused":false,"panel_icon_offer":true})
         );
     }
-    // AC: numeric coercion rejects bool and truncates floats, including list elements.
+    // numeric coercion rejects bool and truncates floats, including list elements.
     #[test]
     fn numeric_coercion() {
         let t = tempfile::tempdir().unwrap();
@@ -1241,7 +1241,7 @@ mod tests {
         assert_eq!(x.config.sync_max_retries, 10);
         assert_eq!(warning_fields(&x), vec![Some("sync_max_retries")]);
     }
-    // AC: Python JSON truthiness mapping.
+    // Python JSON truthiness mapping.
     #[test]
     fn truthiness() {
         for (value, expected) in [
@@ -1260,7 +1260,7 @@ mod tests {
         }
         assert!(json_truthy(None, true));
     }
-    // AC: draw_cursor uses truthiness, not string parsing.
+    // draw_cursor uses truthiness, not string parsing.
     #[test]
     fn cursor_truthiness() {
         let t = tempfile::tempdir().unwrap();
@@ -1269,7 +1269,7 @@ mod tests {
         write(t.path(), json!({"draw_cursor":0}));
         assert!(!load(t.path()).config.draw_cursor);
     }
-    // AC: typed string deviation warns once and defaults empty.
+    // typed string deviation warns once and defaults empty.
     #[test]
     fn non_string_field() {
         let t = tempfile::tempdir().unwrap();
@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(warning_fields(&x), vec![Some("stream")]);
         assert!(x.warnings[0].message.contains("stream=7"));
     }
-    // AC: unknown top-level keys round-trip as equal serde_json::Value through all writers.
+    // unknown top-level keys round-trip as equal serde_json::Value through all writers.
     #[test]
     fn unknown_keys_preserved_through_all_writers() {
         let nested_value = json!({
@@ -1345,7 +1345,7 @@ mod tests {
         }
     }
 
-    // AC: migrate preserves arbitrary unknown content byte-for-byte.
+    // migrate preserves arbitrary unknown content byte-for-byte.
     #[test]
     fn migration_preserves_unknown_bytes_verbatim() {
         let t = tempfile::tempdir().unwrap();
@@ -1363,7 +1363,7 @@ mod tests {
         assert_eq!(dest_bytes, legacy_bytes);
     }
 
-    // AC: settings save overlays only prompted fields and preserves concurrent valid disk fields & unknowns.
+    // settings save overlays only prompted fields and preserves concurrent valid disk fields & unknowns.
     #[test]
     fn settings_merge_preserves_unprompted_fields_and_unknowns() {
         let t = tempfile::tempdir().unwrap();
@@ -1673,7 +1673,7 @@ mod tests {
             assert!(!err_display.contains("PRESERVED-ORDINARY-SENTINEL"));
         }
     }
-    // AC: temp suffix replaces .json and no temp remains after atomic rename.
+    // temp suffix replaces .json and no temp remains after atomic rename.
     #[test]
     fn atomic_temp_name() {
         let t = tempfile::tempdir().unwrap();
@@ -1686,7 +1686,7 @@ mod tests {
         );
     }
 
-    // AC: a stale whole-config writer preserves a newer linked stream.
+    // a stale whole-config writer preserves a newer linked stream.
     #[test]
     fn stale_settings_snapshot_preserves_linked_stream() {
         let t = tempfile::tempdir().unwrap();
@@ -2014,7 +2014,7 @@ mod tests {
         }
     }
 
-    // AC: migration failure is returned as one warning and leaves legacy data intact.
+    // migration failure is returned as one warning and leaves legacy data intact.
     #[test]
     fn migration_warning() {
         let t = tempfile::tempdir().unwrap();
@@ -2035,7 +2035,7 @@ mod tests {
         assert!(x.warnings.iter().all(|warning| warning.field.is_none()));
         assert!(old.join("config.json").exists());
     }
-    // AC: a second migration load is byte- and mode-stable.
+    // a second migration load is byte- and mode-stable.
     #[test]
     fn migration_idempotent() {
         let t = tempfile::tempdir().unwrap();

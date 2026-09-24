@@ -87,7 +87,7 @@ fn collect_files(path: &Path, paths: &mut BTreeSet<PathBuf>) {
     }
 }
 
-// AC: release metadata lives on the member crate and both package formats
+// release metadata lives on the member crate and both package formats
 // resolve to AGPL-3.0-only using their real schemas.
 #[test]
 fn package_metadata_and_resolved_licenses() {
@@ -131,7 +131,7 @@ fn package_metadata_and_resolved_licenses() {
     );
 }
 
-// AC: the committed proof policy names artifacts from the current workspace
+// the committed proof policy names artifacts from the current workspace
 // version so an ordinary CI run catches a stale policy before candidate build.
 #[test]
 fn release_proof_install_commands_track_workspace_version() {
@@ -160,7 +160,7 @@ fn release_proof_install_commands_track_workspace_version() {
     }
 }
 
-// AC: both supported container engines share one ignore policy that excludes
+// both supported container engines share one ignore policy that excludes
 // host build products without hiding the canonical icon sources.
 #[test]
 fn container_context_excludes_host_outputs() {
@@ -176,7 +176,7 @@ fn container_context_excludes_host_outputs() {
     assert!(!ignore.lines().any(|line| line.contains("contrib")));
 }
 
-// AC: each tool's asset dialect resolves to the same committed files plus the
+// each tool's asset dialect resolves to the same committed files plus the
 // workspace-aware release binary, and every committed source exists.
 #[test]
 fn package_assets_exist_and_match() {
@@ -222,7 +222,7 @@ fn package_assets_exist_and_match() {
     );
 }
 
-// AC: Debian sealing must hash the release binary, every declared asset, and
+// Debian sealing must hash the release binary, every declared asset, and
 // cargo-deb's generated copyright file. Keep the Containerfile bound coupled
 // to the package manifest so an asset addition cannot strand the candidate.
 #[test]
@@ -378,7 +378,7 @@ fn output_text(output: &Output) -> String {
     )
 }
 
-// AC: installer dry-run prints a complete plan while leaving repository and
+// installer dry-run prints a complete plan while leaving repository and
 // isolated user roots byte-, metadata-, and path-identical.
 #[test]
 fn installer_dry_run_is_write_free() {
@@ -435,7 +435,7 @@ fn installer_dry_run_is_write_free() {
     assert_eq!(git_status(), git_before);
 }
 
-// AC: a real portable install writes the expected bytes and executable/data
+// a real portable install writes the expected bytes and executable/data
 // modes into an isolated explicit prefix.
 #[test]
 fn installer_installs_archive_into_prefix() {
@@ -491,7 +491,7 @@ fn installer_installs_archive_into_prefix() {
     );
 }
 
-// AC: a real install merges its icons into the shared hicolor theme without
+// a real install merges its icons into the shared hicolor theme without
 // modifying unrelated application icons or the theme index.
 #[test]
 fn installer_preserves_foreign_hicolor_files() {

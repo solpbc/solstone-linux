@@ -174,7 +174,7 @@ mod tests {
             None
         );
     }
-    // AC: only missing and empty values are recovered; existing values win.
+    // only missing and empty values are recovered; existing values win.
     #[test]
     fn recovers_only_missing() {
         let mut env = HashMap::from([
@@ -189,14 +189,14 @@ mod tests {
         assert_eq!(env["WAYLAND_DISPLAY"], "wayland-0");
         assert_eq!(env["DBUS_SESSION_BUS_ADDRESS"], "bus");
     }
-    // AC: empty systemctl values are not assigned.
+    // empty systemctl values are not assigned.
     #[test]
     fn ignores_empty_output_value() {
         let mut env = HashMap::new();
         recover_session_env(&mut env, 1000, &FakeRunner::success("DISPLAY=\n"));
         assert!(!env.contains_key("DISPLAY"));
     }
-    // AC: all-present environment short-circuits without systemctl.
+    // all-present environment short-circuits without systemctl.
     #[test]
     fn all_present_short_circuits() {
         let mut env = HashMap::from([
@@ -208,7 +208,7 @@ mod tests {
         recover_session_env(&mut env, 1000, &runner);
         assert_eq!(runner.calls.get(), 0);
     }
-    // AC: runtime directory is synthesized before systemctl and never overwritten.
+    // runtime directory is synthesized before systemctl and never overwritten.
     #[test]
     fn runtime_dir_fallback() {
         let mut env = HashMap::new();
@@ -226,7 +226,7 @@ mod tests {
         recover_session_env(&mut env, 4321, &FakeRunner::success(""));
         assert_eq!(env["XDG_RUNTIME_DIR"], "/run/user/4321");
     }
-    // AC: non-zero systemctl status is a silent recovery failure.
+    // non-zero systemctl status is a silent recovery failure.
     #[test]
     fn systemctl_nonzero() {
         let mut env = HashMap::new();
@@ -243,7 +243,7 @@ mod tests {
         );
         assert!(!env.contains_key("DISPLAY"));
     }
-    // AC: missing systemctl binary is a silent recovery failure.
+    // missing systemctl binary is a silent recovery failure.
     #[test]
     fn systemctl_missing() {
         let mut env = HashMap::new();
@@ -257,7 +257,7 @@ mod tests {
         );
         assert!(!env.contains_key("DISPLAY"));
     }
-    // AC: systemctl timeout is a silent recovery failure.
+    // systemctl timeout is a silent recovery failure.
     #[test]
     fn systemctl_timeout() {
         let mut env = HashMap::new();
@@ -271,7 +271,7 @@ mod tests {
         );
         assert!(!env.contains_key("DISPLAY"));
     }
-    // AC: pactl failure reports the audio readiness message.
+    // pactl failure reports the audio readiness message.
     #[test]
     fn pactl_failure() {
         let runner = FakeRunner::new(
@@ -286,7 +286,7 @@ mod tests {
             Some("audio server not responding (pactl info failed)")
         );
     }
-    // AC: pactl timeout reports the same audio readiness message.
+    // pactl timeout reports the same audio readiness message.
     #[test]
     fn pactl_timeout() {
         let runner = FakeRunner::new(

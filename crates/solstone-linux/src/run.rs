@@ -716,7 +716,7 @@ mod tests {
         }
     }
 
-    // AC: READY precedes the startup watchdog, which covers every blocking startup phase.
+    // READY precedes the startup watchdog, which covers every blocking startup phase.
     #[test]
     fn ready_precedes_startup_watchdog() {
         let notifier = Arc::new(RecordingNotifier::default());
@@ -731,7 +731,7 @@ mod tests {
         drop(heartbeat);
     }
 
-    // AC: construction heartbeat Drop stops and joins its worker before ticks can begin.
+    // construction heartbeat Drop stops and joins its worker before ticks can begin.
     #[test]
     fn construction_heartbeat_stops_on_drop() {
         let notifier = Arc::new(RecordingNotifier::default());
@@ -748,7 +748,7 @@ mod tests {
         assert_eq!(notifier.watchdogs.load(Ordering::Acquire), stopped_at);
     }
 
-    // AC: successful ticks emit exactly one watchdog and failed ticks emit none.
+    // successful ticks emit exactly one watchdog and failed ticks emit none.
     #[test]
     fn tick_once_watchdog_contract() {
         let notifier = RecordingNotifier::default();
@@ -829,7 +829,7 @@ mod tests {
         }
     }
 
-    // AC: 4 — the production wake dispatcher applies a command before the next tick.
+    // the production wake dispatcher applies a command before the next tick.
     #[test]
     fn command_between_ticks_has_bounded_latency() {
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -858,7 +858,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
-    // AC: 4 — real command routing publishes distinct timed anchors and all indefinite variants.
+    // real command routing publishes distinct timed anchors and all indefinite variants.
     #[test]
     fn pause_durations_produce_distinct_anchors() {
         let (mut observer, receiver) = command_observer();
@@ -1113,7 +1113,7 @@ mod tests {
         assert_eq!(published.pause_until, None);
     }
 
-    // AC: 4 — absolute deadlines advance without drift and skip catch-up storms.
+    // absolute deadlines advance without drift and skip catch-up storms.
     #[test]
     fn tick_deadline_advances_absolutely_and_skips_storms() {
         let start = Instant::now();
@@ -1635,7 +1635,7 @@ mod tests {
         peer.shutdown().await;
     }
 
-    // AC: an unexpected shared UploadClient is still cancelled before shutdown reports the bug.
+    // an unexpected shared UploadClient is still cancelled before shutdown reports the bug.
     #[test]
     fn singleton_lock_precedes_recovery_exactly() {
         let config = Config::default();

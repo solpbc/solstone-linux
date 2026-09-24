@@ -398,7 +398,7 @@ mod tests {
             assert!(value.contains(expected));
         }
     }
-    // AC: missing systemctl is non-fatal after files are written.
+    // missing systemctl is non-fatal after files are written.
     #[test]
     fn systemctl_missing_is_nonfatal() {
         let t = tempfile::tempdir().unwrap();
@@ -417,7 +417,7 @@ mod tests {
         assert!(output.contains("after systemd is available"));
         assert!(runner.calls.borrow().is_empty());
     }
-    // AC: present but failing systemctl is non-fatal after files are written.
+    // present but failing systemctl is non-fatal after files are written.
     #[test]
     fn systemctl_nonzero_is_nonfatal() {
         let t = tempfile::tempdir().unwrap();
@@ -436,7 +436,7 @@ mod tests {
         assert!(output.contains("systemctl enable --now solstone-linux.service failed"));
         assert!(output.contains("to inspect the error"));
     }
-    // AC: missing HOME cannot redirect service writes or removals into the current directory.
+    // missing HOME cannot redirect service writes or removals into the current directory.
     #[test]
     fn production_paths_require_home() {
         let error =
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(error.to_string().contains("HOME is not set"));
     }
-    // AC: uninstall is ordered, idempotent, and preserves all owner data.
+    // uninstall is ordered, idempotent, and preserves all owner data.
     #[test]
     fn uninstall_fake_tree_preserves_owner_data() {
         let t = tempfile::tempdir().unwrap();

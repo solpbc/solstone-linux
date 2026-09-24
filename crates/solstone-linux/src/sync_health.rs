@@ -866,7 +866,7 @@ mod tests {
     use crate::config::DEFAULT_SYNC_STALE_THRESHOLD;
     use crate::private_link::LinkFactState;
 
-    // AC: a failed save leaves no pid-named scratch file behind. The temporary is never
+    // a failed save leaves no pid-named scratch file behind. The temporary is never
     // collected by anything, so an early return would litter the state directory forever.
     #[test]
     fn failed_save_leaves_no_temporary() {
@@ -982,7 +982,7 @@ mod tests {
         }
     }
 
-    // auth_401_is_neither_revoked_nor_connected_nor_offline pins Decision 3.
+    // A 401 is its own state: not revoked, not connected, and not offline.
     // The explicit 401 arm sits above Connected so persisted empty-queue facts cannot turn green.
     #[test]
     fn auth_401_is_neither_revoked_nor_connected_nor_offline() {
@@ -1390,7 +1390,7 @@ mod tests {
         }
     }
 
-    // AC: invalid fields fall back independently and signed pending values round-trip.
+    // invalid fields fall back independently and signed pending values round-trip.
     #[test]
     fn field_parse_failures_are_independent() {
         let temp = tempfile::tempdir().unwrap();
@@ -1408,7 +1408,7 @@ mod tests {
         assert!(facts.progress.is_empty());
     }
 
-    // AC: formatters retain Python truncation, units, and defaulted-vs-raw progress behavior.
+    // formatters retain Python truncation, units, and defaulted-vs-raw progress behavior.
     #[test]
     fn formatter_parity() {
         assert_eq!(format_age(None), "unknown");

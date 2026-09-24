@@ -676,7 +676,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // AC: shared HTTP harness reports URI-specific hit counts for phase gates.
+    // shared HTTP harness reports URI-specific hit counts for phase gates.
     #[tokio::test]
     async fn counts_requests_by_uri_substring() {
         let server = MockServer::new(vec![(200, json!({}))]).await;
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(server.request_count("/app/devices/ingest"), 0);
     }
 
-    // AC: shared HTTP harness can emit test-controlled streaming chunks.
+    // shared HTTP harness can emit test-controlled streaming chunks.
     #[tokio::test]
     async fn streams_receiver_chunks() {
         let (sender, receiver) = mpsc::channel(2);
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(body, Bytes::from_static(b"onetwo"));
     }
 
-    // AC: real-I/O progress waits restore deterministic paused time after their signal arrives.
+    // real-I/O progress waits restore deterministic paused time after their signal arrives.
     #[tokio::test(start_paused = true)]
     async fn bounded_progress_waits_for_test_owned_signal() {
         let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -732,7 +732,7 @@ mod tests {
         assert_eq!(start.elapsed(), Duration::from_secs(1));
     }
 
-    // AC: unreachable real-I/O progress reports its named host-clock bound.
+    // unreachable real-I/O progress reports its named host-clock bound.
     #[tokio::test(start_paused = true)]
     async fn bounded_progress_reports_unreachable_progress() {
         let error = bounded_progress(

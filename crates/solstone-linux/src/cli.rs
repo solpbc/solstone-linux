@@ -846,7 +846,7 @@ mod tests {
         }
     }
 
-    // AC: root help pins the complete Python CLI subcommand surface.
+    // root help pins the complete Python CLI subcommand surface.
     #[test]
     fn root_help_surface() {
         let command = Args::command();
@@ -872,8 +872,8 @@ mod tests {
         );
     }
 
-    // AC: the panel-icon command's own help text is owner-visible and voice-gated.
-    // AC: the control commands name what they pause. ⛔ Not "the solstone app" — the
+    // the panel-icon command's own help text is owner-visible.
+    // the control commands name what they pause, not "the solstone app": the
     // process keeps running and must, in order to receive Resume.
     #[test]
     fn control_help_surface_names_intake_not_the_app() {
@@ -899,7 +899,7 @@ mod tests {
             "set up the GNOME panel icon, where pause and resume live"
         );
     }
-    // AC: run help pins its interval option and exact help text.
+    // run help pins its interval option and exact help text.
     #[test]
     fn run_help_surface() {
         let command = Args::command();
@@ -922,7 +922,7 @@ mod tests {
         );
         assert!(Args::try_parse_from(["solstone-linux", "--version"]).is_err());
     }
-    // AC: verbose raises logging verbosity.
+    // verbose raises logging verbosity.
     #[test]
     fn verbose_flag() {
         assert!(
@@ -932,7 +932,7 @@ mod tests {
         );
         assert!(!Args::try_parse_from(["solstone-linux"]).unwrap().verbose);
     }
-    // AC: the safe wrapper assigns the exact value and leaves the process environment as found.
+    // the safe wrapper assigns the exact value and leaves the process environment as found.
     #[test]
     #[allow(unsafe_code)]
     fn session_environment_wrapper_assigns_and_restores() {
@@ -952,7 +952,7 @@ mod tests {
             None => unsafe { ::std::env::remove_var(NAME) },
         }
     }
-    // AC: bare invocation is run parity.
+    // bare invocation is run parity.
     #[test]
     fn bare_is_run() {
         let args = Args::try_parse_from(["solstone-linux"]).unwrap();
@@ -961,7 +961,7 @@ mod tests {
             Commands::Run { interval: None }
         );
     }
-    // AC: truthy interval overrides while zero does not.
+    // truthy interval overrides while zero does not.
     #[test]
     fn interval_semantics() {
         let mut config = Config::default();
@@ -970,7 +970,7 @@ mod tests {
         apply_interval(&mut config, Some(0));
         assert_eq!(config.segment_interval, 600);
     }
-    // AC: a genuinely unrecoverable session maps to EX_TEMPFAIL 75.
+    // a genuinely unrecoverable session maps to EX_TEMPFAIL 75.
     #[test]
     fn not_ready_exit_75() {
         let runner = FakeRunner {
@@ -980,12 +980,12 @@ mod tests {
         let mut environment = HashMap::new();
         assert_eq!(exit_code(session_gate(&mut environment, 1000, &runner)), 75);
     }
-    // AC: non-session failures map to exit one.
+    // non-session failures map to exit one.
     #[test]
     fn other_failure_exit_1() {
         assert_eq!(exit_code(Err(RunFailure::Other)), 1);
     }
-    // AC: PATH lookup requires an executable regular file.
+    // PATH lookup requires an executable regular file.
     #[test]
     fn executable_lookup_contract() {
         let t = tempfile::tempdir().unwrap();
@@ -997,7 +997,7 @@ mod tests {
         assert!(is_executable_file(file.to_str().unwrap()));
         assert!(Path::new(&file).is_file());
     }
-    // AC: proc hostname input is trimmed before stream validation.
+    // proc hostname input is trimmed before stream validation.
     #[test]
     fn hostname_is_trimmed() {
         assert_eq!("archon\n".trim(), "archon");
@@ -1367,7 +1367,7 @@ mod tests {
         assert!(!disk_text.contains("cache_retention_days"));
     }
 
-    // AC: prompt failure leaves the persisted settings unchanged.
+    // prompt failure leaves the persisted settings unchanged.
     #[test]
     fn settings_prompt_failure_does_not_save() {
         let t = tempfile::tempdir().unwrap();
@@ -1471,7 +1471,7 @@ mod tests {
         );
     }
 
-    // AC: the link line reports the link that exists, so it cannot contradict a sync line
+    // the link line reports the link that exists, so it cannot contradict a sync line
     // telling the owner to pair. This is the upgrade shape — config present, never paired.
     #[test]
     fn status_reports_an_absent_link_as_not_paired() {

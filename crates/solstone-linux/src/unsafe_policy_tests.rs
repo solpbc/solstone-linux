@@ -1340,7 +1340,7 @@ fn reviewed_seams_error(inventory: &Inventory) -> Result<(), String> {
     Ok(())
 }
 
-// AC: the repository has exactly the two reviewed function-local unsafe seams.
+// the repository has exactly the two reviewed function-local unsafe seams.
 #[test]
 fn repository_unsafe_inventory_matches_reviewed_seams() {
     let inventory = scan_workspace_unsafe(&workspace_root()).expect("repository must scan");
@@ -1353,7 +1353,7 @@ fn repository_unsafe_inventory_matches_reviewed_seams() {
     }
 }
 
-// AC: recursive enumeration covers exact conventional and target-named source paths but not metadata output roots.
+// recursive enumeration covers exact conventional and target-named source paths but not metadata output roots.
 #[test]
 fn fixture_coverage_shape_is_computed_by_the_scanner() {
     let fixture = fixture_workspace();
@@ -1394,7 +1394,7 @@ fn fixture_coverage_shape_is_computed_by_the_scanner() {
     assert_eq!(inventory.build_scripts, 2);
 }
 
-// AC: a member-root target/source.rs is scanned when it is not a metadata output root.
+// a member-root target/source.rs is scanned when it is not a metadata output root.
 #[test]
 fn target_named_member_source_directories_are_scanned() {
     let fixture = fixture_workspace();
@@ -1413,7 +1413,7 @@ fn target_named_member_source_directories_are_scanned() {
     );
 }
 
-// AC: a declared bin under src/target/tool.rs remains covered by recursive source scanning.
+// a declared bin under src/target/tool.rs remains covered by recursive source scanning.
 #[test]
 fn target_named_declared_bin_source_is_scanned() {
     let fixture = fixture_workspace();
@@ -1432,7 +1432,7 @@ fn target_named_declared_bin_source_is_scanned() {
     );
 }
 
-// AC: a sibling nested source subtree named target is scanned and reports its exact finding path.
+// a sibling nested source subtree named target is scanned and reports its exact finding path.
 #[test]
 fn nested_target_named_source_is_scanned() {
     let fixture = fixture_workspace();
@@ -1451,7 +1451,7 @@ fn nested_target_named_source_is_scanned() {
     );
 }
 
-// AC: build scripts, tests, examples, and benches are scanned through the same member walk.
+// build scripts, tests, examples, and benches are scanned through the same member walk.
 #[test]
 fn detects_unsafe_source_in_every_member_target_location() {
     for relative in [
@@ -1493,7 +1493,7 @@ fn session_environment_wrapper_assigns_and_restores() {
 }
 "#;
 
-// AC: the authorization assertion accepts only the exact reviewed seam structure.
+// the authorization assertion accepts only the exact reviewed seam structure.
 #[test]
 fn reviewed_seam_fixture_matches_authorization() {
     let fixture = fixture_workspace();
@@ -1502,7 +1502,7 @@ fn reviewed_seam_fixture_matches_authorization() {
     assert_eq!(reviewed_seams_error(&inventory), Ok(()));
 }
 
-// AC: statement, duplication, scope, location, callee, arity, and extra-node mutations fail authorization.
+// statement, duplication, scope, location, callee, arity, and extra-node mutations fail authorization.
 #[test]
 fn reviewed_seam_mutations_fail_authorization() {
     let mutations = [
@@ -1543,7 +1543,7 @@ fn reviewed_seam_mutations_fail_authorization() {
     }
 }
 
-// AC: local modules and import aliases cannot satisfy the globally rooted reviewed call identity.
+// local modules and import aliases cannot satisfy the globally rooted reviewed call identity.
 #[test]
 fn reviewed_seam_shadow_paths_fail_identity() {
     for prefix in [
@@ -1561,7 +1561,7 @@ fn reviewed_seam_shadow_paths_fail_identity() {
     }
 }
 
-// AC: reviewed expressions match directly and expression wrappers are never normalized away.
+// reviewed expressions match directly and expression wrappers are never normalized away.
 #[test]
 fn reviewed_seam_wrapped_expressions_fail_identity() {
     for call in [
@@ -1584,7 +1584,7 @@ fn reviewed_seam_wrapped_expressions_fail_identity() {
     }
 }
 
-// AC: typed ancestry prevents impl and trait methods from impersonating reviewed free functions.
+// typed ancestry prevents impl and trait methods from impersonating reviewed free functions.
 #[test]
 fn impl_and_trait_methods_cannot_impersonate_free_function_seams() {
     for replacement in [
@@ -1608,7 +1608,7 @@ fn impl_and_trait_methods_cannot_impersonate_free_function_seams() {
     }
 }
 
-// AC: the restoration seam requires precisely one cfg(test) tests module and exact test attributes.
+// the restoration seam requires precisely one cfg(test) tests module and exact test attributes.
 #[test]
 fn reviewed_test_seam_requires_test_module_and_attributes() {
     let mutations = [
@@ -1659,7 +1659,7 @@ fn reviewed_test_seam_requires_test_module_and_attributes() {
     assert_eq!(error.cause, ScanErrorCause::InvalidPathAttribute);
 }
 
-// AC: module identity preserves visibility, form, and direct attribute placement without evaluating paths.
+// module identity preserves visibility, form, and direct attribute placement without evaluating paths.
 #[test]
 fn module_identity_distinguishes_reviewed_module_structure() {
     let cases = [
@@ -1712,7 +1712,7 @@ fn module_identity_distinguishes_reviewed_module_structure() {
     }
 }
 
-// AC: reviewed authorization includes the complete span-free production function signature.
+// reviewed authorization includes the complete span-free production function signature.
 #[test]
 fn reviewed_seam_signature_mutations_fail_identity() {
     for signature in [
@@ -1739,7 +1739,7 @@ fn reviewed_seam_signature_mutations_fail_identity() {
     }
 }
 
-// AC: each reviewed function owns one exact direct outer unsafe-code allowance.
+// each reviewed function owns one exact direct outer unsafe-code allowance.
 #[test]
 fn reviewed_seam_allowance_must_be_unique_and_direct() {
     for replacement in [
@@ -1756,7 +1756,7 @@ fn reviewed_seam_allowance_must_be_unique_and_direct() {
     }
 }
 
-// AC: discovery ordinal remains diagnostic and an unrelated preceding safe item cannot alter authorization.
+// discovery ordinal remains diagnostic and an unrelated preceding safe item cannot alter authorization.
 #[test]
 fn reviewed_seam_identity_ignores_diagnostic_ordinal() {
     let fixture = fixture_workspace();
@@ -1766,7 +1766,7 @@ fn reviewed_seam_identity_ignores_diagnostic_ordinal() {
     assert_eq!(reviewed_seams_error(&inventory), Ok(()));
 }
 
-// AC: unsafe blocks are syntax-aware across whitespace and nested member source.
+// unsafe blocks are syntax-aware across whitespace and nested member source.
 #[test]
 fn detects_whitespace_unsafe_blocks_in_nested_member_source() {
     for source in [
@@ -1784,7 +1784,7 @@ fn detects_whitespace_unsafe_blocks_in_nested_member_source() {
     }
 }
 
-// AC: every unsafe declaration form has a distinct finding kind.
+// every unsafe declaration form has a distinct finding kind.
 #[test]
 fn detects_unsafe_functions_traits_impls_extern_blocks_and_modules() {
     let cases = [
@@ -1823,7 +1823,7 @@ fn detects_unsafe_functions_traits_impls_extern_blocks_and_modules() {
     }
 }
 
-// AC: mutable ordinary and foreign statics are both rejected.
+// mutable ordinary and foreign statics are both rejected.
 #[test]
 fn detects_static_mut_and_foreign_static_mut() {
     let cases = [
@@ -1841,7 +1841,7 @@ fn detects_static_mut_and_foreign_static_mut() {
     }
 }
 
-// AC: unsafe and legacy symbol attributes cannot bypass the inventory.
+// unsafe and legacy symbol attributes cannot bypass the inventory.
 #[test]
 fn detects_unsafe_and_legacy_symbol_attributes() {
     let cases = [
@@ -1871,7 +1871,7 @@ fn detects_unsafe_and_legacy_symbol_attributes() {
     }
 }
 
-// AC: unsafe-code lint overrides are found in inner, outer, multi-lint, and nested cfg_attr forms.
+// unsafe-code lint overrides are found in inner, outer, multi-lint, and nested cfg_attr forms.
 #[test]
 fn detects_all_unsafe_code_lint_override_forms() {
     let cases = [
@@ -1940,7 +1940,7 @@ fn detects_all_unsafe_code_lint_override_forms() {
     }
 }
 
-// AC: assembly macros and unsafe syntax nested in opaque macro tokens are inventoried.
+// assembly macros and unsafe syntax nested in opaque macro tokens are inventoried.
 #[test]
 fn detects_assembly_macros_and_nested_macro_tokens() {
     let cases = [
@@ -1968,7 +1968,7 @@ fn detects_assembly_macros_and_nested_macro_tokens() {
     }
 }
 
-// AC: direct path metadata is rejected before target resolution regardless of payload shape.
+// direct path metadata is rejected before target resolution regardless of payload shape.
 #[test]
 fn rejects_direct_path_meta_without_resolution() {
     for source in [
@@ -1983,7 +1983,7 @@ fn rejects_direct_path_meta_without_resolution() {
     }
 }
 
-// AC: path metadata is rejected because alternate source routing is unsupported, not because a directory is excluded.
+// path metadata is rejected because alternate source routing is unsupported, not because a directory is excluded.
 #[test]
 fn rejects_path_meta_regardless_of_target_location() {
     for source in [
@@ -1998,7 +1998,7 @@ fn rejects_path_meta_regardless_of_target_location() {
     }
 }
 
-// AC: every syntactic route to path metadata reaches one fail-closed dispatch point.
+// every syntactic route to path metadata reaches one fail-closed dispatch point.
 #[test]
 fn all_path_meta_forms_are_rejected() {
     for source in [
@@ -2024,7 +2024,7 @@ fn all_path_meta_forms_are_rejected() {
     }
 }
 
-// AC: malformed nested attribute metadata fails with the source path instead of being ignored.
+// malformed nested attribute metadata fails with the source path instead of being ignored.
 #[test]
 fn rejects_malformed_nested_attribute_metadata() {
     let fixture = fixture_workspace();
@@ -2038,7 +2038,7 @@ fn rejects_malformed_nested_attribute_metadata() {
     assert_eq!(error.path, Path::new("crates/solstone-linux/src/lib.rs"));
 }
 
-// AC: symlinked Rust files and directories fail closed instead of escaping member traversal.
+// symlinked Rust files and directories fail closed instead of escaping member traversal.
 #[test]
 fn rejects_symlinked_rust_files_and_directories() {
     use std::os::unix::fs::symlink;
@@ -2066,7 +2066,7 @@ fn rejects_symlinked_rust_files_and_directories() {
     }
 }
 
-// AC: a symlink cannot substitute an external directory for a declared workspace member.
+// a symlink cannot substitute an external directory for a declared workspace member.
 #[test]
 fn rejects_symlinked_workspace_member_root() {
     use std::os::unix::fs::symlink;
@@ -2081,7 +2081,7 @@ fn rejects_symlinked_workspace_member_root() {
     assert_eq!(error.path, Path::new("crates/helper"));
 }
 
-// AC: non-Rust file symlinks are ignored while broken symlinks fail closed with their path.
+// non-Rust file symlinks are ignored while broken symlinks fail closed with their path.
 #[test]
 fn classifies_non_rust_and_broken_symlinks_by_resolved_target() {
     use std::os::unix::fs::symlink;
@@ -2103,7 +2103,7 @@ fn classifies_non_rust_and_broken_symlinks_by_resolved_target() {
     assert_eq!(error.path, Path::new("crates/solstone-linux/broken"));
 }
 
-// AC: source decoding and parsing failures name the offending file.
+// source decoding and parsing failures name the offending file.
 #[test]
 fn reports_non_utf8_and_unparseable_source() {
     for (bytes, expected) in [
@@ -2118,7 +2118,7 @@ fn reports_non_utf8_and_unparseable_source() {
     }
 }
 
-// AC: unreadable source is a named scanner failure rather than an ignored file.
+// unreadable source is a named scanner failure rather than an ignored file.
 #[test]
 fn reports_source_read_failure() {
     use std::os::unix::fs::PermissionsExt;
@@ -2136,7 +2136,7 @@ fn reports_source_read_failure() {
     assert_eq!(error.path, Path::new("crates/solstone-linux/src/lib.rs"));
 }
 
-// AC: workspace member resolution failures are explicit and path-bearing.
+// workspace member resolution failures are explicit and path-bearing.
 #[test]
 fn reports_workspace_member_resolution_failures() {
     let cases = [
@@ -2159,7 +2159,7 @@ fn reports_workspace_member_resolution_failures() {
     }
 }
 
-// AC: a missing root manifest reports RootManifestRead at the exact manifest path.
+// a missing root manifest reports RootManifestRead at the exact manifest path.
 #[test]
 fn reports_root_manifest_read_failure() {
     let temp = tempfile::tempdir().unwrap();
@@ -2170,7 +2170,7 @@ fn reports_root_manifest_read_failure() {
     assert_eq!(error.path, Path::new("Cargo.toml"));
 }
 
-// AC: a non-UTF-8 root manifest reports RootManifestUtf8 at the exact manifest path.
+// a non-UTF-8 root manifest reports RootManifestUtf8 at the exact manifest path.
 #[test]
 fn reports_root_manifest_utf8_failure() {
     let temp = tempfile::tempdir().unwrap();
@@ -2180,7 +2180,7 @@ fn reports_root_manifest_utf8_failure() {
     assert_eq!(error.path, Path::new("Cargo.toml"));
 }
 
-// AC: malformed root TOML reports RootManifestToml at the exact manifest path.
+// malformed root TOML reports RootManifestToml at the exact manifest path.
 #[test]
 fn reports_root_manifest_toml_failure() {
     let temp = tempfile::tempdir().unwrap();
@@ -2190,7 +2190,7 @@ fn reports_root_manifest_toml_failure() {
     assert_eq!(error.path, Path::new("Cargo.toml"));
 }
 
-// AC: a directory removed before recursive enumeration reports Walk at that exact member path.
+// a directory removed before recursive enumeration reports Walk at that exact member path.
 #[test]
 fn reports_member_walk_failure() {
     let fixture = fixture_workspace();
@@ -2259,7 +2259,7 @@ fn output_script(json: &str) -> Vec<u8> {
     format!("#!/bin/sh\nprintf '%s' '{}'\n", json).into_bytes()
 }
 
-// AC: production metadata invocation uses one normalized root for cwd and the complete locked argv.
+// production metadata invocation uses one normalized root for cwd and the complete locked argv.
 #[test]
 fn cargo_metadata_uses_normalized_root_and_manifest_path() {
     let fixture = fixture_workspace();
@@ -2311,7 +2311,7 @@ fn cargo_metadata_uses_normalized_root_and_manifest_path() {
     assert!(!not_run.exists());
 }
 
-// AC: all seven metadata failure discriminants are reachable and carry a path.
+// all seven metadata failure discriminants are reachable and carry a path.
 #[test]
 fn cargo_metadata_failures_are_discriminated_and_path_bearing() {
     let temp = tempfile::tempdir().unwrap();
@@ -2374,7 +2374,7 @@ fn cargo_metadata_failures_are_discriminated_and_path_bearing() {
     assert_eq!(error.path, missing);
 }
 
-// AC: non-executable metadata fixtures run as interpreter data while preserving the exact command boundary and process behavior.
+// non-executable metadata fixtures run as interpreter data while preserving the exact command boundary and process behavior.
 #[test]
 fn non_executable_metadata_fixture_runs_only_through_interpreter_seam() {
     use std::os::unix::fs::PermissionsExt;
@@ -2438,7 +2438,7 @@ fn non_executable_metadata_fixture_runs_only_through_interpreter_seam() {
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }
 
-// AC: every symlink component in a metadata output root fails without regard to its destination.
+// every symlink component in a metadata output root fails without regard to its destination.
 #[test]
 fn metadata_output_root_symlink_component_always_fails() {
     use std::os::unix::fs::symlink;
@@ -2460,7 +2460,7 @@ fn metadata_output_root_symlink_component_always_fails() {
     }
 }
 
-// AC: a non-directory metadata output component fails with its exact path and field cause.
+// a non-directory metadata output component fails with its exact path and field cause.
 #[test]
 fn metadata_output_root_non_directory_component_fails() {
     let temp = tempfile::tempdir().unwrap();
@@ -2472,7 +2472,7 @@ fn metadata_output_root_non_directory_component_fails() {
     assert_eq!(error.path, file);
 }
 
-// AC: a metadata output component I/O error fails with its exact path and field cause.
+// a metadata output component I/O error fails with its exact path and field cause.
 #[test]
 fn metadata_output_root_io_error_fails() {
     let temp = tempfile::tempdir().unwrap();
@@ -2483,7 +2483,7 @@ fn metadata_output_root_io_error_fails() {
     assert_eq!(error.path, offending);
 }
 
-// AC: a nonexistent metadata output root is a valid clean-tree pruning boundary.
+// a nonexistent metadata output root is a valid clean-tree pruning boundary.
 #[test]
 fn nonexistent_metadata_output_root_is_accepted() {
     let temp = tempfile::tempdir().unwrap();
@@ -2491,7 +2491,7 @@ fn nonexistent_metadata_output_root_is_accepted() {
     assert!(validate_output_root(&root, ScanErrorCause::MetadataTargetDirectory).is_ok());
 }
 
-// AC: metadata output roots equal to or containing a member fail with the field cause and member name.
+// metadata output roots equal to or containing a member fail with the field cause and member name.
 #[test]
 fn metadata_output_root_containing_or_equal_to_member_fails() {
     for (field, expected) in [
@@ -2537,7 +2537,7 @@ fn metadata_output_root_containing_or_equal_to_member_fails() {
     }
 }
 
-// AC: malformed and unsafe Rust beneath a valid member-local output root is not scanned.
+// malformed and unsafe Rust beneath a valid member-local output root is not scanned.
 #[test]
 fn metadata_output_root_inside_member_is_pruned() {
     for field in ["target", "build"] {
@@ -2573,7 +2573,7 @@ fn metadata_output_root_inside_member_is_pruned() {
     }
 }
 
-// AC: invalid components in a member-local output root fail before traversal and pruning.
+// invalid components in a member-local output root fail before traversal and pruning.
 #[test]
 fn metadata_output_root_inside_member_is_validated_before_pruning() {
     use std::os::unix::fs::symlink;
@@ -2627,7 +2627,7 @@ fn metadata_output_root_inside_member_is_validated_before_pruning() {
     }
 }
 
-// AC: exact output pruning leaves sibling and ordinary member source visible with precise paths.
+// exact output pruning leaves sibling and ordinary member source visible with precise paths.
 #[test]
 fn metadata_output_prunes_only_the_exact_member_subtree() {
     let fixture = fixture_workspace();
@@ -2679,7 +2679,7 @@ fn metadata_output_prunes_only_the_exact_member_subtree() {
     assert!(inventory.absolute_files.contains(&clean));
 }
 
-// AC: include source is rejected except for the exact generated tray icon include.
+// include source is rejected except for the exact generated tray icon include.
 #[test]
 fn include_boundary_has_one_exact_exemption() {
     for source in [
@@ -2714,7 +2714,7 @@ fn include_boundary_has_one_exact_exemption() {
     assert_eq!(error.path, Path::new("crates/solstone-linux/src/tray.rs"));
 }
 
-// AC: comments that resemble unsafe syntax are not Rust findings.
+// comments that resemble unsafe syntax are not Rust findings.
 #[test]
 fn ignores_comment_containing_unsafe_block_text() {
     let fixture = fixture_workspace();
@@ -2731,7 +2731,7 @@ fn ignores_comment_containing_unsafe_block_text() {
     );
 }
 
-// AC: string literals containing unsafe source remain literals, not executable syntax.
+// string literals containing unsafe source remain literals, not executable syntax.
 #[test]
 fn ignores_string_literal_containing_unsafe_source() {
     let fixture = fixture_workspace();
@@ -2748,7 +2748,7 @@ fn ignores_string_literal_containing_unsafe_source() {
     );
 }
 
-// AC: a safe ABI-qualified function is not confused with an unsafe declaration.
+// a safe ABI-qualified function is not confused with an unsafe declaration.
 #[test]
 fn ignores_safe_extern_c_function() {
     let fixture = fixture_workspace();

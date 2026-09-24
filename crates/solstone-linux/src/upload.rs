@@ -1249,7 +1249,7 @@ mod tests {
         }
     }
 
-    // AC: terminal client/protocol upload responses are not retried.
+    // terminal client/protocol upload responses are not retried.
     #[tokio::test]
     async fn upload_terminal_statuses_make_one_request() {
         for (status, expected) in [
@@ -1292,7 +1292,7 @@ mod tests {
         assert_eq!(result.error_type, Some(ErrorType::Transient));
     }
 
-    // AC: pre-cancellation does not override the only attempt's own result
+    // pre-cancellation does not override the only attempt's own result
     #[tokio::test]
     async fn pre_cancelled_single_attempt_returns_attempt_error() {
         let server = MockServer::new(vec![(400, json!({}))]).await;
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(server.requests().len(), 1);
     }
 
-    // AC: retry rebuilds multipart streams and attempt two receives complete file bytes
+    // retry rebuilds multipart streams and attempt two receives complete file bytes
     #[tokio::test]
     async fn retry_rebuilds_complete_multipart_body() {
         let server = MockServer::new(vec![(500, json!({})), (200, json!({"status":"ok"}))]).await;
@@ -1331,7 +1331,7 @@ mod tests {
         );
     }
 
-    // AC: malformed upload JSON is transient and retries
+    // malformed upload JSON is transient and retries
     #[tokio::test]
     async fn malformed_upload_json_retries_as_transient() {
         let server = MockServer::new_actions(vec![
@@ -1360,7 +1360,7 @@ mod tests {
         assert_eq!(terminal_result.error_type, Some(ErrorType::Transient));
     }
 
-    // AC: a client without a linked capability is classified Transient.
+    // a client without a linked capability is classified Transient.
     #[tokio::test]
     async fn capability_less_upload_is_transient() {
         let temp = TempDir::new().unwrap();
@@ -1450,7 +1450,7 @@ mod tests {
         );
     }
 
-    // AC: all missing files are a local client failure and issue no request.
+    // all missing files are a local client failure and issue no request.
     #[tokio::test]
     async fn all_missing_files_make_no_request() {
         let server = MockServer::new(vec![]).await;
@@ -1498,7 +1498,7 @@ mod tests {
         peer.shutdown().await;
     }
 
-    // AC: pure classification covers protocol statuses and timeout-shaped missing statuses
+    // pure classification covers protocol statuses and timeout-shaped missing statuses
     #[test]
     fn error_classification() {
         assert_eq!(
@@ -1557,7 +1557,7 @@ mod tests {
         assert_eq!(result.status_code, None);
     }
 
-    // AC: empty retry delays use the complete local fallback
+    // empty retry delays use the complete local fallback
     #[tokio::test]
     async fn empty_retry_delays_use_full_fallback() {
         let server = MockServer::new(vec![]).await;
@@ -1568,7 +1568,7 @@ mod tests {
         assert_eq!(client.inner.retry_delays, vec![5, 30, 120, 300]);
     }
 
-    // AC: cancellation raised during backoff interrupts the active wait
+    // cancellation raised during backoff interrupts the active wait
     #[tokio::test]
     async fn cancellation_during_backoff_interrupts_wait() {
         let server = MockServer::new(vec![(500, json!({})), (200, json!({}))]).await;
@@ -1624,12 +1624,12 @@ mod tests {
     async fn ingest_403_latches_revocation() {
         assert_403_latches("upload").await;
     }
-    // AC: upload 403 latches revoked
+    // upload 403 latches revoked
     #[tokio::test]
     async fn upload_403_latches_revoked() {
         assert_403_latches("upload").await;
     }
-    // AC: listing 403 latches revoked
+    // listing 403 latches revoked
     #[tokio::test]
     async fn listing_403_latches_revoked() {
         assert_403_latches("listing").await;

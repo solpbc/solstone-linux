@@ -313,7 +313,7 @@ mod tests {
             }
         );
     }
-    // AC: quarantine formatting shapes.
+    // quarantine formatting shapes.
     #[test]
     fn format_empty() {
         assert_eq!(
@@ -346,7 +346,7 @@ mod tests {
             Some("Held: 2 segment(s) not sent, oldest 5d")
         );
     }
-    // AC: injected now clamps future mtimes to zero age.
+    // injected now clamps future mtimes to zero age.
     #[test]
     fn injected_now() {
         let t = tempfile::tempdir().unwrap();
@@ -359,7 +359,7 @@ mod tests {
         );
     }
 
-    // AC: a failed segment holding only its metadata stub captured nothing, so it is not
+    // a failed segment holding only its metadata stub captured nothing, so it is not
     // reported as unsent content the owner could still recover.
     #[test]
     fn quarantine_skips_payload_free_failed() {
@@ -392,7 +392,7 @@ mod tests {
             }
         );
     }
-    // AC: byte totals truncate rather than round.
+    // byte totals truncate rather than round.
     #[test]
     fn size_truncates() {
         let t = tempfile::tempdir().unwrap();
@@ -400,7 +400,7 @@ mod tests {
         fs::write(final_dir.join("x"), vec![0; 1024 * 1024 - 1]).unwrap();
         assert_eq!(compute_capture_stats(t.path(), "20260101").total_size_mb, 0);
     }
-    // AC: an error after accumulated work returns the partial accumulator (the walk's broad OSError contract).
+    // an error after accumulated work returns the partial accumulator (the walk's broad OSError contract).
     #[test]
     fn os_error_degrades_to_partial() {
         let t = tempfile::tempdir().unwrap();
@@ -454,7 +454,7 @@ mod tests {
         );
     }
 
-    // AC: status counts every direct child directory as a day, including empty and arbitrary names.
+    // status counts every direct child directory as a day, including empty and arbitrary names.
     #[test]
     fn status_counts_all_day_directories() {
         let t = tempfile::tempdir().unwrap();
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(compute_status_capture_stats(t.path()).day_count, 2);
     }
 
-    // AC: accepted, incomplete, and failed segments share one classification and sizing policy.
+    // accepted, incomplete, and failed segments share one classification and sizing policy.
     #[test]
     fn status_classifies_and_sizes_segments() {
         let t = tempfile::tempdir().unwrap();
@@ -491,7 +491,7 @@ mod tests {
         );
     }
 
-    // AC: missing status trees return an empty aggregate.
+    // missing status trees return an empty aggregate.
     #[test]
     fn status_missing_tree_is_empty() {
         let t = tempfile::tempdir().unwrap();

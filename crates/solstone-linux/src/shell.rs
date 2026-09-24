@@ -695,7 +695,7 @@ mod tests {
         }
     }
 
-    // AC: 1, 3 — the shell receiver mirrors published observer state before emitting its payload.
+    // 1, 3 — the shell receiver mirrors published observer state before emitting its payload.
     #[tokio::test]
     async fn published_snapshot_is_mirrored_and_emitted() {
         let initial = snapshot();
@@ -733,7 +733,7 @@ mod tests {
         task.await.unwrap();
     }
 
-    // AC: 2, 3 — one sampler cycle fans the same syncing state into both shared consumers and emits it.
+    // 2, 3 — one sampler cycle fans the same syncing state into both shared consumers and emits it.
     #[tokio::test(start_paused = true)]
     async fn sync_sample_fans_out_and_emits() {
         let initial = snapshot();
@@ -785,7 +785,7 @@ mod tests {
         task.await.unwrap();
     }
 
-    // AC: 4 — tray and D-Bus pause commands share one wake channel and preserve clamp semantics.
+    // tray and D-Bus pause commands share one wake channel and preserve clamp semantics.
     #[test]
     fn command_adapter_preserves_pause_variants() {
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -976,7 +976,7 @@ mod tests {
         );
     }
 
-    // AC: 6 — only the exact name-owning value is stashed and handed to the object-server path.
+    // only the exact name-owning value is stashed and handed to the object-server path.
     #[test]
     fn singleton_stash_preserves_owner_identity_for_both_success_replies() {
         for reply in [
@@ -992,7 +992,7 @@ mod tests {
         }
     }
 
-    // AC: 6 — non-owner replies never make a connection available to the object server.
+    // non-owner replies never make a connection available to the object server.
     #[test]
     fn singleton_stash_rejects_both_non_owner_replies() {
         for reply in [
@@ -1005,7 +1005,7 @@ mod tests {
         }
     }
 
-    // AC: 8 — hung tasks and interface removal are both bounded without a live bus or tray.
+    // hung tasks and interface removal are both bounded without a live bus or tray.
     #[tokio::test]
     async fn shutdown_bounds_hung_task_and_removal() {
         let task = tokio::spawn(std::future::pending::<()>());

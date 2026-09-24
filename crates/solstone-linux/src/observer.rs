@@ -892,7 +892,7 @@ pub(crate) mod tests {
 
     // tests/test_observer.py::test_finalize_segment_clamps_duration_to_interval
     // tests/test_observer.py::test_finalize_segment_floor_is_one
-    // No 1:1 Python ancestor: AC2 wall/monotonic separation.
+    // No 1:1 Python ancestor: wall/monotonic separation.
     #[test]
     fn interval_uses_monotonic_and_wall_jump_does_not_rotate() {
         let mut f = fixture(false);
@@ -904,7 +904,7 @@ pub(crate) mod tests {
         f.observer.tick().unwrap();
         assert_eq!(f.events.completed.borrow().len(), 1)
     }
-    // No 1:1 Python ancestor: AC2 interval+mute witness.
+    // No 1:1 Python ancestor: interval+mute witness.
     #[test]
     fn interval_and_mute_flip_rotate_once() {
         let mut f = fixture(false);
@@ -915,7 +915,7 @@ pub(crate) mod tests {
         assert_eq!(f.events.completed.borrow().len(), 1);
     }
     // tests/test_observer.py::test_start_paused_false_starts_capture
-    // No 1:1 Python ancestor: AC2 screencast entry and exit triggers.
+    // No 1:1 Python ancestor: screencast entry and exit triggers.
     #[test]
     fn screencast_entry_and_exit_rotate() {
         let mut f = fixture(false);
@@ -991,7 +991,7 @@ pub(crate) mod tests {
         assert!(f.observer.state.frames.is_empty());
         assert_eq!(f.drains.get(), 1)
     }
-    // No 1:1 Python ancestor: AC5 gated pause save, clamp, and timed resume.
+    // No 1:1 Python ancestor: gated pause save, clamp, and timed resume.
     #[test]
     fn paused_finalize_saves_three_hits_clamps_and_timed_pause_resumes() {
         let mut f = fixture(false);
@@ -1023,7 +1023,7 @@ pub(crate) mod tests {
         assert_eq!(f.stops.get(), 1);
         assert_eq!(f.starts.get(), 2)
     }
-    // No 1:1 Python ancestor: AC6 unhealthy idle continues audio-only.
+    // No 1:1 Python ancestor: unhealthy idle continues audio-only.
     #[test]
     fn watchdog_idle_continues_audio_only() {
         let mut f = fixture(false);
@@ -1033,7 +1033,7 @@ pub(crate) mod tests {
         f.observer.tick().unwrap();
         assert_eq!(f.observer.state.mode, Mode::Idle)
     }
-    // AC: real Observer state branches all flow through run::tick_once's single watchdog point.
+    // real Observer state branches all flow through run::tick_once's single watchdog point.
     #[test]
     fn runtime_watchdog_covers_real_observer_state_matrix() {
         use crate::run::{ServiceNotifier, tick_once};
@@ -1111,7 +1111,7 @@ pub(crate) mod tests {
         resume.observer.tick().unwrap();
         assert!(resume.observer.state.segment_dir.is_some());
     }
-    // No 1:1 Python ancestor: AC7 regular and resume activity failures keep mode.
+    // No 1:1 Python ancestor: regular and resume activity failures keep mode.
     #[test]
     fn activity_failure_regular_and_resume_keep_mode() {
         let mut f = fixture(false);
@@ -1128,7 +1128,7 @@ pub(crate) mod tests {
         assert_eq!(f.observer.state.mode, Mode::Screencast);
         assert!(!f.observer.state.cached_is_muted)
     }
-    // No 1:1 Python ancestor: AC7 resume failure calls start_segment twice, potentially orphaning the first directory.
+    // No 1:1 Python ancestor: resume failure calls start_segment twice, potentially orphaning the first directory.
     #[test]
     fn resume_reopen_failure_falls_back_and_double_starts() {
         let mut f = fixture(true);
@@ -1243,7 +1243,7 @@ pub(crate) mod tests {
         assert_eq!(code, 1);
         assert!(cleaned.get());
     }
-    // tests/test_observer.py::test_degraded_segment_finalizes_with_video_only; AC10/13.
+    // tests/test_observer.py::test_degraded_segment_finalizes_with_video_only.
     #[test]
     fn completed_once_for_nonempty_and_none_for_empty() {
         let mut f = fixture(false);
@@ -1300,7 +1300,7 @@ pub(crate) mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         handle.join().unwrap()
     }
-    // No 1:1 Python ancestor: AC12 Observer::shutdown() is the deterministic seam a signal handler will call.
+    // No 1:1 Python ancestor: Observer::shutdown() is the deterministic seam a signal handler will call.
     #[test]
     fn shutdown_mid_segment_saves_and_finalizes() {
         let mut f = fixture(false);
@@ -1340,7 +1340,7 @@ pub(crate) mod tests {
         let result = io.observer.tick();
         assert!(matches!(result, Err(ObserverError::Io(_))), "{result:?}");
     }
-    // No 1:1 Python ancestor: AC14 first/60s/paused stats and snapshot.
+    // No 1:1 Python ancestor: first/60s/paused stats and snapshot.
     #[test]
     fn stats_first_tick_then_sixty_seconds_and_while_paused() {
         let mut f = fixture(false);
@@ -1359,7 +1359,7 @@ pub(crate) mod tests {
         assert_eq!(f.stats.0.get(), 2);
         assert_eq!(f.states.0.borrow().last().unwrap().captures_today, 2)
     }
-    // tests/test_observer.py::test_pause_state_fields_exist; AC15 ordered subscription.
+    // tests/test_observer.py::test_pause_state_fields_exist; ordered subscription.
     #[test]
     fn subscriber_observes_pause_resume_in_order() {
         let mut f = fixture(false);
@@ -1443,7 +1443,7 @@ pub(crate) mod tests {
         serde_json::from_str(&fs::read_to_string(dir.join(".metadata")).unwrap()).unwrap()
     }
 
-    // AC1: open sidecar is default progress with last_durable_write_at omitted.
+    // open sidecar is default progress with last_durable_write_at omitted.
     #[test]
     fn open_metadata_is_default_progress() {
         let mut f = fixture(false);
@@ -1456,7 +1456,7 @@ pub(crate) mod tests {
         assert!(meta.get("last_durable_write_at").is_none());
     }
 
-    // AC2: production tick refresh sees a test-planted file. Do not call the writer.
+    // production tick refresh sees a test-planted file. Do not call the writer.
     #[test]
     fn tick_refresh_stamps_observer_wall() {
         let mut f = fixture(false);
@@ -1473,7 +1473,7 @@ pub(crate) mod tests {
         assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
     }
 
-    // AC3: a tick with no media omits last_durable_write_at.
+    // a tick with no media omits last_durable_write_at.
     #[test]
     fn tick_refresh_without_media_omits_write_at() {
         let mut f = fixture(false);
@@ -1488,7 +1488,7 @@ pub(crate) mod tests {
         assert!(meta.get("last_durable_write_at").is_none());
     }
 
-    // AC4: start_timestamp is write-once from state; last_durable_write_at is the refresh wall.
+    // start_timestamp is write-once from state; last_durable_write_at is the refresh wall.
     #[test]
     fn tick_refresh_keeps_open_start_timestamp() {
         let mut f = fixture(false);
@@ -1508,7 +1508,7 @@ pub(crate) mod tests {
         );
     }
 
-    // AC8: Idle→Idle boundary that keeps planted media completes.
+    // Idle→Idle boundary that keeps planted media completes.
     #[test]
     fn idle_boundary_with_media_completes() {
         let mut f = fixture(false);
