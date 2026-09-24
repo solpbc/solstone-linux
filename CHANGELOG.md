@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.7] - 2026-09-24
+
 ### Fixed
 
 - the solstone app no longer asks your journal every minute about what your journal already holds, and no longer rereads each file still on this computer to check it.
