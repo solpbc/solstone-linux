@@ -1107,7 +1107,7 @@ mod tests {
         peer.shutdown().await;
     }
 
-    // AC 7: a burst is bounded by cooldown and the next 300-second window starts fresh.
+    // a burst is bounded by cooldown and the next 300-second window starts fresh.
     #[tokio::test]
     async fn upload_multipart_shape_headers_and_content_types() {
         let server = MockServer::new(vec![(200, json!({"status":"ok"}))]).await;
@@ -1527,7 +1527,7 @@ mod tests {
         );
     }
 
-    // Supports AC 3/8: UploadResult preserves an HTTP status and uses None without a response.
+    // UploadResult preserves an HTTP status and uses None without a response.
     #[tokio::test]
     async fn upload_result_status_matches_terminal_attempt() {
         for status in [401, 403] {

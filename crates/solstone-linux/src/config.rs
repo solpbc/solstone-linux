@@ -1386,6 +1386,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&disk_path).unwrap()).unwrap();
         disk_val["stream"] = json!("desktop-stream-2");
         disk_val["sync_retry_delays"] = json!([10, 20]);
+        disk_val["sync_max_retries"] = json!(25);
         disk_val["sync_stale_threshold"] = json!(1200);
         disk_val["custom_plugin_field"] = json!({"active": true});
         fs::write(&disk_path, serde_json::to_string_pretty(&disk_val).unwrap()).unwrap();
@@ -1410,6 +1411,7 @@ mod tests {
         // Disk unprompted fields & unknowns win
         assert_eq!(saved_val["stream"], "desktop-stream-2");
         assert_eq!(saved_val["sync_retry_delays"], json!([10, 20]));
+        assert_eq!(saved_val["sync_max_retries"], 25);
         assert_eq!(saved_val["sync_stale_threshold"], 1200);
         assert_eq!(saved_val["custom_plugin_field"], json!({"active": true}));
     }

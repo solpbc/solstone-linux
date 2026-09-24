@@ -446,10 +446,12 @@ impl SyncWorker {
                 }
                 break;
             }
-            if self.client.has_capability() {
-                self.finish_confirmed_locally();
-            }
+            // The pass finishes confirmed segments itself; when the pass is skipped the
+            // local finish still runs here, so it runs exactly once per iteration.
             if self.client.is_revoked() {
+                if self.client.has_capability() {
+                    self.finish_confirmed_locally();
+                }
                 tracing::warn!("Sync refused: observer credential is revoked");
                 continue;
             }
@@ -462,6 +464,7 @@ impl SyncWorker {
                 continue;
             }
             if self.circuit_open && !self.try_probe().await {
+                self.finish_confirmed_locally();
                 continue;
             }
             if completion_pending {
@@ -1154,10 +1157,18 @@ impl SyncWorker {
             );
             UploadOutcome::Bounded
         } else {
-            if result.reason_code.as_deref() == Some("segment_removed") {
-                let _ = remove_segment_removed(segment_dir);
+            if result.status_code == Some(500)
+                && result.reason_code.as_deref() == Some("segment_removed")
+            {
+                if remove_segment_removed(segment_dir).is_err() {
+                    self.retry_floors.insert(
+                        segment_dir.to_path_buf(),
+                        self.clock.wall_seconds() + 3600.0,
+                    );
+                }
                 self.record_contact(false);
-                return UploadOutcome::Bounded;
+                self.reset_failures();
+                return UploadOutcome::Acked;
             }
             if result.is_local_failure && result.status_code == Some(413) {
                 self.record_bounded(
@@ -1268,11 +1279,7 @@ impl SyncWorker {
 
         let retry = IngestRetry {
             retry_version: 1,
-            next_attempt_after: if actual_bound.is_infinite() {
-                f64::INFINITY
-            } else {
-                now + actual_bound
-            },
+            next_attempt_after: now + actual_bound,
             last_attempt_at: now,
             identical_count,
             status_code,
@@ -1282,14 +1289,8 @@ impl SyncWorker {
         };
         if let Err(error) = write_retry(segment_dir, &retry) {
             tracing::warn!(%error, path = %segment_dir.display(), "Failed to write ingest retry marker");
-            self.retry_floors.insert(
-                segment_dir.to_path_buf(),
-                now + if actual_bound.is_infinite() {
-                    86400.0
-                } else {
-                    actual_bound
-                },
-            );
+            self.retry_floors
+                .insert(segment_dir.to_path_buf(), now + actual_bound);
         }
 
         if let Some(err) = error_type {
@@ -1477,7 +1478,8 @@ fn is_bookkeeping_file(name: &str) -> bool {
         || name == INGEST_ACK_FILENAME
         || name == INGEST_RETRY_FILENAME
         || name == SERVER_KEY_FILENAME
-        || (name.starts_with('.') && name.contains(".tmp"))
+        || (name.starts_with('.') && name.ends_with(".tmp"))
+        || name.starts_with(".ingest_retry.json.tmp.")
 }
 
 fn remove_confirmed_segment(dir: &Path) -> io::Result<()> {
@@ -3450,7 +3452,7 @@ mod tests {
         assert!(upload_hits(&server) >= 2);
     }
 
-    // AC 4: upload_403_latches_permanently pins both revocation latches, not request counts.
+    // upload_403_latches_permanently pins both revocation latches, not request counts.
     #[tokio::test]
     async fn upload_403_latches_permanently() {
         let temp = tempfile::tempdir().unwrap();
@@ -3461,7 +3463,7 @@ mod tests {
         assert!(worker.client.is_revoked());
     }
 
-    // AC 8: upload_401_records_and_persists_status pins POST status through durable facts.
+    // upload_401_records_and_persists_status pins POST status through durable facts.
     #[tokio::test]
     async fn upload_401_records_and_persists_status() {
         let temp = tempfile::tempdir().unwrap();
@@ -3664,7 +3666,7 @@ mod tests {
         );
     }
 
-    // AC 10: sustained_401_retries_stay_bounded drives only MutableClock and one wake per step.
+    // sustained_401_retries_stay_bounded drives only MutableClock and one wake per step.
     // The conservative bound is 5 + ceil(log2(300 / 30)) + ceil(14400 / 300) + 1
     // = 5 + 4 + 48 + 1 = 58; a 401 actually opens at CIRCUIT_THRESHOLD_AUTH.
     #[tokio::test]
@@ -5107,9 +5109,9 @@ mod tests {
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
-    // AC 1: Confirmed sealed segment removed in same pass and next pass is connected
+    // Confirmed sealed segment removed in same pass and next pass is connected
     #[tokio::test]
-    async fn acceptance_1_valid_receipt_removes_segment_and_next_pass_is_connected() {
+    async fn valid_receipt_removes_segment_and_next_pass_is_connected() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"video data");
         let (server, mut worker) = test_worker(
@@ -5142,15 +5144,16 @@ mod tests {
         assert_eq!(facts.pending_confirmed, Some(0));
     }
 
-    // AC 2: Removal cleans bookkeeping and stray temporary files
+    // Removal cleans bookkeeping and stray temporary files
     #[tokio::test]
-    async fn acceptance_2_removal_cleans_metadata_and_stray_tmp_files() {
+    async fn removal_cleans_bookkeeping_and_temporary_files() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"video data");
         fs::write(segment.join(".metadata"), b"meta").unwrap();
         fs::write(segment.join(INGEST_RETRY_FILENAME), b"{}").unwrap();
         fs::write(segment.join(".server_key"), b"key").unwrap();
-        fs::write(segment.join(".screen.webm.tmp123"), b"tmp").unwrap();
+        fs::write(segment.join(".ingest_ack.json.4242.0.tmp"), b"tmp").unwrap();
+        fs::write(segment.join(".ingest_retry.json.tmp.4242"), b"tmp").unwrap();
 
         let (_server, mut worker) = test_worker(
             &temp,
@@ -5161,11 +5164,23 @@ mod tests {
         assert!(!segment.exists());
     }
 
+    #[test]
+    fn bookkeeping_match_covers_only_our_temporary_files() {
+        assert!(is_bookkeeping_file(".ingest_ack.json.4242.0.tmp"));
+        assert!(is_bookkeeping_file(".ingest_retry.json.tmp.4242"));
+        assert!(is_bookkeeping_file(INGEST_ACK_FILENAME));
+        assert!(is_bookkeeping_file(INGEST_RETRY_FILENAME));
+        assert!(!is_bookkeeping_file(".screen.webm.tmp123"));
+        assert!(!is_bookkeeping_file(".notes.tmpl"));
+        assert!(!is_bookkeeping_file("screen.webm.tmp"));
+        assert!(!is_bookkeeping_file("screen.webm"));
+    }
+
     static INGEST_FAULT_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    // AC 3: Invalid descriptors leave segment on disk with retry file
+    // Invalid descriptors leave segment on disk with retry file
     #[tokio::test]
-    async fn acceptance_3_invalid_descriptors_leave_segment_with_retry_file() {
+    async fn invalid_descriptors_leave_segment_with_retry_file() {
         // Variation 1: wrong size
         {
             let temp = tempfile::tempdir().unwrap();
@@ -5248,9 +5263,9 @@ mod tests {
         }
     }
 
-    // AC 4: segment_removed removes segment and uploads older segment in same pass
+    // segment_removed removes segment and uploads older segment in same pass
     #[tokio::test]
-    async fn acceptance_4_segment_removed_removes_and_uploads_older_segment() {
+    async fn segment_removed_removes_and_uploads_older_segment() {
         let temp = tempfile::tempdir().unwrap();
         let seg_older = create_segment(&temp, "110000_300", b"older data");
         let seg_newer = create_segment(&temp, "120000_300", b"newer data");
@@ -5269,10 +5284,116 @@ mod tests {
         assert!(!seg_newer.exists());
         assert!(!seg_older.exists());
         assert_eq!(upload_hits(&server), 2);
+        let facts = worker.facts.lock().unwrap().clone();
+        let health = crate::sync_health::derive_health(&facts, worker.clock.wall_seconds(), 600.0);
+        assert_eq!(health.state, crate::sync_health::HealthState::Connected);
+        assert_eq!(facts.last_error_class, None);
+        assert_eq!(facts.pending_confirmed, Some(0));
     }
 
     #[tokio::test]
-    async fn acceptance_4_twin_journal_write_failed_keeps_segment() {
+    async fn segment_removed_after_a_failed_pass_commits_as_connected() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"data");
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                500,
+                json!({
+                    "reason_code": "segment_removed",
+                    "error": "Segment already removed"
+                }),
+            )],
+        )
+        .await;
+        // A previous pass ended on a transient journal error.
+        worker.last_error_type = Some(ErrorType::Transient);
+        worker.last_error_code = Some(503);
+        {
+            let mut facts = worker.facts.lock().unwrap();
+            facts.last_error_class = Some(ErrorType::Transient);
+            facts.last_error_code = Some(503);
+        }
+
+        worker.sync_pass().await;
+
+        assert!(!segment.exists());
+        assert_eq!(upload_hits(&server), 1);
+        let facts = worker.facts.lock().unwrap().clone();
+        let health = crate::sync_health::derive_health(&facts, worker.clock.wall_seconds(), 600.0);
+        assert_eq!(health.state, crate::sync_health::HealthState::Connected);
+        assert_eq!(facts.last_error_class, None);
+        assert_eq!(facts.pending_confirmed, Some(0));
+        assert_eq!(worker.last_error_type, None);
+    }
+
+    #[tokio::test]
+    async fn segment_removed_code_on_other_statuses_keeps_segment() {
+        for status in [409, 503] {
+            let temp = tempfile::tempdir().unwrap();
+            let segment = create_segment(&temp, "120000_300", b"data");
+            let (server, mut worker) = test_worker(
+                &temp,
+                vec![(
+                    status,
+                    json!({
+                        "reason_code": "segment_removed",
+                        "error": "Segment already removed"
+                    }),
+                )],
+            )
+            .await;
+            worker.sync_pass().await;
+            assert_eq!(upload_hits(&server), 1, "status {status}");
+            assert!(segment.join("screen.webm").exists(), "status {status}");
+            assert!(
+                segment.join(INGEST_RETRY_FILENAME).exists(),
+                "status {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn segment_removed_removal_failure_is_not_resent_for_an_hour() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"data");
+        let removed = json!({
+            "reason_code": "segment_removed",
+            "error": "Segment already removed"
+        });
+        let (server, mut worker) = test_worker(&temp, vec![(500, removed.clone())]).await;
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o555)).unwrap();
+
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 1);
+        assert!(segment.join("screen.webm").exists());
+
+        // The next passes inside the hour do not send it again.
+        worker.sync_pass().await;
+        let start = worker.clock.wall_seconds();
+        worker.clock = Arc::new(FixedClock {
+            wall: start + 3500.0,
+            mono: 200.0,
+        });
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 1);
+
+        // After the hour it is sent again, and a removal that now succeeds removes it.
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o755)).unwrap();
+        server.enqueue_response(500, removed.to_string());
+        worker.clock = Arc::new(FixedClock {
+            wall: start + 3601.0,
+            mono: 300.0,
+        });
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 2);
+        assert!(!segment.exists());
+    }
+
+    #[tokio::test]
+    async fn journal_write_failed_keeps_segment() {
         let temp = tempfile::tempdir().unwrap();
         let seg_newer = create_segment(&temp, "120000_300", b"newer data");
         let (server, mut worker) = test_worker(
@@ -5293,9 +5414,9 @@ mod tests {
         assert_eq!(upload_hits(&server), 1);
     }
 
-    // AC 5: Fresh worker removes all three ack variations locally with zero requests
+    // Fresh worker removes all three ack variations locally with zero requests
     #[tokio::test]
-    async fn acceptance_5_fresh_worker_removes_all_three_ack_variations_locally() {
+    async fn fresh_worker_removes_all_three_ack_variations_locally() {
         let _fault_lock = INGEST_FAULT_TEST_MUTEX.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let day = temp.path().join("captures/20260101/archon");
@@ -5405,9 +5526,9 @@ mod tests {
         assert_eq!(worker.facts.lock().unwrap().pending_confirmed, Some(0));
     }
 
-    // AC 6: Bookkeeping and empty dirs removed; unknown subdirectories kept
+    // Bookkeeping and empty dirs removed; unknown subdirectories kept
     #[tokio::test]
-    async fn acceptance_6_bookkeeping_and_empty_dirs_removed_unknown_subdir_kept() {
+    async fn bookkeeping_and_empty_dirs_removed_unknown_subdir_kept() {
         let temp = tempfile::tempdir().unwrap();
         let day = temp.path().join("captures/20260101/archon");
         fs::create_dir_all(&day).unwrap();
@@ -5475,9 +5596,9 @@ mod tests {
         assert_eq!(worker.facts.lock().unwrap().pending_confirmed, Some(0));
     }
 
-    // AC 7: Ack write fault bounds retry and succeeds after cooldown
+    // Ack write fault bounds retry and succeeds after cooldown
     #[tokio::test]
-    async fn acceptance_7_ack_write_fault_bounds_retry_and_succeeds_after_cooldown() {
+    async fn ack_write_fault_bounds_retry_and_succeeds_after_cooldown() {
         let _fault_lock = INGEST_FAULT_TEST_MUTEX.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"video data");
@@ -5519,9 +5640,9 @@ mod tests {
         assert!(!segment.exists());
     }
 
-    // AC 8: Auth stops pass after removing acked segment
+    // Auth stops pass after removing acked segment
     #[tokio::test]
-    async fn acceptance_8_auth_stops_pass_after_removing_acked_segment() {
+    async fn auth_stops_pass_after_removing_acked_segment() {
         let temp = tempfile::tempdir().unwrap();
         let seg1 = create_segment(&temp, "110000_300", b"acked");
         let seg2 = create_segment(&temp, "120000_300", b"pending");
@@ -5548,7 +5669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acceptance_8_conflict_stops_pass_after_removing_acked_segment() {
+    async fn conflict_stops_pass_after_removing_acked_segment() {
         let temp = tempfile::tempdir().unwrap();
         let seg1 = create_segment(&temp, "110000_300", b"acked");
         let seg2 = create_segment(&temp, "120000_300", b"pending");
@@ -5585,7 +5706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acceptance_8_breaker_and_lifecycle_variations_through_run() {
+    async fn local_finish_runs_with_breaker_open_or_revoked_and_not_when_unpaired() {
         // 1. Breaker open + probe 500: still runs finish_confirmed_locally
         {
             let temp = tempfile::tempdir().unwrap();
@@ -5602,23 +5723,35 @@ mod tests {
             );
             write_ack(&seg_acked, &ack).unwrap();
 
-            // Trip breaker
+            // Breaker open with its cooldown already elapsed, so the probe runs.
             worker.circuit_open = true;
-            worker.circuit_open_since = 100.0;
-            worker.circuit_cooldown = 1000.0;
+            worker.circuit_open_since = 0.0;
+            worker.circuit_cooldown = 10.0;
 
             let notify = Arc::clone(&worker.notify);
             let running = Arc::clone(&worker.running);
-            let task = tokio::spawn(async move { worker.run().await });
+            let task = tokio::spawn(async move {
+                worker.run().await;
+                worker
+            });
             notify.notify_one();
-            for _ in 0..20 {
-                tokio::task::yield_now().await;
-            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while seg_acked.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
             running.store(false, Ordering::Release);
             notify.notify_one();
-            task.await.unwrap();
+            let worker = task.await.unwrap();
 
-            // seg_acked is removed even with breaker open
+            // The probe ran and failed: the breaker stays open with a longer cooldown.
+            assert!(worker.circuit_open);
+            assert_eq!(worker.circuit_cooldown, 10.0 * CIRCUIT_COOLDOWN_FACTOR);
+            assert_eq!(worker.circuit_open_since, worker.clock.monotonic_seconds());
+            assert_eq!(worker.facts.lock().unwrap().last_error_code, Some(500));
+            // seg_acked is removed even though the pass was skipped
             assert!(!seg_acked.exists());
             assert_eq!(upload_hits(&server), 0);
         }
@@ -5691,9 +5824,9 @@ mod tests {
         }
     }
 
-    // AC 8a: Unwritable segment logs cleanup failed and retries
+    // Unwritable segment logs cleanup failed and retries
     #[tokio::test]
-    async fn acceptance_8a_unwritable_segment_logs_cleanup_failed_and_retries() {
+    async fn unwritable_segment_logs_cleanup_failed_and_retries() {
         use std::os::unix::fs::PermissionsExt;
 
         #[derive(Clone)]
@@ -5785,9 +5918,81 @@ mod tests {
         fs::set_permissions(&segment, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    // AC 8b: Incomplete and failed segments with metadata survive without upload
     #[tokio::test]
-    async fn acceptance_8b_incomplete_and_failed_with_metadata_survive_without_upload() {
+    async fn failing_local_removal_logs_once_per_run_iteration() {
+        use std::os::unix::fs::PermissionsExt;
+
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"data");
+        let (server, worker) = test_worker(&temp, vec![]).await;
+        let (cur_id, cur_pair) = worker.current_identity_and_pairing();
+        let ack = create_test_ack(
+            &segment,
+            "120000_300",
+            &cur_id.unwrap_or_default(),
+            &cur_pair.unwrap_or_default(),
+        );
+        write_ack(&segment, &ack).unwrap();
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let count = || {
+            String::from_utf8(output.lock().unwrap().clone())
+                .unwrap()
+                .matches("Cleanup failed")
+                .count()
+        };
+        let notify = Arc::clone(&worker.notify);
+        let running = Arc::clone(&worker.running);
+        let facts = Arc::clone(&worker.facts);
+        let mut worker = worker;
+        let task = tokio::spawn(async move { worker.run().await }.with_subscriber(subscriber));
+
+        for iteration in 1..=2 {
+            // Wait for each pass to commit before the next trigger, so every
+            // trigger is its own loop iteration.
+            facts.lock().unwrap().last_successful_sync = None;
+            notify.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while facts.lock().unwrap().last_successful_sync.is_none() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(count(), iteration);
+        }
+        running.store(false, Ordering::Release);
+        notify.notify_one();
+        task.await.unwrap();
+
+        assert_eq!(count(), 2);
+        assert_eq!(upload_hits(&server), 0);
+        assert!(segment.exists());
+        fs::set_permissions(&segment, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Incomplete and failed segments with metadata survive without upload
+    #[tokio::test]
+    async fn incomplete_and_failed_with_metadata_survive_without_upload() {
         let temp = tempfile::tempdir().unwrap();
         let day = temp.path().join("captures/20260101/archon");
         fs::create_dir_all(&day).unwrap();
@@ -5810,9 +6015,9 @@ mod tests {
         assert_eq!(upload_hits(&server), 0);
     }
 
-    // AC 9: Removes old retention formats and tolerates null retry
+    // Removes old retention formats and tolerates null retry
     #[tokio::test]
-    async fn acceptance_9_removes_old_retention_formats_and_tolerates_null_retry() {
+    async fn removes_old_retention_formats_and_tolerates_null_retry() {
         let temp = tempfile::tempdir().unwrap();
         let day = temp.path().join("captures/20260101/archon");
         fs::create_dir_all(&day).unwrap();
@@ -5925,9 +6130,9 @@ mod tests {
         );
     }
 
-    // AC 10: Sparse local 413 records bounded retry and uploads older segment; journal 413 stops walk
+    // Sparse local 413 records bounded retry and uploads older segment; journal 413 stops walk
     #[tokio::test]
-    async fn acceptance_10_sparse_local_413_records_bounded_retry_and_uploads_older_segment() {
+    async fn sparse_local_413_records_bounded_retry_and_uploads_older_segment() {
         let temp = tempfile::tempdir().unwrap();
         let seg_older = create_segment(&temp, "110000_300", b"older data");
         let seg_newer = create_segment(&temp, "120000_300", b"newer data");
@@ -5960,7 +6165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acceptance_10_journal_413_stops_walk() {
+    async fn journal_413_stops_walk() {
         let temp = tempfile::tempdir().unwrap();
         let seg_older = create_segment(&temp, "110000_300", b"older data");
         let seg_newer = create_segment(&temp, "120000_300", b"newer data");
@@ -5984,9 +6189,9 @@ mod tests {
         assert_eq!(worker.last_error_code, Some(413));
     }
 
-    // AC 11: Aged failed segment survives and doctor / unacked accounting ignores it
+    // Aged failed segment survives and doctor / unacked accounting ignores it
     #[tokio::test]
-    async fn acceptance_11_aged_failed_segment_survives_and_formats_quarantine_line() {
+    async fn aged_failed_segment_survives_and_formats_quarantine_line() {
         use std::fs::FileTimes;
 
         let temp = tempfile::tempdir().unwrap();
@@ -6018,9 +6223,9 @@ mod tests {
         assert_eq!(captures, 0);
     }
 
-    // AC 12: Direct-to-listing cutover variations
+    // Direct-to-listing cutover variations
     #[tokio::test]
-    async fn acceptance_12_cutover_variations() {
+    async fn listing_cutover_variations() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
@@ -6092,9 +6297,9 @@ mod tests {
         .unwrap();
     }
 
-    // AC 13: Config with retired retention key runs pass and removes confirmed segment
+    // Config with retired retention key runs pass and removes confirmed segment
     #[tokio::test]
-    async fn acceptance_13_config_with_retired_retention_key_runs_pass_and_removes_confirmed() {
+    async fn config_with_retired_retention_key_runs_pass_and_removes_confirmed() {
         let temp = tempfile::tempdir().unwrap();
         let config_dir = temp.path().join("config");
         fs::create_dir_all(&config_dir).unwrap();

@@ -982,7 +982,7 @@ mod tests {
         }
     }
 
-    // AC 7: auth_401_is_neither_revoked_nor_connected_nor_offline pins Decision 3.
+    // auth_401_is_neither_revoked_nor_connected_nor_offline pins Decision 3.
     // The explicit 401 arm sits above Connected so persisted empty-queue facts cannot turn green.
     #[test]
     fn auth_401_is_neither_revoked_nor_connected_nor_offline() {

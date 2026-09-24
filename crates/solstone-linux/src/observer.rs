@@ -1417,7 +1417,7 @@ pub(crate) mod tests {
         );
         assert_eq!(skipped.get(), 0)
     }
-    // AC 11: audit imports rather than prose, so comments cannot false-positive.
+    // audit imports rather than prose, so comments cannot false-positive.
     #[test]
     fn observer_dependency_surface_contains_no_network_backend() {
         let source = include_str!("observer.rs");
