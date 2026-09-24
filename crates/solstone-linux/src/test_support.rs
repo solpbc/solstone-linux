@@ -353,6 +353,15 @@ impl LinkedMockServer {
         self.peer.enqueue_response(status, body);
     }
 
+    pub(crate) fn enqueue_gated_response(
+        &self,
+        status: u16,
+        body: impl Into<Vec<u8>>,
+        gate: Arc<Notify>,
+    ) {
+        self.peer.enqueue_gated_response(status, body, gate);
+    }
+
     pub(crate) fn requests(&self) -> Vec<Received> {
         let is_probe = |uri: &str| {
             uri == "/app/network/api/clients/self"

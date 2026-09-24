@@ -104,7 +104,6 @@ impl Tray for KsniTray {
                 MenuItem::Separator,
                 item(self.model.segment.clone(), false),
                 item(self.model.cache.clone(), false),
-                item(self.model.captures.clone(), false),
                 item(self.model.uptime.clone(), false),
             ],
             ..Default::default()
@@ -272,7 +271,7 @@ mod tests {
             MenuItem::SubMenu(value) => value,
             _ => panic!("status submenu missing"),
         };
-        assert_eq!(status.submenu.len(), 7);
+        assert_eq!(status.submenu.len(), 6);
         assert_eq!(
             match &status.submenu[0] {
                 MenuItem::Standard(value) => value.label.as_str(),
@@ -606,7 +605,7 @@ mod tests {
 // test_on_about_to_show_failure_keeps_tray_and_last_known_layout -> desktop_component::tests::recompute_failure_keeps_task_alive_until_terminal_loss.
 // test_first_update_clears_starting_tooltip: retired-by-construction; watch always contains an
 //   initialized real snapshot, so "starting…" and the initial "on"/"segment: --:--"/"cache: --"/
-//   "today: --"/"uptime: --" placeholders are unreachable. "sync: checking..." remains sourced
+//   "uptime: --" placeholders are unreachable. "sync: checking..." remains sourced
 //   exclusively from SURFACE_BY_STATE.
 // test_update_reads_observer_state -> tray_model::tests::live_stats_and_tooltip_are_rendered_from_snapshot_and_health.
 // test_update_shows_paused -> tray_model::tests::paused_and_idle_snapshots_select_typed_status.

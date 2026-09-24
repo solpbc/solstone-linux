@@ -692,7 +692,7 @@ mod tests {
         sync_health::{
             ProcessEpoch, SyncFacts, derive_health, load_facts_with_liveness, save_facts,
         },
-        test_support::{DayCustodyFixture, MockServer, OpportunisticDefaultListenerTrap},
+        test_support::{MockServer, OpportunisticDefaultListenerTrap},
     };
     use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicUsize};
 
@@ -1695,13 +1695,12 @@ mod tests {
             private_link::{Pairer, PrivateStateLock, load_credential},
             sync::cleanup_synced_day_for_composition,
         };
-        use sha2::{Digest, Sha256};
         use std::{
             fs,
             future::Future,
             io::Cursor,
             os::unix::fs::PermissionsExt,
-            path::{Path, PathBuf},
+            path::PathBuf,
             pin::Pin,
             sync::atomic::{AtomicUsize, Ordering},
         };
@@ -1802,24 +1801,6 @@ mod tests {
             }
         }
 
-        fn custody_listing(day: &str, path: &Path) -> DayCustodyFixture {
-            let bytes = fs::read(path.join("screen.webm")).unwrap();
-            let sha = format!("{:x}", Sha256::digest(&bytes));
-            let key = path.file_name().unwrap().to_string_lossy();
-            DayCustodyFixture::new(
-                day,
-                vec![serde_json::json!({
-                    "key": key,
-                    "files": [{
-                        "name": "screen.webm",
-                        "status": "present",
-                        "sha256": sha,
-                        "size": bytes.len(),
-                    }]
-                })],
-            )
-        }
-
         async fn start_owner(
             config: &Config,
             lock: PrivateStateLock,
@@ -1884,7 +1865,12 @@ mod tests {
             assert!(transport_enabled);
             let persisted: serde_json::Value =
                 serde_json::from_slice(&fs::read(config.config_path()).unwrap()).unwrap();
-            for legacy in ["server_url", "key", "chat_bridge_enabled"] {
+            for legacy in [
+                "server_url",
+                "key",
+                "chat_bridge_enabled",
+                "cache_retention_days",
+            ] {
                 assert!(persisted.get(legacy).is_none());
             }
             assert_eq!(config.segment_interval, 173);
@@ -2027,7 +2013,6 @@ mod tests {
             );
             assert_pending_unchanged(&pending, &[true, true, true]);
 
-            peer.enqueue_response(503, Vec::new());
             cleanup_synced_day_for_composition(
                 config.clone(),
                 Arc::clone(&upload),
@@ -2035,44 +2020,8 @@ mod tests {
                 day,
             )
             .await;
-            assert_pending_unchanged(&pending, &[true, true, true]);
+            assert_pending_unchanged(&pending, &[false, false, false]);
             assert_real_observer_ticks_advance();
-
-            for fixture in [
-                DayCustodyFixture::new(day, Vec::new()),
-                DayCustodyFixture::new(day, Vec::new()).with_segments_total(3),
-            ] {
-                peer.enqueue_day_custody(fixture);
-                cleanup_synced_day_for_composition(
-                    config.clone(),
-                    Arc::clone(&upload),
-                    Arc::new(SystemClock::new()),
-                    day,
-                )
-                .await;
-                assert_pending_unchanged(&pending, &[true, true, true]);
-                assert_real_observer_ticks_advance();
-            }
-
-            let proving_clock = Arc::new(crate::test_support::MutableClock::new(
-                SystemClock::new().wall_seconds() + 200_000.0,
-                0.0,
-            ));
-            for index in 0..pending.len() {
-                proving_clock.set_wall(
-                    SystemClock::new().wall_seconds() + 200_000.0 + (index as f64) * 100_000.0,
-                );
-                peer.enqueue_day_custody(custody_listing(day, &pending[index].0));
-                cleanup_synced_day_for_composition(
-                    config.clone(),
-                    Arc::clone(&upload),
-                    Arc::clone(&proving_clock) as Arc<dyn Clock + Send + Sync>,
-                    day,
-                )
-                .await;
-                let present = [false, index == 0, index <= 1];
-                assert_pending_unchanged(&pending, &present);
-            }
             owner.shutdown().await.unwrap();
             drop(upload);
             let released = PrivateStateLock::acquire(&config.config_dir).unwrap();

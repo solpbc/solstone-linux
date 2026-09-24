@@ -545,19 +545,6 @@ fn prompt_framerate(io: &mut dyn PromptIo, current: i64) -> io::Result<i64> {
     }
 }
 
-fn prompt_retention(io: &mut dyn PromptIo, current: i64) -> io::Result<i64> {
-    loop {
-        let value = io.read_line(&format!("Cache retention days (-1 = keep forever, 0 = delete synced segments after the day ends, N = keep N days) [{current}]: "))?;
-        if value.trim().is_empty() {
-            return Ok(current);
-        }
-        match value.trim().parse() {
-            Ok(value) => return Ok(value),
-            Err(_) => io.write_line("Enter an integer.")?,
-        }
-    }
-}
-
 fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
     let loaded = load_config(paths);
     let mut config = loaded.config;
@@ -567,7 +554,6 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
         config.start_paused = prompt_bool(prompt, "Start paused", config.start_paused)?;
         config.segment_interval =
             prompt_positive_int(prompt, "Segment interval seconds", config.segment_interval)?;
-        config.cache_retention_days = prompt_retention(prompt, config.cache_retention_days)?;
         save_config(&config)?;
         prompt.write_line(&format!(
             "\nSettings saved to {}",
@@ -691,11 +677,6 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 output,
                 format!("Cache:  {} (not created yet)", captures.display()),
             )?;
-        }
-        match config.cache_retention_days {
-            value if value < 0 => write_line(output, "Retain: forever")?,
-            0 => write_line(output, "Retain: delete synced segments after the day ends")?,
-            value => write_line(output, format!("Retain: {value} day(s)"))?,
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1330,16 +1311,15 @@ mod tests {
     #[test]
     fn settings_enter_keeps_all() {
         let t = tempfile::tempdir().unwrap();
-        let (config, _) = run_settings(&t, &["", "", "", "", ""]);
+        let (config, _) = run_settings(&t, &["", "", "", ""]);
         assert_eq!(
             (
                 config.capture_framerate,
                 config.draw_cursor,
                 config.start_paused,
                 config.segment_interval,
-                config.cache_retention_days
             ),
-            (2, true, false, 300, 7)
+            (2, true, false, 300)
         );
         assert_eq!(config.stream, "strm");
     }
@@ -1348,17 +1328,14 @@ mod tests {
     #[test]
     fn settings_changes_framerate() {
         let t = tempfile::tempdir().unwrap();
-        assert_eq!(
-            run_settings(&t, &["5", "", "", "", ""]).0.capture_framerate,
-            5
-        );
+        assert_eq!(run_settings(&t, &["5", "", "", ""]).0.capture_framerate, 5);
     }
 
     // tests/test_cli.py::test_cmd_settings_framerate_clamped
     #[test]
     fn settings_framerate_clamped() {
         let t = tempfile::tempdir().unwrap();
-        let (config, output) = run_settings(&t, &["99", "", "", "", ""]);
+        let (config, output) = run_settings(&t, &["99", "", "", ""]);
         assert_eq!(config.capture_framerate, 10);
         assert!(output.contains("(clamped to 10)"));
     }
@@ -1367,7 +1344,7 @@ mod tests {
     #[test]
     fn settings_framerate_reprompts() {
         let t = tempfile::tempdir().unwrap();
-        let (config, output) = run_settings(&t, &["abc", "3", "", "", "", ""]);
+        let (config, output) = run_settings(&t, &["abc", "3", "", "", ""]);
         assert_eq!(config.capture_framerate, 3);
         assert!(output.contains("Enter an integer."));
     }
@@ -1376,19 +1353,18 @@ mod tests {
     #[test]
     fn settings_toggles_bool() {
         let t = tempfile::tempdir().unwrap();
-        assert!(!run_settings(&t, &["", "n", "", "", ""]).0.draw_cursor);
+        assert!(!run_settings(&t, &["", "n", "", ""]).0.draw_cursor);
     }
 
     // tests/test_cli.py::test_cmd_settings_retention_semantics
     #[test]
-    fn settings_retention_accepts_negative() {
+    fn settings_omits_retention_prompt_and_strips_key() {
         let t = tempfile::tempdir().unwrap();
-        assert_eq!(
-            run_settings(&t, &["", "", "", "", "-1"])
-                .0
-                .cache_retention_days,
-            -1
-        );
+        let (config, output) = run_settings(&t, &["", "", "", ""]);
+        assert!(!output.contains("retention"));
+        assert!(!output.contains("Retention"));
+        let disk_text = fs::read_to_string(config.config_path()).unwrap();
+        assert!(!disk_text.contains("cache_retention_days"));
     }
 
     // AC: prompt failure leaves the persisted settings unchanged.
@@ -1453,7 +1429,7 @@ mod tests {
             0
         );
         let expected = format!(
-            "Config: {}\nJournal link: managed privately\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nRetain: 7 day(s)\nSync: offline; held on this device; will retry\n\nService: active\n",
+            "Config: {}\nJournal link: managed privately\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nSync: offline; held on this device; will retry\n\nService: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );

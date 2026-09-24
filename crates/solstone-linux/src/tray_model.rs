@@ -25,7 +25,6 @@ pub struct TrayModel {
     pub sni_status: String,
     pub segment: String,
     pub cache: String,
-    pub captures: String,
     pub uptime: String,
     pub resume: String,
     pub pause_visible: bool,
@@ -145,7 +144,6 @@ pub fn build_with_open_journal(
         sni_status: sni_status(status, health),
         segment: format!("segment: {}:{:02} remaining", segment / 60, segment % 60),
         cache: format!("cache: {} MB", snapshot.total_size_mb),
-        captures: format!("today: {} segments", snapshot.captures_today),
         uptime: format!("uptime: {}h {}m", up / 3600, (up % 3600) / 60),
         resume: if pause > 0 {
             format!("resume ({}m remaining)", pause / 60)
@@ -332,7 +330,6 @@ mod tests {
     fn live_stats_and_tooltip_are_rendered_from_snapshot_and_health() {
         let model = build(&snapshot(), 300, 100.0, &connected_health());
         assert_eq!(model.cache, "cache: 3 MB");
-        assert_eq!(model.captures, "today: 2 segments");
         assert_eq!(model.uptime, "uptime: 0h 0m");
         assert_eq!(model.segment, "segment: 5:00 remaining");
         assert_eq!(model.tooltip, "on\nsync: up to date");

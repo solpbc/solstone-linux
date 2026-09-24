@@ -6,9 +6,16 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- the solstone app now removes a segment from this computer as soon as your journal confirms it has it, or that you removed it from your journal, instead of keeping it as long as your cache retention setting said (seven days unless you changed it), so that setting is gone. anything an earlier version kept goes on the first sync after this update, once your journal has confirmed it. the tray's count of today's segments is gone too.
+
 ### Fixed
 
 - if a second copy of the solstone app started under the same login, what the first copy was in the middle of could fail to reach your journal, and the first copy then stopped. a second copy now refuses to start and notes why in its log.
+- a segment the app couldn't finish is now set aside on this computer until you remove it. before, it was removed after 30 days.
+- a segment you had removed from your journal is now removed from this computer too, instead of being offered to your journal again every minute.
+- one segment too large to send no longer stops older segments from reaching your journal.
 
 ## [2.0.7] - 2026-09-24
 

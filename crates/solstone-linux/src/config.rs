@@ -23,7 +23,12 @@ const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_micros(100);
 static CONFIG_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
-pub(crate) const RETIRED_CONFIG_KEYS: [&str; 3] = ["server_url", "key", "chat_bridge_enabled"];
+pub(crate) const RETIRED_CONFIG_KEYS: [&str; 4] = [
+    "server_url",
+    "key",
+    "chat_bridge_enabled",
+    "cache_retention_days",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -32,7 +37,6 @@ pub struct Config {
     pub sync_retry_delays: Vec<i64>,
     pub sync_max_retries: i64,
     pub sync_stale_threshold: i64,
-    pub cache_retention_days: i64,
     pub capture_framerate: i64,
     pub draw_cursor: bool,
     pub start_paused: bool,
@@ -64,7 +68,6 @@ impl Default for Config {
             sync_retry_delays: DEFAULT_RETRY_DELAYS.to_vec(),
             sync_max_retries: 10,
             sync_stale_threshold: DEFAULT_SYNC_STALE_THRESHOLD,
-            cache_retention_days: 7,
             capture_framerate: 1,
             draw_cursor: true,
             start_paused: false,
@@ -279,7 +282,6 @@ fn load_resolved_config(mut config: Config) -> LoadedConfig {
         DEFAULT_SYNC_STALE_THRESHOLD,
         &mut warnings,
     );
-    config.cache_retention_days = load_int(values, "cache_retention_days", 7, &mut warnings);
     config.capture_framerate = load_int(values, "capture_framerate", 1, &mut warnings).clamp(1, 10);
     config.draw_cursor = json_truthy(values.get("draw_cursor"), true);
     config.start_paused = json_truthy(values.get("start_paused"), false);
@@ -427,11 +429,6 @@ fn write_config_merge(
     } else {
         DEFAULT_SYNC_STALE_THRESHOLD
     };
-    let mut cache_retention_days = if merge_basis.is_some() {
-        load_int(&map, "cache_retention_days", 7, &mut warnings)
-    } else {
-        7
-    };
     let mut capture_framerate = if merge_basis.is_some() {
         load_int(&map, "capture_framerate", 1, &mut warnings).clamp(1, 10)
     } else {
@@ -460,11 +457,10 @@ fn write_config_merge(
             start_paused = snapshot.start_paused;
             panel_icon_offer = snapshot.panel_icon_offer;
             segment_interval = snapshot.segment_interval;
-            cache_retention_days = snapshot.cache_retention_days;
             if merge_basis.is_none() {
                 stream = snapshot.stream.clone();
-                sync_retry_delays = snapshot.sync_retry_delays.clone();
                 sync_max_retries = snapshot.sync_max_retries;
+                sync_retry_delays = snapshot.sync_retry_delays.clone();
                 sync_stale_threshold = snapshot.sync_stale_threshold;
             }
         }
@@ -483,7 +479,6 @@ fn write_config_merge(
         sync_retry_delays: sync_retry_delays.clone(),
         sync_max_retries,
         sync_stale_threshold,
-        cache_retention_days,
         capture_framerate,
         draw_cursor,
         start_paused,
@@ -511,10 +506,6 @@ fn write_config_merge(
         map.insert(
             "sync_stale_threshold".into(),
             Value::Number(sync_stale_threshold.into()),
-        );
-        map.insert(
-            "cache_retention_days".into(),
-            Value::Number(cache_retention_days.into()),
         );
         map.insert(
             "capture_framerate".into(),
@@ -693,7 +684,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum SettingsField {
         SegmentInterval,
-        CacheRetentionDays,
+        CaptureFramerate,
     }
 
     #[derive(Clone, Copy)]
@@ -710,8 +701,8 @@ mod tests {
     };
     const SECOND_WRITE: ConfigWriteValue = ConfigWriteValue {
         stream: "linked-second",
-        field: SettingsField::CacheRetentionDays,
-        setting: 22,
+        field: SettingsField::CaptureFramerate,
+        setting: 9,
     };
 
     #[derive(Clone, Copy)]
@@ -737,8 +728,8 @@ mod tests {
                 let mut config = load_config(paths.clone()).config;
                 match value.field {
                     SettingsField::SegmentInterval => config.segment_interval = value.setting,
-                    SettingsField::CacheRetentionDays => {
-                        config.cache_retention_days = value.setting;
+                    SettingsField::CaptureFramerate => {
+                        config.capture_framerate = value.setting;
                     }
                 }
                 save_config(&config)
@@ -753,8 +744,8 @@ mod tests {
                 SettingsField::SegmentInterval => {
                     assert_eq!(config.segment_interval, value.setting);
                 }
-                SettingsField::CacheRetentionDays => {
-                    assert_eq!(config.cache_retention_days, value.setting);
+                SettingsField::CaptureFramerate => {
+                    assert_eq!(config.capture_framerate, value.setting);
                 }
             },
             ConfigWriteFlow::Linked => assert_eq!(config.stream, value.stream),
@@ -980,8 +971,6 @@ mod tests {
     );
     // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[sync_max_retries]
     invalid!(invalid_max_retries, "sync_max_retries", "many", 10);
-    // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[cache_retention_days]
-    invalid!(invalid_retention, "cache_retention_days", json!([]), 7);
     // tests/test_config.py::test_load_non_object_json_warns_and_defaults
     #[test]
     fn non_object() {
@@ -1022,22 +1011,6 @@ mod tests {
         });
         assert_eq!(c.sync_retry_delays, vec![10, 60, 300]);
         assert_eq!(c.sync_max_retries, 5);
-    }
-    // tests/test_config.py::test_cache_retention_days_roundtrip
-    #[test]
-    fn retention_roundtrip() {
-        let t = tempfile::tempdir().unwrap();
-        assert_eq!(
-            round_trip(t.path(), |c| c.cache_retention_days = 14).cache_retention_days,
-            14
-        );
-    }
-    // tests/test_config.py::test_cache_retention_days_default
-    #[test]
-    fn retention_default() {
-        let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"stream":"old"}));
-        assert_eq!(load(t.path()).config.cache_retention_days, 7);
     }
     // tests/test_config.py::test_capture_framerate_default
     #[test]
@@ -1245,13 +1218,13 @@ mod tests {
         assert_eq!(x.config.capture_framerate, 4);
         assert!(old.exists());
     }
-    // AC: all ten persisted defaults.
+    // AC: all nine persisted defaults.
     #[test]
     fn all_defaults() {
         let c = Config::default();
         assert_eq!(
             serde_json::to_value(c).unwrap(),
-            json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"cache_retention_days":7,"capture_framerate":1,"draw_cursor":true,"start_paused":false,"panel_icon_offer":true})
+            json!({"stream":"","segment_interval":300,"sync_retry_delays":[5,30,120,300],"sync_max_retries":10,"sync_stale_threshold":600,"capture_framerate":1,"draw_cursor":true,"start_paused":false,"panel_icon_offer":true})
         );
     }
     // AC: numeric coercion rejects bool and truncates floats, including list elements.
@@ -1327,11 +1300,11 @@ mod tests {
         initial_map1.insert("stream".into(), json!("initial-stream"));
         write(t1.path(), Value::Object(initial_map1));
         let mut c1 = load(t1.path()).config;
-        c1.cache_retention_days = 14;
+        c1.segment_interval = 600;
         save_config(&c1).unwrap();
         let v1: Value =
             serde_json::from_str(&fs::read_to_string(c1.config_path()).unwrap()).unwrap();
-        assert_eq!(v1["cache_retention_days"], 14);
+        assert_eq!(v1["segment_interval"], 600);
         assert_eq!(v1["stream"], "initial-stream");
         for (k, v) in nested_value.as_object().unwrap() {
             assert_eq!(&v1[k], v, "save_config preserved key {k}");
@@ -1398,7 +1371,6 @@ mod tests {
         let initial = Config {
             base_dir: t.path().into(),
             config_dir: t.path().join("cfg"),
-            cache_retention_days: 7,
             segment_interval: 300,
             ..Config::default()
         };
@@ -1414,34 +1386,30 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&disk_path).unwrap()).unwrap();
         disk_val["stream"] = json!("desktop-stream-2");
         disk_val["sync_retry_delays"] = json!([10, 20]);
-        disk_val["sync_max_retries"] = json!(25);
         disk_val["sync_stale_threshold"] = json!(1200);
         disk_val["custom_plugin_field"] = json!({"active": true});
         fs::write(&disk_path, serde_json::to_string_pretty(&disk_val).unwrap()).unwrap();
 
-        // Snapshot applies 5 prompted fields:
+        // Snapshot applies 4 prompted fields:
         snapshot.capture_framerate = 5;
         snapshot.draw_cursor = false;
         snapshot.start_paused = true;
         snapshot.segment_interval = 600;
-        snapshot.cache_retention_days = 30;
 
         // Stale snapshot has old stream "desktop-stream-1", old delays, etc.
         save_config(&snapshot).unwrap();
 
         let saved_val: Value =
             serde_json::from_str(&fs::read_to_string(&disk_path).unwrap()).unwrap();
-        // 5 prompted fields win
+        // 4 prompted fields win
         assert_eq!(saved_val["capture_framerate"], 5);
         assert_eq!(saved_val["draw_cursor"], false);
         assert_eq!(saved_val["start_paused"], true);
         assert_eq!(saved_val["segment_interval"], 600);
-        assert_eq!(saved_val["cache_retention_days"], 30);
 
         // Disk unprompted fields & unknowns win
         assert_eq!(saved_val["stream"], "desktop-stream-2");
         assert_eq!(saved_val["sync_retry_delays"], json!([10, 20]));
-        assert_eq!(saved_val["sync_max_retries"], 25);
         assert_eq!(saved_val["sync_stale_threshold"], 1200);
         assert_eq!(saved_val["custom_plugin_field"], json!({"active": true}));
     }
@@ -1576,7 +1544,7 @@ mod tests {
             bytes_to_write: external_bytes_a.clone(),
         };
         let mut modified_config_a = config_a.clone();
-        modified_config_a.cache_retention_days = 99;
+        modified_config_a.segment_interval = 99;
         let res_a = save_config_with_fault(&modified_config_a, &fault_a);
         assert!(res_a.is_err());
         assert_eq!(fs::read(&path_a).unwrap(), external_bytes_a);
@@ -1723,7 +1691,7 @@ mod tests {
         let initial = Config {
             base_dir: t.path().into(),
             config_dir: t.path().join("cfg"),
-            cache_retention_days: 7,
+            sync_max_retries: 25,
             ..Config::default()
         };
         save_config(&initial).unwrap();
@@ -1732,12 +1700,15 @@ mod tests {
         let mut stale_settings = load_config(config_paths.clone()).config;
 
         save_linked_stream(&config_paths, "desktop-new").unwrap();
-        stale_settings.cache_retention_days = 30;
+        stale_settings.segment_interval = 600;
         save_config(&stale_settings).unwrap();
 
         let saved = load_config(config_paths).config;
         assert_eq!(saved.stream, "desktop-new");
-        assert_eq!(saved.cache_retention_days, 30);
+        assert_eq!(saved.segment_interval, 600);
+        let saved_val: Value =
+            serde_json::from_slice(&fs::read(saved.config_path()).unwrap()).unwrap();
+        assert_eq!(saved_val["sync_max_retries"], 25);
     }
 
     #[test]
@@ -1809,7 +1780,7 @@ mod tests {
         let second_config = Config {
             base_dir: second_base,
             config_dir: second_paths.config_dir.clone().unwrap(),
-            cache_retention_days: 44,
+            segment_interval: 444,
             ..Config::default()
         };
 
@@ -1846,7 +1817,7 @@ mod tests {
         save_config(&second_config).unwrap();
         let saved = load_config(second_paths).config;
         assert_eq!(saved.stream, "legacy");
-        assert_eq!(saved.cache_retention_days, 44);
+        assert_eq!(saved.segment_interval, 444);
     }
 
     #[test]
@@ -1876,7 +1847,6 @@ mod tests {
         assert_eq!(sanitized.sync_retry_delays, vec![2, 4]);
         assert_eq!(sanitized.sync_max_retries, 3);
         assert_eq!(sanitized.sync_stale_threshold, 91);
-        assert_eq!(sanitized.cache_retention_days, 12);
         assert_eq!(sanitized.capture_framerate, 4);
         assert!(!sanitized.draw_cursor);
         assert!(sanitized.start_paused);
@@ -1885,6 +1855,7 @@ mod tests {
         assert!(value.get("server_url").is_none());
         assert!(value.get("key").is_none());
         assert!(value.get("chat_bridge_enabled").is_none());
+        assert!(value.get("cache_retention_days").is_none());
     }
 
     #[test]
@@ -1941,6 +1912,7 @@ mod tests {
         assert!(value.get("server_url").is_none());
         assert!(value.get("key").is_none());
         assert!(value.get("chat_bridge_enabled").is_none());
+        assert!(value.get("cache_retention_days").is_none());
         assert_eq!(value["stream"], "");
         assert_eq!(
             text,
@@ -1953,7 +1925,6 @@ mod tests {
                 "  ],\n",
                 "  \"sync_max_retries\": 10,\n",
                 "  \"sync_stale_threshold\": 600,\n",
-                "  \"cache_retention_days\": 7,\n",
                 "  \"capture_framerate\": 1,\n",
                 "  \"draw_cursor\": true,\n",
                 "  \"start_paused\": false,\n",
@@ -2089,5 +2060,33 @@ mod tests {
                 .mode(),
             mode
         );
+    }
+
+    #[test]
+    fn retired_cache_retention_days_loads_without_warning_and_save_omits() {
+        for days in [-1, 0, 7] {
+            let t = tempfile::tempdir().unwrap();
+            let config_dir = t.path().join("cfg");
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(
+                config_dir.join("config.json"),
+                format!("{{\"cache_retention_days\": {days}, \"stream\": \"test\"}}\n"),
+            )
+            .unwrap();
+            let loaded = load_config(ConfigPaths {
+                base_dir: Some(t.path().into()),
+                config_dir: Some(config_dir.clone()),
+            });
+            assert!(
+                !loaded
+                    .warnings
+                    .iter()
+                    .any(|w| w.field == Some("cache_retention_days")
+                        || w.message.contains("cache_retention_days"))
+            );
+            save_config(&loaded.config).unwrap();
+            let saved_json = fs::read_to_string(config_dir.join("config.json")).unwrap();
+            assert!(!saved_json.contains("cache_retention_days"));
+        }
     }
 }
