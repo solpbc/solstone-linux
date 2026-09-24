@@ -767,6 +767,9 @@ fn cmd_run(interval: Option<i64>) -> i32 {
 fn run_preparation_error_guidance(error: &PrivateStateError) -> &'static str {
     match error {
         PrivateStateError::LockContended => "Linked private state is already in use",
+        PrivateStateError::CaptureRootInUse => {
+            "Another copy of the solstone app is already running for this login, so this one did not start. Stop the other copy, then try again."
+        }
         PrivateStateError::HealthInitializationFailed => {
             "Startup could not continue because the solstone app could not clear the sync status from the previous run. Make sure the solstone app can write its local data, then try again."
         }
@@ -802,6 +805,7 @@ pub(crate) fn prepare_run_config(
             false
         }
     };
+    state_lock.hold_capture_root(&config.base_dir)?;
     let process_epoch = match ProcessEpoch::generate() {
         Ok(epoch) => Some(epoch),
         Err(error) => {

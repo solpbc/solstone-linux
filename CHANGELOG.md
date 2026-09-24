@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- if a second copy of the solstone app started under the same login, what the first copy was in the middle of could fail to reach your journal, and the first copy then stopped. a second copy now refuses to start and notes why in its log.
+
 ## [2.0.7] - 2026-09-24
 
 ### Fixed

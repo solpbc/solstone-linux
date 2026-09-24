@@ -39,6 +39,11 @@ use crate::private_file::{
 
 pub(crate) const CREDENTIALS_FILENAME: &str = "credentials.json";
 const PRIVATE_STATE_LOCK_FILENAME: &str = ".solstone-linux.private-state.lock";
+// Held in the capture root for the life of a run. The private-state lock above
+// lives in the config root, and two processes with different config roots can
+// share one capture root (the same HOME); without this, the second one's
+// startup recovery takes the first one's live segment.
+const CAPTURE_ROOT_LOCK_FILENAME: &str = ".solstone-linux.capture-root.lock";
 pub(crate) const PRIVATE_STATE_READY_LOCK_FILENAME: &str =
     ".solstone-linux.private-state.ready.lock";
 const MAX_PAIR_LINK_BYTES: u64 = 4096;
@@ -90,6 +95,7 @@ pub(crate) enum PrivateStateError {
         source: io::Error,
     },
     LockContended,
+    CaptureRootInUse,
     PairInputInvalid,
     PairingFailed,
     BridgeUnavailable,
@@ -108,6 +114,7 @@ impl fmt::Display for PrivateStateError {
                 write!(formatter, "Io({operation:?}, {:?})", source.kind())
             }
             Self::LockContended => formatter.write_str("LockContended"),
+            Self::CaptureRootInUse => formatter.write_str("CaptureRootInUse"),
             Self::PairInputInvalid => formatter.write_str("PairInputInvalid"),
             Self::PairingFailed => formatter.write_str("PairingFailed"),
             Self::BridgeUnavailable => formatter.write_str("BridgeUnavailable"),
@@ -226,6 +233,7 @@ fn hex(byte: u8) -> Result<u8, PrivateStateError> {
 pub(crate) struct PrivateStateLock {
     _file: File,
     readiness_file: Option<File>,
+    capture_root_file: Option<File>,
     canonical_root: PathBuf,
     handle_count: Arc<AtomicUsize>,
 }
@@ -398,6 +406,7 @@ impl PrivateStateLock {
         Ok(Self {
             _file: file,
             readiness_file: None,
+            capture_root_file: None,
             canonical_root,
             handle_count: Arc::new(AtomicUsize::new(1)),
         })
@@ -434,6 +443,43 @@ impl PrivateStateLock {
         Ok(())
     }
 
+    /// Take the capture root for this run, refusing if another process holds it.
+    pub(crate) fn hold_capture_root(
+        &mut self,
+        capture_root: &Path,
+    ) -> Result<(), PrivateStateError> {
+        fs::create_dir_all(capture_root).map_err(|source| PrivateStateError::Io {
+            operation: PrivateIoOperation::EnsureDirectory,
+            source,
+        })?;
+        let descriptor = rustix::fs::openat(
+            rustix::fs::CWD,
+            capture_root.join(CAPTURE_ROOT_LOCK_FILENAME),
+            rustix::fs::OFlags::RDWR
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CREATE,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .map_err(|source| PrivateStateError::Io {
+            operation: PrivateIoOperation::Open,
+            source: source.into(),
+        })?;
+        let file = File::from(descriptor);
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::WOULDBLOCK) => return Err(PrivateStateError::CaptureRootInUse),
+            Err(source) => {
+                return Err(PrivateStateError::Io {
+                    operation: PrivateIoOperation::Lock,
+                    source: source.into(),
+                });
+            }
+        }
+        self.capture_root_file = Some(file);
+        Ok(())
+    }
+
     pub(crate) fn root(&self) -> &Path {
         &self.canonical_root
     }
@@ -455,10 +501,20 @@ impl PrivateStateLock {
                 operation: PrivateIoOperation::Lock,
                 source,
             })?;
+        let capture_root_file = self
+            .capture_root_file
+            .as_ref()
+            .map(File::try_clone)
+            .transpose()
+            .map_err(|source| PrivateStateError::Io {
+                operation: PrivateIoOperation::Lock,
+                source,
+            })?;
         self.handle_count.fetch_add(1, Ordering::AcqRel);
         Ok(Self {
             _file: file,
             readiness_file,
+            capture_root_file,
             canonical_root: self.canonical_root.clone(),
             handle_count: Arc::clone(&self.handle_count),
         })
@@ -475,6 +531,12 @@ impl Drop for PrivateStateLock {
                 rustix::fs::flock(readiness_file, rustix::fs::FlockOperation::Unlock)
         {
             tracing::error!(%error, "Failed to release private state readiness lock");
+        }
+        if let Some(capture_root_file) = &self.capture_root_file
+            && let Err(error) =
+                rustix::fs::flock(capture_root_file, rustix::fs::FlockOperation::Unlock)
+        {
+            tracing::error!(%error, "Failed to release capture root lock");
         }
         if let Err(error) = rustix::fs::flock(&self._file, rustix::fs::FlockOperation::Unlock) {
             tracing::error!(%error, "Failed to release private state lock");

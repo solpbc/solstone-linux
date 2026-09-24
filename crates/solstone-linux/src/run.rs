@@ -1409,6 +1409,53 @@ mod tests {
         peer.shutdown().await;
     }
 
+    fn tree_snapshot(root: &std::path::Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        let mut entries = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    entries.push((path.clone(), None));
+                    pending.push(path);
+                } else {
+                    entries.push((path.clone(), Some(std::fs::read(&path).unwrap())));
+                }
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    #[tokio::test]
+    async fn second_instance_on_one_capture_root_refuses_and_leaves_the_first_intact() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("home/.local/share/solstone-linux");
+        let paths_for = |config: &str| crate::config::ConfigPaths {
+            base_dir: Some(base_dir.clone()),
+            config_dir: Some(temp.path().join(config)),
+        };
+        let (first, first_config, _, _) =
+            crate::cli::prepare_run_config(paths_for("config-a")).unwrap();
+        let live_segment = first_config
+            .captures_dir()
+            .join("20260924/120000_300.incomplete");
+        std::fs::create_dir_all(&live_segment).unwrap();
+        std::fs::write(live_segment.join("audio.flac"), b"live").unwrap();
+        let before = tree_snapshot(&base_dir);
+
+        assert!(matches!(
+            crate::cli::prepare_run_config(paths_for("config-b")),
+            Err(PrivateStateError::CaptureRootInUse)
+        ));
+        assert_eq!(tree_snapshot(&base_dir), before);
+        assert!(live_segment.join("audio.flac").exists());
+
+        drop(first);
+        let (second, _, _, _) = crate::cli::prepare_run_config(paths_for("config-b")).unwrap();
+        drop(second);
+    }
+
     #[tokio::test]
     async fn prepare_run_config_lock_failure_does_not_mutate_config_or_private_state() {
         let temp = tempfile::tempdir().unwrap();
