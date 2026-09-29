@@ -454,7 +454,13 @@ where
             .join(date)
             .join(&self.config.stream)
             .join(format!("{time}.incomplete"));
-        fs::create_dir_all(&dir)?;
+        // Resume may fall back after video startup fails. Only this observer's
+        // still-open segment can be reused; never adopt a directory from disk.
+        if self.state.segment_dir.as_ref() == Some(&dir) {
+            return Ok(dir);
+        }
+        fs::create_dir_all(dir.parent().expect("segment directory has a parent"))?;
+        fs::create_dir(&dir)?;
         write_segment_metadata(&dir, wall, SegmentProgress::default());
         write_capture_zone(
             &dir,
@@ -473,10 +479,10 @@ where
         let Some(dir) = self.state.segment_dir.take() else {
             return Ok(());
         };
-        let _ = fs::remove_file(dir.join(".metadata"));
         let nonempty = fs::read_dir(&dir)?
             .any(|e| e.is_ok_and(|x| x.path().is_file() && !is_segment_sidecar(&x.file_name())));
         if !nonempty {
+            let _ = fs::remove_file(dir.join(".metadata"));
             let _ = fs::remove_file(dir.join(CAPTURE_ZONE_FILENAME));
             let _ = fs::remove_dir(&dir);
             return Ok(());
@@ -487,7 +493,8 @@ where
             self.config.segment_interval.max(1) as u64,
         );
         let key = segment_key(&time, duration);
-        let _final_dir = finalize_segment_dir(&dir, &key)?;
+        let final_dir = finalize_segment_dir(&dir, &key)?;
+        let _ = fs::remove_file(final_dir.join(".metadata"));
         self.backends
             .events
             .segment_completed(SegmentCompletedEvent { key });
@@ -876,6 +883,65 @@ pub(crate) mod tests {
         f.observer.initialize().unwrap()
     }
 
+    #[test]
+    fn existing_incomplete_segment_is_not_adopted_or_overwritten() {
+        let mut f = fixture(false);
+        let (day, time) = timestamp_parts(f.wall.get());
+        let dir = f
+            .observer
+            .config
+            .captures_dir()
+            .join(day)
+            .join("desk")
+            .join(format!("{time}.incomplete"));
+        fs::create_dir_all(&dir).unwrap();
+        let files = [
+            ("screen.webm", b"first hour".as_slice()),
+            (".metadata", b"first progress".as_slice()),
+            (CAPTURE_ZONE_FILENAME, b"first zone".as_slice()),
+        ];
+        for (name, bytes) in files {
+            fs::write(dir.join(name), bytes).unwrap();
+        }
+        assert!(matches!(
+            f.observer.start_segment(),
+            Err(ObserverError::Io(_))
+        ));
+        for (name, bytes) in files {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), bytes);
+        }
+        assert!(f.observer.state.segment_dir.is_none());
+        assert_eq!(f.starts.get(), 0);
+        assert!(f.events.completed.borrow().is_empty());
+    }
+
+    #[test]
+    fn final_name_collision_preserves_media_and_recovery_metadata() {
+        let mut f = fixture(false);
+        let dir = f.observer.start_segment().unwrap();
+        fs::write(dir.join("screen.webm"), b"second hour").unwrap();
+        let metadata = fs::read(dir.join(".metadata")).unwrap();
+        let zone = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
+        f.wall.set(f.wall.get() + 300.0);
+        let (_, time) = timestamp_parts(f.observer.state.segment_start_wall);
+        let destination = dir.with_file_name(segment_key(&time, 300));
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("screen.webm"), b"first hour").unwrap();
+
+        assert!(matches!(
+            f.observer.finalize_segment(),
+            Err(ObserverError::Io(_))
+        ));
+        assert_eq!(fs::read(dir.join("screen.webm")).unwrap(), b"second hour");
+        assert_eq!(fs::read(dir.join(".metadata")).unwrap(), metadata);
+        assert_eq!(fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap(), zone);
+        assert_eq!(
+            fs::read(destination.join("screen.webm")).unwrap(),
+            b"first hour"
+        );
+        assert!(f.events.completed.borrow().is_empty());
+    }
+
     pub(crate) fn drive_real_observer_ticks() {
         let mut fixture = fixture(true);
         initialize(&mut fixture);
@@ -1137,7 +1203,7 @@ pub(crate) mod tests {
         assert_eq!(f.observer.state.mode, Mode::Screencast);
         assert!(!f.observer.state.cached_is_muted);
         assert_eq!(f.observer.backends.mute.0.len(), 1);
-        f.observer.state.segment_dir = None;
+        f.observer.finalize_segment().unwrap();
         f.observer.backends.activity.0.push_back(Err("x".into()));
         f.observer.tick().unwrap();
         assert_eq!(f.observer.state.mode, Mode::Screencast);

@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- an unfinished moment is kept if a new one would use the same folder.
+
 ## [2.0.9] - 2026-09-28
 
 ### Fixed
