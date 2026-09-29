@@ -158,7 +158,7 @@ fn holds_payload(segment_dir: &Path) -> bool {
         entry
             .path()
             .file_name()
-            .is_some_and(|name| name != crate::recovery::METADATA_FILENAME)
+            .is_some_and(|name| !crate::recovery::is_segment_sidecar(name))
     })
 }
 
@@ -368,9 +368,16 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let empty = segment(t.path(), "20260101", "120000.failed");
         let stub = segment(t.path(), "20260101", "130000.failed");
+        let zone_stub = segment(t.path(), "20260101", "133000.failed");
         fs::write(stub.join(crate::recovery::METADATA_FILENAME), b"{}").unwrap();
+        fs::write(
+            zone_stub.join(crate::recovery::CAPTURE_ZONE_FILENAME),
+            b"{}",
+        )
+        .unwrap();
         set_mtime(&empty, NOW - 30.0 * 86_400.0);
         set_mtime(&stub, NOW - 29.0 * 86_400.0);
+        set_mtime(&zone_stub, NOW - 28.0 * 86_400.0);
         assert_eq!(
             compute_quarantine_stats(t.path(), NOW),
             QuarantineStats {
@@ -382,6 +389,7 @@ mod tests {
         // A sibling carrying real media is still held, and sets the reported age alone.
         let real = segment(t.path(), "20260101", "140000.failed");
         fs::write(real.join(crate::recovery::METADATA_FILENAME), b"{}").unwrap();
+        fs::write(real.join(crate::recovery::CAPTURE_ZONE_FILENAME), b"{}").unwrap();
         fs::write(real.join("audio.flac"), b"x").unwrap();
         set_mtime(&real, NOW - 3.0 * 86_400.0);
         assert_eq!(

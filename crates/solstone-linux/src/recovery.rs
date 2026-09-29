@@ -3,16 +3,22 @@
 
 use crate::segment::clamp_duration;
 use claxon::{FlacReader, FlacReaderOptions};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    ffi::OsStr,
     fs::{self, File, FileTimes},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
 pub(crate) const METADATA_FILENAME: &str = ".metadata";
+pub(crate) const CAPTURE_ZONE_FILENAME: &str = ".capture_zone";
 const MINIMUM_AGE_SECONDS: f64 = 120.0;
+
+pub(crate) fn is_segment_sidecar(name: &OsStr) -> bool {
+    name == METADATA_FILENAME || name == CAPTURE_ZONE_FILENAME
+}
 
 pub trait MediaDurationProbe {
     fn duration(&self, path: &Path) -> Option<f64>;
@@ -80,9 +86,34 @@ pub fn write_segment_metadata(segment_dir: &Path, start_timestamp: f64, progress
     }
 }
 
-// Existence of a non-`.metadata` regular file, not byte_count > 0 — a 0-byte leftover
-// is media, matching finalize_segment. Not shared with finalize_segment (boolean any-file
-// after deleting `.metadata`) or recover_segment (every non-`.metadata` entry, including dirs).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureZone {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+    pub utc_offset_seconds: i32,
+}
+
+pub fn write_capture_zone(segment_dir: &Path, zone: &CaptureZone) {
+    let Ok(mut text) = serde_json::to_string(zone) else {
+        tracing::warn!("Failed to write capture zone");
+        return;
+    };
+    text.push('\n');
+    if let Err(error) = fs::write(segment_dir.join(CAPTURE_ZONE_FILENAME), text) {
+        tracing::warn!("Failed to write capture zone: {error}");
+    }
+}
+
+pub fn read_capture_zone(segment_dir: &Path) -> Option<CaptureZone> {
+    let text = fs::read_to_string(segment_dir.join(CAPTURE_ZONE_FILENAME)).ok()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str(&text).ok()
+}
+
+// Existence of a non-sidecar regular file, not byte_count > 0 — a 0-byte leftover
+// is media, matching finalize_segment.
 pub fn scan_segment_progress(segment_dir: &Path) -> (bool, u64) {
     let Ok(entries) = fs::read_dir(segment_dir) else {
         return (false, 0);
@@ -91,10 +122,7 @@ pub fn scan_segment_progress(segment_dir: &Path) -> (bool, u64) {
     let mut durable_byte_count = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path
-            .file_name()
-            .is_some_and(|name| name == METADATA_FILENAME)
-        {
+        if path.file_name().is_some_and(is_segment_sidecar) {
             continue;
         }
         if !path.is_file() {
@@ -282,17 +310,18 @@ fn recover_segment(
     let Ok(entries) = fs::read_dir(segment_dir) else {
         return mark_failed(segment_dir, now);
     };
-    // Unlike observer._finalize_segment, every non-metadata entry counts, including subdirectories.
+    // Unlike observer._finalize_segment, every non-sidecar entry counts, including subdirectories.
     let contents: Vec<_> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
             path.file_name()
-                .is_some_and(|name| name != METADATA_FILENAME)
+                .is_some_and(|name| !is_segment_sidecar(name))
         })
         .collect();
     if contents.is_empty() {
         tracing::warn!("Empty incomplete segment: {name}");
+        let _ = fs::remove_file(segment_dir.join(CAPTURE_ZONE_FILENAME));
         return mark_failed(segment_dir, now);
     }
     if let Some(readable) = readable_media_duration(&contents, probe) {
@@ -663,5 +692,66 @@ mod tests {
             fs::read_to_string(t.path().join(METADATA_FILENAME)).unwrap(),
             "{\"start_timestamp\":1234.5,\"has_durable_media\":true,\"durable_byte_count\":4,\"last_durable_write_at\":5678.5}\n"
         );
+    }
+
+    #[test]
+    fn capture_zone_serialization_and_read() {
+        let t = tempfile::tempdir().unwrap();
+        let zone = CaptureZone {
+            tz: None,
+            utc_offset_seconds: 0,
+        };
+        write_capture_zone(t.path(), &zone);
+        let raw = fs::read_to_string(t.path().join(CAPTURE_ZONE_FILENAME)).unwrap();
+        assert_eq!(raw, "{\"utc_offset_seconds\":0}\n");
+        assert_eq!(read_capture_zone(t.path()), Some(zone));
+
+        let zone_with_tz = CaptureZone {
+            tz: Some("America/Denver".into()),
+            utc_offset_seconds: -25200,
+        };
+        write_capture_zone(t.path(), &zone_with_tz);
+        assert_eq!(read_capture_zone(t.path()), Some(zone_with_tz));
+    }
+
+    #[test]
+    fn recovery_preserves_capture_zone_with_media() {
+        let t = tempfile::tempdir().unwrap();
+        let now = 1_700_000_060.0;
+        let path = incomplete(t.path(), "140000", now);
+        write_segment_metadata(&path, 1_700_000_000.0, SegmentProgress::default());
+        let zone = CaptureZone {
+            tz: Some("Asia/Kolkata".into()),
+            utc_offset_seconds: 19800,
+        };
+        write_capture_zone(&path, &zone);
+        age(&path, now);
+
+        assert_eq!(recover_incomplete_segments(t.path(), 300, now, &NoMedia), 1);
+        let final_dir = path.with_file_name("140000_60");
+        assert!(final_dir.exists());
+        assert!(!final_dir.join(METADATA_FILENAME).exists());
+        assert_eq!(read_capture_zone(&final_dir), Some(zone));
+    }
+
+    #[test]
+    fn recovery_cleans_up_zone_only_incomplete() {
+        let t = tempfile::tempdir().unwrap();
+        let now = 1_700_000_060.0;
+        let path = incomplete(t.path(), "140000", now);
+        fs::remove_file(path.join("screen.webm")).unwrap();
+        let zone = CaptureZone {
+            tz: Some("America/Denver".into()),
+            utc_offset_seconds: -25200,
+        };
+        write_capture_zone(&path, &zone);
+        age(&path, now);
+
+        assert_eq!(recover_incomplete_segments(t.path(), 300, now, &NoMedia), 0);
+        assert!(!path.exists());
+        assert!(!path.with_file_name("140000_60").exists());
+        let failed_dir = path.with_file_name("140000.failed");
+        assert!(failed_dir.exists());
+        assert!(!failed_dir.join(CAPTURE_ZONE_FILENAME).exists());
     }
 }

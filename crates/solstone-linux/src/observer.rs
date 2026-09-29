@@ -8,8 +8,14 @@ use crate::{
     chunking::{DrainedChunk, HitGate},
     config::Config,
     encoding::{AudioOutputPlan, audio_output_plan},
-    recovery::{SegmentProgress, scan_segment_progress, write_segment_metadata},
-    segment::{clamp_duration, finalize_segment_dir, segment_key, timestamp_parts},
+    recovery::{
+        CAPTURE_ZONE_FILENAME, CaptureZone, SegmentProgress, is_segment_sidecar,
+        scan_segment_progress, write_capture_zone, write_segment_metadata,
+    },
+    segment::{
+        capture_tz_name, clamp_duration, finalize_segment_dir, local_offset_seconds, segment_key,
+        timestamp_parts,
+    },
 };
 #[cfg(test)]
 use serde_json::Value;
@@ -450,6 +456,13 @@ where
             .join(format!("{time}.incomplete"));
         fs::create_dir_all(&dir)?;
         write_segment_metadata(&dir, wall, SegmentProgress::default());
+        write_capture_zone(
+            &dir,
+            &CaptureZone {
+                tz: capture_tz_name(),
+                utc_offset_seconds: local_offset_seconds(wall),
+            },
+        );
         self.state.segment_start_wall = wall;
         self.state.segment_start_mono = self.backends.clock.monotonic_seconds();
         self.state.segment_dir = Some(dir.clone());
@@ -461,8 +474,10 @@ where
             return Ok(());
         };
         let _ = fs::remove_file(dir.join(".metadata"));
-        let nonempty = fs::read_dir(&dir)?.any(|e| e.is_ok_and(|x| x.path().is_file()));
+        let nonempty = fs::read_dir(&dir)?
+            .any(|e| e.is_ok_and(|x| x.path().is_file() && !is_segment_sidecar(&x.file_name())));
         if !nonempty {
+            let _ = fs::remove_file(dir.join(CAPTURE_ZONE_FILENAME));
             let _ = fs::remove_dir(&dir);
             return Ok(());
         }
@@ -1528,5 +1543,68 @@ pub(crate) mod tests {
         f.mono.set(300.0);
         f.observer.tick().unwrap();
         assert_eq!(f.events.completed.borrow().len(), 1);
+    }
+
+    #[test]
+    fn capture_zone_written_on_init_and_unchanged_on_tick() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let dir = f.observer.state.segment_dir.clone().unwrap();
+        let zone = crate::recovery::read_capture_zone(&dir).expect("capture zone exists");
+        assert_eq!(
+            zone.utc_offset_seconds,
+            local_offset_seconds(1_700_000_000.0)
+        );
+        assert_eq!(zone.tz, capture_tz_name());
+        let initial_bytes = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
+
+        // Advance wall clock and tick
+        f.wall.set(1_700_000_050.0);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
+
+        let meta = sidecar(&dir);
+        assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
+        let updated_bytes = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
+        assert_eq!(initial_bytes, updated_bytes);
+    }
+
+    #[test]
+    fn idle_boundary_with_media_preserves_capture_zone() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let dir = f.observer.state.segment_dir.clone().unwrap();
+        let initial_bytes = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
+        fs::write(dir.join("screen.webm"), b"video").unwrap();
+
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.mono.set(300.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.events.completed.borrow().len(), 1);
+
+        let sealed_key = &f.events.completed.borrow()[0].key;
+        let sealed_dir = dir.with_file_name(sealed_key);
+        assert!(sealed_dir.exists());
+        assert!(!sealed_dir.join(crate::recovery::METADATA_FILENAME).exists());
+        let sealed_bytes = fs::read(sealed_dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
+        assert_eq!(initial_bytes, sealed_bytes);
+    }
+
+    #[test]
+    fn pause_finalize_with_no_media_cleans_up_capture_zone() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        initialize(&mut f);
+        let dir = f.observer.state.segment_dir.clone().unwrap();
+        assert!(dir.join(CAPTURE_ZONE_FILENAME).exists());
+
+        f.observer.pause(0);
+        f.observer.tick().unwrap();
+
+        assert!(!dir.exists());
+        assert!(!dir.join(CAPTURE_ZONE_FILENAME).exists());
+        assert_eq!(f.events.completed.borrow().len(), 0);
     }
 }

@@ -1055,7 +1055,11 @@ impl SyncWorker {
         }
 
         let key = segment_dir.file_name().unwrap().to_string_lossy();
-        let result = self.client.upload_segment(day, &key, &files).await;
+        let zone = crate::recovery::read_capture_zone(segment_dir);
+        let result = self
+            .client
+            .upload_segment_with_meta(day, &key, &files, zone.as_ref())
+            .await;
         let (current_identity, current_pairing) = self.current_identity_and_pairing();
 
         if result.success {
@@ -1475,6 +1479,7 @@ fn file_stamp(path: &Path) -> io::Result<IngestAckFileStamp> {
 
 fn is_bookkeeping_file(name: &str) -> bool {
     name == METADATA_FILENAME
+        || name == crate::recovery::CAPTURE_ZONE_FILENAME
         || name == INGEST_ACK_FILENAME
         || name == INGEST_RETRY_FILENAME
         || name == SERVER_KEY_FILENAME
@@ -5170,6 +5175,7 @@ mod tests {
         assert!(is_bookkeeping_file(".ingest_retry.json.tmp.4242"));
         assert!(is_bookkeeping_file(INGEST_ACK_FILENAME));
         assert!(is_bookkeeping_file(INGEST_RETRY_FILENAME));
+        assert!(is_bookkeeping_file(crate::recovery::CAPTURE_ZONE_FILENAME));
         assert!(!is_bookkeeping_file(".screen.webm.tmp123"));
         assert!(!is_bookkeeping_file(".notes.tmpl"));
         assert!(!is_bookkeeping_file("screen.webm.tmp"));
@@ -6329,5 +6335,106 @@ mod tests {
         crate::config::save_config(&config).unwrap();
         let saved_str = fs::read_to_string(config.config_path()).unwrap();
         assert!(!saved_str.contains("cache_retention_days"));
+    }
+
+    #[tokio::test]
+    async fn sync_uploads_stored_capture_zone_independent_of_live_offset() {
+        use crate::segment::{civil_time_in_zoneinfo, local_offset_seconds};
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let live = local_offset_seconds(now_unix);
+        let instant = if live == -25200 {
+            1784138400_i64
+        } else {
+            1768503600_i64
+        };
+        let civil = civil_time_in_zoneinfo("America/Denver", instant).unwrap();
+        assert_ne!(civil.utc_offset_seconds, live);
+
+        let temp = tempfile::tempdir().unwrap();
+        let seg_name = format!("{}_060", civil.hms);
+        let segment_dir = temp
+            .path()
+            .join(format!("captures/{}/archon", civil.day))
+            .join(&seg_name);
+        fs::create_dir_all(&segment_dir).unwrap();
+        fs::write(segment_dir.join("screen.webm"), b"video-content").unwrap();
+        crate::recovery::write_capture_zone(
+            &segment_dir,
+            &crate::recovery::CaptureZone {
+                tz: Some("America/Denver".into()),
+                utc_offset_seconds: civil.utc_offset_seconds,
+            },
+        );
+
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                json!({
+                    "status": "ok",
+                    "segment": &seg_name,
+                    "file_descriptors": [{
+                        "submitted": "screen.webm",
+                        "written": "screen.webm",
+                        "size": 13,
+                        "sha256": sha256_file(&segment_dir.join("screen.webm")).unwrap(),
+                        "disposition": "written",
+                    }]
+                }),
+            )],
+        )
+        .await;
+
+        let outcome = worker.upload_segment(&civil.day, &segment_dir).await;
+        assert_eq!(outcome, UploadOutcome::Acked);
+
+        let request = &server.requests()[0];
+        let body = String::from_utf8_lossy(&request.body);
+        for forbidden in ["stream", "observer", "host", "platform"] {
+            assert!(!body.contains(&format!("\"{forbidden}\":")));
+        }
+        let expected_meta = format!(
+            "\"meta\":{{\"tz\":\"America/Denver\",\"utc_offset_seconds\":{}}}",
+            civil.utc_offset_seconds
+        );
+        assert!(
+            body.contains(&expected_meta),
+            "missing {expected_meta:?} in {body}"
+        );
+        assert!(body.contains(&format!("\"segment\":\"{seg_name}\"")));
+    }
+
+    #[tokio::test]
+    async fn sync_uploads_segment_without_capture_zone_omits_meta() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"video data");
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                json!({
+                    "status": "ok",
+                    "segment": "120000_300",
+                    "file_descriptors": [{
+                        "submitted": "screen.webm",
+                        "written": "screen.webm",
+                        "size": 10,
+                        "sha256": sha256_file(&segment.join("screen.webm")).unwrap(),
+                        "disposition": "written",
+                    }]
+                }),
+            )],
+        )
+        .await;
+
+        let outcome = worker.upload_segment("20260101", &segment).await;
+        assert_eq!(outcome, UploadOutcome::Acked);
+
+        let request = &server.requests()[0];
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(!body.contains("\"meta\":"));
     }
 }

@@ -221,6 +221,17 @@ impl UploadClient {
         segment: &str,
         files: &[PathBuf],
     ) -> UploadResult {
+        self.upload_segment_with_meta(day, segment, files, None)
+            .await
+    }
+
+    pub async fn upload_segment_with_meta(
+        &self,
+        day: &str,
+        segment: &str,
+        files: &[PathBuf],
+        meta: Option<&crate::recovery::CaptureZone>,
+    ) -> UploadResult {
         if self.is_revoked() {
             return UploadResult::failure(Some(ErrorType::Auth), None, None);
         }
@@ -228,7 +239,8 @@ impl UploadClient {
         let mut last_status = None;
         let mut last_reason_code = None;
         for attempt in 0..self.inner.immediate_attempts {
-            let (form, framed_length) = match build_multipart_form(day, segment, files).await {
+            let (form, framed_length) = match build_multipart_form(day, segment, files, meta).await
+            {
                 Ok(form) => form,
                 Err(MultipartBuildError::NoFiles) => {
                     return UploadResult::local_failure(Some(ErrorType::Client), None);
@@ -539,6 +551,8 @@ struct UploadEnvelope<'a> {
     day: &'a str,
     segment: &'a str,
     files: Vec<SubmittedFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<&'a crate::recovery::CaptureZone>,
 }
 
 #[derive(Serialize)]
@@ -579,6 +593,7 @@ async fn build_multipart_form(
     day: &str,
     segment: &str,
     files: &[PathBuf],
+    meta: Option<&crate::recovery::CaptureZone>,
 ) -> Result<(multipart::Form, u64), MultipartBuildError> {
     let form = multipart::Form::new();
     let boundary = form.boundary().to_owned();
@@ -607,6 +622,7 @@ async fn build_multipart_form(
         day,
         segment,
         files: submitted,
+        meta,
     })
     .expect("upload envelope is serializable");
     if envelope.len() as u64 > MAX_MULTIPART_PART_BYTES {
@@ -926,7 +942,18 @@ mod tests {
         assert!(envelope.get("observer").is_none());
         assert!(envelope.get("host").is_none());
         assert!(envelope.get("platform").is_none());
-        assert!(envelope.get("meta").is_none());
+        if let Some(meta) = envelope.get("meta") {
+            let obj = meta.as_object().unwrap();
+            for key in obj.keys() {
+                assert!(key == "tz" || key == "utc_offset_seconds");
+            }
+            if let Some(tz) = obj.get("tz") {
+                assert!(tz.is_string());
+            }
+            if let Some(offset) = obj.get("utc_offset_seconds") {
+                assert!(offset.is_number());
+            }
+        }
         for (name, mime, expected) in [
             ("audio.flac", "audio/flac", flac.as_slice()),
             ("screen.webm", "video/webm", webm.as_slice()),
@@ -1014,7 +1041,7 @@ mod tests {
         file.set_len(MAX_MULTIPART_PART_BYTES).unwrap();
         drop(file);
         assert!(
-            build_multipart_form("20260101", "boundary", &[media])
+            build_multipart_form("20260101", "boundary", &[media], None)
                 .await
                 .is_ok()
         );
@@ -1029,9 +1056,10 @@ mod tests {
             let file = std::fs::File::create(path).unwrap();
             file.set_len(MAX_MULTIPART_PART_BYTES - 4096).unwrap();
         }
-        let (_, encoded_length) = build_multipart_form("20260101", "boundary", &[first, second])
-            .await
-            .unwrap();
+        let (_, encoded_length) =
+            build_multipart_form("20260101", "boundary", &[first, second], None)
+                .await
+                .unwrap();
         assert!(encoded_length <= MAX_REQUEST_BODY_BYTES);
     }
 
@@ -1048,7 +1076,13 @@ mod tests {
         second_file.set_len(MAX_MULTIPART_PART_BYTES).unwrap();
         drop(second_file);
         assert!(matches!(
-            build_multipart_form("20260101", "boundary", &[media.clone(), second.clone()]).await,
+            build_multipart_form(
+                "20260101",
+                "boundary",
+                &[media.clone(), second.clone()],
+                None
+            )
+            .await,
             Err(MultipartBuildError::RequestTooLarge)
         ));
         let result = client
@@ -1147,10 +1181,90 @@ mod tests {
         ] {
             assert!(body.contains(expected), "missing {expected:?} in {body}");
         }
-        for forbidden in ["stream", "observer", "host", "platform", "meta"] {
+        for forbidden in ["stream", "observer", "host", "platform"] {
             assert!(!body.contains(&format!("\"{forbidden}\":")));
         }
         assert_eq!(body.matches("name=\"files\"").count(), 3);
+    }
+
+    #[tokio::test]
+    async fn upload_multipart_meta_capture_zone_shape() {
+        use crate::segment::civil_time_in_zoneinfo;
+        use chrono::{NaiveDate, NaiveTime};
+
+        for (zone, instant, expected_offset) in [
+            ("America/Denver", 1768503600_i64, -25200_i32),
+            ("America/Denver", 1784138400_i64, -21600_i32),
+            ("Asia/Kolkata", 1768458600_i64, 19800_i32),
+        ] {
+            let civil = civil_time_in_zoneinfo(zone, instant).unwrap();
+            assert_eq!(civil.utc_offset_seconds, expected_offset);
+
+            let naive_date = NaiveDate::parse_from_str(&civil.day, "%Y%m%d").unwrap();
+            let naive_time = NaiveTime::parse_from_str(&civil.hms, "%H%M%S").unwrap();
+            let wall_unix = naive_date.and_time(naive_time).and_utc().timestamp();
+            assert_eq!(wall_unix - i64::from(civil.utc_offset_seconds), instant);
+
+            let server = MockServer::new(vec![(200, json!({"status":"ok"}))]).await;
+            let temp = TempDir::new().unwrap();
+            let config = config(&server, &temp);
+            let media = write_file(&temp, "audio.flac", b"audio-bytes");
+
+            let capture_zone = crate::recovery::CaptureZone {
+                tz: Some(zone.to_string()),
+                utc_offset_seconds: civil.utc_offset_seconds,
+            };
+            let seg_key = format!("{}_060", civil.hms);
+
+            assert!(
+                client(&config, &server.url)
+                    .upload_segment_with_meta(&civil.day, &seg_key, &[media], Some(&capture_zone))
+                    .await
+                    .success
+            );
+
+            let request = &server.requests()[0];
+            let body = String::from_utf8_lossy(&request.body);
+
+            for forbidden in ["stream", "observer", "host", "platform"] {
+                assert!(!body.contains(&format!("\"{forbidden}\":")));
+            }
+            assert!(!body.contains(":null"));
+
+            let expected_meta = format!(
+                "\"meta\":{{\"tz\":\"{zone}\",\"utc_offset_seconds\":{}}}",
+                civil.utc_offset_seconds
+            );
+            assert!(
+                body.contains(&expected_meta),
+                "missing {expected_meta:?} in {body}"
+            );
+        }
+
+        let server = MockServer::new(vec![(200, json!({"status":"ok"}))]).await;
+        let temp = TempDir::new().unwrap();
+        let config = config(&server, &temp);
+        let media = write_file(&temp, "audio.flac", b"audio-bytes");
+        let capture_zone_no_tz = crate::recovery::CaptureZone {
+            tz: None,
+            utc_offset_seconds: 19800,
+        };
+        assert!(
+            client(&config, &server.url)
+                .upload_segment_with_meta(
+                    "20260115",
+                    "120000_060",
+                    &[media],
+                    Some(&capture_zone_no_tz)
+                )
+                .await
+                .success
+        );
+        let request = &server.requests()[0];
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(body.contains("\"meta\":{\"utc_offset_seconds\":19800}"));
+        assert!(!body.contains("\"tz\""));
+        assert!(!body.contains(":null"));
     }
 
     // tests/test_upload.py::test_upload_segment_returns_stored_key
