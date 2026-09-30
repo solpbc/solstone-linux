@@ -3287,6 +3287,7 @@ mod tests {
             "terminal_revocation": snapshot.terminal_revocation,
             "token_persistence_failure": snapshot.token_persistence_failure,
             "journal_version_observed": snapshot.journal_version_observed,
+            "journal_mark_held": snapshot.journal_mark_held,
             "unknown_journals": unknown_journals_json,
             "paired_jid": snapshot.paired_jid,
             "unknown_spoken_marks": unknown_spoken_marks_json,
@@ -3307,6 +3308,7 @@ mod tests {
                 .filter(|(key, _)| !matches!(
                     key.as_str(),
                     "journal_version_observed"
+                        | "journal_mark_held"
                         | "transport_unavailable"
                         | "unknown_journals"
                         | "paired_jid"

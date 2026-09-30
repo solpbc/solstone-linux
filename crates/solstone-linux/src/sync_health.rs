@@ -46,6 +46,7 @@ impl ErrorType {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum HealthState {
     UnsafeLinkState,
+    JournalMarkHeld,
     RePairRequired,
     TokenPersistenceFailed,
     PairingRequired,
@@ -156,6 +157,23 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
                 doctor_severity: "fail",
                 doctor_detail: "sync health: pairing unsafe; repair this device's pairing and restart the solstone app",
                 dbus: "unsafe-link-state",
+            },
+        ),
+        (
+            HealthState::JournalMarkHeld,
+            HealthSurface {
+                header_recording: "waiting for you to confirm your journal's mark",
+                header_idle: "waiting for you to confirm your journal's mark",
+                sync_line: "waiting for you to confirm your journal's mark",
+                tooltip: "waiting for you to confirm your journal's mark",
+                accessible_recording: "waiting for you to confirm your journal's mark",
+                accessible_idle: "waiting for you to confirm your journal's mark",
+                icon: "attention",
+                sni: "NeedsAttention",
+                cli: "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.\nwhen you're ready, run: solstone-linux confirm",
+                doctor_severity: "fail",
+                doctor_detail: "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.\nwhen you're ready, run: solstone-linux confirm",
+                dbus: "journal-mark-held",
             },
         ),
         (
@@ -420,6 +438,8 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
         && !facts.in_progress;
     let state = if link.private_state_invalid || link.config_sanitation_failed {
         HealthState::UnsafeLinkState
+    } else if link.journal_mark_held {
+        HealthState::JournalMarkHeld
     } else if link.terminal_revocation || terminal_auth {
         HealthState::RePairRequired
     } else if link.token_persistence_failure {
@@ -656,6 +676,10 @@ pub(crate) fn load_link_facts(
     };
     Ok(Some(LinkFactState {
         pairing_required: boolean("pairing_required")?,
+        journal_mark_held: link
+            .get("journal_mark_held")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         private_state_invalid: boolean("private_state_invalid")?,
         config_sanitation_failed: boolean("config_sanitation_failed")?,
         listener_ready: boolean("listener_ready")?,
@@ -737,6 +761,7 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
                 .collect();
             json!({
                 "pairing_required": link.pairing_required,
+                "journal_mark_held": link.journal_mark_held,
                 "private_state_invalid": link.private_state_invalid,
                 "config_sanitation_failed": link.config_sanitation_failed,
                 "listener_ready": link.listener_ready,
@@ -1138,7 +1163,7 @@ mod tests {
     // tests/test_sync_health.py::test_every_health_state_has_complete_surface
     #[test]
     fn every_health_state_has_complete_surface() {
-        assert_eq!(SURFACE_BY_STATE.len(), 12);
+        assert_eq!(SURFACE_BY_STATE.len(), 13);
         for surface in SURFACE_BY_STATE.values() {
             assert!(!surface.header_recording.is_empty());
             assert!(!surface.header_idle.is_empty());
@@ -1176,6 +1201,13 @@ mod tests {
                     ..Default::default()
                 }),
                 HealthState::UnsafeLinkState,
+            ),
+            (
+                link(LinkFactState {
+                    journal_mark_held: true,
+                    ..Default::default()
+                }),
+                HealthState::JournalMarkHeld,
             ),
             (
                 link(LinkFactState {
@@ -1247,6 +1279,7 @@ mod tests {
 
         let all = LinkFactState {
             pairing_required: true,
+            journal_mark_held: true,
             private_state_invalid: true,
             config_sanitation_failed: true,
             listener_ready: true,
@@ -1268,12 +1301,22 @@ mod tests {
                     config_sanitation_failed: false,
                     ..all.clone()
                 },
+                HealthState::JournalMarkHeld,
+            ),
+            (
+                LinkFactState {
+                    private_state_invalid: false,
+                    config_sanitation_failed: false,
+                    journal_mark_held: false,
+                    ..all.clone()
+                },
                 HealthState::RePairRequired,
             ),
             (
                 LinkFactState {
                     private_state_invalid: false,
                     config_sanitation_failed: false,
+                    journal_mark_held: false,
                     terminal_revocation: false,
                     ..all.clone()
                 },
@@ -1283,6 +1326,7 @@ mod tests {
                 LinkFactState {
                     private_state_invalid: false,
                     config_sanitation_failed: false,
+                    journal_mark_held: false,
                     terminal_revocation: false,
                     token_persistence_failure: false,
                     ..all.clone()
@@ -1293,6 +1337,7 @@ mod tests {
                 LinkFactState {
                     private_state_invalid: false,
                     config_sanitation_failed: false,
+                    journal_mark_held: false,
                     terminal_revocation: false,
                     token_persistence_failure: false,
                     pairing_required: false,
@@ -1660,5 +1705,96 @@ Unknown journal seen at 127.0.0.1:5015:
         assert_eq!(loaded.paired_jid, Some("some-paired-jid".to_owned()));
         assert!(loaded.unknown_spoken_marks.is_empty());
         assert_eq!(loaded.paired_spoken_mark, None);
+    }
+
+    #[test]
+    fn held_health_outranks_transport_auth_and_stale() {
+        let now = 1000.0;
+        let stale_threshold = 60.0;
+
+        let facts = SyncFacts {
+            link: Some(LinkFactState {
+                journal_mark_held: true,
+                transport_unavailable: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let health = derive_health(&facts, now, stale_threshold);
+        assert_eq!(health.state, HealthState::JournalMarkHeld);
+
+        let facts_stale = SyncFacts {
+            last_successful_contact: Some(now - 100.0),
+            link: Some(LinkFactState {
+                journal_mark_held: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let health_stale = derive_health(&facts_stale, now, stale_threshold);
+        assert_eq!(health_stale.state, HealthState::JournalMarkHeld);
+
+        let facts_auth = SyncFacts {
+            last_error_class: Some(ErrorType::Auth),
+            last_error_code: Some(403),
+            link: Some(LinkFactState {
+                journal_mark_held: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let health_auth = derive_health(&facts_auth, now, stale_threshold);
+        assert_eq!(health_auth.state, HealthState::JournalMarkHeld);
+
+        let facts_incompat = SyncFacts {
+            last_error_class: Some(ErrorType::Incompatible),
+            link: Some(LinkFactState {
+                journal_mark_held: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let health_incompat = derive_health(&facts_incompat, now, stale_threshold);
+        assert_eq!(health_incompat.state, HealthState::JournalMarkHeld);
+
+        let facts_unsafe = SyncFacts {
+            link: Some(LinkFactState {
+                journal_mark_held: true,
+                private_state_invalid: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let health_unsafe = derive_health(&facts_unsafe, now, stale_threshold);
+        assert_eq!(health_unsafe.state, HealthState::UnsafeLinkState);
+
+        assert_eq!(
+            health.header_recording,
+            "waiting for you to confirm your journal's mark"
+        );
+        assert_eq!(
+            health.header_idle,
+            "waiting for you to confirm your journal's mark"
+        );
+        assert_eq!(
+            health.sync_line,
+            "waiting for you to confirm your journal's mark"
+        );
+        assert_eq!(
+            health.tooltip,
+            "waiting for you to confirm your journal's mark"
+        );
+        assert_eq!(
+            health.accessible_recording,
+            "waiting for you to confirm your journal's mark"
+        );
+        assert_eq!(
+            health.accessible_idle,
+            "waiting for you to confirm your journal's mark"
+        );
+
+        let expected_detail = "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.\nwhen you're ready, run: solstone-linux confirm";
+        assert_eq!(health.cli, expected_detail);
+        assert_eq!(health.doctor_detail, expected_detail);
     }
 }

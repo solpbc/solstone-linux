@@ -375,7 +375,7 @@ fn credential_and_acceptor(port: u16, refusal: Arc<AtomicU8>) -> (Credential, Tl
             client_cert_pem: client.pem(),
             ca_chain_pem: vec![ca.pem()],
             ca_fp_prefix: spl_core::ca::sha256(ca_der.as_ref())[..16].to_vec(),
-            instance_id: "test-instance".into(),
+            instance_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             home_label: "test home".into(),
             endpoints: vec![EndpointAddr {
                 host: "127.0.0.1".into(),

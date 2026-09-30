@@ -285,7 +285,19 @@ fn run_capture(
     let linked_state_lock = state_lock
         .try_clone()
         .map_err(|error| ObserverError::Io(format!("linked state lock clone failed: {error}")))?;
+    let sync = SyncService::start_with_epoch(
+        config.clone(),
+        Arc::clone(&upload),
+        Arc::new(clock.clone()),
+        process_epoch.clone(),
+    );
+    let sync_trigger = sync.trigger_handle();
+    let sync_sampler = sync.sampler_handle();
+    sync.trigger();
+    let linked_shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let linked_start = if process_epoch.is_some() {
+        let shutdown_notify = Arc::clone(&linked_shutdown_notify);
+        let on_confirmed = Some(sync_trigger.clone());
         runtime.spawn(start_linked_owner(
             linked_upload,
             linked_root,
@@ -293,6 +305,8 @@ fn run_capture(
             linked_state_lock,
             transport_enabled,
             open_journal.clone(),
+            shutdown_notify,
+            on_confirmed,
         ))
     } else {
         runtime.spawn(async {
@@ -301,15 +315,6 @@ fn run_capture(
             )
         })
     };
-    let sync = SyncService::start_with_epoch(
-        config.clone(),
-        Arc::clone(&upload),
-        Arc::new(clock.clone()),
-        process_epoch,
-    );
-    let sync_trigger = sync.trigger_handle();
-    let sync_sampler = sync.sampler_handle();
-    sync.trigger();
     let initial_snapshot = StateSnapshot {
         mode: Mode::Idle,
         paused: config.start_paused,
@@ -417,6 +422,7 @@ fn run_capture(
     if let Err(error) = notifier.stopping() {
         tracing::warn!(%error, "Failed to notify systemd stopping state");
     }
+    linked_shutdown_notify.notify_one();
     let (shutdown, sync_shutdown, linked_shutdown) = runtime.block_on(shutdown_in_order(
         observer,
         (Observer::shutdown, || open_journal.close_current()),
@@ -445,6 +451,7 @@ fn run_capture(
         .and(linked_shutdown)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_linked_owner(
     upload: Arc<UploadClient>,
     config_root: PathBuf,
@@ -452,15 +459,23 @@ async fn start_linked_owner(
     state_lock: PrivateStateLock,
     transport_enabled: bool,
     open_journal: crate::private_link::OpenJournalAccess,
+    shutdown: Arc<tokio::sync::Notify>,
+    on_confirmed: Option<crate::sync::SyncTrigger>,
 ) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
     upload.begin_owner_generation();
     if !transport_enabled {
         upload.publish_link_fact(crate::private_link::LinkFact::ConfigSanitationFailed);
         return Err(crate::private_link::PrivateStateError::BridgeUnavailable);
     }
-    let credential = match load_credential(&config_root) {
+
+    if let Ok(_lock) = crate::journal_mark::AnswerLock::acquire(&config_root).await {
+        let _ = crate::journal_mark::grandfather_answer_file(&config_root);
+    }
+
+    let initial_cred = match load_credential(&config_root) {
         Ok(Some(credential)) => credential,
         Ok(None) => {
+            upload.link_facts().set_journal_mark_held(false);
             upload.publish_link_fact(crate::private_link::LinkFact::PairingRequired);
             return Err(crate::private_link::PrivateStateError::MalformedCredential);
         }
@@ -469,14 +484,63 @@ async fn start_linked_owner(
             return Err(error);
         }
     };
-    let mut owner =
-        start_private_link_owner_with_lock(state_lock, credential, &stream, upload.link_facts())
-            .await
-            .inspect_err(|_| {
-                upload.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
-            })?;
+
+    let mut armed = true;
+    let mut current_cred = Some(initial_cred);
+    let confirmed_cred = loop {
+        if let Some(cred) = &current_cred {
+            let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
+            if crate::journal_mark::is_pairing_confirmed(&config_root, &pairing_id) {
+                upload.link_facts().set_journal_mark_held(false);
+                break cred.clone();
+            }
+            upload.link_facts().set_journal_mark_held(true);
+        }
+
+        tokio::select! {
+            _ = shutdown.notified() => {
+                return Err(crate::private_link::PrivateStateError::BridgeUnavailable);
+            }
+            _ = tokio::time::sleep(crate::journal_mark::JOURNAL_MARK_RECHECK_INTERVAL) => {}
+        }
+
+        match load_credential(&config_root) {
+            Ok(Some(cred)) => {
+                armed = true;
+                current_cred = Some(cred);
+            }
+            Ok(None) => {
+                current_cred = None;
+                upload.link_facts().set_journal_mark_held(false);
+                upload.publish_link_fact(crate::private_link::LinkFact::PairingRequired);
+                if !armed {
+                    return Err(crate::private_link::PrivateStateError::MalformedCredential);
+                }
+            }
+            Err(error) => {
+                if !armed {
+                    upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
+                    return Err(error);
+                }
+                upload.link_facts().set_journal_mark_held(true);
+            }
+        }
+    };
+    let mut owner = start_private_link_owner_with_lock(
+        state_lock,
+        confirmed_cred,
+        &stream,
+        upload.link_facts(),
+    )
+    .await
+    .inspect_err(|_| {
+        upload.publish_link_fact(crate::private_link::LinkFact::TransportUnavailable);
+    })?;
     owner.install_open_journal_access(open_journal);
     upload.install_capability(owner.capability());
+    if let Some(trigger) = on_confirmed {
+        trigger.trigger();
+    }
     Ok(owner)
 }
 
@@ -1300,6 +1364,8 @@ mod tests {
             lock,
             transport_enabled,
             crate::private_link::OpenJournalAccess::default(),
+            Arc::new(tokio::sync::Notify::new()),
+            None,
         ));
         assert_real_observer_ticks_advance();
         let result = start.await.unwrap();
@@ -1836,6 +1902,8 @@ mod tests {
                 lock,
                 true,
                 crate::private_link::OpenJournalAccess::default(),
+                Arc::new(tokio::sync::Notify::new()),
+                None,
             )
             .await
             .unwrap();
@@ -1911,6 +1979,8 @@ mod tests {
                 lock,
                 true,
                 crate::private_link::OpenJournalAccess::default(),
+                Arc::new(tokio::sync::Notify::new()),
+                None,
             )
             .await;
             assert!(first_start.is_err());
@@ -1938,6 +2008,7 @@ mod tests {
                     &failure_root,
                     &failure_root.join("state"),
                     "desktop",
+                    Some("bramble quokka"),
                     Cursor::new(b"pair link with whitespace\n"),
                     &mut failure_output,
                     &mut failure_errors,
@@ -1946,6 +2017,10 @@ mod tests {
                 1
             );
             assert_eq!(failed_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                String::from_utf8(failure_errors.clone()).unwrap(),
+                "Setup failed: the pair link was not valid.\n"
+            );
             failure_output.clear();
             failure_errors.clear();
             assert_eq!(
@@ -1954,6 +2029,7 @@ mod tests {
                     &failure_root,
                     &failure_root.join("state"),
                     "desktop",
+                    Some("bramble quokka"),
                     Cursor::new(format!(
                         "{}\n",
                         crate::private_link::DIRECT_PAIR_LINK_FOR_TEST
@@ -1975,12 +2051,16 @@ mod tests {
             };
             let mut output = Vec::new();
             let mut errors = Vec::new();
+            let mark = spl_core::mark::mark_from_jid(&peer.credential().instance_id).unwrap();
+            let spec = mark.to_render_spec();
+            let mark_str = format!("{} {}", spec.words[0], spec.words[1]);
             assert_eq!(
                 dispatch_setup_with_pairer_for_test(
                     &pairer,
                     &config.config_dir,
                     &config.state_dir(),
                     "desktop",
+                    Some(&mark_str),
                     Cursor::new(format!(
                         "{}\n",
                         crate::private_link::DIRECT_PAIR_LINK_FOR_TEST
@@ -2008,6 +2088,8 @@ mod tests {
                 contended_lock,
                 true,
                 crate::private_link::OpenJournalAccess::default(),
+                Arc::new(tokio::sync::Notify::new()),
+                None,
             )
             .await
             .unwrap();
@@ -2059,5 +2141,206 @@ mod tests {
             assert!(PrivateStateLock::acquire(&final_config.config_dir).is_ok());
             peer.shutdown().await;
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_wait_does_not_start_after_credential_disappears() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_root = temp.path().join("config");
+        let state_dir = temp.path().join("state");
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let cred = peer.credential();
+        crate::private_link::persist_credential(&config_root, &cred).unwrap();
+
+        let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
+        crate::journal_mark::write_pairing_answer(&config_root, "").unwrap();
+
+        let paths = crate::config::ConfigPaths {
+            base_dir: Some(state_dir.clone()),
+            config_dir: Some(config_root.clone()),
+        };
+        let config = crate::config::load_config(paths).config;
+        let upload = Arc::new(UploadClient::new(
+            &config,
+            None::<PrivateLinkCapability>,
+            Arc::new(SystemClock::new()),
+        ));
+        let state_lock = PrivateStateLock::acquire(&config_root).unwrap();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let upload_clone = Arc::clone(&upload);
+        let config_root_clone = config_root.clone();
+        let shutdown_clone = Arc::clone(&shutdown);
+
+        let handle = tokio::spawn(async move {
+            start_linked_owner(
+                upload_clone,
+                config_root_clone,
+                "main".to_string(),
+                state_lock,
+                true,
+                crate::private_link::OpenJournalAccess::default(),
+                shutdown_clone,
+                None,
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(upload.link_facts().snapshot().journal_mark_held);
+
+        std::fs::remove_file(config_root.join("credentials.json")).unwrap();
+        crate::journal_mark::write_pairing_answer(&config_root, &pairing_id).unwrap();
+
+        tokio::time::advance(crate::journal_mark::JOURNAL_MARK_RECHECK_INTERVAL).await;
+        tokio::task::yield_now().await;
+
+        let facts = upload.link_facts().snapshot();
+        assert!(!facts.journal_mark_held);
+        assert!(facts.pairing_required);
+        assert!(!handle.is_finished());
+
+        shutdown.notify_waiters();
+        let res = handle.await.unwrap();
+        assert!(res.is_err());
+        peer.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_pairing_sends_nothing_until_confirm() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_root = temp.path().join("config");
+        let state_dir = temp.path().join("state");
+        let captures_dir = state_dir.join("captures");
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&captures_dir).unwrap();
+
+        let paths = crate::config::ConfigPaths {
+            base_dir: Some(state_dir.clone()),
+            config_dir: Some(config_root.clone()),
+        };
+        let mut config = crate::config::load_config(paths).config;
+        config.stream = "main".into();
+
+        let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let cred = peer.credential();
+        crate::private_link::persist_credential(&config_root, &cred).unwrap();
+        crate::journal_mark::write_pairing_answer(&config_root, "").unwrap();
+
+        let day = "2026-03-31";
+        let day_dir = captures_dir.join(day);
+        std::fs::create_dir_all(&day_dir).unwrap();
+        let seg1 = day_dir.join("00000000000000-01-segment");
+        let seg2 = day_dir.join("00000000000001-01-segment");
+        std::fs::create_dir_all(&seg1).unwrap();
+        std::fs::create_dir_all(&seg2).unwrap();
+        std::fs::write(seg1.join("screen.webm"), b"video1").unwrap();
+        std::fs::write(seg2.join("screen.webm"), b"video2").unwrap();
+
+        let state_lock = PrivateStateLock::acquire(&config_root).unwrap();
+        let upload = Arc::new(UploadClient::new(
+            &config,
+            None::<PrivateLinkCapability>,
+            Arc::new(SystemClock::new()),
+        ));
+        let open_journal = crate::private_link::OpenJournalAccess::default();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let upload_clone = Arc::clone(&upload);
+        let config_root_clone = config_root.clone();
+        let open_journal_clone = open_journal.clone();
+        let shutdown_clone = Arc::clone(&shutdown);
+
+        let owner_handle = tokio::spawn(async move {
+            start_linked_owner(
+                upload_clone,
+                config_root_clone,
+                "main".to_string(),
+                state_lock,
+                true,
+                open_journal_clone,
+                shutdown_clone,
+                None,
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(peer.accepted_carriers(), 0);
+        assert!(peer.requests().is_empty());
+
+        let _ = open_journal.open();
+        tokio::task::yield_now().await;
+        assert_eq!(peer.accepted_carriers(), 0);
+        assert!(peer.requests().is_empty());
+
+        let mark = spl_core::mark::mark_from_jid(&cred.instance_id).unwrap();
+        let spec = mark.to_render_spec();
+        let mark_str = format!("{} {}", spec.words[0], spec.words[1]);
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status = crate::cli::confirm_async(
+            &config_root,
+            Some(&mark_str),
+            None::<std::os::fd::BorrowedFd<'_>>,
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(status, 0);
+
+        tokio::time::advance(crate::journal_mark::JOURNAL_MARK_RECHECK_INTERVAL).await;
+        tokio::task::yield_now().await;
+
+        let owner = owner_handle.await.unwrap().unwrap();
+
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "segment": "k1"
+            }))
+            .unwrap(),
+        );
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "segment": "k2"
+            }))
+            .unwrap(),
+        );
+
+        let res1 = upload
+            .upload_segment(
+                day,
+                "00000000000000-01-segment",
+                &[seg1.join("screen.webm")],
+            )
+            .await;
+        assert!(res1.success);
+        assert_eq!(res1.stored_key.as_deref(), Some("k1"));
+        let res2 = upload
+            .upload_segment(
+                day,
+                "00000000000001-01-segment",
+                &[seg2.join("screen.webm")],
+            )
+            .await;
+        assert!(res2.success);
+        assert_eq!(res2.stored_key.as_deref(), Some("k2"));
+
+        let requests = peer.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].path.starts_with("/app/devices/ingest"));
+        assert!(requests[1].path.starts_with("/app/devices/ingest"));
+
+        owner.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 }

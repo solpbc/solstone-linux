@@ -58,7 +58,7 @@ Pairing is the only setup path. The pair link comes from your journal. A journal
 on the same machine connects through the same private network path as any other journal;
 There is no URL, key, local Python installation, or direct fallback to configure.
 The solstone app can continue taking in what you share while unpaired or offline.
-That material goes into your journal once the connection is available.
+Setup asks you to confirm your journal's mark, or takes `--mark` when there is no terminal. Nothing goes into your journal until you confirm. `solstone-linux confirm` confirms a mark while the solstone app is running. Setup still needs the app stopped, because setup takes the private-state lock.
 
 ### Developers building from source
 
@@ -77,9 +77,7 @@ systemctl --user start solstone-linux
 solstone-linux setup < pair-link.txt
 ```
 
-Setup and runtime deliberately share one private-state lock. Stop the solstone app before
-pairing. If the solstone app is running, setup exits before consuming the pair link and leaves
-intake state, configuration, and private state unchanged.
+Setup and runtime deliberately share one private-state lock. Confirm changes pairing state while the solstone app is running, and setup still needs the app stopped because it takes the lock. If the solstone app is running, setup exits before consuming the pair link and leaves intake state, configuration, and private state unchanged.
 
 For an upgrade that needs a new pair link:
 

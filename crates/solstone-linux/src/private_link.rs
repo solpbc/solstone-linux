@@ -56,7 +56,7 @@ const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
 const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
-const SYSTEM_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const SYSTEM_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const SYSTEM_STATUS_PATH: &str = "/api/system/status";
 pub(crate) const OBSERVER_HEADER_NAME: &str = "x-solstone-observer";
 pub(crate) const PROTOCOL_VERSION_HEADER_NAME: &str = "x-solstone-protocol-version";
@@ -675,14 +675,93 @@ impl Pairer for SplPairer {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetupOutcome {
+    Confirmed,
+    MarkUsage,
+    NoTerminal,
+    TerminalNo,
+    TerminalCancel,
+    MarkMismatch,
+    SetupUnverifiable,
+    WalkedAwayHeld,
+    WalkedAwayConfirmedAlready,
+}
+
 #[cfg(test)]
 pub(crate) async fn setup<R: Read>(
     config_root: &Path,
     state_dir: &Path,
     device_label: &str,
     input: R,
-) -> Result<(), PrivateStateError> {
-    setup_with_stream(config_root, state_dir, device_label, None, input).await
+) -> Result<SetupOutcome, PrivateStateError> {
+    setup_with_stream(
+        config_root,
+        state_dir,
+        device_label,
+        None,
+        None,
+        None,
+        input,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn setup_with_pairer<R: Read>(
+    pairer: &dyn Pairer,
+    config_root: &Path,
+    state_dir: &Path,
+    device_label: &str,
+    input: R,
+) -> Result<SetupOutcome, PrivateStateError> {
+    setup_with_pairer_and_stream(pairer, config_root, state_dir, device_label, None, input).await
+}
+
+#[cfg(test)]
+pub(crate) async fn setup_with_pairer_and_mark<R: Read>(
+    pairer: &dyn Pairer,
+    config_root: &Path,
+    state_dir: &Path,
+    device_label: &str,
+    mark: Option<&str>,
+    input: R,
+) -> Result<SetupOutcome, PrivateStateError> {
+    setup_with_pairer_and_stream_with_fault(
+        pairer,
+        config_root,
+        state_dir,
+        device_label,
+        None,
+        mark,
+        None,
+        input,
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn setup_with_pairer_and_stream<R: Read>(
+    pairer: &dyn Pairer,
+    config_root: &Path,
+    state_dir: &Path,
+    device_label: &str,
+    stream: Option<&str>,
+    input: R,
+) -> Result<SetupOutcome, PrivateStateError> {
+    setup_with_pairer_and_stream_with_fault(
+        pairer,
+        config_root,
+        state_dir,
+        device_label,
+        stream,
+        None,
+        None,
+        input,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn setup_with_stream<R: Read>(
@@ -690,70 +769,57 @@ pub(crate) async fn setup_with_stream<R: Read>(
     state_dir: &Path,
     device_label: &str,
     stream: Option<&str>,
+    mark_override: Option<&str>,
+    terminal_fd: Option<std::os::fd::BorrowedFd<'_>>,
     input: R,
-) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream(
+) -> Result<SetupOutcome, PrivateStateError> {
+    setup_with_pairer_and_stream_with_fault(
         &SplPairer,
         config_root,
         state_dir,
         device_label,
         stream,
-        input,
-    )
-    .await
-}
-
-#[cfg(test)]
-async fn setup_with_pairer<R: Read>(
-    pairer: &dyn Pairer,
-    config_root: &Path,
-    state_dir: &Path,
-    device_label: &str,
-    input: R,
-) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream(pairer, config_root, state_dir, device_label, None, input).await
-}
-
-async fn setup_with_pairer_and_stream<R: Read>(
-    pairer: &dyn Pairer,
-    config_root: &Path,
-    state_dir: &Path,
-    device_label: &str,
-    stream: Option<&str>,
-    input: R,
-) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream_with_fault(
-        pairer,
-        config_root,
-        state_dir,
-        device_label,
-        stream,
+        mark_override,
+        terminal_fd,
         input,
         None,
     )
     .await
 }
 
-async fn setup_with_pairer_and_stream_with_fault<R: Read>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
     pairer: &dyn Pairer,
     config_root: &Path,
     state_dir: &Path,
     device_label: &str,
     stream: Option<&str>,
+    mark_override: Option<&str>,
+    terminal_fd: Option<std::os::fd::BorrowedFd<'_>>,
     input: R,
-    credential_fault: Option<&dyn DurableWriteFault>,
-) -> Result<(), PrivateStateError> {
+    confirmed_write_fault: Option<&dyn DurableWriteFault>,
+) -> Result<SetupOutcome, PrivateStateError> {
     let state_lock = PrivateStateLock::acquire(config_root)?;
-    sanitize_link_authority(&private_config_paths(state_lock.root()))
-        .map_err(config_persist_error)?;
-    if let Some(stream) = stream {
-        save_linked_stream(&private_config_paths(state_lock.root()), stream)
-            .map_err(config_persist_error)?;
+
+    let parsed_mark = if let Some(mark_str) = mark_override {
+        match crate::journal_mark::parse_mark_words(mark_str) {
+            Some(words) => Some(words),
+            None => return Ok(SetupOutcome::MarkUsage),
+        }
+    } else {
+        None
+    };
+
+    if parsed_mark.is_none() && terminal_fd.is_none() {
+        return Ok(SetupOutcome::NoTerminal);
     }
+
+    {
+        let _answer_lock = crate::journal_mark::AnswerLock::acquire(state_lock.root()).await?;
+        crate::journal_mark::grandfather_answer_file(state_lock.root())?;
+    }
+
     let link = read_pair_link(input)?;
-    // Carrier selection is governed by the shared pair-link parser, before
-    // pairing returns any credential fields. A pairer performs the ceremony;
-    // it cannot reclassify the link or infer carrier selection from its result.
     let relay_pair_link =
         match pairlink::parse(&link).map_err(|_| PrivateStateError::PairInputInvalid)? {
             ParsedPairLink::Relay(relay_link) => Some(relay_link),
@@ -770,14 +836,117 @@ async fn setup_with_pairer_and_stream_with_fault<R: Read>(
         TransportClient::new_relay_only(credential.clone(), None)
             .map_err(|_| PrivateStateError::PairingFailed)?;
     }
-    let result = match credential_fault {
-        Some(fault) => persist_credential_with_fault(state_lock.root(), &credential, fault),
-        None => persist_credential(state_lock.root(), &credential),
-    };
-    if result.is_ok() {
-        let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
+
+    let new_pairing_id = compute_pairing_id(&credential.client_cert_pem);
+
+    if let Some(ref mark_words) = parsed_mark {
+        match crate::journal_mark::compare_mark_to_credential(&credential, mark_words) {
+            Ok(true) => {
+                let _answer_lock =
+                    crate::journal_mark::AnswerLock::acquire(state_lock.root()).await?;
+                sanitize_link_authority(&private_config_paths(state_lock.root()))
+                    .map_err(config_persist_error)?;
+                if let Some(stream) = stream {
+                    save_linked_stream(&private_config_paths(state_lock.root()), stream)
+                        .map_err(config_persist_error)?;
+                }
+                persist_credential(state_lock.root(), &credential)?;
+                let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
+
+                let write_res = match confirmed_write_fault {
+                    Some(fault) => crate::journal_mark::write_pairing_answer_with_fault(
+                        state_lock.root(),
+                        &new_pairing_id,
+                        fault,
+                    ),
+                    None => crate::journal_mark::write_pairing_answer(
+                        state_lock.root(),
+                        &new_pairing_id,
+                    ),
+                };
+                if write_res.is_err() {
+                    return Ok(SetupOutcome::WalkedAwayHeld);
+                }
+                return Ok(SetupOutcome::Confirmed);
+            }
+            Ok(false) => {
+                crate::journal_mark::retire_client_registration(&credential).await;
+                return Ok(SetupOutcome::MarkMismatch);
+            }
+            Err(()) => {
+                crate::journal_mark::retire_client_registration(&credential).await;
+                return Ok(SetupOutcome::SetupUnverifiable);
+            }
+        }
     }
-    result
+
+    let question_outcome = if let Some(fd) = terminal_fd {
+        crate::journal_mark::ask_terminal_question(fd, &credential).await
+    } else {
+        crate::journal_mark::QuestionOutcome::WalkedAway
+    };
+
+    let _answer_lock = crate::journal_mark::AnswerLock::acquire(state_lock.root()).await?;
+    let existing_cred = load_credential(state_lock.root())?;
+    let is_already_confirmed = existing_cred.as_ref().is_some_and(|ex| {
+        let ex_id = compute_pairing_id(&ex.client_cert_pem);
+        crate::journal_mark::is_pairing_confirmed(state_lock.root(), &ex_id)
+    });
+
+    match question_outcome {
+        crate::journal_mark::QuestionOutcome::Confirmed => {
+            sanitize_link_authority(&private_config_paths(state_lock.root()))
+                .map_err(config_persist_error)?;
+            if let Some(stream) = stream {
+                save_linked_stream(&private_config_paths(state_lock.root()), stream)
+                    .map_err(config_persist_error)?;
+            }
+            persist_credential(state_lock.root(), &credential)?;
+            let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
+
+            let write_res = match confirmed_write_fault {
+                Some(fault) => crate::journal_mark::write_pairing_answer_with_fault(
+                    state_lock.root(),
+                    &new_pairing_id,
+                    fault,
+                ),
+                None => {
+                    crate::journal_mark::write_pairing_answer(state_lock.root(), &new_pairing_id)
+                }
+            };
+            if write_res.is_err() {
+                return Ok(SetupOutcome::WalkedAwayHeld);
+            }
+            Ok(SetupOutcome::Confirmed)
+        }
+        crate::journal_mark::QuestionOutcome::No => {
+            drop(_answer_lock);
+            crate::journal_mark::retire_client_registration(&credential).await;
+            Ok(SetupOutcome::TerminalNo)
+        }
+        crate::journal_mark::QuestionOutcome::Cancel => {
+            drop(_answer_lock);
+            crate::journal_mark::retire_client_registration(&credential).await;
+            Ok(SetupOutcome::TerminalCancel)
+        }
+        crate::journal_mark::QuestionOutcome::WalkedAway => {
+            if is_already_confirmed {
+                drop(_answer_lock);
+                crate::journal_mark::retire_client_registration(&credential).await;
+                Ok(SetupOutcome::WalkedAwayConfirmedAlready)
+            } else {
+                sanitize_link_authority(&private_config_paths(state_lock.root()))
+                    .map_err(config_persist_error)?;
+                if let Some(stream) = stream {
+                    save_linked_stream(&private_config_paths(state_lock.root()), stream)
+                        .map_err(config_persist_error)?;
+                }
+                persist_credential(state_lock.root(), &credential)?;
+                let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
+                Ok(SetupOutcome::WalkedAwayHeld)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -787,9 +956,21 @@ pub(crate) async fn setup_with_pairer_for_test<R: Read>(
     state_dir: &Path,
     device_label: &str,
     stream: Option<&str>,
+    mark_override: Option<&str>,
     input: R,
-) -> Result<(), PrivateStateError> {
-    setup_with_pairer_and_stream(pairer, config_root, state_dir, device_label, stream, input).await
+) -> Result<SetupOutcome, PrivateStateError> {
+    setup_with_pairer_and_stream_with_fault(
+        pairer,
+        config_root,
+        state_dir,
+        device_label,
+        stream,
+        mark_override,
+        None,
+        input,
+        None,
+    )
+    .await
 }
 
 fn private_config_paths(config_root: &Path) -> ConfigPaths {
@@ -806,7 +987,7 @@ fn config_persist_error(source: io::Error) -> PrivateStateError {
     }
 }
 
-fn read_private_file(
+pub(crate) fn read_private_file(
     path: &Path,
     kind: PrivateTargetKind,
 ) -> Result<Option<Vec<u8>>, PrivateStateError> {
@@ -867,6 +1048,7 @@ pub(crate) fn persist_credential(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn persist_credential_with_fault(
     config_root: &Path,
     credential: &Credential,
@@ -929,6 +1111,7 @@ pub(crate) struct LinkFacts {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LinkFactState {
     pub(crate) pairing_required: bool,
+    pub(crate) journal_mark_held: bool,
     pub(crate) private_state_invalid: bool,
     pub(crate) config_sanitation_failed: bool,
     pub(crate) listener_ready: bool,
@@ -1092,6 +1275,16 @@ impl LinkFacts {
         }
         state.paired_spoken_mark = jid.as_deref().and_then(format_spoken_mark);
         state.paired_jid = jid;
+        drop(state);
+        self.persist();
+    }
+
+    pub(crate) fn set_journal_mark_held(&self, held: bool) {
+        let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.journal_mark_held == held {
+            return;
+        }
+        state.journal_mark_held = held;
         drop(state);
         self.persist();
     }
@@ -3175,7 +3368,7 @@ pub(crate) mod tests {
                     client_cert_pem: client.pem(),
                     ca_chain_pem: vec![ca.pem()],
                     ca_fp_prefix: spl_core::ca::sha256(ca_der.as_ref())[..16].to_vec(),
-                    instance_id: "instance".into(),
+                    instance_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
                     home_label: "home".into(),
                     endpoints: vec![EndpointAddr {
                         host: "127.0.0.1".into(),
@@ -3184,11 +3377,20 @@ pub(crate) mod tests {
                     home_attestation: Some("attestation".into()),
                     local_endpoints: Some(serde_json::json!([{"ip":"127.0.0.1","port":7657}])),
                     relay_origin: Some("https://relay.invalid".into()),
-                    device_token: Some(test_jwt_for_instance("instance", 123)),
+                    device_token: Some(test_jwt_for_instance(
+                        "01234567-89ab-cdef-0123-456789abcdef",
+                        123,
+                    )),
                     device_token_expires_at: Some(123),
                 }
             })
             .clone()
+    }
+
+    fn mark_for_cred(cred: &Credential) -> String {
+        let mark = spl_core::mark::mark_from_jid(&cred.instance_id).unwrap();
+        let spec = mark.to_render_spec();
+        format!("{} {}", spec.words[0], spec.words[1])
     }
 
     struct FakePairer {
@@ -3197,7 +3399,6 @@ pub(crate) mod tests {
     }
 
     struct SanitizedConfigPairer {
-        config_path: PathBuf,
         calls: Arc<AtomicUsize>,
         result: Credential,
     }
@@ -3211,10 +3412,6 @@ pub(crate) mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<Credential, PrivateStateError>> + Send + 'a>>
         {
             Box::pin(async move {
-                let value: serde_json::Value =
-                    serde_json::from_slice(&fs::read(&self.config_path).unwrap()).unwrap();
-                assert!(value.get("server_url").is_none());
-                assert!(value.get("key").is_none());
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(self.result.clone())
             })
@@ -3497,7 +3694,9 @@ pub(crate) mod tests {
         }
     }
 
-    struct IdentityAssertingPairer;
+    struct IdentityAssertingPairer {
+        calls: Arc<AtomicUsize>,
+    }
 
     impl Pairer for IdentityAssertingPairer {
         fn pair<'a>(
@@ -3507,6 +3706,7 @@ pub(crate) mod tests {
             additional_fields: &'a serde_json::Map<String, serde_json::Value>,
         ) -> Pin<Box<dyn Future<Output = Result<Credential, PrivateStateError>> + Send + 'a>>
         {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(device_label, "suze");
             assert_eq!(
                 additional_fields.get("client_label"),
@@ -3534,15 +3734,21 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn setup_passes_hostname_and_linux_platform_as_pairing_identity() {
         let temporary = tempfile::tempdir().unwrap();
-        setup_with_pairer(
-            &IdentityAssertingPairer,
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mark = mark_for_cred(&credential());
+        setup_with_pairer_and_mark(
+            &IdentityAssertingPairer {
+                calls: calls.clone(),
+            },
             temporary.path(),
             &temporary.path().join("state"),
             "suze",
+            Some(&mark),
             std::io::Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await
         .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3585,7 +3791,8 @@ pub(crate) mod tests {
         assert!(!source.endpoints.is_empty());
         assert!(source.local_endpoints.is_some());
 
-        setup_with_pairer(
+        let mark = mark_for_cred(&source);
+        setup_with_pairer_and_mark(
             &FakePairer {
                 calls: Arc::new(AtomicUsize::new(0)),
                 result: Some(source.clone()),
@@ -3593,6 +3800,7 @@ pub(crate) mod tests {
             direct_temp.path(),
             &direct_temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await
@@ -3611,7 +3819,7 @@ pub(crate) mod tests {
         );
         direct_owner.shutdown().await.unwrap();
 
-        setup_with_pairer(
+        setup_with_pairer_and_mark(
             &FakePairer {
                 calls: Arc::new(AtomicUsize::new(0)),
                 result: Some(source.clone()),
@@ -3619,6 +3827,7 @@ pub(crate) mod tests {
             relay_temp.path(),
             &relay_temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(RELAY_PAIR_LINK.as_bytes()),
         )
         .await
@@ -3677,7 +3886,8 @@ pub(crate) mod tests {
                 value
             },
         ] {
-            let error = setup_with_pairer(
+            let mark = mark_for_cred(&valid_relay);
+            let error = setup_with_pairer_and_mark(
                 &FakePairer {
                     calls: Arc::new(AtomicUsize::new(0)),
                     result: Some(invalid),
@@ -3685,6 +3895,7 @@ pub(crate) mod tests {
                 temp.path(),
                 &temp.path().join("state"),
                 "device",
+                Some(&mark),
                 Cursor::new(RELAY_PAIR_LINK.as_bytes()),
             )
             .await
@@ -3716,7 +3927,8 @@ pub(crate) mod tests {
         let mut mismatched = credential();
         mismatched.relay_origin = Some("https://other-relay.invalid".to_owned());
         mismatched.device_token = Some(test_jwt(i64::MAX / 2));
-        let error = setup_with_pairer(
+        let mark = mark_for_cred(&mismatched);
+        let error = setup_with_pairer_and_mark(
             &FakePairer {
                 calls: Arc::new(AtomicUsize::new(0)),
                 result: Some(mismatched),
@@ -3724,6 +3936,7 @@ pub(crate) mod tests {
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(RELAY_PAIR_LINK.as_bytes()),
         )
         .await
@@ -3742,7 +3955,8 @@ pub(crate) mod tests {
         let direct = credential();
         persist_credential(temp.path(), &direct).unwrap();
         let before = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
-        let error = setup_with_pairer(
+        let mark = mark_for_cred(&direct);
+        let error = setup_with_pairer_and_mark(
             &FakePairer {
                 calls: Arc::new(AtomicUsize::new(0)),
                 result: None,
@@ -3750,6 +3964,7 @@ pub(crate) mod tests {
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(RELAY_PAIR_LINK.as_bytes()),
         )
         .await
@@ -3786,7 +4001,8 @@ pub(crate) mod tests {
         paired.relay_origin = Some(relay_origin);
         paired.device_token = Some(test_jwt(i64::MAX / 2));
         paired.device_token_expires_at = Some(i64::MAX / 2);
-        setup_with_pairer(
+        let mark = mark_for_cred(&paired);
+        setup_with_pairer_and_mark(
             &FakePairer {
                 calls: Arc::new(AtomicUsize::new(0)),
                 result: Some(paired),
@@ -3794,6 +4010,7 @@ pub(crate) mod tests {
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(relay_pair_link.as_bytes()),
         )
         .await
@@ -3838,7 +4055,8 @@ pub(crate) mod tests {
         persist_credential(temp.path(), &direct).unwrap();
         let before = fs::read(temp.path().join(CREDENTIALS_FILENAME)).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
-        let error = setup_with_pairer(
+        let mark = mark_for_cred(&direct);
+        let error = setup_with_pairer_and_mark(
             &FakePairer {
                 calls: calls.clone(),
                 result: Some(credential()),
@@ -3846,6 +4064,7 @@ pub(crate) mod tests {
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(b"not-a-pair-link"),
         )
         .await
@@ -3873,6 +4092,7 @@ pub(crate) mod tests {
         projected.endpoints.clear();
         projected.local_endpoints = None;
         let projected_bytes = serde_json::to_vec(&projected).unwrap();
+        let mark = mark_for_cred(&hybrid);
 
         for stage in [
             DurableWriteStage::Create,
@@ -3885,20 +4105,9 @@ pub(crate) mod tests {
             persist_credential(temp.path(), &prior).unwrap();
             let credential_path = temp.path().join(CREDENTIALS_FILENAME);
             let prior_bytes = fs::read(&credential_path).unwrap();
-            let error = setup_with_pairer_and_stream_with_fault(
-                &FakePairer {
-                    calls: Arc::new(AtomicUsize::new(0)),
-                    result: Some(hybrid.clone()),
-                },
-                temp.path(),
-                &temp.path().join("state"),
-                "device",
-                None,
-                Cursor::new(RELAY_PAIR_LINK.as_bytes()),
-                Some(&FailStage(stage)),
-            )
-            .await
-            .unwrap_err();
+
+            let error = persist_credential_with_fault(temp.path(), &projected, &FailStage(stage))
+                .unwrap_err();
             assert!(matches!(
                 error,
                 PrivateStateError::Io {
@@ -3913,8 +4122,29 @@ pub(crate) mod tests {
             } else {
                 assert_eq!(current, prior_bytes);
             }
-            let loaded: Credential = serde_json::from_slice(&current).unwrap();
-            assert!(loaded == prior || loaded == projected);
+
+            let outcome = setup_with_pairer_and_stream_with_fault(
+                &FakePairer {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    result: Some(hybrid.clone()),
+                },
+                temp.path(),
+                &temp.path().join("state"),
+                "device",
+                None,
+                Some(&mark),
+                None,
+                Cursor::new(RELAY_PAIR_LINK.as_bytes()),
+                Some(&FailStage(stage)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome, SetupOutcome::WalkedAwayHeld);
+
+            let final_cred = fs::read(&credential_path).unwrap();
+            assert_eq!(final_cred, projected_bytes);
+            let loaded: Credential = serde_json::from_slice(&final_cred).unwrap();
+            assert_eq!(loaded, projected);
             assert_eq!(
                 fs::metadata(&credential_path).unwrap().permissions().mode() & 0o777,
                 0o600
@@ -3938,11 +4168,13 @@ pub(crate) mod tests {
             calls: calls.clone(),
             result: None,
         };
-        let failed = setup_with_pairer(
+        let mark = mark_for_cred(&credential());
+        let failed = setup_with_pairer_and_mark(
             &pairer,
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await;
@@ -3953,11 +4185,12 @@ pub(crate) mod tests {
             calls: calls.clone(),
             result: Some(credential()),
         };
-        setup_with_pairer(
+        setup_with_pairer_and_mark(
             &pairer,
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await
@@ -4807,22 +5040,27 @@ pub(crate) mod tests {
         .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let pairer = SanitizedConfigPairer {
-            config_path: temp.path().join("config.json"),
             calls: calls.clone(),
             result: peer.credential(),
         };
-        setup_with_pairer(
+        let mark = mark_for_cred(&peer.credential());
+        setup_with_pairer_and_mark(
             &pairer,
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
         )
         .await
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-
         let config_path = temp.path().join("config.json");
+        let sanitized_setup: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert!(sanitized_setup.get("server_url").is_none());
+        assert!(sanitized_setup.get("key").is_none());
+
         let mut reacquired: serde_json::Value =
             serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
         reacquired["server_url"] = serde_json::json!(traps.configured_origin());
@@ -5395,7 +5633,8 @@ pub(crate) mod tests {
         paired.relay_origin = Some(relay_origin);
         paired.device_token = Some(test_jwt_for_instance(&paired_inst, 1));
         paired.device_token_expires_at = Some(1);
-        setup_with_pairer(
+        let mark = mark_for_cred(&paired);
+        setup_with_pairer_and_mark(
             &FakePairer {
                 calls: Arc::new(AtomicUsize::new(0)),
                 result: Some(paired),
@@ -5403,6 +5642,7 @@ pub(crate) mod tests {
             temp.path(),
             &temp.path().join("state"),
             "device",
+            Some(&mark),
             Cursor::new(relay_pair_link.as_bytes()),
         )
         .await

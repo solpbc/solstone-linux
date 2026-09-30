@@ -475,7 +475,15 @@ impl DoctorChecks for RealDoctor<'_> {
         let config = self.config().clone();
         let liveness = PrivateStateLock::try_probe(&config.config_dir)
             .unwrap_or(PrivateStateLockLiveness::NoLiveOwner);
-        let facts = load_facts_with_liveness(&config.state_dir(), liveness);
+        let mut facts = load_facts_with_liveness(&config.state_dir(), liveness);
+        if liveness != PrivateStateLockLiveness::LiveOwner
+            && crate::journal_mark::journal_mark_held_on_disk(&config.config_dir)
+        {
+            facts.link = Some(crate::private_link::LinkFactState {
+                journal_mark_held: true,
+                ..Default::default()
+            });
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

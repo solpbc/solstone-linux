@@ -217,6 +217,22 @@ pub(crate) fn atomic_write_bytes_guarded(
             kind: io::ErrorKind::NotFound,
             ..
         }) => {}
+        Err(PrivateFileError::Io {
+            kind: io::ErrorKind::PermissionDenied,
+            ..
+        }) => {
+            let stat = rustix::fs::statat(
+                &parent_descriptor,
+                Path::new(name),
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+            )
+            .map_err(|error| PrivateFileError::io("file", "inspect", error.into()))?;
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                != rustix::fs::FileType::RegularFile
+            {
+                return Err(PrivateFileError::InvalidTarget("file"));
+            }
+        }
         Err(error) => return Err(error),
     }
     let temporary = format!(

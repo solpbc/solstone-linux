@@ -12,6 +12,7 @@ pub mod dbus_service;
 pub mod desktop_component;
 pub mod doctor;
 pub mod encoding;
+mod journal_mark;
 pub mod matching;
 pub mod observer;
 pub mod panel_icon;
