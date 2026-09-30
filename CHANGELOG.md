@@ -9,6 +9,9 @@ and this project adheres to Semantic Versioning.
 ### Fixed
 
 - if a moment changes on its way into your journal, the changed files stay on this computer for another attempt.
+- a moment that's underway when you change time zones no longer lands under a mixed-up time. each new moment takes its day and time from your computer's time zone when it starts.
+- when the clocks go back an hour, intake keeps running through the repeated hour. before, it could stop.
+- on some linux setups, your time zone's name was missing from each moment. the solstone app now includes it.
 
 ## [2.0.10] - 2026-09-30
 
