@@ -883,33 +883,7 @@ impl SyncWorker {
                                         let files = eligible_files(segment_dir)?;
                                         let mut ack_files = Vec::new();
                                         for f in &files {
-                                            let fname =
-                                                f.file_name().and_then(|n| n.to_str()).ok_or_else(
-                                                    || io::Error::other("non-utf8 file name"),
-                                                )?;
-                                            let meta = f.metadata()?;
-                                            let sha = sha256_file(f)?;
-                                            let stamp = file_stamp(f)?;
-                                            let disposition = entry
-                                                .files
-                                                .as_deref()
-                                                .unwrap_or_default()
-                                                .iter()
-                                                .find(|rf| {
-                                                    rf.name.as_deref() == Some(fname)
-                                                        || rf.submitted_name.as_deref()
-                                                            == Some(fname)
-                                                })
-                                                .and_then(|rf| rf.status.clone())
-                                                .unwrap_or_else(|| "present".to_string());
-                                            ack_files.push(IngestAckFile {
-                                                submitted: fname.to_owned(),
-                                                written: fname.to_owned(),
-                                                size: meta.len(),
-                                                sha256: sha,
-                                                disposition,
-                                                stamp,
-                                            });
+                                            ack_files.push(listing_ack_file(f, entry)?);
                                         }
                                         let stream = segment_dir
                                             .parent()
@@ -1487,10 +1461,74 @@ fn is_bookkeeping_file(name: &str) -> bool {
         || name.starts_with(".ingest_retry.json.tmp.")
 }
 
+fn listing_ack_file(file: &Path, entry: &ListingEntry) -> io::Result<IngestAckFile> {
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("non-utf8 file name"))?;
+    let remote = entry
+        .files
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|remote| {
+            remote.submitted_name.as_deref() == Some(name) || remote.name.as_deref() == Some(name)
+        })
+        .ok_or_else(|| io::Error::other("file absent from custody listing"))?;
+    // Keep the journal's identity: local bytes can change after the listing check.
+    Ok(IngestAckFile {
+        submitted: name.to_owned(),
+        written: remote.name.clone().unwrap_or_else(|| name.to_owned()),
+        size: remote
+            .size
+            .ok_or_else(|| io::Error::other("size absent from custody listing"))?,
+        sha256: remote
+            .sha256
+            .as_ref()
+            .ok_or_else(|| io::Error::other("hash absent from custody listing"))?
+            .to_ascii_lowercase(),
+        disposition: remote
+            .status
+            .clone()
+            .ok_or_else(|| io::Error::other("disposition absent from custody listing"))?,
+        stamp: file_stamp(file)?,
+    })
+}
+
 fn remove_confirmed_segment(dir: &Path) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
         let files = eligible_files(dir)?;
+        let ack = read_ack(dir);
+        let matches = |file: &Path| {
+            let Some(ack) = ack.as_ref() else {
+                return false;
+            };
+            let name = file.file_name().and_then(|name| name.to_str());
+            ack.local_key == dir.file_name().unwrap_or_default().to_string_lossy()
+                && ack.files.iter().any(|proof| {
+                    Some(proof.submitted.as_str()) == name
+                        && if ack.proof == "listing" {
+                            proof.disposition == "present" || proof.disposition == "processed"
+                        } else {
+                            proof.disposition == "written" || proof.disposition == "already_held"
+                        }
+                        && file.metadata().is_ok_and(|meta| meta.len() == proof.size)
+                        && sha256_file(file).is_ok_and(|sha| sha == proof.sha256)
+                })
+        };
+        // A fresh stamp can belong to bytes replaced during upload. Rehash every
+        // payload before removing any, and again directly before each unlink.
+        if !files.iter().all(|file| matches(file)) {
+            let _ = fs::remove_file(dir.join(INGEST_ACK_FILENAME));
+            return Err(io::Error::other(
+                "local payload no longer matches ingest acknowledgment",
+            ));
+        }
         for file in files {
+            if !matches(&file) {
+                let _ = fs::remove_file(dir.join(INGEST_ACK_FILENAME));
+                return Err(io::Error::other("local payload changed before removal"));
+            }
             fs::remove_file(file)?;
         }
         let ack_path = dir.join(INGEST_ACK_FILENAME);
@@ -2075,6 +2113,70 @@ mod tests {
             proof: "upload".to_string(),
             files: ack_files,
         }
+    }
+
+    #[test]
+    fn confirmed_cleanup_keeps_replacement_bytes_even_with_a_matching_stamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"original");
+        let mut ack = create_test_ack(&segment, "120000_300", "", "");
+        // The receipt covers the original bytes, but upload completion observes
+        // the replacement's stamp before it writes the acknowledgment.
+        fs::write(segment.join("screen.webm"), b"replaced").unwrap();
+        ack.files[0].stamp = file_stamp(&segment.join("screen.webm")).unwrap();
+        write_ack(&segment, &ack).unwrap();
+        assert!(is_ack_valid(&segment, read_ack(&segment), None, None));
+
+        assert!(remove_confirmed_segment(&segment).is_err());
+        assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"replaced");
+        assert!(!segment.join(INGEST_ACK_FILENAME).exists());
+    }
+
+    #[test]
+    fn confirmed_cleanup_keeps_all_payload_when_an_unproved_file_appears() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"original");
+        let ack = create_test_ack(&segment, "120000_300", "", "");
+        write_ack(&segment, &ack).unwrap();
+        fs::write(segment.join("mic.flac"), b"new audio").unwrap();
+
+        assert!(remove_confirmed_segment(&segment).is_err());
+        assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"original");
+        assert_eq!(fs::read(segment.join("mic.flac")).unwrap(), b"new audio");
+    }
+
+    #[test]
+    fn confirmed_cleanup_rehashes_listing_proof_and_keeps_a_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"original");
+        let mut ack = create_test_ack(&segment, "120000_300", "", "");
+        ack.proof = "listing".to_string();
+        ack.files[0].disposition = "processed".to_string();
+        write_ack(&segment, &ack).unwrap();
+        fs::write(segment.join("screen.webm"), b"replaced").unwrap();
+
+        assert!(remove_confirmed_segment(&segment).is_err());
+        assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"replaced");
+    }
+
+    #[test]
+    fn listing_ack_keeps_the_journals_hash_if_bytes_change_after_custody_check() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"original");
+        let file = segment.join("screen.webm");
+        let original_sha = sha256_file(&file).unwrap();
+        let mut remote = entry("screen.webm", "present", &original_sha);
+        remote.files.as_mut().unwrap()[0].size = Some(fs::metadata(&file).unwrap().len());
+        assert!(segment_custody_proven(&segment, &remote).unwrap());
+        fs::write(&file, b"replaced").unwrap();
+
+        let mut ack = create_test_ack(&segment, "120000_300", "", "");
+        ack.proof = "listing".to_string();
+        ack.files = vec![listing_ack_file(&file, &remote).unwrap()];
+        assert_eq!(ack.files[0].sha256, original_sha);
+        write_ack(&segment, &ack).unwrap();
+        assert!(remove_confirmed_segment(&segment).is_err());
+        assert_eq!(fs::read(file).unwrap(), b"replaced");
     }
 
     fn custody(items: Vec<Value>) -> Value {

@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- if a moment changes on its way into your journal, the changed files stay on this computer for another attempt.
+
 ## [2.0.10] - 2026-09-30
 
 ### Added
