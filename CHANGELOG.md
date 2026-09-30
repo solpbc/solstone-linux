@@ -6,6 +6,12 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.10] - 2026-09-30
+
+### Added
+
+- the solstone app now includes your computer's time zone with each segment that goes into your journal.
+
 ### Fixed
 
 - an unfinished moment is kept if a new one would use the same folder.
