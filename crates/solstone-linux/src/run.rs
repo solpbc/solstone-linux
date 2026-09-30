@@ -340,7 +340,15 @@ fn run_capture(
         stats: BackgroundCaptureStats::new(),
         states,
     };
-    let mut observer = Observer::new(config, backends);
+    let zone = Box::new(crate::segment::DeviceZoneReader::new(
+        std::env::var_os("TZ"),
+        std::path::PathBuf::from("/etc/localtime"),
+        crate::segment::ZONE_INFO_DIRECTORIES
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect(),
+    ));
+    let mut observer = Observer::new(config, backends, zone);
     let initialized = !stopped.load(Ordering::Acquire);
     let mut run_result = if initialized {
         observer.initialize()
@@ -1031,7 +1039,18 @@ mod tests {
             stats: TestStats,
             states,
         };
-        let mut observer = Observer::new(Config::default(), backends);
+        struct DummyZone;
+        impl crate::segment::ZoneSource for DummyZone {
+            fn read_zone(&mut self, _: f64) -> crate::segment::ZoneReading {
+                crate::segment::ZoneReading {
+                    day: "20260101".into(),
+                    hms: "000000".into(),
+                    utc_offset_seconds: 0,
+                    tz: None,
+                }
+            }
+        }
+        let mut observer = Observer::new(Config::default(), backends, Box::new(DummyZone));
         let open_journal = crate::private_link::OpenJournalAccess::default();
 
         let menu_items = tray.menu();

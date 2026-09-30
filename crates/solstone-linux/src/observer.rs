@@ -13,8 +13,7 @@ use crate::{
         scan_segment_progress, write_capture_zone, write_segment_metadata,
     },
     segment::{
-        capture_tz_name, clamp_duration, finalize_segment_dir, local_offset_seconds, segment_key,
-        timestamp_parts,
+        ZoneReading, ZoneSource, clamp_duration, finalize_segment_dir, segment_key, timestamp_parts,
     },
 };
 #[cfg(test)]
@@ -229,6 +228,7 @@ pub struct Observer<V, A, P, M, W, E, C, Q, N> {
     pub config: Config,
     pub state: ObserverState,
     pub backends: Backends<V, A, P, M, W, E, C, Q, N>,
+    zone: Box<dyn ZoneSource>,
 }
 
 impl<V, A, P, M, W, E, C, Q, N> Observer<V, A, P, M, W, E, C, Q, N>
@@ -243,13 +243,18 @@ where
     Q: CaptureStatsSource,
     N: StateSink,
 {
-    pub fn new(config: Config, backends: Backends<V, A, P, M, W, E, C, Q, N>) -> Self {
+    pub(crate) fn new(
+        config: Config,
+        backends: Backends<V, A, P, M, W, E, C, Q, N>,
+        zone: Box<dyn ZoneSource>,
+    ) -> Self {
         let wall = backends.clock.wall_seconds();
         let mono = backends.clock.monotonic_seconds();
         let paused = config.start_paused;
         Self {
             config,
             backends,
+            zone,
             state: ObserverState {
                 mode: Mode::Idle,
                 paused,
@@ -447,7 +452,13 @@ where
     }
     fn start_segment(&mut self) -> Result<PathBuf, ObserverError> {
         let wall = self.backends.clock.wall_seconds();
-        let (date, time) = timestamp_parts(wall);
+        if let Some(ref dir) = self.state.segment_dir
+            && (wall.floor() as i64) == (self.state.segment_start_wall.floor() as i64)
+        {
+            return Ok(dir.clone());
+        }
+        let reading = self.zone.read_zone(wall);
+        let (date, time) = self.choose_stem(&reading);
         let dir = self
             .config
             .captures_dir()
@@ -465,8 +476,8 @@ where
         write_capture_zone(
             &dir,
             &CaptureZone {
-                tz: capture_tz_name(),
-                utc_offset_seconds: local_offset_seconds(wall),
+                tz: reading.tz,
+                utc_offset_seconds: reading.utc_offset_seconds,
             },
         );
         self.state.segment_start_wall = wall;
@@ -474,6 +485,55 @@ where
         self.state.segment_dir = Some(dir.clone());
         self.state.video_started = false;
         Ok(dir)
+    }
+    fn choose_stem(&self, reading: &ZoneReading) -> (String, String) {
+        let mut curr_day = reading.day.clone();
+        let mut curr_hms = reading.hms.clone();
+        loop {
+            let dir = self
+                .config
+                .captures_dir()
+                .join(&curr_day)
+                .join(&self.config.stream);
+            match fs::read_dir(&dir) {
+                Ok(entries) => {
+                    let mut taken = false;
+                    for entry in entries {
+                        let Ok(entry) = entry else {
+                            tracing::warn!("could not list segment names; using the unbumped stem");
+                            return (reading.day.clone(), reading.hms.clone());
+                        };
+                        let path = entry.path();
+                        if self.state.segment_dir.as_ref() == Some(&path) {
+                            continue;
+                        }
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                            && file_name.starts_with(&curr_hms)
+                        {
+                            taken = true;
+                            break;
+                        }
+                    }
+                    if !taken {
+                        return (curr_day, curr_hms);
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    return (curr_day, curr_hms);
+                }
+                Err(_) => {
+                    tracing::warn!("could not list segment names; using the unbumped stem");
+                    return (reading.day.clone(), reading.hms.clone());
+                }
+            }
+
+            let (next_day, next_hms) = bump_stem(&curr_day, &curr_hms);
+            if next_day == curr_day && next_hms == curr_hms {
+                return (curr_day, curr_hms);
+            }
+            curr_day = next_day;
+            curr_hms = next_hms;
+        }
     }
     fn finalize_segment(&mut self) -> Result<(), ObserverError> {
         let Some(dir) = self.state.segment_dir.take() else {
@@ -487,12 +547,20 @@ where
             let _ = fs::remove_dir(&dir);
             return Ok(());
         }
-        let (_, time) = timestamp_parts(self.state.segment_start_wall);
+        let Some(time) = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".incomplete"))
+        else {
+            return Err(ObserverError::Io(
+                "invalid incomplete directory name".into(),
+            ));
+        };
         let duration = clamp_duration(
             self.backends.clock.wall_seconds() - self.state.segment_start_wall,
             self.config.segment_interval.max(1) as u64,
         );
-        let key = segment_key(&time, duration);
+        let key = segment_key(time, duration);
         let final_dir = finalize_segment_dir(&dir, &key)?;
         let _ = fs::remove_file(final_dir.join(".metadata"));
         self.backends
@@ -544,6 +612,44 @@ where
         })
     }
 }
+
+fn bump_stem(day: &str, hms: &str) -> (String, String) {
+    if hms.len() != 6 {
+        return (day.to_string(), hms.to_string());
+    }
+    let Ok(hh) = hms[0..2].parse::<u32>() else {
+        return (day.to_string(), hms.to_string());
+    };
+    let Ok(mm) = hms[2..4].parse::<u32>() else {
+        return (day.to_string(), hms.to_string());
+    };
+    let Ok(ss) = hms[4..6].parse::<u32>() else {
+        return (day.to_string(), hms.to_string());
+    };
+
+    let (new_hh, new_mm, new_ss, rollover_day) = if ss < 59 {
+        (hh, mm, ss + 1, false)
+    } else if mm < 59 {
+        (hh, mm + 1, 0, false)
+    } else if hh < 23 {
+        (hh + 1, 0, 0, false)
+    } else {
+        (0, 0, 0, true)
+    };
+
+    let bumped_hms = format!("{new_hh:02}{new_mm:02}{new_ss:02}");
+    if rollover_day {
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(day, "%Y%m%d")
+            && let Some(next_date) = date.succ_opt()
+        {
+            return (next_date.format("%Y%m%d").to_string(), bumped_hms);
+        }
+        (day.to_string(), hms.to_string())
+    } else {
+        (day.to_string(), bumped_hms)
+    }
+}
+
 fn mode(a: ActivityState) -> Mode {
     if a.screen_locked || a.power_save || (a.power_unreadable && a.user_idle) {
         Mode::Idle
@@ -751,6 +857,25 @@ pub(crate) mod tests {
         FakeStats,
         States,
     >;
+    #[derive(Clone)]
+    struct CountingZone {
+        reads: Rc<Cell<usize>>,
+    }
+    impl ZoneSource for CountingZone {
+        fn read_zone(&mut self, wall_seconds: f64) -> ZoneReading {
+            self.reads.set(self.reads.get() + 1);
+            let dt = chrono::DateTime::from_timestamp(wall_seconds.floor() as i64, 0)
+                .expect("valid unix seconds")
+                .naive_utc();
+            ZoneReading {
+                day: dt.format("%Y%m%d").to_string(),
+                hms: dt.format("%H%M%S").to_string(),
+                utc_offset_seconds: 46800,
+                tz: Some("Pacific/Auckland".into()),
+            }
+        }
+    }
+
     struct Fixture {
         _temp: tempfile::TempDir,
         observer: TestObserver,
@@ -761,6 +886,7 @@ pub(crate) mod tests {
         stops: Rc<Cell<usize>>,
         drains: Rc<Cell<usize>>,
         audio_stopped: Rc<Cell<bool>>,
+        zone_reads: Rc<Cell<usize>>,
         writes: Writes,
         events: Events,
         states: States,
@@ -814,6 +940,19 @@ pub(crate) mod tests {
     }
     fn fixture(start_paused: bool) -> Fixture {
         let temp = tempfile::tempdir().unwrap();
+        let zone_reads = Rc::new(Cell::new(0));
+        let zone = Box::new(CountingZone {
+            reads: zone_reads.clone(),
+        });
+        fixture_in(start_paused, temp, zone, zone_reads)
+    }
+
+    fn fixture_in(
+        start_paused: bool,
+        temp: tempfile::TempDir,
+        zone: Box<dyn ZoneSource>,
+        zone_reads: Rc<Cell<usize>>,
+    ) -> Fixture {
         let wall = Rc::new(Cell::new(1_700_000_000.0));
         let mono = Rc::new(Cell::new(0.0));
         let wall_step = Rc::new(Cell::new(0.0));
@@ -865,7 +1004,7 @@ pub(crate) mod tests {
         };
         Fixture {
             _temp: temp,
-            observer: Observer::new(config, backends),
+            observer: Observer::new(config, backends, zone),
             wall,
             mono,
             wall_step,
@@ -873,6 +1012,7 @@ pub(crate) mod tests {
             stops,
             drains,
             audio_stopped,
+            zone_reads,
             writes,
             events,
             states,
@@ -886,7 +1026,9 @@ pub(crate) mod tests {
     #[test]
     fn existing_incomplete_segment_is_not_adopted_or_overwritten() {
         let mut f = fixture(false);
-        let (day, time) = timestamp_parts(f.wall.get());
+        let reading = f.observer.zone.read_zone(f.wall.get());
+        f.zone_reads.set(0);
+        let (day, time) = (reading.day, reading.hms);
         let dir = f
             .observer
             .config
@@ -903,14 +1045,12 @@ pub(crate) mod tests {
         for (name, bytes) in files {
             fs::write(dir.join(name), bytes).unwrap();
         }
-        assert!(matches!(
-            f.observer.start_segment(),
-            Err(ObserverError::Io(_))
-        ));
+        let bumped_dir = f.observer.start_segment().unwrap();
+        assert_ne!(bumped_dir, dir);
         for (name, bytes) in files {
             assert_eq!(fs::read(dir.join(name)).unwrap(), bytes);
         }
-        assert!(f.observer.state.segment_dir.is_none());
+        assert_eq!(f.observer.state.segment_dir, Some(bumped_dir));
         assert_eq!(f.starts.get(), 0);
         assert!(f.events.completed.borrow().is_empty());
     }
@@ -923,8 +1063,12 @@ pub(crate) mod tests {
         let metadata = fs::read(dir.join(".metadata")).unwrap();
         let zone = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
         f.wall.set(f.wall.get() + 300.0);
-        let (_, time) = timestamp_parts(f.observer.state.segment_start_wall);
-        let destination = dir.with_file_name(segment_key(&time, 300));
+        let stem = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".incomplete"))
+            .unwrap();
+        let destination = dir.with_file_name(segment_key(stem, 300));
         fs::create_dir(&destination).unwrap();
         fs::write(destination.join("screen.webm"), b"first hour").unwrap();
 
@@ -1233,7 +1377,8 @@ pub(crate) mod tests {
             .unwrap()
             .count(),
             2
-        )
+        );
+        assert_eq!(f.zone_reads.get(), 2);
     }
     // tests/test_observer.py::test_async_run_returns_1_when_audio_recorder_has_fatal_error
     #[test]
@@ -1618,11 +1763,8 @@ pub(crate) mod tests {
         initialize(&mut f);
         let dir = f.observer.state.segment_dir.clone().unwrap();
         let zone = crate::recovery::read_capture_zone(&dir).expect("capture zone exists");
-        assert_eq!(
-            zone.utc_offset_seconds,
-            local_offset_seconds(1_700_000_000.0)
-        );
-        assert_eq!(zone.tz, capture_tz_name());
+        assert_eq!(zone.utc_offset_seconds, 46800);
+        assert_eq!(zone.tz, Some("Pacific/Auckland".into()));
         let initial_bytes = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
 
         // Advance wall clock and tick
@@ -1634,6 +1776,7 @@ pub(crate) mod tests {
         assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
         let updated_bytes = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
         assert_eq!(initial_bytes, updated_bytes);
+        assert_eq!(f.zone_reads.get(), 1);
     }
 
     #[test]
@@ -1672,5 +1815,259 @@ pub(crate) mod tests {
         assert!(!dir.exists());
         assert!(!dir.join(CAPTURE_ZONE_FILENAME).exists());
         assert_eq!(f.events.completed.borrow().len(), 0);
+    }
+
+    #[test]
+    fn repeated_hour_preserves_planted_and_finalizes_bumped() {
+        use crate::segment::DeviceZoneReader;
+        let temp = tempfile::tempdir().unwrap();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/zoneinfo");
+        let link = temp.path().join("localtime");
+        let reader = DeviceZoneReader::new(
+            Some(std::ffi::OsString::from("Europe/Berlin")),
+            link,
+            vec![root],
+        );
+        let zone_reads = Rc::new(Cell::new(0));
+        let mut f = fixture_in(false, temp, Box::new(reader), zone_reads);
+
+        let planted_dir = f
+            .observer
+            .config
+            .captures_dir()
+            .join("20261025/desk/023000_300");
+        fs::create_dir_all(&planted_dir).unwrap();
+        fs::write(planted_dir.join("screen.webm"), b"planted media").unwrap();
+
+        f.wall.set(1792891800.0);
+        let dir = f.observer.start_segment().unwrap();
+        assert_eq!(
+            dir.file_name().unwrap().to_str().unwrap(),
+            "023001.incomplete"
+        );
+        fs::write(dir.join("screen.webm"), b"new video").unwrap();
+
+        f.wall.set(1792891800.0 + 300.0);
+        f.observer.finalize_segment().unwrap();
+
+        assert_eq!(
+            fs::read(planted_dir.join("screen.webm")).unwrap(),
+            b"planted media"
+        );
+
+        let final_dir = f
+            .observer
+            .config
+            .captures_dir()
+            .join("20261025/desk/023001_300");
+        assert!(final_dir.exists());
+        let zone = crate::recovery::read_capture_zone(&final_dir).unwrap();
+        assert_eq!(zone.tz, Some("Europe/Berlin".into()));
+        assert_eq!(zone.utc_offset_seconds, 3600);
+
+        assert!(f.observer.start_segment().is_ok());
+    }
+
+    #[test]
+    fn travel_link_retargeting() {
+        use crate::segment::DeviceZoneReader;
+        let temp = tempfile::tempdir().unwrap();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/zoneinfo");
+        let link = temp.path().join("localtime");
+        std::os::unix::fs::symlink(root.join("Asia/Kolkata"), &link).unwrap();
+
+        let reader = DeviceZoneReader::new(None, link.clone(), vec![root.clone()]);
+        let zone_reads = Rc::new(Cell::new(0));
+        let mut f = fixture_in(false, temp, Box::new(reader), zone_reads);
+
+        f.wall.set(1790706000.0);
+        let dir1 = f.observer.start_segment().unwrap();
+        assert_eq!(
+            dir1.file_name().unwrap().to_str().unwrap(),
+            "235000.incomplete"
+        );
+        fs::write(dir1.join("screen.webm"), b"video1").unwrap();
+        f.wall.set(1790706000.0 + 300.0);
+        f.observer.finalize_segment().unwrap();
+
+        let final_dir1 = f
+            .observer
+            .config
+            .captures_dir()
+            .join("20260929/desk/235000_300");
+        assert!(final_dir1.exists());
+        let zone1 = crate::recovery::read_capture_zone(&final_dir1).unwrap();
+        assert_eq!(zone1.tz, Some("Asia/Kolkata".into()));
+        assert_eq!(zone1.utc_offset_seconds, 19800);
+
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(root.join("Pacific/Auckland"), &link).unwrap();
+
+        f.wall.set(1790706300.0);
+        let dir2 = f.observer.start_segment().unwrap();
+        let expected_dir2 = f
+            .observer
+            .config
+            .captures_dir()
+            .join("20260930/desk/072500.incomplete");
+        assert_eq!(dir2, expected_dir2);
+        let zone2 = crate::recovery::read_capture_zone(&dir2).unwrap();
+        assert_eq!(zone2.tz, Some("Pacific/Auckland".into()));
+        assert_eq!(zone2.utc_offset_seconds, 46800);
+    }
+
+    #[test]
+    fn one_read_per_new_segment() {
+        let mut f = fixture(false);
+        assert_eq!(f.zone_reads.get(), 0);
+
+        let _dir1 = f.observer.start_segment().unwrap();
+        assert_eq!(f.zone_reads.get(), 1);
+
+        let _dir1_again = f.observer.start_segment().unwrap();
+        assert_eq!(f.zone_reads.get(), 1);
+
+        f.observer.finalize_segment().unwrap();
+        f.wall.set(f.wall.get() + 10.0);
+        let _dir2 = f.observer.start_segment().unwrap();
+        assert_eq!(f.zone_reads.get(), 2);
+    }
+
+    #[test]
+    fn chained_stem_bump() {
+        let mut f = fixture(false);
+        f.wall.set(1704076200.0);
+        let base = f.observer.config.captures_dir().join("20240101/desk");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir(base.join("023000_300")).unwrap();
+        fs::create_dir(base.join("023001_300")).unwrap();
+
+        let dir = f.observer.start_segment().unwrap();
+        assert_eq!(
+            dir.file_name().unwrap().to_str().unwrap(),
+            "023002.incomplete"
+        );
+    }
+
+    #[test]
+    fn failed_dir_alone_bumps() {
+        let mut f = fixture(false);
+        f.wall.set(1704076200.0);
+        let base = f.observer.config.captures_dir().join("20240101/desk");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir(base.join("023000.failed")).unwrap();
+
+        let dir = f.observer.start_segment().unwrap();
+        assert_eq!(
+            dir.file_name().unwrap().to_str().unwrap(),
+            "023001.incomplete"
+        );
+
+        let mut f2 = fixture(false);
+        f2.wall.set(1704076200.0);
+        let base2 = f2.observer.config.captures_dir().join("20240101/desk");
+        fs::create_dir_all(&base2).unwrap();
+        fs::create_dir(base2.join("023000_300.failed")).unwrap();
+
+        let dir2 = f2.observer.start_segment().unwrap();
+        assert_eq!(
+            dir2.file_name().unwrap().to_str().unwrap(),
+            "023001.incomplete"
+        );
+    }
+
+    #[test]
+    fn midnight_rollover_bump() {
+        let mut f = fixture(false);
+        f.wall.set(1798761599.0);
+        let base = f.observer.config.captures_dir().join("20261231/desk");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir(base.join("235959_300")).unwrap();
+
+        let dir = f.observer.start_segment().unwrap();
+        let expected_dir = f
+            .observer
+            .config
+            .captures_dir()
+            .join("20270101/desk/000000.incomplete");
+        assert_eq!(dir, expected_dir);
+        let meta = sidecar(&dir);
+        assert_eq!(meta["start_timestamp"], 1798761599.0);
+        let zone = crate::recovery::read_capture_zone(&dir).unwrap();
+        assert_eq!(zone.tz, Some("Pacific/Auckland".into()));
+        assert_eq!(zone.utc_offset_seconds, 46800);
+
+        fs::write(dir.join("screen.webm"), b"video").unwrap();
+        f.wall.set(1798761599.0 + 300.0);
+        f.observer.finalize_segment().unwrap();
+
+        let final_dir = f
+            .observer
+            .config
+            .captures_dir()
+            .join("20270101/desk/000000_300");
+        assert!(final_dir.exists());
+    }
+
+    #[test]
+    fn negative_twin_different_stream_or_day_does_not_bump() {
+        let mut f = fixture(false);
+        f.wall.set(1704076200.0);
+        let other_stream = f.observer.config.captures_dir().join("20240101/room");
+        fs::create_dir_all(&other_stream).unwrap();
+        fs::create_dir(other_stream.join("023000_300")).unwrap();
+
+        let other_day = f.observer.config.captures_dir().join("20240102/desk");
+        fs::create_dir_all(&other_day).unwrap();
+        fs::create_dir(other_day.join("023000_300")).unwrap();
+
+        let dir = f.observer.start_segment().unwrap();
+        assert_eq!(
+            dir.file_name().unwrap().to_str().unwrap(),
+            "023000.incomplete"
+        );
+    }
+
+    #[test]
+    fn resume_reopen_bumped_stem_same_second() {
+        let mut f = fixture(true);
+        initialize(&mut f);
+        f.observer.resume();
+
+        let (day, time) = ("20231114", "221320");
+        let base = f.observer.config.captures_dir().join(day).join("desk");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir(base.join(format!("{time}_300"))).unwrap();
+
+        f.observer.backends.video.fail_start = true;
+        f.wall_step.set(0.0);
+        f.observer.tick().unwrap();
+
+        assert_eq!(f.starts.get(), 1);
+        assert!(f.observer.state.segment_dir.is_some());
+        let seg_dir = f.observer.state.segment_dir.clone().unwrap();
+        assert_eq!(
+            seg_dir.file_name().unwrap().to_str().unwrap(),
+            "221321.incomplete"
+        );
+        assert_eq!(
+            fs::read_dir(seg_dir.parent().unwrap())
+                .unwrap()
+                .filter(|e| e
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_str()
+                    .unwrap()
+                    .ends_with(".incomplete"))
+                .count(),
+            1
+        );
+        let zone_path = seg_dir.join(".capture_zone");
+        let zone_bytes = fs::read(&zone_path).unwrap();
+        let reopened = f.observer.start_segment().unwrap();
+        assert_eq!(reopened, seg_dir);
+        assert_eq!(fs::read(&zone_path).unwrap(), zone_bytes);
+        assert_eq!(f.zone_reads.get(), 1);
     }
 }
