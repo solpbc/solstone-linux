@@ -77,6 +77,10 @@ systemctl --user start solstone-linux
 solstone-linux setup < pair-link.txt
 ```
 
+```bash
+solstone-linux setup --mark "word word" < pair-link.txt
+```
+
 Setup and runtime deliberately share one private-state lock. Confirm changes pairing state while the solstone app is running, and setup still needs the app stopped because it takes the lock. If the solstone app is running, setup exits before consuming the pair link and leaves intake state, configuration, and private state unchanged.
 
 For an upgrade that needs a new pair link:

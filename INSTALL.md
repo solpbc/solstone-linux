@@ -124,6 +124,10 @@ Pairing is the only setup path:
 solstone-linux setup < pair-link.txt
 ```
 
+```bash
+solstone-linux setup --mark "word word" < pair-link.txt
+```
+
 The pair link comes from your journal. A journal on the same machine uses the
 same private network path as any other journal. There is no URL, key, local installation
 of the journal or Python, or direct fallback to configure. The solstone app can

@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- this is a security fix: setup now asks you to confirm your journal's mark, and nothing waiting on this computer goes to the journal until you confirm it's your journal. before, setup finished pairing first and only printed the mark, so anything waiting could go before you had checked it, even to a journal that wasn't yours. if setup can't ask you (run from a script, say), it now needs the mark's two words, shown in your journal's network app, with --mark. if you paired before this update, you won't be asked.
 - if a moment changes on its way into your journal, the changed files stay on this computer for another attempt.
 - a moment that's underway when you change time zones no longer lands under a mixed-up time. each new moment takes its day and time from your computer's time zone when it starts.
 - when the clocks go back an hour, intake keeps running through the repeated hour. before, it could stop.

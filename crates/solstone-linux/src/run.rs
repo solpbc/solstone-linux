@@ -2213,33 +2213,71 @@ mod tests {
     async fn held_pairing_sends_nothing_until_confirm() {
         let temp = tempfile::tempdir().unwrap();
         let config_root = temp.path().join("config");
-        let state_dir = temp.path().join("state");
-        let captures_dir = state_dir.join("captures");
-        std::fs::create_dir_all(&config_root).unwrap();
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::create_dir_all(&captures_dir).unwrap();
+        let base_dir = temp.path().join("data");
 
         let paths = crate::config::ConfigPaths {
-            base_dir: Some(state_dir.clone()),
+            base_dir: Some(base_dir),
             config_dir: Some(config_root.clone()),
         };
         let mut config = crate::config::load_config(paths).config;
         config.stream = "main".into();
+        config.ensure_dirs().unwrap();
+        std::fs::write(
+            config
+                .state_dir()
+                .join(crate::sync::INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[]}\n",
+        )
+        .unwrap();
+        let captures_dir = config.captures_dir();
 
         let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
         let cred = peer.credential();
+        let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
         crate::private_link::persist_credential(&config_root, &cred).unwrap();
         crate::journal_mark::write_pairing_answer(&config_root, "").unwrap();
 
         let day = "2026-03-31";
-        let day_dir = captures_dir.join(day);
-        std::fs::create_dir_all(&day_dir).unwrap();
-        let seg1 = day_dir.join("00000000000000-01-segment");
-        let seg2 = day_dir.join("00000000000001-01-segment");
+        let stream_dir = captures_dir.join(day).join(&config.stream);
+        std::fs::create_dir_all(&stream_dir).unwrap();
+        let seg1 = stream_dir.join("120000_300");
+        let seg2 = stream_dir.join("120500_300");
         std::fs::create_dir_all(&seg1).unwrap();
         std::fs::create_dir_all(&seg2).unwrap();
-        std::fs::write(seg1.join("screen.webm"), b"video1").unwrap();
-        std::fs::write(seg2.join("screen.webm"), b"video2").unwrap();
+        std::fs::write(seg1.join("screen.webm"), b"video").unwrap();
+        std::fs::write(seg2.join("screen.webm"), b"video").unwrap();
+
+        let sha = spl_core::ca::sha256_hex(b"video");
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "segment": "k1",
+                "file_descriptors": [{
+                    "submitted": "screen.webm",
+                    "written": "screen.webm",
+                    "size": 5,
+                    "sha256": sha,
+                    "disposition": "written",
+                }]
+            }))
+            .unwrap(),
+        );
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "segment": "k2",
+                "file_descriptors": [{
+                    "submitted": "screen.webm",
+                    "written": "screen.webm",
+                    "size": 5,
+                    "sha256": sha,
+                    "disposition": "written",
+                }]
+            }))
+            .unwrap(),
+        );
 
         let state_lock = PrivateStateLock::acquire(&config_root).unwrap();
         let upload = Arc::new(UploadClient::new(
@@ -2250,10 +2288,17 @@ mod tests {
         let open_journal = crate::private_link::OpenJournalAccess::default();
         let shutdown = Arc::new(tokio::sync::Notify::new());
 
+        let sync = crate::sync::SyncService::start(
+            config.clone(),
+            upload.clone(),
+            Arc::new(SystemClock::new()),
+        );
+
         let upload_clone = Arc::clone(&upload);
         let config_root_clone = config_root.clone();
         let open_journal_clone = open_journal.clone();
         let shutdown_clone = Arc::clone(&shutdown);
+        let on_confirmed = Some(sync.trigger_handle());
 
         let owner_handle = tokio::spawn(async move {
             start_linked_owner(
@@ -2264,83 +2309,271 @@ mod tests {
                 true,
                 open_journal_clone,
                 shutdown_clone,
-                None,
+                on_confirmed,
             )
             .await
         });
 
-        tokio::task::yield_now().await;
-        assert_eq!(peer.accepted_carriers(), 0);
-        assert!(peer.requests().is_empty());
+        let mut entered_wait = false;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if upload.link_facts().snapshot().journal_mark_held {
+                entered_wait = true;
+                break;
+            }
+        }
+        assert!(entered_wait, "owner must enter the held wait loop");
 
-        let _ = open_journal.open();
-        tokio::task::yield_now().await;
-        assert_eq!(peer.accepted_carriers(), 0);
-        assert!(peer.requests().is_empty());
+        tokio::time::advance(Duration::from_secs(59)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!upload.has_capability());
+        assert!(!owner_handle.is_finished());
+        assert!(
+            !peer
+                .requests()
+                .iter()
+                .any(|r| r.path.starts_with("/app/devices/ingest"))
+        );
 
-        let mark = spl_core::mark::mark_from_jid(&cred.instance_id).unwrap();
-        let spec = mark.to_render_spec();
-        let mark_str = format!("{} {}", spec.words[0], spec.words[1]);
+        sync.trigger();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!upload.has_capability());
+        assert!(!owner_handle.is_finished());
+        assert!(
+            !peer
+                .requests()
+                .iter()
+                .any(|r| r.path.starts_with("/app/devices/ingest"))
+        );
+
+        crate::journal_mark::write_pairing_answer(&config_root, &pairing_id).unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut has_cap = false;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if upload.has_capability() {
+                has_cap = true;
+                break;
+            }
+        }
+        assert!(has_cap, "upload must acquire capability after confirmation");
+
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ingest_count = peer
+                    .requests()
+                    .iter()
+                    .filter(|r| r.path.starts_with("/app/devices/ingest"))
+                    .count();
+                if ingest_count >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let requests = peer.requests();
+        let ingest_requests: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path.starts_with("/app/devices/ingest"))
+            .collect();
+        assert_eq!(ingest_requests.len(), 2);
+
+        shutdown.notify_waiters();
+        let owner = owner_handle.await.unwrap().unwrap();
+        owner.shutdown().await.unwrap();
+        sync.shutdown(Duration::from_secs(1)).await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn repair_grandfathers_and_syncs_to_original_peer() {
+        use rustix::fd::AsFd;
+        use std::fs;
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_root = temp.path().join("config");
+        let base_dir = temp.path().join("data");
+
+        let paths = crate::config::ConfigPaths {
+            base_dir: Some(base_dir),
+            config_dir: Some(config_root.clone()),
+        };
+        let mut config = crate::config::load_config(paths).config;
+        config.stream = "main".into();
+        config.ensure_dirs().unwrap();
+        let captures_dir = config.captures_dir();
+        let state_dir = config.state_dir();
+
+        let peer_x = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let cred_x = peer_x.credential();
+        let id_x = crate::private_link::compute_pairing_id(&cred_x.client_cert_pem);
+        crate::private_link::persist_credential(&config_root, &cred_x).unwrap();
+        let cred_x_bytes_before = fs::read(config_root.join("credentials.json")).unwrap();
+
+        let peer_y = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let cred_y = peer_y.credential();
+
+        struct CustomPairer(spl_transport::credential::Credential);
+        impl crate::private_link::Pairer for CustomPairer {
+            fn pair<'a>(
+                &'a self,
+                _link: &'a str,
+                _device_label: &'a str,
+                _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                spl_transport::credential::Credential,
+                                crate::private_link::PrivateStateError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                let cred = self.0.clone();
+                Box::pin(async move { Ok(cred) })
+            }
+        }
+
+        let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
+        tty_peer.write_all(b"no\n").unwrap();
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let status = crate::cli::confirm_async(
+        let res = crate::private_link::setup_with_pairer_and_stream_with_fault(
+            &CustomPairer(cred_y.clone()),
             &config_root,
-            Some(&mark_str),
-            None::<std::os::fd::BorrowedFd<'_>>,
-            &mut out,
-            &mut err,
+            &state_dir,
+            "desktop",
+            Some("desktop"),
+            None,
+            Some(tty_child.as_fd()),
+            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+            None,
+            None,
         )
         .await;
-        assert_eq!(status, 0);
+        let status = crate::cli::render_setup_result(res, &mut out, &mut err);
+        assert_eq!(status, 1);
+        assert_eq!(
+            fs::read(config_root.join("credentials.json")).unwrap(),
+            cred_x_bytes_before
+        );
 
-        tokio::time::advance(crate::journal_mark::JOURNAL_MARK_RECHECK_INTERVAL).await;
-        tokio::task::yield_now().await;
+        let answer = crate::journal_mark::read_pairing_answer(&config_root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer.confirmed, id_x);
 
+        let hex_y = spl_core::ca::sha256_hex(peer_y.client_der());
+        let requests_y = peer_y.requests();
+        assert_eq!(requests_y.len(), 1);
+        assert_eq!(requests_y[0].method, "DELETE");
+        assert_eq!(
+            requests_y[0].path,
+            format!("/app/network/api/clients/sha256:{hex_y}")
+        );
+
+        // Segment setup and sync pass
+        let day = "2026-03-31";
+        let stream_dir = captures_dir.join(day).join(&config.stream);
+        std::fs::create_dir_all(&stream_dir).unwrap();
+        std::fs::write(
+            config
+                .state_dir()
+                .join(crate::sync::INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[]}\n",
+        )
+        .unwrap();
+        let seg = stream_dir.join("120000_300");
+        std::fs::create_dir_all(&seg).unwrap();
+        std::fs::write(seg.join("screen.webm"), b"video1").unwrap();
+
+        let sha1 = spl_core::ca::sha256_hex(b"video1");
+        peer_x.enqueue_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "segment": "k1",
+                "file_descriptors": [{
+                    "submitted": "screen.webm",
+                    "written": "screen.webm",
+                    "size": 6,
+                    "sha256": sha1,
+                    "disposition": "written",
+                }]
+            }))
+            .unwrap(),
+        );
+
+        let state_lock = PrivateStateLock::acquire(&config_root).unwrap();
+        let upload = Arc::new(UploadClient::new(
+            &config,
+            None::<PrivateLinkCapability>,
+            Arc::new(SystemClock::new()),
+        ));
+        let open_journal = crate::private_link::OpenJournalAccess::default();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let sync = crate::sync::SyncService::start(
+            config.clone(),
+            upload.clone(),
+            Arc::new(SystemClock::new()),
+        );
+
+        let upload_clone = Arc::clone(&upload);
+        let config_root_clone = config_root.clone();
+        let open_journal_clone = open_journal.clone();
+        let shutdown_clone = Arc::clone(&shutdown);
+        let on_confirmed = Some(sync.trigger_handle());
+
+        let owner_handle = tokio::spawn(async move {
+            start_linked_owner(
+                upload_clone,
+                config_root_clone,
+                "main".to_string(),
+                state_lock,
+                true,
+                open_journal_clone,
+                shutdown_clone,
+                on_confirmed,
+            )
+            .await
+        });
+
+        sync.trigger();
+        let mut completed = false;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if !peer_x.requests().is_empty() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed);
+        let requests_x = peer_x.requests();
+        let ingest_requests: Vec<_> = requests_x
+            .iter()
+            .filter(|r| r.path.starts_with("/app/devices/ingest"))
+            .collect();
+        assert_eq!(ingest_requests.len(), 1);
+
+        shutdown.notify_waiters();
         let owner = owner_handle.await.unwrap().unwrap();
-
-        peer.enqueue_response(
-            200,
-            serde_json::to_vec(&serde_json::json!({
-                "status": "ok",
-                "segment": "k1"
-            }))
-            .unwrap(),
-        );
-        peer.enqueue_response(
-            200,
-            serde_json::to_vec(&serde_json::json!({
-                "status": "ok",
-                "segment": "k2"
-            }))
-            .unwrap(),
-        );
-
-        let res1 = upload
-            .upload_segment(
-                day,
-                "00000000000000-01-segment",
-                &[seg1.join("screen.webm")],
-            )
-            .await;
-        assert!(res1.success);
-        assert_eq!(res1.stored_key.as_deref(), Some("k1"));
-        let res2 = upload
-            .upload_segment(
-                day,
-                "00000000000001-01-segment",
-                &[seg2.join("screen.webm")],
-            )
-            .await;
-        assert!(res2.success);
-        assert_eq!(res2.stored_key.as_deref(), Some("k2"));
-
-        let requests = peer.requests();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].path.starts_with("/app/devices/ingest"));
-        assert!(requests[1].path.starts_with("/app/devices/ingest"));
-
         owner.shutdown().await.unwrap();
-        peer.shutdown().await;
+        sync.shutdown(Duration::from_secs(1)).await.unwrap();
+        peer_x.shutdown().await;
+        peer_y.shutdown().await;
     }
 }

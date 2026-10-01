@@ -29,7 +29,6 @@ pub(crate) const ANSWER_LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const JOURNAL_MARK_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 pub(crate) const HELD_BOTH_SENTENCES: &str = "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.";
-#[allow(dead_code)]
 pub(crate) const HELD_FIRST_SENTENCE: &str = "waiting for you to confirm your journal's mark";
 pub(crate) const RUN_LINE: &str = "when you're ready, run: solstone-linux confirm";
 pub(crate) const SUCCESS_LINE: &str = "the solstone app can now connect to your journal.";
@@ -198,13 +197,13 @@ pub(crate) fn read_pairing_answer(
     config_root: &Path,
 ) -> Result<Option<PairingAnswer>, PrivateStateError> {
     let path = config_root.join(PAIRING_ANSWER_FILENAME);
-    let bytes = match read_private_file(&path, PrivateTargetKind::Credential)? {
+    let bytes = match read_private_file(&path, PrivateTargetKind::PairingAnswer)? {
         Some(bytes) => bytes,
         None => return Ok(None),
     };
     serde_json::from_slice(&bytes)
         .map(Some)
-        .map_err(|_| PrivateStateError::MalformedCredential)
+        .map_err(|_| PrivateStateError::MalformedPairingAnswer)
 }
 
 pub(crate) fn write_pairing_answer(
@@ -230,7 +229,7 @@ pub(crate) fn write_pairing_answer_with_fault(
     atomic_write_bytes_with_fault(&path, &bytes, fault).map_err(|error| {
         map_private_file(
             error,
-            PrivateTargetKind::Credential,
+            PrivateTargetKind::PairingAnswer,
             PrivateIoOperation::Persist,
         )
     })
@@ -260,6 +259,13 @@ pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
 }
 
 pub(crate) fn grandfather_answer_file(config_root: &Path) -> Result<(), PrivateStateError> {
+    grandfather_answer_file_with_fault(config_root, &NoWriteFault)
+}
+
+pub(crate) fn grandfather_answer_file_with_fault(
+    config_root: &Path,
+    fault: &dyn DurableWriteFault,
+) -> Result<(), PrivateStateError> {
     let path = config_root.join(PAIRING_ANSWER_FILENAME);
     match open_regular_readonly(&path) {
         Ok(_) => Ok(()),
@@ -271,12 +277,28 @@ pub(crate) fn grandfather_answer_file(config_root: &Path) -> Result<(), PrivateS
             match cred {
                 Some(cred) => {
                     let id = compute_pairing_id(&cred.client_cert_pem);
-                    write_pairing_answer(config_root, &id)
+                    write_pairing_answer_with_fault(config_root, &id, fault)
                 }
-                None => write_pairing_answer(config_root, ""),
+                None => write_pairing_answer_with_fault(config_root, "", fault),
             }
         }
         Err(_) => Ok(()),
+    }
+}
+
+pub(crate) fn apply_live_owner_journal_mark_held(
+    link: &mut crate::private_link::LinkFactState,
+    config_root: &Path,
+) {
+    if let Ok(Some(cred)) = load_credential(config_root) {
+        let pairing_id = compute_pairing_id(&cred.client_cert_pem);
+        if is_pairing_confirmed(config_root, &pairing_id) {
+            link.journal_mark_held = false;
+            return;
+        }
+    }
+    if journal_mark_held_on_disk(config_root) {
+        link.journal_mark_held = true;
     }
 }
 
@@ -599,14 +621,14 @@ mod tests {
         fs::write(&path, br#"{"confirmed":"abc123pairingid","extra":true}"#).unwrap();
         assert!(matches!(
             read_pairing_answer(&root),
-            Err(PrivateStateError::MalformedCredential)
+            Err(PrivateStateError::MalformedPairingAnswer)
         ));
 
         // Malformed JSON rejected
         fs::write(&path, br#"not json"#).unwrap();
         assert!(matches!(
             read_pairing_answer(&root),
-            Err(PrivateStateError::MalformedCredential)
+            Err(PrivateStateError::MalformedPairingAnswer)
         ));
     }
 
@@ -703,8 +725,7 @@ mod tests {
                 .await;
 
         assert_eq!(status, 1);
-        let certs = spl_transport::tls::parse_certs(&cred.client_cert_pem).unwrap();
-        let hex = spl_core::ca::sha256_hex(certs[0].as_ref());
+        let hex = spl_core::ca::sha256_hex(peer.client_der());
         let requests = peer.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "DELETE");
@@ -741,8 +762,7 @@ mod tests {
         .await;
 
         assert_eq!(status, 1);
-        let certs = spl_transport::tls::parse_certs(&cred.client_cert_pem).unwrap();
-        let hex = spl_core::ca::sha256_hex(certs[0].as_ref());
+        let hex = spl_core::ca::sha256_hex(peer.client_der());
         let requests = peer.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "DELETE");
@@ -765,7 +785,7 @@ mod tests {
         let cred_y = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-y");
         let cred_z = sample_credential("89abcdef-0123-4567-89ab-cdef01234567", "cert-z");
         crate::private_link::persist_credential(&root, &cred_y).unwrap();
-        write_pairing_answer(&root, "").unwrap();
+        write_pairing_answer(&root, "unrelated-id").unwrap();
 
         let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
         let root_clone = root.clone();
@@ -774,8 +794,10 @@ mod tests {
         let fut1 = async {
             let mut out = Vec::new();
             let mut err = Vec::new();
-            crate::cli::confirm_async(&root, None, Some(tty_child.as_fd()), &mut out, &mut err)
-                .await
+            let status =
+                crate::cli::confirm_async(&root, None, Some(tty_child.as_fd()), &mut out, &mut err)
+                    .await;
+            (status, out, err)
         };
         let fut2 = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 64];
@@ -784,12 +806,13 @@ mod tests {
             tty_peer.write_all(b"yes\n").unwrap();
         });
 
-        let (status, res2) = tokio::join!(fut1, fut2);
+        let ((status, _out, err), res2) = tokio::join!(fut1, fut2);
         res2.unwrap();
         assert_eq!(status, 1);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.starts_with("Error:"));
         let answer = read_pairing_answer(&root).unwrap().unwrap();
-        let id_z = compute_pairing_id(&cred_z.client_cert_pem);
-        assert_ne!(answer.confirmed, id_z);
+        assert_eq!(answer.confirmed, "unrelated-id");
     }
 
     #[tokio::test]
@@ -803,7 +826,7 @@ mod tests {
         let cred_z = sample_credential("89abcdef-0123-4567-89ab-cdef01234567", "cert-z");
 
         crate::private_link::persist_credential(&root, &cred_y).unwrap();
-        write_pairing_answer(&root, "").unwrap();
+        write_pairing_answer(&root, "unrelated-id").unwrap();
 
         let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
         let root_clone = root.clone();
@@ -812,8 +835,10 @@ mod tests {
         let fut1 = async {
             let mut out = Vec::new();
             let mut err = Vec::new();
-            crate::cli::confirm_async(&root, None, Some(tty_child.as_fd()), &mut out, &mut err)
-                .await
+            let status =
+                crate::cli::confirm_async(&root, None, Some(tty_child.as_fd()), &mut out, &mut err)
+                    .await;
+            (status, out, err)
         };
         let fut2 = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 64];
@@ -822,7 +847,7 @@ mod tests {
             tty_peer.write_all(b"no\n").unwrap();
         });
 
-        let (status, res2) = tokio::join!(fut1, fut2);
+        let ((status, out, err), res2) = tokio::join!(fut1, fut2);
         res2.unwrap();
         assert_eq!(status, 1);
         assert!(root.join("credentials.json").exists());
@@ -831,8 +856,7 @@ mod tests {
             .unwrap();
         assert_eq!(current_cred.instance_id, cred_z.instance_id);
 
-        let certs = spl_transport::tls::parse_certs(&cred_y.client_cert_pem).unwrap();
-        let hex = spl_core::ca::sha256_hex(certs[0].as_ref());
+        let hex = spl_core::ca::sha256_hex(peer_y.client_der());
         let requests = peer_y.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "DELETE");
@@ -840,6 +864,14 @@ mod tests {
             requests[0].path,
             format!("/app/network/api/clients/sha256:{hex}")
         );
+
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains(NOT_PAIRED));
+        assert!(!out_str.contains(MISMATCH_BODY));
+        assert!(!out_str.contains(CANCEL_LINE));
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.starts_with("Error:"));
+
         peer_y.shutdown().await;
     }
 
@@ -866,7 +898,7 @@ mod tests {
 
         assert_eq!(status, 5);
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains("couldn't verify."));
+        assert!(!out_str.contains("couldn't verify."));
         assert!(out_str.contains(CONFIRM_UNVERIFIABLE_LINE));
         assert!(root.join("credentials.json").exists());
     }
@@ -1019,5 +1051,433 @@ mod tests {
         let id = compute_pairing_id(&cred.client_cert_pem);
         let ans = read_pairing_answer(&root).unwrap();
         assert_eq!(ans, Some(PairingAnswer { confirmed: id }));
+    }
+
+    #[tokio::test]
+    async fn confirm_no_reload_none_prints_error() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("cfg");
+        fs::create_dir_all(&root).unwrap();
+
+        let peer_y = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let cred_y = peer_y.credential();
+
+        crate::private_link::persist_credential(&root, &cred_y).unwrap();
+        write_pairing_answer(&root, "unrelated-id").unwrap();
+
+        let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
+        let root_clone = root.clone();
+
+        let fut1 = async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status =
+                crate::cli::confirm_async(&root, None, Some(tty_child.as_fd()), &mut out, &mut err)
+                    .await;
+            (status, out, err)
+        };
+        let fut2 = tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; 64];
+            let _ = tty_peer.read(&mut buf).unwrap();
+            let _ = fs::remove_file(root_clone.join("credentials.json"));
+            tty_peer.write_all(b"no\n").unwrap();
+        });
+
+        let ((status, out, err), res2) = tokio::join!(fut1, fut2);
+        res2.unwrap();
+        assert_eq!(status, 1);
+
+        let hex = spl_core::ca::sha256_hex(peer_y.client_der());
+        let requests = peer_y.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "DELETE");
+        assert_eq!(
+            requests[0].path,
+            format!("/app/network/api/clients/sha256:{hex}")
+        );
+
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains(NOT_PAIRED));
+        assert!(!out_str.contains(MISMATCH_BODY));
+        assert!(!out_str.contains(CANCEL_LINE));
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.starts_with("Error:"));
+
+        peer_y.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn confirm_no_reload_err_prints_error() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("cfg");
+        fs::create_dir_all(&root).unwrap();
+
+        let peer_y = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let cred_y = peer_y.credential();
+
+        crate::private_link::persist_credential(&root, &cred_y).unwrap();
+        write_pairing_answer(&root, "unrelated-id").unwrap();
+
+        let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
+        let root_clone = root.clone();
+
+        let fut1 = async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status =
+                crate::cli::confirm_async(&root, None, Some(tty_child.as_fd()), &mut out, &mut err)
+                    .await;
+            (status, out, err)
+        };
+        let fut2 = tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; 64];
+            let _ = tty_peer.read(&mut buf).unwrap();
+            fs::write(root_clone.join("credentials.json"), b"invalid-json").unwrap();
+            tty_peer.write_all(b"no\n").unwrap();
+        });
+
+        let ((status, out, err), res2) = tokio::join!(fut1, fut2);
+        res2.unwrap();
+        assert_eq!(status, 1);
+
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains(NOT_PAIRED));
+        assert!(!out_str.contains(MISMATCH_BODY));
+        assert!(!out_str.contains(CANCEL_LINE));
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.starts_with("Error:"));
+
+        peer_y.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn confirm_no_unlink_failure_prints_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("cfg");
+        fs::create_dir_all(&root).unwrap();
+
+        let cred_y = sample_credential("89abcdef-0123-4567-89ab-cdef01234567", "cert-y");
+        crate::private_link::persist_credential(&root, &cred_y).unwrap();
+        let pairing_id = crate::private_link::compute_pairing_id(&cred_y.client_cert_pem);
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = crate::cli::drop_same_pairing(&root, &pairing_id);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        match result {
+            Err(PrivateStateError::Io {
+                operation: PrivateIoOperation::Remove,
+                ..
+            }) => {}
+            other => panic!("expected Io(Remove, ...), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn confirm_cancel_does_not_delete_a_replaced_credential() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("cfg");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut cred_y = sample_credential("invalid-jid", "invalid-cert");
+        cred_y.ca_fp_prefix = vec![];
+        let cred_z = sample_credential("89abcdef-0123-4567-89ab-cdef01234567", "cert-z");
+
+        crate::private_link::persist_credential(&root, &cred_y).unwrap();
+        write_pairing_answer(&root, "unrelated-id").unwrap();
+
+        let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
+        let root_clone = root.clone();
+        let cred_z_clone = cred_z.clone();
+
+        let fut1 = async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status =
+                crate::cli::confirm_async(&root, None, Some(tty_child.as_fd()), &mut out, &mut err)
+                    .await;
+            (status, out, err)
+        };
+        let fut2 = tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; 64];
+            let _ = tty_peer.read(&mut buf).unwrap();
+            crate::private_link::persist_credential(&root_clone, &cred_z_clone).unwrap();
+            tty_peer.write_all(b"cancel\n").unwrap();
+        });
+
+        let ((status, out, err), res2) = tokio::join!(fut1, fut2);
+        res2.unwrap();
+        assert_eq!(status, 1);
+        assert!(root.join("credentials.json").exists());
+
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains(CANCEL_LINE));
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.starts_with("Error:"));
+    }
+
+    #[tokio::test]
+    async fn confirm_mark_mismatch_does_not_delete_a_replaced_credential() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("cfg");
+        fs::create_dir_all(&root).unwrap();
+
+        let peer_y = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let cred_y = peer_y.credential();
+        let cred_z = sample_credential("89abcdef-0123-4567-89ab-cdef01234567", "cert-z");
+
+        crate::private_link::persist_credential(&root, &cred_y).unwrap();
+        write_pairing_answer(&root, "unrelated-id").unwrap();
+
+        let root_clone = root.clone();
+        let cred_z_clone = cred_z.clone();
+
+        peer_y.enqueue_response(200, Vec::new());
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        peer_y.gate_queued_response_nonblocking(0, gate.clone());
+
+        let fut1 = async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = crate::cli::confirm_async(
+                &root,
+                Some("wrong words"),
+                None::<std::os::fd::BorrowedFd<'_>>,
+                &mut out,
+                &mut err,
+            )
+            .await;
+            (status, out, err)
+        };
+        let fut2 = async {
+            while peer_y.requests().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            crate::private_link::persist_credential(&root_clone, &cred_z_clone).unwrap();
+            gate.store(true, std::sync::atomic::Ordering::Release);
+            peer_y.notify_response_gates();
+        };
+
+        let ((status, out, err), _) = tokio::join!(fut1, fut2);
+        assert_eq!(status, 1);
+        assert!(root.join("credentials.json").exists());
+
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(!out_str.contains(NOT_PAIRED));
+        assert!(!out_str.contains(MARK_MISMATCH_LINE));
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.starts_with("Error:"));
+
+        peer_y.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mark_words_permutations_and_mismatch() {
+        let temp = tempdir().unwrap();
+        let config_root = temp.path().join("config");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&config_root).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cred = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-pem");
+        let mark = spl_core::mark::mark_from_jid(&cred.instance_id).unwrap();
+        let spec = mark.to_render_spec();
+        let word_a = spec.words[0].to_lowercase();
+        let word_b = spec.words[1].to_lowercase();
+        assert!(word_a.len() > 1 && word_b.len() > 1);
+
+        struct DirectPairer(spl_transport::credential::Credential);
+        impl crate::private_link::Pairer for DirectPairer {
+            fn pair<'a>(
+                &'a self,
+                _link: &'a str,
+                _device_label: &'a str,
+                _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                spl_transport::credential::Credential,
+                                crate::private_link::PrivateStateError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                let cred = self.0.clone();
+                Box::pin(async move { Ok(cred) })
+            }
+        }
+
+        // 1. "{A} {B}" confirms (exit 0)
+        {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = crate::cli::dispatch_setup_with_pairer_for_test(
+                &DirectPairer(cred.clone()),
+                &config_root,
+                &state_dir,
+                "desktop",
+                Some(&format!("{word_a} {word_b}")),
+                std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+                &mut out,
+                &mut err,
+            )
+            .await;
+            assert_eq!(status, 0);
+        }
+
+        // 2. "{B} {A}" mismatches (exit 1), not usage
+        {
+            let _ = fs::remove_file(config_root.join("credentials.json"));
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = crate::cli::dispatch_setup_with_pairer_for_test(
+                &DirectPairer(cred.clone()),
+                &config_root,
+                &state_dir,
+                "desktop",
+                Some(&format!("{word_b} {word_a}")),
+                std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+                &mut out,
+                &mut err,
+            )
+            .await;
+            assert_eq!(status, 1);
+            let out_str = String::from_utf8(out).unwrap();
+            assert!(out_str.contains(crate::journal_mark::MARK_MISMATCH_LINE));
+        }
+
+        // 3. Move space off A/B boundary
+        {
+            let _ = fs::remove_file(config_root.join("credentials.json"));
+            let shifted = format!(
+                "{} {}{}",
+                &word_a[..word_a.len() - 1],
+                &word_a[word_a.len() - 1..],
+                word_b
+            );
+            assert!(parse_mark_words(&shifted).is_some());
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = crate::cli::dispatch_setup_with_pairer_for_test(
+                &DirectPairer(cred.clone()),
+                &config_root,
+                &state_dir,
+                "desktop",
+                Some(&shifted),
+                std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+                &mut out,
+                &mut err,
+            )
+            .await;
+            assert_eq!(status, 1);
+            let out_str = String::from_utf8(out).unwrap();
+            assert!(out_str.contains(crate::journal_mark::MARK_MISMATCH_LINE));
+        }
+    }
+
+    #[test]
+    fn mode_000_answer_at_grandfather_start_is_held_and_unmodified() {
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("cfg");
+        fs::create_dir_all(&root).unwrap();
+
+        let cred = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-pem");
+        crate::private_link::persist_credential(&root, &cred).unwrap();
+
+        let ans_path = root.join(PAIRING_ANSWER_FILENAME);
+        let initial_bytes = b"mode 000 initial answer bytes";
+        fs::write(&ans_path, initial_bytes).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let _ = grandfather_answer_file(&root);
+
+        assert!(journal_mark_held_on_disk(&root));
+        fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read(&ans_path).unwrap(), initial_bytes);
+    }
+
+    #[test]
+    fn grandfather_with_write_fault_fails() {
+        struct FailingFault;
+        impl DurableWriteFault for FailingFault {
+            fn before(&self, _stage: crate::private_file::DurableWriteStage) -> io::Result<()> {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "fault injected",
+                ))
+            }
+        }
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("cfg");
+        fs::create_dir_all(&root).unwrap();
+
+        let cred = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-pem");
+        crate::private_link::persist_credential(&root, &cred).unwrap();
+
+        let res = grandfather_answer_file_with_fault(&root, &FailingFault);
+        assert!(res.is_err());
+        assert!(!root.join(PAIRING_ANSWER_FILENAME).exists());
+    }
+
+    #[tokio::test]
+    async fn setup_retire_outcomes_keep_answer_file_and_different_cred_is_held() {
+        let temp = tempdir().unwrap();
+        let config_root = temp.path().join("config");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&config_root).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cred_x = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-x");
+        let cred_diff = sample_credential("89abcdef-0123-4567-89ab-cdef01234567", "cert-diff");
+
+        struct FakePairer(spl_transport::credential::Credential);
+        impl crate::private_link::Pairer for FakePairer {
+            fn pair<'a>(
+                &'a self,
+                _link: &'a str,
+                _device_label: &'a str,
+                _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                spl_transport::credential::Credential,
+                                crate::private_link::PrivateStateError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                let cred = self.0.clone();
+                Box::pin(async move { Ok(cred) })
+            }
+        }
+
+        // Run setup that hits MarkMismatch
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let _ = crate::cli::dispatch_setup_with_pairer_for_test(
+            &FakePairer(cred_x.clone()),
+            &config_root,
+            &state_dir,
+            "desktop",
+            Some("wrong words"),
+            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+            &mut out,
+            &mut err,
+        )
+        .await;
+
+        assert!(config_root.join(PAIRING_ANSWER_FILENAME).exists());
+        crate::private_link::persist_credential(&config_root, &cred_diff).unwrap();
+        assert!(journal_mark_held_on_disk(&config_root));
     }
 }

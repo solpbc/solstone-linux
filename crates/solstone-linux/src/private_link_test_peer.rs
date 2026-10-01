@@ -85,6 +85,7 @@ struct PeerState {
 
 pub(crate) struct PrivateLinkPeer {
     credential: Credential,
+    client_der: Vec<u8>,
     state: PeerState,
     task: JoinHandle<()>,
 }
@@ -93,7 +94,7 @@ impl PrivateLinkPeer {
     pub(crate) async fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let refusal_alert = Arc::new(AtomicU8::new(0));
-        let (credential, acceptor) =
+        let (credential, client_der, acceptor) =
             credential_and_acceptor(listener.local_addr().unwrap().port(), refusal_alert.clone());
         let state = PeerState {
             routes: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -128,6 +129,7 @@ impl PrivateLinkPeer {
         });
         Self {
             credential,
+            client_der,
             state,
             task,
         }
@@ -135,6 +137,9 @@ impl PrivateLinkPeer {
 
     pub(crate) fn credential(&self) -> Credential {
         self.credential.clone()
+    }
+    pub(crate) fn client_der(&self) -> &[u8] {
+        &self.client_der
     }
     pub(crate) fn set_route(&self, path: &str, status: u16, body: Vec<u8>) {
         self.state
@@ -329,7 +334,10 @@ impl ClientCertVerifier for RefusingVerifier {
     }
 }
 
-fn credential_and_acceptor(port: u16, refusal: Arc<AtomicU8>) -> (Credential, TlsAcceptor) {
+fn credential_and_acceptor(
+    port: u16,
+    refusal: Arc<AtomicU8>,
+) -> (Credential, Vec<u8>, TlsAcceptor) {
     let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -350,6 +358,7 @@ fn credential_and_acceptor(port: u16, refusal: Arc<AtomicU8>) -> (Credential, Tl
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ClientAuth);
     let client = client_params.signed_by(&client_key, &ca, &ca_key).unwrap();
+    let client_der = client.der().to_vec();
     let ca_der = CertificateDer::from(ca.der().to_vec());
     let mut roots = RootCertStore::empty();
     roots.add(ca_der.clone()).unwrap();
@@ -387,6 +396,7 @@ fn credential_and_acceptor(port: u16, refusal: Arc<AtomicU8>) -> (Credential, Tl
             device_token: None,
             device_token_expires_at: None,
         },
+        client_der,
         TlsAcceptor::from(Arc::new(config)),
     )
 }

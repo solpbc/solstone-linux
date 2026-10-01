@@ -71,6 +71,7 @@ pub(crate) enum PrivateTargetKind {
     Credential,
     Observer,
     Lock,
+    PairingAnswer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,10 +84,13 @@ pub(crate) enum PrivateIoOperation {
     Lock,
     Read,
     Persist,
+    Remove,
 }
 
 pub(crate) enum PrivateStateError {
     MalformedCredential,
+    MalformedPairingAnswer,
+    CredentialChanged,
     InvalidTarget {
         kind: PrivateTargetKind,
     },
@@ -109,6 +113,8 @@ impl fmt::Display for PrivateStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MalformedCredential => formatter.write_str("MalformedCredential"),
+            Self::MalformedPairingAnswer => formatter.write_str("MalformedPairingAnswer"),
+            Self::CredentialChanged => formatter.write_str("CredentialChanged"),
             Self::InvalidTarget { kind } => write!(formatter, "InvalidTarget({kind:?})"),
             Self::Io { operation, source } => {
                 write!(formatter, "Io({operation:?}, {:?})", source.kind())
@@ -737,6 +743,7 @@ pub(crate) async fn setup_with_pairer_and_mark<R: Read>(
         None,
         input,
         None,
+        None,
     )
     .await
 }
@@ -759,6 +766,7 @@ pub(crate) async fn setup_with_pairer_and_stream<R: Read>(
         None,
         None,
         input,
+        None,
         None,
     )
     .await
@@ -783,6 +791,7 @@ pub(crate) async fn setup_with_stream<R: Read>(
         terminal_fd,
         input,
         None,
+        None,
     )
     .await
 }
@@ -798,6 +807,7 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
     terminal_fd: Option<std::os::fd::BorrowedFd<'_>>,
     input: R,
     confirmed_write_fault: Option<&dyn DurableWriteFault>,
+    grandfather_write_fault: Option<&dyn DurableWriteFault>,
 ) -> Result<SetupOutcome, PrivateStateError> {
     let state_lock = PrivateStateLock::acquire(config_root)?;
 
@@ -816,7 +826,8 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
 
     {
         let _answer_lock = crate::journal_mark::AnswerLock::acquire(state_lock.root()).await?;
-        crate::journal_mark::grandfather_answer_file(state_lock.root())?;
+        let fault = grandfather_write_fault.unwrap_or(&NoWriteFault);
+        crate::journal_mark::grandfather_answer_file_with_fault(state_lock.root(), fault)?;
     }
 
     let link = read_pair_link(input)?;
@@ -968,6 +979,7 @@ pub(crate) async fn setup_with_pairer_for_test<R: Read>(
         mark_override,
         None,
         input,
+        None,
         None,
     )
     .await
@@ -4136,6 +4148,7 @@ pub(crate) mod tests {
                 None,
                 Cursor::new(RELAY_PAIR_LINK.as_bytes()),
                 Some(&FailStage(stage)),
+                None,
             )
             .await
             .unwrap();

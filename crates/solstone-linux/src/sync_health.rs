@@ -162,12 +162,12 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
         (
             HealthState::JournalMarkHeld,
             HealthSurface {
-                header_recording: "waiting for you to confirm your journal's mark",
-                header_idle: "waiting for you to confirm your journal's mark",
-                sync_line: "waiting for you to confirm your journal's mark",
-                tooltip: "waiting for you to confirm your journal's mark",
-                accessible_recording: "waiting for you to confirm your journal's mark",
-                accessible_idle: "waiting for you to confirm your journal's mark",
+                header_recording: crate::journal_mark::HELD_FIRST_SENTENCE,
+                header_idle: crate::journal_mark::HELD_FIRST_SENTENCE,
+                sync_line: crate::journal_mark::HELD_FIRST_SENTENCE,
+                tooltip: crate::journal_mark::HELD_FIRST_SENTENCE,
+                accessible_recording: crate::journal_mark::HELD_FIRST_SENTENCE,
+                accessible_idle: crate::journal_mark::HELD_FIRST_SENTENCE,
                 icon: "attention",
                 sni: "NeedsAttention",
                 cli: "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.\nwhen you're ready, run: solstone-linux confirm",

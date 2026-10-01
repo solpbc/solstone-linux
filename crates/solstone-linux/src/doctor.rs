@@ -144,18 +144,23 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
 
 pub struct RealDoctor<'a> {
     pub runner: &'a dyn Runner,
+    paths: ConfigPaths,
     config: Option<Config>,
 }
 impl<'a> RealDoctor<'a> {
     pub fn new(runner: &'a dyn Runner) -> Self {
+        Self::with_paths(runner, ConfigPaths::default())
+    }
+    pub fn with_paths(runner: &'a dyn Runner, paths: ConfigPaths) -> Self {
         Self {
             runner,
+            paths,
             config: None,
         }
     }
     fn config(&mut self) -> &Config {
         self.config
-            .get_or_insert_with(|| load_config(ConfigPaths::default()).config)
+            .get_or_insert_with(|| load_config(self.paths.clone()).config)
     }
 }
 
@@ -476,9 +481,11 @@ impl DoctorChecks for RealDoctor<'_> {
         let liveness = PrivateStateLock::try_probe(&config.config_dir)
             .unwrap_or(PrivateStateLockLiveness::NoLiveOwner);
         let mut facts = load_facts_with_liveness(&config.state_dir(), liveness);
-        if liveness != PrivateStateLockLiveness::LiveOwner
-            && crate::journal_mark::journal_mark_held_on_disk(&config.config_dir)
-        {
+        if liveness == PrivateStateLockLiveness::LiveOwner {
+            if let Some(link) = facts.link.as_mut() {
+                crate::journal_mark::apply_live_owner_journal_mark_held(link, &config.config_dir);
+            }
+        } else if crate::journal_mark::journal_mark_held_on_disk(&config.config_dir) {
             facts.link = Some(crate::private_link::LinkFactState {
                 journal_mark_held: true,
                 ..Default::default()
