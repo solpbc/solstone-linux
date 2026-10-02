@@ -43,10 +43,10 @@ sd-notify = "0.5.0"
 native-browser-frame = { version = "1.0.0", path = "../../vendor/crates/native-browser-frame" }
 
 [features]
-# The browser host stays off in owner builds until it is launched. `browser`
-# makes host mode reachable and writes the browser registrations;
-# `browser-dev-host` also admits the unpacked development extension, and no
-# release target sets it.
+# `browser` makes host mode reachable and writes the browser registrations, and
+# owner builds carry it. `browser-dev-host` also admits the unpacked development
+# extension, and no release target sets it.
+default = ["browser"]
 browser = []
 browser-dev-host = ["browser"]
 
