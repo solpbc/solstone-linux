@@ -907,7 +907,7 @@ fn cmd_discard_browser_pages(
         Ok(summary) if summary.periods == 0 => {
             let _ = write_line(
                 output,
-                "there are no browser pages kept for another journal",
+                "there are no browser pages kept for a journal this computer was paired with before",
             );
             0
         }
@@ -919,7 +919,10 @@ fn cmd_discard_browser_pages(
             0
         }
         Err(error) => {
-            let _ = write_line(errors, format!("could not discard them: {error}"));
+            let _ = write_line(
+                errors,
+                format!("could not discard the browser pages: {error}"),
+            );
             1
         }
     }

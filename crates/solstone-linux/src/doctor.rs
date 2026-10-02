@@ -521,6 +521,9 @@ impl DoctorChecks for RealDoctor<'_> {
                 std::path::PathBuf::from("/var/lib/flatpak/app"),
             ],
         );
+        if installs.firefox_snap {
+            installs.firefox_snap_decision = crate::browser::status::SnapDecision::Unknown;
+        }
         if installs.firefox_snap
             && let Some(gdbus) = self.runner.which("gdbus")
         {

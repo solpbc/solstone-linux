@@ -70,7 +70,7 @@ pub fn status_lines(base_dir: &Path, now_ms: i64) -> Vec<String> {
             });
             if running.full {
                 lines.push(
-                    "        browser pages are full, so no new pages are taken in until some go into your journal"
+                    "        the room for browser pages on this computer is full, so no new pages are taken in until some go into your journal"
                         .to_owned(),
                 );
             } else if running.capture == "paused" {
@@ -130,6 +130,8 @@ pub struct BrowserInstalls {
 pub enum SnapDecision {
     #[default]
     NotAsked,
+    /// The answer could not be read on this desktop.
+    Unknown,
     Allowed,
     Refused,
 }
@@ -212,11 +214,14 @@ pub fn doctor_lines(home: &Path, binary: &Path, installs: &BrowserInstalls) -> V
             SnapDecision::NotAsked => {
                 "ok    firefox (snap)                asks you once to let it start the solstone app".to_owned()
             }
+            SnapDecision::Unknown => {
+                "warn  firefox (snap)                asks you once to let it start the solstone app; doctor couldn't read what you answered".to_owned()
+            }
             SnapDecision::Allowed => {
                 "ok    firefox (snap)                allowed to start the solstone app".to_owned()
             }
             SnapDecision::Refused => format!(
-                "warn  firefox (snap)                you told firefox not to start the solstone app, so nothing is taken in from it. to be asked again, run:\n      gdbus {} --method org.freedesktop.impl.portal.PermissionStore.DeletePermission {PERMISSION_TABLE} {} {SNAP_FIREFOX}",
+                "warn  firefox (snap)                you told your desktop not to let firefox start the solstone app, so nothing is taken in from it. to be asked again, run:\n      gdbus {} --method org.freedesktop.impl.portal.PermissionStore.DeletePermission {PERMISSION_TABLE} {} {SNAP_FIREFOX}",
                 PERMISSION_STORE.join(" "),
                 native_browser_frame::PROD_HOST
             ),
@@ -230,7 +235,7 @@ pub fn doctor_lines(home: &Path, binary: &Path, installs: &BrowserInstalls) -> V
     }
     for id in &installs.flatpak_chromium_family {
         lines.push(format!(
-            "warn  {id:<28}  can't reach the solstone app from inside a flatpak; use a chrome, edge or firefox package"
+            "warn  {id:<28}  can't reach the solstone app from inside a flatpak; use chrome, edge or firefox installed outside flatpak"
         ));
     }
     lines
