@@ -119,7 +119,51 @@ fn retired_lines(layout: &Layout) -> Vec<String> {
 pub struct BrowserInstalls {
     pub chromium_snap: bool,
     pub firefox_snap: bool,
+    /// What the owner answered when snap Firefox asked to start the solstone app.
+    pub firefox_snap_decision: SnapDecision,
     pub flatpak_chromium_family: Vec<String>,
+}
+
+/// Snap Firefox reaches the app through the desktop's WebExtensions portal, which
+/// asks the owner once and remembers the answer in the portal permission store.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SnapDecision {
+    #[default]
+    NotAsked,
+    Allowed,
+    Refused,
+}
+
+/// The portal permission store, as `gdbus` reaches it.
+pub const PERMISSION_STORE: [&str; 6] = [
+    "call",
+    "--session",
+    "--dest",
+    "org.freedesktop.impl.portal.PermissionStore",
+    "--object-path",
+    "/org/freedesktop/impl/portal/PermissionStore",
+];
+pub const PERMISSION_TABLE: &str = "webextensions";
+pub const SNAP_FIREFOX: &str = "snap.firefox";
+
+/// Read the answer out of a `PermissionStore.Lookup` reply such as
+/// `({'snap.firefox': ['no']}, <byte 0x00>)`. No reply means it never asked.
+pub fn parse_snap_decision(lookup: Option<&str>) -> SnapDecision {
+    let Some(reply) = lookup else {
+        return SnapDecision::NotAsked;
+    };
+    let Some(start) = reply.find(&format!("'{SNAP_FIREFOX}'")) else {
+        return SnapDecision::NotAsked;
+    };
+    let rest = &reply[start..];
+    let answer = &rest[..rest.find(']').unwrap_or(rest.len())];
+    if answer.contains("'yes'") {
+        SnapDecision::Allowed
+    } else if answer.contains("'no'") {
+        SnapDecision::Refused
+    } else {
+        SnapDecision::NotAsked
+    }
 }
 
 pub fn detect_installs(snap_root: &Path, flatpak_roots: &[PathBuf]) -> BrowserInstalls {
@@ -138,6 +182,7 @@ pub fn detect_installs(snap_root: &Path, flatpak_roots: &[PathBuf]) -> BrowserIn
     BrowserInstalls {
         chromium_snap: snap_root.join("chromium").is_dir(),
         firefox_snap: snap_root.join("firefox").is_dir(),
+        firefox_snap_decision: SnapDecision::NotAsked,
         flatpak_chromium_family,
     }
 }
@@ -163,10 +208,19 @@ pub fn doctor_lines(home: &Path, binary: &Path, installs: &BrowserInstalls) -> V
         ));
     }
     if installs.firefox_snap {
-        lines.push(
-            "ok    firefox (snap)                asks you once to let it reach the solstone app; if you said no, change it in Settings, Apps, Firefox"
-                .to_owned(),
-        );
+        lines.push(match installs.firefox_snap_decision {
+            SnapDecision::NotAsked => {
+                "ok    firefox (snap)                asks you once to let it start the solstone app".to_owned()
+            }
+            SnapDecision::Allowed => {
+                "ok    firefox (snap)                allowed to start the solstone app".to_owned()
+            }
+            SnapDecision::Refused => format!(
+                "warn  firefox (snap)                you told firefox not to start the solstone app, so nothing is taken in from it. to be asked again, run:\n      gdbus {} --method org.freedesktop.impl.portal.PermissionStore.DeletePermission {PERMISSION_TABLE} {} {SNAP_FIREFOX}",
+                PERMISSION_STORE.join(" "),
+                native_browser_frame::PROD_HOST
+            ),
+        });
     }
     if installs.chromium_snap {
         lines.push(
@@ -220,6 +274,37 @@ mod tests {
         assert_eq!(
             status_lines(temp.path(), 1_000_000 + RUNNING_STALE_MS)[0],
             "Browser: the solstone app is not running"
+        );
+    }
+
+    #[test]
+    fn the_snap_firefox_answer_is_read_from_the_portal_store() {
+        assert_eq!(parse_snap_decision(None), SnapDecision::NotAsked);
+        assert_eq!(
+            parse_snap_decision(Some("({'snap.firefox': ['no']}, <byte 0x00>)")),
+            SnapDecision::Refused
+        );
+        assert_eq!(
+            parse_snap_decision(Some("({'snap.firefox': ['yes']}, <byte 0x00>)")),
+            SnapDecision::Allowed
+        );
+        assert_eq!(
+            parse_snap_decision(Some("({'snap.other': ['yes']}, <byte 0x00>)")),
+            SnapDecision::NotAsked
+        );
+        let refused = BrowserInstalls {
+            firefox_snap: true,
+            firefox_snap_decision: SnapDecision::Refused,
+            ..Default::default()
+        };
+        let lines = doctor_lines(
+            Path::new("/nonexistent"),
+            Path::new("/usr/bin/solstone-linux"),
+            &refused,
+        );
+        assert!(lines[1].starts_with("warn  firefox (snap)"));
+        assert!(
+            lines[1].contains("DeletePermission webextensions app.solstone.browser snap.firefox")
         );
     }
 

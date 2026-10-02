@@ -514,13 +514,32 @@ impl DoctorChecks for RealDoctor<'_> {
             return Vec::new();
         };
         let home = std::path::PathBuf::from(home);
-        let installs = crate::browser::status::detect_installs(
+        let mut installs = crate::browser::status::detect_installs(
             std::path::Path::new("/snap"),
             &[
                 home.join(".local/share/flatpak/app"),
                 std::path::PathBuf::from("/var/lib/flatpak/app"),
             ],
         );
+        if installs.firefox_snap
+            && let Some(gdbus) = self.runner.which("gdbus")
+        {
+            use crate::browser::status::{PERMISSION_STORE, PERMISSION_TABLE, parse_snap_decision};
+            let mut args: Vec<&str> = PERMISSION_STORE.to_vec();
+            args.extend([
+                "--method",
+                "org.freedesktop.impl.portal.PermissionStore.Lookup",
+                PERMISSION_TABLE,
+                native_browser_frame::PROD_HOST,
+            ]);
+            let reply = self
+                .runner
+                .run(&gdbus, &args, Duration::from_secs(5), &HashMap::new())
+                .ok()
+                .filter(|output| output.success)
+                .map(|output| output.stdout);
+            installs.firefox_snap_decision = parse_snap_decision(reply.as_deref());
+        }
         crate::browser::status::doctor_lines(
             &home,
             &crate::browser::registration::stable_binary(&executable),
