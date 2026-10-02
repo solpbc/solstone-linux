@@ -151,6 +151,18 @@ pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::W
         let _ = writeln!(output, "Error writing service files: {error}");
         return 1;
     }
+    if crate::browser::ENABLED
+        && let Err(error) = crate::browser::registration::write_all(
+            &paths.home,
+            &crate::browser::registration::stable_binary(&paths.binary),
+            crate::browser::DEV_ENABLED,
+        )
+    {
+        let _ = writeln!(
+            output,
+            "Warning: could not write every browser registration: {error}"
+        );
+    }
     systemctl_nonfatal(
         runner,
         &["--user", "daemon-reload"],
@@ -200,6 +212,14 @@ pub fn uninstall(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io:
             let _ = writeln!(output, "Error removing {}: {error}", path.display());
             return 1;
         }
+    }
+    if crate::browser::ENABLED
+        && let Err(error) = crate::browser::registration::remove_all(&paths.home)
+    {
+        let _ = writeln!(
+            output,
+            "Warning: could not remove every browser registration: {error}"
+        );
     }
     systemctl_nonfatal(
         runner,

@@ -327,6 +327,11 @@ fn run_capture(
     };
     let snapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
     let (states, tray_receiver) = WatchStateSink::channel(initial_snapshot);
+    let browser = if crate::browser::ENABLED {
+        start_browser(&config, tray_receiver.clone(), sync_trigger.clone())
+    } else {
+        None
+    };
     let signal_receiver = tray_receiver.clone();
     let (initial_health, initial_progress) = sync_sampler.sample();
     let health = Arc::new(Mutex::new(initial_health));
@@ -422,6 +427,9 @@ fn run_capture(
     if let Err(error) = notifier.stopping() {
         tracing::warn!(%error, "Failed to notify systemd stopping state");
     }
+    if let Some(browser) = browser {
+        runtime.block_on(browser.shutdown());
+    }
     linked_shutdown_notify.notify_one();
     let (shutdown, sync_shutdown, linked_shutdown) = runtime.block_on(shutdown_in_order(
         observer,
@@ -449,6 +457,57 @@ fn run_capture(
         .and(shutdown)
         .and(sync_shutdown)
         .and(linked_shutdown)
+}
+
+/// Write the browser registrations and open the browser endpoint. Opening custody
+/// retires anything held for a journal this app is no longer paired with. A failure
+/// here leaves the rest of the app running.
+fn start_browser(
+    config: &Config,
+    paused: tokio::sync::watch::Receiver<StateSnapshot>,
+    sync: SyncTrigger,
+) -> Option<crate::browser::server::ServerHandle> {
+    use crate::browser::{custody, registration, server};
+    match (env::var_os("HOME"), env::current_exe()) {
+        (Some(home), Ok(executable)) => {
+            if let Err(error) = registration::write_all(
+                std::path::Path::new(&home),
+                &registration::stable_binary(&executable),
+                crate::browser::DEV_ENABLED,
+            ) {
+                tracing::warn!(%error, "Could not write every browser registration");
+            }
+        }
+        _ => tracing::warn!("Could not locate the browser registrations"),
+    }
+    let journal = match load_credential(&config.config_dir) {
+        Ok(Some(credential)) => Some(custody::journal_identity(
+            &credential.instance_id,
+            &credential.ca_chain_pem,
+        )),
+        _ => None,
+    };
+    let endpoint = match crate::browser::production_endpoint_path() {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            tracing::warn!(%error, "Browser pages are unavailable");
+            return None;
+        }
+    };
+    match server::start(server::ServerConfig {
+        base_dir: config.base_dir.clone(),
+        endpoint,
+        journal,
+        dev_enabled: crate::browser::DEV_ENABLED,
+        paused,
+        on_period_finished: Arc::new(move || sync.trigger()),
+    }) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            tracing::warn!(%error, "Browser pages are unavailable");
+            None
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

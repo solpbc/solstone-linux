@@ -496,6 +496,20 @@ impl SyncWorker {
         self.is_running() || self.draining_shutdown
     }
 
+    /// The generation whose browser periods may go to the paired journal. Periods kept
+    /// for any other journal are never delivered.
+    fn browser_generation(&self) -> Option<String> {
+        let credential = crate::private_link::load_credential(&self.config.config_dir).ok()??;
+        let journal = crate::browser::custody::journal_identity(
+            &credential.instance_id,
+            &credential.ca_chain_pem,
+        );
+        crate::browser::custody::deliverable_generation(
+            &crate::browser::custody::Layout::new(&self.config.base_dir),
+            Some(&journal),
+        )
+    }
+
     fn current_identity_and_pairing(&self) -> (Option<String>, Option<String>) {
         self.client
             .capability()
@@ -595,7 +609,10 @@ impl SyncWorker {
         ensure_cutover(&self.config.state_dir(), &self.config.captures_dir());
         let (current_identity, current_pairing) = self.current_identity_and_pairing();
         let cutover_segments = load_cutover_segments(&self.config.state_dir());
-        let segments_by_day = collect_segments(&self.config.captures_dir());
+        let segments_by_day = deliverable_segments(
+            collect_segments(&self.config.captures_dir()),
+            self.browser_generation().as_deref(),
+        );
         let mut days: Vec<String> = segments_by_day.keys().cloned().collect();
         days.sort_by(|a, b| b.cmp(a));
 
@@ -696,9 +713,17 @@ impl SyncWorker {
         // Phase 2: Targeted single GET /app/devices/ingest/segments/{day} for legacy due
         if !pass_stopped && !self.circuit_open && self.is_active() {
             let mut custody_days = HashSet::new();
-            for (day, segments) in &segments_by_day {
+            for ((day, source), segments) in segments_by_day.iter().flat_map(|(day, segments)| {
+                [None, Some(crate::browser::SOURCE)].map(|source| {
+                    let class: Vec<&PathBuf> = segments
+                        .iter()
+                        .filter(|segment| segment_source(segment) == source)
+                        .collect();
+                    ((day, source), class)
+                })
+            }) {
                 let enters_phase2 = segments.iter().any(|s| {
-                    if uploaded_in_phase1.contains(s) {
+                    if uploaded_in_phase1.contains(*s) {
                         return false;
                     }
                     let ack = read_ack(s);
@@ -739,20 +764,26 @@ impl SyncWorker {
                     false
                 });
                 if enters_phase2 {
-                    custody_days.insert(day.clone());
+                    custody_days.insert((day.clone(), source));
                 }
             }
             let mut sorted_custody_days: Vec<_> = custody_days.into_iter().collect();
             sorted_custody_days.sort_by(|a, b| b.cmp(a));
 
-            for day in sorted_custody_days {
+            for (day, source) in sorted_custody_days {
+                let day_segments: Vec<&PathBuf> = segments_by_day
+                    .get(&day)
+                    .into_iter()
+                    .flatten()
+                    .filter(|segment| segment_source(segment) == source)
+                    .collect();
                 if !self.is_active() || self.circuit_open {
                     pass_stopped = true;
                     break;
                 }
                 self.set_progress(format!("checking {day}..."), true);
                 requests_made += 1;
-                let custody = self.client.fetch_day_custody(&day).await;
+                let custody = self.client.fetch_source_day_custody(&day, source).await;
                 if custody.error_type == Some(ErrorType::Auth) {
                     pass_stopped = true;
                     pass_error_type = custody.error_type;
@@ -764,8 +795,8 @@ impl SyncWorker {
                 {
                     // Non-auth error or no proof: do not record_failure, do not stop pass.
                     // Upload each legacy segment on that day directly in this pass.
-                    if let Some(segments) = segments_by_day.get(&day) {
-                        for segment_dir in segments {
+                    {
+                        for segment_dir in day_segments.iter().copied() {
                             let ack = read_ack(segment_dir);
                             let valid_ack = is_ack_valid(
                                 segment_dir,
@@ -825,8 +856,8 @@ impl SyncWorker {
 
                 self.record_contact(false);
                 let indexed = index_entries(&custody.items);
-                if let Some(segments) = segments_by_day.get(&day) {
-                    for segment_dir in segments {
+                {
+                    for segment_dir in day_segments.iter().copied() {
                         if uploaded_in_phase1.contains(segment_dir) {
                             continue;
                         }
@@ -1032,7 +1063,13 @@ impl SyncWorker {
         let zone = crate::recovery::read_capture_zone(segment_dir);
         let result = self
             .client
-            .upload_segment_with_meta(day, &key, &files, zone.as_ref())
+            .upload_source_segment(
+                day,
+                &key,
+                &files,
+                zone.as_ref(),
+                segment_source(segment_dir),
+            )
             .await;
         let (current_identity, current_pairing) = self.current_identity_and_pairing();
 
@@ -1457,6 +1494,8 @@ fn is_bookkeeping_file(name: &str) -> bool {
         || name == INGEST_ACK_FILENAME
         || name == INGEST_RETRY_FILENAME
         || name == SERVER_KEY_FILENAME
+        || name == crate::browser::custody::PERIOD_FILE
+        || name == crate::browser::custody::RECEIPTS_FILE
         || (name.starts_with('.') && name.ends_with(".tmp"))
         || name.starts_with(".ingest_retry.json.tmp.")
 }
@@ -1994,6 +2033,32 @@ fn collect_segments(root: &Path) -> HashMap<String, Vec<PathBuf>> {
         }
     }
     result
+}
+
+/// The journal source a capture segment goes in as: browser periods under their own
+/// stream folder are the `browser` source; every other stream folder is this device's
+/// primary capture.
+fn segment_source(segment_dir: &Path) -> Option<&'static str> {
+    crate::browser::is_browser_segment(segment_dir).then_some(crate::browser::SOURCE)
+}
+
+/// Drop browser periods that were not accepted for the journal this app is paired with
+/// now. They are retired when the app starts, so this only closes the window before.
+fn deliverable_segments(
+    mut segments_by_day: HashMap<String, Vec<PathBuf>>,
+    browser_generation: Option<&str>,
+) -> HashMap<String, Vec<PathBuf>> {
+    for segments in segments_by_day.values_mut() {
+        segments.retain(|segment| {
+            !crate::browser::is_browser_segment(segment)
+                || browser_generation.is_some_and(|generation| {
+                    crate::browser::custody::segment_generation(segment).as_deref()
+                        == Some(generation)
+                })
+        });
+    }
+    segments_by_day.retain(|_, segments| !segments.is_empty());
+    segments_by_day
 }
 
 fn remove_if_empty(path: &Path) {
@@ -6509,6 +6574,134 @@ mod tests {
             "missing {expected_meta:?} in {body}"
         );
         assert!(body.contains(&format!("\"segment\":\"{seg_name}\"")));
+    }
+
+    /// Keep one browser batch for `journal` and finish its period into a capture
+    /// segment, the way the running app does.
+    fn browser_period(temp: &tempfile::TempDir, journal: &str) -> PathBuf {
+        use chrono::TimeZone;
+        let layout = crate::browser::custody::Layout::new(temp.path());
+        let at = |minute| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 10, 2, 10, minute, 0)
+                .earliest()
+                .unwrap()
+        };
+        let mut custody =
+            crate::browser::custody::Custody::open(layout, Some(journal), at(1)).unwrap();
+        let batch = json!({
+            "type": "batch",
+            "destination_generation": custody.generation().unwrap(),
+            "inst": "inst-a",
+            "batch_id": "0123456789abcdef0123456789abcdef",
+            "queued_at_ms": at(1).timestamp_millis() - 1000,
+            "records": [{"t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
+                         "blocks": [{"id": "b1", "text": "browser marker"}]}],
+        });
+        assert!(matches!(
+            custody.accept(&batch, at(1)).0,
+            crate::browser::custody::Outcome::Accepted { .. }
+        ));
+        assert!(custody.tick(at(5)).is_some());
+        let segment = temp.path().join("captures/20261002/_browser/100100_240");
+        assert!(segment.join(crate::browser::PAGES_FILENAME).is_file());
+        segment
+    }
+
+    fn paired_journal(temp: &tempfile::TempDir, server: &LinkedMockServer) -> String {
+        let config_dir = temp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let credential = server.credential();
+        crate::private_link::persist_credential(&config_dir, &credential).unwrap();
+        crate::browser::custody::journal_identity(&credential.instance_id, &credential.ca_chain_pem)
+    }
+
+    #[tokio::test]
+    async fn a_browser_period_goes_into_the_journal_as_the_browser_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let (server, mut worker) = test_worker(&temp, Vec::new()).await;
+        let journal = paired_journal(&temp, &server);
+        let segment = browser_period(&temp, &journal);
+        let pages = segment.join(crate::browser::PAGES_FILENAME);
+        server.enqueue_response(
+            200,
+            json!({
+                "status": "ok",
+                "segment": "100100_240",
+                "file_descriptors": [{
+                    "submitted": "browser_pages.jsonl",
+                    "written": "browser_pages.jsonl",
+                    "size": fs::metadata(&pages).unwrap().len(),
+                    "sha256": sha256_file(&pages).unwrap(),
+                    "disposition": "written",
+                }]
+            })
+            .to_string(),
+        );
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 1);
+        let request = server
+            .requests()
+            .into_iter()
+            .find(|request| request.uri == "/app/devices/ingest")
+            .unwrap();
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(body.contains("\"source\":\"browser\""), "{body}");
+        assert!(body.contains("\"segment\":\"100100_240\""), "{body}");
+        assert!(body.contains("Content-Type: application/jsonl"), "{body}");
+        assert!(!body.contains(crate::browser::custody::PERIOD_FILE));
+        // Confirmed by the journal, so nothing of the period is left on this computer.
+        assert!(!segment.exists());
+    }
+
+    #[tokio::test]
+    async fn primary_capture_carries_no_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"video data");
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                json!({
+                    "status": "ok",
+                    "segment": "120000_300",
+                    "file_descriptors": [{
+                        "submitted": "screen.webm",
+                        "written": "screen.webm",
+                        "size": 10,
+                        "sha256": sha256_file(&segment.join("screen.webm")).unwrap(),
+                        "disposition": "written",
+                    }]
+                }),
+            )],
+        )
+        .await;
+        worker.sync_pass().await;
+        let body = String::from_utf8_lossy(&server.requests()[0].body).into_owned();
+        assert!(!body.contains("\"source\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_browser_period_kept_for_another_journal_is_never_uploaded() {
+        let temp = tempfile::tempdir().unwrap();
+        let (server, mut worker) = test_worker(&temp, Vec::new()).await;
+        // Kept while paired with another journal; the app has not restarted since the
+        // credential changed, so nothing has retired it yet.
+        let segment = browser_period(&temp, "another-journal");
+        paired_journal(&temp, &server);
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 0);
+        assert!(segment.join(crate::browser::PAGES_FILENAME).is_file());
+    }
+
+    #[tokio::test]
+    async fn browser_periods_wait_while_the_journal_is_unpaired() {
+        let temp = tempfile::tempdir().unwrap();
+        let (server, mut worker) = test_worker(&temp, Vec::new()).await;
+        let segment = browser_period(&temp, "journal-a");
+        worker.sync_pass().await;
+        assert_eq!(upload_hits(&server), 0);
+        assert!(segment.exists());
     }
 
     #[tokio::test]

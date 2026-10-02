@@ -89,6 +89,12 @@ enum Commands {
     },
     #[command(about = "resume intake")]
     Resume,
+    #[cfg(feature = "browser")]
+    #[command(
+        name = "discard-browser-pages",
+        about = "discard browser pages kept for a journal this computer was paired with before"
+    )]
+    DiscardBrowserPages,
 }
 
 struct SystemRunner;
@@ -226,6 +232,17 @@ fn setup_logging(verbose: bool) {
 }
 
 pub fn run() -> i32 {
+    // A browser's native-messaging launch is recognised from argv alone, before any
+    // other startup work: no logging, no config, and no credential lock.
+    if crate::browser::ENABLED {
+        use crate::browser::argv::{Recognition, recognize};
+        let arguments: Vec<_> = env::args_os().skip(1).collect();
+        match recognize(&arguments, crate::browser::DEV_ENABLED) {
+            Recognition::Host(invocation) => return crate::browser::host::run(invocation),
+            Recognition::Refused => return crate::browser::host::refuse(&mut io::stdout()),
+            Recognition::NotHost => {}
+        }
+    }
     let args = Args::parse();
     setup_logging(args.verbose);
     match effective_command(args.command) {
@@ -263,6 +280,10 @@ pub fn run() -> i32 {
                 1
             }
         },
+        #[cfg(feature = "browser")]
+        Commands::DiscardBrowserPages => {
+            cmd_discard_browser_pages(ConfigPaths::default(), &mut io::stdout(), &mut io::stderr())
+        }
         Commands::UninstallService => match crate::service::ServicePaths::production() {
             Ok(paths) => crate::service::uninstall(&paths, &SystemRunner, &mut io::stdout()),
             Err(error) => {
@@ -874,6 +895,36 @@ fn escape_display_version(raw: &str) -> String {
     clean
 }
 
+#[cfg_attr(not(feature = "browser"), allow(dead_code))]
+fn cmd_discard_browser_pages(
+    paths: ConfigPaths,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> i32 {
+    let config = load_config(paths).config;
+    let layout = crate::browser::custody::Layout::new(&config.base_dir);
+    match crate::browser::custody::discard_retired(&layout) {
+        Ok(summary) if summary.periods == 0 => {
+            let _ = write_line(
+                output,
+                "there are no browser pages kept for another journal",
+            );
+            0
+        }
+        Ok(_) => {
+            let _ = write_line(
+                output,
+                "discarded the browser pages kept for a journal this computer was paired with before",
+            );
+            0
+        }
+        Err(error) => {
+            let _ = write_line(errors, format!("could not discard them: {error}"));
+            1
+        }
+    }
+}
+
 fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -> i32 {
     let loaded = load_config(paths);
     let config = loaded.config;
@@ -976,6 +1027,18 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
             output,
             derive_health(&facts, now, config.sync_stale_threshold as f64).cli,
         )?;
+        if crate::browser::ENABLED {
+            let now_ms = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(i64::MAX);
+            for line in crate::browser::status::status_lines(&config.base_dir, now_ms) {
+                write_line(output, line)?;
+            }
+        }
         if let Some(systemctl) = runner.which("systemctl")
             && let Ok(result) = runner.run(
                 &systemctl,
@@ -1147,22 +1210,23 @@ mod tests {
             .get_subcommands()
             .map(|subcommand| subcommand.get_name())
             .collect();
-        assert_eq!(
-            names,
-            vec![
-                "run",
-                "setup",
-                "confirm",
-                "doctor",
-                "settings",
-                "install-service",
-                "uninstall-service",
-                "status",
-                "panel-icon",
-                "pause",
-                "resume"
-            ]
-        );
+        let mut expected = vec![
+            "run",
+            "setup",
+            "confirm",
+            "doctor",
+            "settings",
+            "install-service",
+            "uninstall-service",
+            "status",
+            "panel-icon",
+            "pause",
+            "resume",
+        ];
+        if crate::browser::ENABLED {
+            expected.push("discard-browser-pages");
+        }
+        assert_eq!(names, expected);
     }
 
     // the panel-icon command's own help text is owner-visible.
@@ -1819,8 +1883,13 @@ mod tests {
             cmd_status(paths(&t), &StatusRunner(Some("active\n")), &mut out),
             0
         );
+        let browser = if crate::browser::ENABLED {
+            "Browser: the solstone app is not running\n"
+        } else {
+            ""
+        };
         let expected = format!(
-            "Config: {}\nJournal link: managed privately\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nSync: offline; held on this device; will retry\n\nService: active\n",
+            "Config: {}\nJournal link: managed privately\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nSync: offline; held on this device; will retry\n{browser}\nService: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );

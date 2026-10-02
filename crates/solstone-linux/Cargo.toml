@@ -27,7 +27,7 @@ rustix = { version = "1", features = ["event", "fs", "process", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "multipart", "stream"] }
 spl-core.workspace = true
 spl-transport.workspace = true
-tokio = { workspace = true, features = ["signal", "sync"] }
+tokio = { workspace = true, features = ["io-util", "net", "signal", "sync"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 ashpd = { version = "=0.13.12", features = ["screencast"] }
 futures-util = "0.3"
@@ -40,6 +40,15 @@ open = "5.4.0"
 notify-rust = { version = "=4.18.0", default-features = false, features = ["z-with-tokio"] }
 zbus = { version = "=5.17.0", features = ["tokio"] }
 sd-notify = "0.5.0"
+native-browser-frame = { version = "1.0.0", path = "../../vendor/crates/native-browser-frame" }
+
+[features]
+# The browser host stays off in owner builds until it is launched. `browser`
+# makes host mode reachable and writes the browser registrations;
+# `browser-dev-host` also admits the unpacked development extension, and no
+# release target sets it.
+browser = []
+browser-dev-host = ["browser"]
 
 [build-dependencies]
 resvg = { version = "0.47", default-features = false }

@@ -125,6 +125,27 @@ Shipping system packages:
 - Captures: `~/.local/share/solstone-linux/captures/`
 - State: `~/.local/share/solstone-linux/state/`
 - Restore token: `~/.config/solstone-linux/restore_token`
+- Browser custody: `~/.local/share/solstone-linux/browser/` (open periods, the
+  destination generation, and pages retired for a previous journal); finished
+  browser periods are capture segments under the `_browser` stream folder
+- Browser endpoint: `$XDG_RUNTIME_DIR/solstone-linux/browser-host.sock`
+
+## Browser host
+
+The solstone browser extension reaches the app over native messaging. The
+browser starts this same binary in host mode, recognised from argv at the top of
+`cli::run` before any other startup work; host mode relays whole frames to the
+running app's same-user unix socket and holds no journal credential. The app
+keeps accepted text in `src/browser/custody.rs` and the sync service delivers
+finished periods as the `browser` source. The wire contract and the frame crate
+are vendored unchanged under `vendor/` from `solstone-browser`; the pin is
+`vendor/contracts/native-browser/adoption.json`, and a test checks every vendored
+artifact against the bundle manifest.
+
+The path is compiled and tested in every build but reachable only with the
+`browser` feature: without it there is no host mode, no endpoint and no browser
+registration. `browser-dev-host` also admits the unpacked development extension;
+no release target sets it.
 
 ## Testing
 

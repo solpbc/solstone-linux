@@ -3,6 +3,8 @@ members = [
     "crates/rust-release-manifest",
     "crates/solstone-linux",
 ]
+# Vendored from solstone-browser with the browser contract; see vendor/contracts/native-browser/adoption.json.
+exclude = ["vendor/crates/native-browser-frame"]
 resolver = "3"
 
 [workspace.package]

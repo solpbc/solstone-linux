@@ -2040,17 +2040,20 @@ impl PrivateLinkCapability {
         .await
     }
 
-    pub(crate) async fn segments_day(&self, day: &str) -> LinkOutcome {
+    pub(crate) async fn segments_day(&self, day: &str, source: Option<&str>) -> LinkOutcome {
         if !Self::validate_day(day) {
             return LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             };
         }
-        let Ok(url) = self.ingest_v3_url(&format!("/segments/{day}")) else {
+        let Ok(mut url) = self.ingest_v3_url(&format!("/segments/{day}")) else {
             return LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
             };
         };
+        if let Some(source) = source {
+            url.query_pairs_mut().append_pair("source", source);
+        }
         self.send(
             self.inner
                 .client
@@ -4648,7 +4651,7 @@ pub(crate) mod tests {
             LinkOutcome::Success { .. }
         ));
         assert!(matches!(
-            capability.segments_day("20260101").await,
+            capability.segments_day("20260101", None).await,
             LinkOutcome::Success { .. }
         ));
         assert!(matches!(capability.system_status().await, Ok(Some(_))));
@@ -4691,7 +4694,7 @@ pub(crate) mod tests {
         let capability = session.capability();
         for day in ["", "2026010", "202601011", "202601?1", "../20260101"] {
             assert!(matches!(
-                capability.segments_day(day).await,
+                capability.segments_day(day, None).await,
                 LinkOutcome::LocalRejected {
                     status: StatusCode::BAD_REQUEST
                 }
@@ -4851,7 +4854,7 @@ pub(crate) mod tests {
         .await;
         assert!(response.starts_with(b"HTTP/1.1 400"));
         assert!(matches!(
-            session.capability().segments_day("20260101").await,
+            session.capability().segments_day("20260101", None).await,
             LinkOutcome::Success { .. }
         ));
         assert_eq!(peer.requests().len(), 1);
@@ -5089,7 +5092,7 @@ pub(crate) mod tests {
         assert!(sanitized.get("server_url").is_none());
         assert!(sanitized.get("key").is_none());
         assert!(matches!(
-            session.capability().segments_day("20260101").await,
+            session.capability().segments_day("20260101", None).await,
             LinkOutcome::Success { .. }
         ));
         assert_eq!(peer.accepted_carriers(), 1);
@@ -5573,7 +5576,7 @@ pub(crate) mod tests {
             .unwrap();
         let request = tokio::spawn({
             let capability = owner.capability();
-            async move { capability.segments_day("20260101").await }
+            async move { capability.segments_day("20260101", None).await }
         });
         peer.wait_for_requests(1).await;
         assert!(!request.is_finished());

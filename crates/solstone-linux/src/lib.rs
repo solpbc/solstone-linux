@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod audio;
+pub mod browser;
 pub mod capture_stats;
 pub mod chunking;
 pub mod cli;

@@ -232,6 +232,19 @@ impl UploadClient {
         files: &[PathBuf],
         meta: Option<&crate::recovery::CaptureZone>,
     ) -> UploadResult {
+        self.upload_source_segment(day, segment, files, meta, None)
+            .await
+    }
+
+    /// Upload a segment as one of the device's sources; `None` is the primary capture.
+    pub async fn upload_source_segment(
+        &self,
+        day: &str,
+        segment: &str,
+        files: &[PathBuf],
+        meta: Option<&crate::recovery::CaptureZone>,
+        source: Option<&str>,
+    ) -> UploadResult {
         if self.is_revoked() {
             return UploadResult::failure(Some(ErrorType::Auth), None, None);
         }
@@ -239,7 +252,10 @@ impl UploadClient {
         let mut last_status = None;
         let mut last_reason_code = None;
         for attempt in 0..self.inner.immediate_attempts {
-            let (form, framed_length) = match build_multipart_form(day, segment, files, meta).await
+            let (form, framed_length) = match build_multipart_form(
+                day, segment, files, meta, source,
+            )
+            .await
             {
                 Ok(form) => form,
                 Err(MultipartBuildError::NoFiles) => {
@@ -345,6 +361,10 @@ impl UploadClient {
     }
 
     pub async fn fetch_day_custody(&self, day: &str) -> DayCustody {
+        self.fetch_source_day_custody(day, None).await
+    }
+
+    pub async fn fetch_source_day_custody(&self, day: &str, source: Option<&str>) -> DayCustody {
         if self.is_revoked() {
             return custody_failure(ErrorType::Auth, None);
         }
@@ -353,7 +373,7 @@ impl UploadClient {
         };
 
         let (segments, status_code) = match self
-            .read_json(capability.segments_day(day).await, "segments")
+            .read_json(capability.segments_day(day, source).await, "segments")
             .await
         {
             Ok(value) => value,
@@ -520,6 +540,7 @@ async fn multipart_part(
     let content_type = match path.extension().and_then(|value| value.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("flac") => "audio/flac",
         Some(extension) if extension.eq_ignore_ascii_case("webm") => "video/webm",
+        Some(extension) if extension.eq_ignore_ascii_case("jsonl") => "application/jsonl",
         _ => "application/octet-stream",
     };
     let file_name = path
@@ -553,6 +574,8 @@ struct UploadEnvelope<'a> {
     files: Vec<SubmittedFile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<&'a crate::recovery::CaptureZone>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -594,6 +617,7 @@ async fn build_multipart_form(
     segment: &str,
     files: &[PathBuf],
     meta: Option<&crate::recovery::CaptureZone>,
+    source: Option<&str>,
 ) -> Result<(multipart::Form, u64), MultipartBuildError> {
     let form = multipart::Form::new();
     let boundary = form.boundary().to_owned();
@@ -623,6 +647,7 @@ async fn build_multipart_form(
         segment,
         files: submitted,
         meta,
+        source,
     })
     .expect("upload envelope is serializable");
     if envelope.len() as u64 > MAX_MULTIPART_PART_BYTES {
@@ -1041,7 +1066,7 @@ mod tests {
         file.set_len(MAX_MULTIPART_PART_BYTES).unwrap();
         drop(file);
         assert!(
-            build_multipart_form("20260101", "boundary", &[media], None)
+            build_multipart_form("20260101", "boundary", &[media], None, None)
                 .await
                 .is_ok()
         );
@@ -1057,7 +1082,7 @@ mod tests {
             file.set_len(MAX_MULTIPART_PART_BYTES - 4096).unwrap();
         }
         let (_, encoded_length) =
-            build_multipart_form("20260101", "boundary", &[first, second], None)
+            build_multipart_form("20260101", "boundary", &[first, second], None, None)
                 .await
                 .unwrap();
         assert!(encoded_length <= MAX_REQUEST_BODY_BYTES);
@@ -1080,7 +1105,8 @@ mod tests {
                 "20260101",
                 "boundary",
                 &[media.clone(), second.clone()],
-                None
+                None,
+                None,
             )
             .await,
             Err(MultipartBuildError::RequestTooLarge)

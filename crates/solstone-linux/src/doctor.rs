@@ -85,6 +85,10 @@ pub trait DoctorChecks {
     fn panel_icon(&mut self) -> CheckResult;
     fn sync_health(&mut self) -> CheckResult;
     fn quarantine(&mut self) -> Option<String>;
+    /// Browser registration and browser installs that cannot reach the app.
+    fn browser(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> i32 {
@@ -133,6 +137,9 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
         }
     }
     if let Some(line) = checks.quarantine() {
+        let _ = writeln!(output, "{line}");
+    }
+    for line in checks.browser() {
         let _ = writeln!(output, "{line}");
     }
     let _ = writeln!(
@@ -498,6 +505,29 @@ impl DoctorChecks for RealDoctor<'_> {
         let health = derive_health(&facts, now, config.sync_stale_threshold as f64);
         sync_health_result(health)
     }
+    fn browser(&mut self) -> Vec<String> {
+        if !crate::browser::ENABLED {
+            return Vec::new();
+        }
+        let (Some(home), Ok(executable)) = (std::env::var_os("HOME"), std::env::current_exe())
+        else {
+            return Vec::new();
+        };
+        let home = std::path::PathBuf::from(home);
+        let installs = crate::browser::status::detect_installs(
+            std::path::Path::new("/snap"),
+            &[
+                home.join(".local/share/flatpak/app"),
+                std::path::PathBuf::from("/var/lib/flatpak/app"),
+            ],
+        );
+        crate::browser::status::doctor_lines(
+            &home,
+            &crate::browser::registration::stable_binary(&executable),
+            &installs,
+        )
+    }
+
     fn quarantine(&mut self) -> Option<String> {
         let root = self.config().captures_dir();
         let now = SystemTime::now()
