@@ -816,6 +816,8 @@ pub struct PairedJournalVersion {
     pub version: String,
     pub name: Option<String>,
     pub observed_at: f64,
+    pub about: Option<crate::about::About>,
+    pub about_observed_at: Option<f64>,
 }
 
 pub fn load_paired_journal_version(state_dir: &Path) -> Option<PairedJournalVersion> {
@@ -829,12 +831,27 @@ pub fn load_paired_journal_version(state_dir: &Path) -> Option<PairedJournalVers
         .get("name")
         .and_then(|v| v.as_str())
         .map(ToOwned::to_owned);
-    let observed_at = data.get("observed_at")?.as_f64()?;
+    // Legacy version-only stores stay readable; an absent time never gains an age.
+    let observed_at = data
+        .get("observed_at")
+        .and_then(Value::as_f64)
+        .filter(|time| time.is_finite() && *time >= 0.0)
+        .unwrap_or(-1.0);
+    let about = data
+        .get("about")
+        .and_then(|value| crate::about::decode_about(&serde_json::to_vec(value).ok()?))
+        .filter(|facts| facts.version.trim_start_matches('v') == version.trim_start_matches('v'));
+    let about_observed_at = data
+        .get("about_observed_at")
+        .and_then(Value::as_f64)
+        .filter(|time| time.is_finite() && *time >= 0.0);
     Some(PairedJournalVersion {
         identity_key,
         version,
         name,
         observed_at,
+        about,
+        about_observed_at,
     })
 }
 
@@ -873,6 +890,19 @@ pub(crate) fn save_paired_journal_version_guarded(
         "version": version,
         "observed_at": observed_at,
     });
+    // A version acceptance refreshes only the version observation. Keep host
+    // facts only for the same identity and normalized version, at their old time.
+    if let Some(old) = load_paired_journal_version(state_dir).filter(|old| {
+        old.identity_key == identity_key
+            && old.version.trim_start_matches('v') == version.trim_start_matches('v')
+    }) {
+        if let Some(about) = old.about {
+            payload["about"] = serde_json::to_value(about).map_err(io::Error::other)?;
+        }
+        if let Some(time) = old.about_observed_at {
+            payload["about_observed_at"] = json!(time);
+        }
+    }
     if let Some(n) = name {
         payload
             .as_object_mut()
@@ -883,6 +913,41 @@ pub(crate) fn save_paired_journal_version_guarded(
     text.push('\n');
     crate::private_file::atomic_write_bytes_guarded(&path, text.as_bytes(), fault, is_current)
         .map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub(crate) fn save_paired_journal_about_guarded(
+    state_dir: &Path,
+    identity_key: &str,
+    about: &crate::about::About,
+    fault: &dyn crate::private_file::DurableWriteFault,
+    is_current: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    if !about.valid() {
+        return Err(io::Error::other("invalid About"));
+    }
+    let path = paired_journal_path(state_dir);
+    let mut value: Value = serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?;
+    let matches = value["identity_key"].as_str() == Some(identity_key)
+        && value["version"].as_str().is_some_and(|version| {
+            version.trim_start_matches('v') == about.version.trim_start_matches('v')
+        });
+    if !matches {
+        return Err(io::Error::other(
+            "About no longer matches the accepted version",
+        ));
+    }
+    // This is a facts-only update. Neither version timestamp nor version currentness changes.
+    value["about"] = serde_json::to_value(about).map_err(io::Error::other)?;
+    value["about_observed_at"] = json!(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+    );
+    let mut text = serde_json::to_vec(&value).map_err(io::Error::other)?;
+    text.push(b'\n');
+    crate::private_file::atomic_write_bytes_guarded(&path, &text, fault, is_current)
+        .map_err(|error| io::Error::other(error.to_string()))
 }
 
 #[cfg(test)]

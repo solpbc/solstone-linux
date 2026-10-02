@@ -494,6 +494,29 @@ fn start_browser(
             return None;
         }
     };
+    let about_config = config.clone();
+    let about_host = crate::about::host_facts();
+    let about = Arc::new(move |facts: &custody::Facts| {
+        let unknown = || crate::about::AboutBlock::unknown(about_host.clone()).native();
+        let current_generation = || {
+            let credential = load_credential(&about_config.config_dir).ok().flatten()?;
+            let identity =
+                custody::journal_identity(&credential.instance_id, &credential.ca_chain_pem);
+            custody::deliverable_generation(
+                &custody::Layout::new(&about_config.base_dir),
+                Some(&identity),
+            )
+        };
+        if facts.generation.is_none() || current_generation() != facts.generation {
+            return unknown();
+        }
+        let block =
+            crate::about::AboutBlock::snapshot(&about_config, &about_host, crate::about::now());
+        if current_generation() != facts.generation {
+            return unknown();
+        }
+        block.native()
+    });
     match server::start(server::ServerConfig {
         base_dir: config.base_dir.clone(),
         endpoint,
@@ -501,6 +524,7 @@ fn start_browser(
         dev_enabled: crate::browser::DEV_ENABLED,
         paused,
         on_period_finished: Arc::new(move || sync.trigger()),
+        about,
     }) {
         Ok(handle) => Some(handle),
         Err(error) => {
@@ -626,11 +650,18 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                 observer.config.clone(),
                 open_journal.clone(),
             )
-            .perform_desktop_command(command)
+            .perform_desktop_command(command.clone())
             {
                 tracing::warn!(%error, "Failed to perform desktop command");
-                if matches!(command, TrayCommand::OpenJournal) {
-                    let message = crate::desktop_component::OPEN_JOURNAL_REMEDIATION;
+                if matches!(
+                    command,
+                    TrayCommand::OpenJournal | TrayCommand::CopyAbout(_)
+                ) {
+                    let message = if matches!(command, TrayCommand::CopyAbout(_)) {
+                        error.as_str()
+                    } else {
+                        crate::desktop_component::OPEN_JOURNAL_REMEDIATION
+                    };
                     if let Err(notification_error) = notify_rust::Notification::new()
                         .summary("solstone app")
                         .body(message)
@@ -642,12 +673,19 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                         );
                     }
                 }
+            } else if matches!(command, TrayCommand::CopyAbout(_))
+                && let Err(error) = notify_rust::Notification::new()
+                    .summary("solstone app")
+                    .body("copied")
+                    .show()
+            {
+                tracing::debug!(%error, "Could not show clipboard confirmation");
             }
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ObserverAction {
     Pause(u64),
     Resume,
@@ -952,11 +990,17 @@ mod tests {
         for command in [
             TrayCommand::OpenJournal,
             TrayCommand::OpenUrl("https://example.test"),
-            TrayCommand::ReportProblem(crate::tray_model::TrayStatus::Recording),
+            TrayCommand::ReportProblem(
+                crate::tray_model::TrayStatus::Recording,
+                crate::about::AboutBlock::unknown(crate::about::HostFacts::default()),
+            ),
             TrayCommand::OpenConfig,
             TrayCommand::CopyInstructions,
         ] {
-            assert_eq!(route_command(command), ObserverAction::Desktop(command));
+            assert_eq!(
+                route_command(command.clone()),
+                ObserverAction::Desktop(command)
+            );
         }
     }
 

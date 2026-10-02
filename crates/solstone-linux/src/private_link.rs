@@ -1877,6 +1877,16 @@ impl PrivateLinkCapability {
             .await
     }
 
+    pub(crate) async fn about_get(&self, timeout: Duration) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.inner.optional_origin, "/api/system/about") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_optional(self.inner.optional_client.get(url), timeout)
+            .await
+    }
+
     // Authenticated current-device PUT is forwarded; optional failure if the journal/bridge rejects it.
     pub(crate) async fn clients_self_put(&self, body: Vec<u8>, timeout: Duration) -> LinkOutcome {
         let url = match confine_path(&self.inner.optional_origin, "/app/network/api/clients/self") {
@@ -2776,6 +2786,32 @@ impl OrderedCredentialWriter {
         self.facts
             .note_metadata_saved(association_epoch, dial_generation);
         Ok(())
+    }
+
+    pub(crate) fn publish_about(
+        &self,
+        attempt: &OptionalAttemptLease,
+        association_epoch: u64,
+        state_dir: &Path,
+        about: &crate::about::About,
+    ) -> Result<(), ()> {
+        let _owner = self.credential.lock().unwrap_or_else(|p| p.into_inner());
+        let current = || {
+            !self.shutdown_fenced.load(Ordering::Acquire)
+                && attempt.is_current()
+                && self.facts.metadata_owner_is_current(association_epoch)
+        };
+        if !current() {
+            return Err(());
+        }
+        crate::sync_health::save_paired_journal_about_guarded(
+            state_dir,
+            &self.identity_key,
+            about,
+            self.fault.as_ref(),
+            &current,
+        )
+        .map_err(|_| ())
     }
 
     #[cfg(test)]
@@ -6747,7 +6783,23 @@ pub(crate) mod tests {
                 prior
             );
             assert!(crate::sync_health::load_paired_journal_version(temp.path()).is_none());
-            assert_eq!(peer.requests().len(), 1);
+            // Metadata now makes one independent optional About GET. The expired
+            // staging guard must still prevent every follow-up PUT/write.
+            let requests = peer.requests();
+            assert!(
+                requests
+                    .iter()
+                    .filter(|request| request.path == "/api/system/about")
+                    .count()
+                    <= 1
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.path != "/api/system/about")
+                    .count(),
+                1
+            );
             peer.shutdown().await;
         }
     }

@@ -203,7 +203,7 @@ fn json_truthy(value: Option<&Value>, default: bool) -> bool {
     }
 }
 
-fn resolve_config_paths(paths: &ConfigPaths) -> Config {
+pub(crate) fn resolve_config_paths(paths: &ConfigPaths) -> Config {
     let mut config = Config::default();
     if let Some(base_dir) = &paths.base_dir {
         config.base_dir = base_dir.clone();

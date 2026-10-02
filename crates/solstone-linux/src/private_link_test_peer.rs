@@ -55,6 +55,7 @@ struct PeerResponse {
     body: Vec<u8>,
     gate: Option<Arc<Notify>>,
     nonblocking_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
+    body_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 enum QueuedResponse {
@@ -66,6 +67,8 @@ struct OutboundResponse {
     bytes: Vec<u8>,
     offset: usize,
     credit: usize,
+    body_offset: usize,
+    body_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -148,6 +151,27 @@ impl PrivateLinkPeer {
             .unwrap()
             .insert(path.to_owned(), plain_response(status, body));
     }
+    pub(crate) fn set_pending_route(
+        &self,
+        path: &str,
+        status: u16,
+        body: Vec<u8>,
+        gate: Arc<std::sync::atomic::AtomicBool>,
+        body_only: bool,
+    ) {
+        let mut response = plain_response(status, body);
+        if body_only {
+            response.body_gate = Some(gate);
+        } else {
+            response.nonblocking_gate = Some(gate);
+        }
+        self.state
+            .routes
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), response);
+    }
+
     pub(crate) fn enqueue_response(&self, status: u16, body: impl Into<Vec<u8>>) {
         self.state
             .responses
@@ -159,6 +183,7 @@ impl PrivateLinkPeer {
                 body: body.into(),
                 gate: None,
                 nonblocking_gate: None,
+                body_gate: None,
             }));
     }
 
@@ -187,6 +212,7 @@ impl PrivateLinkPeer {
                 body: body.into(),
                 gate: Some(gate),
                 nonblocking_gate: None,
+                body_gate: None,
             }));
     }
     pub(crate) fn gate_next_response_nonblocking(&self, gate: Arc<std::sync::atomic::AtomicBool>) {
@@ -429,6 +455,11 @@ async fn serve_carrier(mut tls: TlsStream<TcpStream>, state: &PeerState) -> io::
                         outbound.insert(stream, response);
                     }
                 }
+                for stream in outbound.keys().copied().collect::<Vec<_>>() {
+                    let response = outbound.get_mut(&stream).unwrap();
+                    flush_response(&mut tls, stream, response).await?;
+                    if response.offset == response.bytes.len() { outbound.remove(&stream); }
+                }
                 continue;
             }
             () = state.request_credit_changed.notified() => {
@@ -602,6 +633,10 @@ fn next_response(state: &PeerState, request: Option<&PeerRequest>) -> PeerRespon
     if let Some(response) = state.routes.lock().unwrap().get(&request.path).cloned() {
         return response;
     }
+    // Optional About has its own route and never consumes a metadata fixture.
+    if request.path == "/api/system/about" {
+        return plain_response(404, Vec::new());
+    }
     if let Some(day) = request.path.strip_prefix("/app/devices/ingest/segments/") {
         let mut guard = state.responses.lock().unwrap();
         if let Some(pos) = guard.iter().position(|q| match q {
@@ -694,6 +729,7 @@ fn plain_response(status: u16, body: Vec<u8>) -> PeerResponse {
         body,
         gate: None,
         nonblocking_gate: None,
+        body_gate: None,
     }
 }
 
@@ -715,12 +751,15 @@ fn encode_response(response: PeerResponse) -> OutboundResponse {
         head.push_str("\r\n");
     }
     head.push_str(&format!("content-length: {}\r\n\r\n", response.body.len()));
+    let body_offset = head.len();
     let mut bytes = head.into_bytes();
     bytes.extend(response.body);
     OutboundResponse {
         bytes,
         offset: 0,
         credit: INITIAL_WINDOW,
+        body_offset,
+        body_gate: response.body_gate,
     }
 }
 
@@ -730,7 +769,19 @@ async fn flush_response(
     response: &mut OutboundResponse,
 ) -> io::Result<()> {
     while response.offset < response.bytes.len() && response.credit > 0 {
-        let count = (response.bytes.len() - response.offset)
+        let end_limit = if response
+            .body_gate
+            .as_ref()
+            .is_some_and(|gate| !gate.load(Ordering::Acquire))
+        {
+            response.body_offset
+        } else {
+            response.bytes.len()
+        };
+        if response.offset >= end_limit {
+            break;
+        }
+        let count = (end_limit - response.offset)
             .min(RECOMMENDED_CHUNK)
             .min(response.credit);
         let end = response.offset + count;

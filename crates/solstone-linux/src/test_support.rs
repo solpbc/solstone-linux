@@ -367,6 +367,7 @@ impl LinkedMockServer {
             uri == "/app/network/api/clients/self"
                 || uri == "/app/network/api/relay/access"
                 || uri == "/api/system/status"
+                || uri == "/api/system/about"
         };
         self.peer
             .requests()
@@ -529,6 +530,7 @@ impl MockServer {
             uri == "/app/network/api/clients/self"
                 || uri == "/app/network/api/relay/access"
                 || uri == "/api/system/status"
+                || uri == "/api/system/about"
         };
         let linked = self
             .linked

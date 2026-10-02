@@ -247,7 +247,7 @@ where
         association_epoch: capability.facts().association_epoch(),
         lease: Arc::clone(&attempt.lease),
     };
-    tokio::time::timeout_at(deadline, async {
+    let metadata = tokio::time::timeout_at(deadline, async {
         let remaining = || {
             if !attempt.lease.is_current() {
                 return Err(());
@@ -319,14 +319,47 @@ where
             }
         }
         Err(())
-    })
-    .await
-    .unwrap_or(Err(()))
+    });
+    // Both reads share this existing attempt/deadline. The metadata GET and PUT
+    // publish immediately; optional About headers/body cannot hold either up.
+    let optional = tokio::time::timeout_at(deadline, capability.about_get(timeout));
+    let (metadata, optional) = tokio::join!(metadata, optional);
+    if let Ok(LinkOutcome::Success {
+        status: StatusCode::OK,
+        body,
+    }) = optional
+        && let Some(about) = crate::about::decode_about(&body)
+    {
+        let state_dir = state_dir.to_path_buf();
+        let lease = Arc::clone(&attempt.lease);
+        let epoch = publication.association_epoch;
+        let _ = capability
+            .blocking_optional(move |writer, _| {
+                writer.publish_about(&lease, epoch, &state_dir, &about)
+            })
+            .await;
+    }
+    metadata.unwrap_or(Err(()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn metadata_requests(
+        peer: &crate::private_link_test_peer::PrivateLinkPeer,
+    ) -> Vec<crate::private_link_test_peer::PeerRequest> {
+        let requests = peer.requests();
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.path == "/api/system/about")
+                .all(|request| request.method == "GET")
+        );
+        requests
+            .into_iter()
+            .filter(|request| request.path != "/api/system/about")
+            .collect()
+    }
 
     #[test]
     fn full_reported_object_accepts_all_required_nullable_strings() {
@@ -568,7 +601,7 @@ mod tests {
         assert_eq!(loaded.version, "v1.2.4");
         assert_eq!(loaded.name.as_deref(), Some("My Journal"));
 
-        let requests = peer.requests();
+        let requests = metadata_requests(&peer);
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].path, "/app/network/api/clients/self");
 
@@ -711,7 +744,7 @@ mod tests {
         .await;
         assert!(res.is_ok());
 
-        let requests = peer.requests();
+        let requests = metadata_requests(&peer);
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[0].method, "GET");
         assert_eq!(requests[1].method, "PUT");
@@ -862,7 +895,7 @@ mod tests {
         assert!(res.is_ok());
 
         // GET and PUT forwarded to peer
-        let requests = peer.requests();
+        let requests = metadata_requests(&peer);
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].method, "GET");
         assert_eq!(requests[0].path, "/app/network/api/clients/self");
@@ -909,7 +942,7 @@ mod tests {
         assert!(res.is_err());
 
         // Only one request was made (GET /app/network/api/clients/self), no fallback to system status
-        let requests = peer.requests();
+        let requests = metadata_requests(&peer);
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].path, "/app/network/api/clients/self");
 
@@ -983,7 +1016,7 @@ mod tests {
         .await;
         assert!(res.is_ok());
 
-        let requests = peer.requests();
+        let requests = metadata_requests(&peer);
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].method, "GET");
         assert_eq!(requests[1].method, "PUT");
@@ -1023,7 +1056,7 @@ mod tests {
             .await
         });
         tokio::time::timeout(Duration::from_secs(2), async {
-            while peer.requests().is_empty() {
+            while metadata_requests(&peer).is_empty() {
                 tokio::task::yield_now().await;
             }
         })
@@ -1032,7 +1065,7 @@ mod tests {
         cap.writer().invalidate_optional_attempts();
         gate.notify_one();
         assert!(old.await.unwrap().is_err());
-        assert_eq!(peer.requests().len(), 1);
+        assert_eq!(metadata_requests(&peer).len(), 1);
         assert!(crate::sync_health::load_paired_journal_version(temp.path()).is_none());
         crate::sync_health::save_paired_journal_version(
             temp.path(),
@@ -1093,9 +1126,255 @@ mod tests {
                 saved.name.as_deref(),
                 if malformed { Some("from GET") } else { None }
             );
-            assert_eq!(peer.requests().len(), 2);
+            assert_eq!(metadata_requests(&peer).len(), 2);
             session.shutdown().await.unwrap();
             peer.shutdown().await;
         }
+    }
+    fn about_resource(version: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"protocol_version":1,"version":version,"os":"ubuntu","os_version":"24.04","arch":"x86_64","about":crate::about::render_line("journal", version, None, "ubuntu", "24.04", "x86_64")})).unwrap()
+    }
+
+    fn metadata_resource(version: &str, reported: Option<ClientSelfReported>) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"protocol_version":1,"revision":1,"reported":reported,
+            "owner_label":null,"updated_at":null,"display_label":"PRIVATE_device","journal":{"name":"PRIVATE_journal","version":version}})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn about_pending_headers_and_body_do_not_hold_metadata_get_or_put() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for body_only in [false, true] {
+            let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+            let temp = tempfile::tempdir().unwrap();
+            let session = crate::private_link::start_private_link_session(
+                temp.path(),
+                peer.credential(),
+                "stream",
+            )
+            .await
+            .unwrap();
+            let cap = session.capability();
+            cap.facts()
+                .publish(crate::private_link::LinkFact::CarrierProven);
+            let gate = Arc::new(AtomicBool::new(false));
+            peer.set_pending_route(
+                "/api/system/about",
+                200,
+                about_resource("2.0.29"),
+                Arc::clone(&gate),
+                body_only,
+            );
+            peer.enqueue_response(200, metadata_resource("2.0.29", None));
+            peer.enqueue_response(
+                200,
+                metadata_resource(
+                    "2.0.29",
+                    Some(ClientSelfReported::from(&DeviceSnapshot::default())),
+                ),
+            );
+            let read_cap = cap.clone();
+            let path = temp.path().to_path_buf();
+            let task = tokio::spawn(async move {
+                execute_metadata_sync(
+                    &read_cap,
+                    &path,
+                    "ignored",
+                    DeviceSnapshot::default,
+                    Duration::from_secs(4),
+                )
+                .await
+            });
+            peer.wait_for_requests(3).await;
+            let stored = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if cap.facts().snapshot().journal_version_observed {
+                        break crate::sync_health::load_paired_journal_version(temp.path())
+                            .unwrap();
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(stored.version, "2.0.29");
+            assert!(stored.about.is_none());
+            assert_eq!(
+                peer.requests()
+                    .iter()
+                    .filter(|request| request.path == "/api/system/about")
+                    .count(),
+                1
+            );
+            assert!(peer.requests().iter().any(|request| request.method == "PUT"
+                && request.path == "/app/network/api/clients/self"));
+            assert!(
+                !task.is_finished(),
+                "About is still pending while required metadata has published"
+            );
+            assert!(!gate.load(Ordering::Acquire));
+            gate.store(true, Ordering::Release);
+            peer.notify_response_gates();
+            assert!(task.await.unwrap().is_ok());
+            let final_store = crate::sync_health::load_paired_journal_version(temp.path()).unwrap();
+            assert!(final_store.about.is_some());
+            assert!(final_store.observed_at >= stored.observed_at);
+            session.shutdown().await.unwrap();
+            peer.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn about_failure_and_version_mismatch_leave_current_version_only() {
+        for (status, body) in [
+            (404, vec![]),
+            (503, vec![]),
+            (200, b"bad JSON".to_vec()),
+            (200, about_resource("9.9")),
+        ] {
+            let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+            let temp = tempfile::tempdir().unwrap();
+            let session = crate::private_link::start_private_link_session(
+                temp.path(),
+                peer.credential(),
+                "stream",
+            )
+            .await
+            .unwrap();
+            let cap = session.capability();
+            cap.facts()
+                .publish(crate::private_link::LinkFact::CarrierProven);
+            peer.set_route("/api/system/about", status, body);
+            peer.enqueue_response(
+                200,
+                metadata_resource(
+                    "2.0.29",
+                    Some(ClientSelfReported::from(&DeviceSnapshot::default())),
+                ),
+            );
+            assert!(
+                execute_metadata_sync(
+                    &cap,
+                    temp.path(),
+                    "ignored",
+                    DeviceSnapshot::default,
+                    Duration::from_secs(2)
+                )
+                .await
+                .is_ok()
+            );
+            let saved = crate::sync_health::load_paired_journal_version(temp.path()).unwrap();
+            assert_eq!(saved.version, "2.0.29");
+            assert!(saved.about.is_none());
+            assert!(cap.facts().snapshot().journal_version_observed);
+            session.shutdown().await.unwrap();
+            peer.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn about_success_cannot_promote_version_after_failed_metadata() {
+        let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let session = crate::private_link::start_private_link_session(
+            temp.path(),
+            peer.credential(),
+            "stream",
+        )
+        .await
+        .unwrap();
+        let cap = session.capability();
+        cap.facts()
+            .publish(crate::private_link::LinkFact::CarrierProven);
+        crate::sync_health::save_paired_journal_version(
+            temp.path(),
+            cap.writer().identity_key(),
+            "2.0.29",
+            None,
+        )
+        .unwrap();
+        let original = crate::sync_health::load_paired_journal_version(temp.path()).unwrap();
+        peer.set_route("/api/system/about", 200, about_resource("2.0.29"));
+        peer.enqueue_response(503, vec![]);
+        assert!(
+            execute_metadata_sync(
+                &cap,
+                temp.path(),
+                "ignored",
+                DeviceSnapshot::default,
+                Duration::from_secs(2)
+            )
+            .await
+            .is_err()
+        );
+        let saved = crate::sync_health::load_paired_journal_version(temp.path()).unwrap();
+        assert!(saved.about.is_some());
+        assert_eq!(saved.observed_at, original.observed_at);
+        assert!(!cap.facts().snapshot().journal_version_observed);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn invalidated_about_completion_cannot_replace_observations() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let session = crate::private_link::start_private_link_session(
+            temp.path(),
+            peer.credential(),
+            "stream",
+        )
+        .await
+        .unwrap();
+        let cap = session.capability();
+        cap.facts()
+            .publish(crate::private_link::LinkFact::CarrierProven);
+        peer.enqueue_response(
+            200,
+            metadata_resource(
+                "2.0.29",
+                Some(ClientSelfReported::from(&DeviceSnapshot::default())),
+            ),
+        );
+        let gate = Arc::new(AtomicBool::new(false));
+        peer.set_pending_route(
+            "/api/system/about",
+            200,
+            about_resource("2.0.29"),
+            Arc::clone(&gate),
+            true,
+        );
+        let read_cap = cap.clone();
+        let path = temp.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            execute_metadata_sync(
+                &read_cap,
+                &path,
+                "ignored",
+                DeviceSnapshot::default,
+                Duration::from_secs(3),
+            )
+            .await
+        });
+        peer.wait_for_requests(2).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while crate::sync_health::load_paired_journal_version(temp.path()).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cap.writer().invalidate_optional_attempts();
+        gate.store(true, Ordering::Release);
+        peer.notify_response_gates();
+        let _ = task.await.unwrap();
+        assert!(
+            crate::sync_health::load_paired_journal_version(temp.path())
+                .unwrap()
+                .about
+                .is_none()
+        );
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+pub mod about;
 pub mod activity;
 pub mod audio;
 pub mod browser;
@@ -61,3 +62,6 @@ mod test_support;
 mod toolchain_policy_tests;
 #[cfg(test)]
 mod unsafe_policy_tests;
+
+#[cfg(test)]
+mod about_tests;

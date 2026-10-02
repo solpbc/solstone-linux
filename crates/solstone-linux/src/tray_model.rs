@@ -18,6 +18,7 @@ pub enum TrayStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayModel {
     pub status: TrayStatus,
+    pub about: crate::about::AboutBlock,
     pub header: String,
     pub sync: String,
     pub tooltip: String,
@@ -137,6 +138,7 @@ pub fn build_with_open_journal(
     let up = uptime(snapshot, now);
     TrayModel {
         status,
+        about: crate::about::AboutBlock::unknown(crate::about::HostFacts::default()),
         header: header_label(status, health, pause),
         sync: health.sync_line.clone(),
         tooltip: tooltip(status, health),

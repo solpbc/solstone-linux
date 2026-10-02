@@ -10,14 +10,15 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/tray_icons.rs"));
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
     Pause(u64),
     PauseIndefinite,
     Resume,
     OpenJournal,
     OpenUrl(&'static str),
-    ReportProblem(crate::tray_model::TrayStatus),
+    ReportProblem(crate::tray_model::TrayStatus, crate::about::AboutBlock),
+    CopyAbout(crate::about::AboutBlock),
     OpenConfig,
     CopyInstructions,
 }
@@ -38,7 +39,7 @@ fn action(label: &str, command: TrayCommand) -> StandardItem<KsniTray> {
     StandardItem {
         label: label.into(),
         activate: Box::new(move |tray| {
-            let _ = tray.commands.send(command);
+            let _ = tray.commands.send(command.clone());
         }),
         ..Default::default()
     }
@@ -142,9 +143,19 @@ impl Tray for KsniTray {
                 label: "about".into(),
                 submenu: vec![
                     item(
-                        format!("solstone app v{}", env!("CARGO_PKG_VERSION")),
+                        self.model.about.text.lines().next().unwrap_or_default(),
                         false,
                     ),
+                    item(
+                        self.model
+                            .about
+                            .text
+                            .lines()
+                            .nth(1)
+                            .unwrap_or("journal unknown"),
+                        false,
+                    ),
+                    action("copy", TrayCommand::CopyAbout(self.model.about.clone())).into(),
                     action(
                         "solstone.app",
                         TrayCommand::OpenUrl("https://solstone.app/observers"),
@@ -163,7 +174,7 @@ impl Tray for KsniTray {
                     action("get help", TrayCommand::OpenUrl(crate::support::HELP_URL)).into(),
                     action(
                         "report a problem",
-                        TrayCommand::ReportProblem(self.model.status),
+                        TrayCommand::ReportProblem(self.model.status, self.model.about.clone()),
                     )
                     .into(),
                     action(
@@ -318,12 +329,63 @@ mod tests {
             TrayCommand::OpenUrl("https://github.com/solpbc/solstone-linux"),
             TrayCommand::OpenUrl("https://solpbc.org/privacy"),
             TrayCommand::OpenUrl(crate::support::HELP_URL),
-            TrayCommand::ReportProblem(tray.model.status),
+            TrayCommand::ReportProblem(tray.model.status, tray.model.about.clone()),
         ];
-        for (item, expected) in about.submenu[1..6].iter().zip(expected) {
+        for (item, expected) in about.submenu[3..8].iter().zip(expected) {
             if let MenuItem::Standard(value) = item {
                 (value.activate)(&mut tray);
             }
+            assert_eq!(receiver.try_recv(), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn about_actions_keep_the_displayed_snapshot_after_model_refresh() {
+        let mut tray = tray();
+        let saved = crate::sync_health::PairedJournalVersion {
+            identity_key: "PRIVATE_identity".into(),
+            version: "2.0.29".into(),
+            name: Some("PRIVATE_device".into()),
+            observed_at: 0.0,
+            about: None,
+            about_observed_at: None,
+        };
+        let displayed = crate::about::AboutBlock::from_version(
+            crate::about::HostFacts::default(),
+            Some(&saved),
+            false,
+            172800,
+        );
+        tray.model.about = displayed.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        tray.commands = sender;
+        let menu = tray.menu();
+        let MenuItem::SubMenu(about) = &menu[8] else {
+            panic!("about submenu missing");
+        };
+        let lines: Vec<_> = about.submenu[..2]
+            .iter()
+            .map(|item| match item {
+                MenuItem::Standard(value) => value.label.as_str(),
+                _ => panic!("about fact row missing"),
+            })
+            .collect();
+        assert_eq!(lines.join("\n"), displayed.text);
+        tray.model.about = crate::about::AboutBlock::from_version(
+            crate::about::HostFacts::default(),
+            Some(&saved),
+            false,
+            259200,
+        );
+        assert_ne!(tray.model.about.text, displayed.text);
+        for (index, expected) in [
+            (2, TrayCommand::CopyAbout(displayed.clone())),
+            (7, TrayCommand::ReportProblem(tray.model.status, displayed)),
+        ] {
+            let MenuItem::Standard(action) = &about.submenu[index] else {
+                panic!("about action missing");
+            };
+            (action.activate)(&mut tray);
             assert_eq!(receiver.try_recv(), Ok(expected));
         }
     }

@@ -136,12 +136,22 @@ impl DesktopComponent {
             crate::tray::TrayCommand::OpenUrl(url) => {
                 open::that_detached(url).map_err(|e| e.to_string())
             }
-            crate::tray::TrayCommand::ReportProblem(status) => open::that_detached(
-                crate::support::report_url(crate::tray_model::status_name(status)),
+            crate::tray::TrayCommand::ReportProblem(status, about) => open::that_detached(
+                crate::support::report_url(crate::tray_model::status_name(status), &about),
             )
             .map_err(|e| e.to_string()),
             crate::tray::TrayCommand::OpenConfig => {
                 open::that_detached(self.config.config_path()).map_err(|e| e.to_string())
+            }
+            crate::tray::TrayCommand::CopyAbout(about) => {
+                let session = std::env::var_os("XDG_SESSION_TYPE");
+                let display = std::env::var_os("WAYLAND_DISPLAY");
+                let wayland = crate::clipboard::is_wayland(session.as_deref(), display.as_deref());
+                if crate::clipboard::copy(&about.text, wayland).unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err("couldn't copy. run `solstone-linux about` to select and copy your versions.".into())
+                }
             }
             crate::tray::TrayCommand::CopyInstructions => {
                 let text = crate::clipboard::agent_instructions(

@@ -74,6 +74,7 @@ enum Commands {
     UninstallService,
     #[command(about = "show status")]
     Status,
+    About,
     #[command(
         name = "panel-icon",
         about = "set up the GNOME panel icon, where pause and resume live"
@@ -261,6 +262,19 @@ pub fn run() -> i32 {
             &mut io::stderr(),
         ),
         Commands::Settings => cmd_settings(ConfigPaths::default(), &mut ConsolePrompt),
+        Commands::About => {
+            let config = crate::config::resolve_config_paths(&ConfigPaths::default());
+            let block = crate::about::AboutBlock::snapshot(
+                &config,
+                &crate::about::host_facts(),
+                crate::about::now(),
+            );
+            if writeln!(io::stdout(), "{}", block.text).is_ok() {
+                0
+            } else {
+                1
+            }
+        }
         Commands::Status => cmd_status(ConfigPaths::default(), &SystemRunner, &mut io::stdout()),
         Commands::PanelIcon => cmd_panel_icon(&mut io::stdout(), &mut io::stderr()),
         Commands::Pause { minutes } => cmd_control(
@@ -1222,6 +1236,7 @@ mod tests {
             "install-service",
             "uninstall-service",
             "status",
+            "about",
             "panel-icon",
             "pause",
             "resume",

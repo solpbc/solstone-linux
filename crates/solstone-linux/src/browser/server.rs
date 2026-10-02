@@ -67,9 +67,14 @@ struct Shared {
     dev_enabled: bool,
     uid: u32,
     on_period_finished: Arc<dyn Fn() + Send + Sync>,
+    about: Arc<dyn Fn(&Facts) -> crate::about::NativeAbout + Send + Sync>,
 }
 
 impl Shared {
+    fn state_message(&self, kind: &str, facts: &Facts) -> Value {
+        state_message_with_about(kind, facts, &(self.about)(facts))
+    }
+
     fn paused(&self) -> bool {
         self.paused.borrow().paused
     }
@@ -146,6 +151,7 @@ pub struct ServerConfig {
     pub dev_enabled: bool,
     pub paused: watch::Receiver<StateSnapshot>,
     pub on_period_finished: Arc<dyn Fn() + Send + Sync>,
+    pub about: Arc<dyn Fn(&Facts) -> crate::about::NativeAbout + Send + Sync>,
 }
 
 /// Open custody and publish the endpoint. Must be called inside a tokio runtime.
@@ -168,6 +174,7 @@ pub fn start(config: ServerConfig) -> io::Result<ServerHandle> {
         dev_enabled: config.dev_enabled,
         uid,
         on_period_finished: config.on_period_finished,
+        about: config.about,
     });
     shared.write_status();
     let tasks = vec![
@@ -355,6 +362,16 @@ pub fn state_message(kind: &str, facts: &Facts) -> Value {
     message
 }
 
+pub fn state_message_with_about(
+    kind: &str,
+    facts: &Facts,
+    about: &crate::about::NativeAbout,
+) -> Value {
+    let mut message = state_message(kind, facts);
+    message["about"] = serde_json::to_value(about).expect("public About strings serialize");
+    message
+}
+
 struct Hello {
     brand: String,
     inst: String,
@@ -460,8 +477,10 @@ async fn run_session(
 ) -> io::Result<()> {
     let facts = shared.facts();
     let generation = facts.generation.clone();
-    session.send(&state_message("hello_ack", &facts)).await?;
-    session.send(&state_message("state", &facts)).await?;
+    session
+        .send(&shared.state_message("hello_ack", &facts))
+        .await?;
+    session.send(&shared.state_message("state", &facts)).await?;
     let mut renewal = tokio::time::interval(Duration::from_millis(STATE_RENEWAL_MS_INTERVAL));
     renewal.tick().await;
     loop {
@@ -501,14 +520,14 @@ async fn run_session(
                     (shared.on_period_finished)();
                 }
                 session.send(&reply(&batch, outcome)?).await?;
-                session.send(&state_message("state", &shared.facts())).await?;
+                session.send(&shared.state_message("state", &shared.facts())).await?;
             }
             _ = renewal.tick() => {
-                session.send(&state_message("state", &shared.facts())).await?;
+                session.send(&shared.state_message("state", &shared.facts())).await?;
             }
             event = events.recv() => match event {
                 Ok(Event::Publish) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                    session.send(&state_message("state", &shared.facts())).await?;
+                    session.send(&shared.state_message("state", &shared.facts())).await?;
                 }
                 Ok(Event::Boundary { generation: changed, period_id }) => {
                     if generation.as_deref() == Some(changed.as_str()) {
@@ -516,7 +535,7 @@ async fn run_session(
                             .send(&json!({"type": "boundary", "destination_generation": changed, "period_id": period_id}))
                             .await?;
                     }
-                    session.send(&state_message("state", &shared.facts())).await?;
+                    session.send(&shared.state_message("state", &shared.facts())).await?;
                 }
                 Ok(Event::Bye(reason)) => {
                     let _ = session.send(&json!({"type": "bye", "reason": reason})).await;
@@ -586,6 +605,9 @@ mod tests {
             dev_enabled,
             paused,
             on_period_finished: Arc::new(|| {}),
+            about: Arc::new(|_| {
+                crate::about::AboutBlock::unknown(crate::about::HostFacts::default()).native()
+            }),
         })
         .unwrap();
         Rig {

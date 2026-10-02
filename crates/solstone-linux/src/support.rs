@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use std::fs;
-
 pub const HELP_URL: &str = "https://support.solstone.app";
 
-pub fn report_url(state: &str) -> String {
-    let (os, os_version) = linux_version();
+pub fn report_url(state: &str, about: &crate::about::AboutBlock) -> String {
+    let os = &about.host.os;
+    let os_version = &about.host.os_version;
     let mut fields = vec![
         ("report", "v1".to_owned()),
         ("app", "solstone for linux".to_owned()),
@@ -15,38 +14,22 @@ pub fn report_url(state: &str) -> String {
     if !version.is_empty() {
         fields.push(("version", limited(version, 120)));
     }
-    let build = option_env!("SOLSTONE_SOURCE_COMMIT").unwrap_or("development");
-    if !build.is_empty() {
-        fields.push(("build", limited(build, 120)));
-    }
     if !os.is_empty() {
-        fields.push(("os", limited(&os, 120)));
+        fields.push(("os", limited(os, 120)));
     }
-    if let Some(os_version) = os_version {
-        fields.push(("os_version", limited(&os_version, 120)));
+    if !os_version.is_empty() {
+        fields.push(("os_version", limited(os_version, 120)));
     }
     if !state.is_empty() {
         fields.push(("state", limited(state, 500)));
     }
+    fields.push(("about", about.text.clone()));
     let fragment = fields
         .into_iter()
         .map(|(key, value)| format!("{}={}", form_encode(key), form_encode(&value)))
         .collect::<Vec<_>>()
         .join("&");
     format!("{HELP_URL}/#{fragment}")
-}
-
-fn linux_version() -> (String, Option<String>) {
-    let text = fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let value = |key: &str| {
-        text.lines()
-            .find_map(|line| line.strip_prefix(&format!("{key}=")))
-            .map(|raw| raw.trim_matches('"').to_owned())
-    };
-    (
-        value("NAME").unwrap_or_else(|| "linux".to_owned()),
-        value("VERSION_ID").filter(|value| !value.is_empty()),
-    )
 }
 
 fn limited(value: &str, limit: usize) -> String {
@@ -71,15 +54,23 @@ fn form_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture() -> crate::about::AboutBlock {
+        crate::about::AboutBlock::unknown(crate::about::HostFacts {
+            os: "ubuntu".into(),
+            os_version: "24.04".into(),
+            arch: "x86_64".into(),
+        })
+    }
 
     #[test]
     fn report_uses_the_fixed_fragment_contract() {
-        let url = report_url("recording");
+        let url = report_url("recording", &fixture());
         assert!(url.starts_with("https://support.solstone.app/#report=v1&app=solstone+for+linux"));
         assert!(url.contains("&state=recording"));
         assert!(!url.contains('?'));
         assert!(!url.contains("hostname"));
-        assert!(!url.contains("journal"));
+        assert!(!url.contains("PRIVATE"));
+        assert!(!url.contains("&build="));
     }
 
     #[test]
@@ -90,8 +81,8 @@ mod tests {
     #[test]
     fn state_is_bounded_and_empty_state_is_omitted() {
         let long = "é".repeat(501);
-        let url = report_url(&long);
+        let url = report_url(&long, &fixture());
         assert_eq!(url.matches("%C3%A9").count(), 500);
-        assert!(!report_url("").contains("&state="));
+        assert!(!report_url("", &fixture()).contains("&state="));
     }
 }

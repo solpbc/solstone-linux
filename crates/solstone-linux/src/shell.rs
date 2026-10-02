@@ -271,13 +271,17 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         shutdown_rx.clone(),
     ));
 
-    let initial_model = tray_model::build_with_open_journal(
+    let about_host = crate::about::host_facts();
+    let about_config = inputs.config.clone();
+    let mut initial_model = tray_model::build_with_open_journal(
         &initial_snapshot,
         inputs.config.segment_interval,
         inputs.clock.monotonic_seconds(),
         &initial_health,
         inputs.open_journal.available(),
     );
+    initial_model.about =
+        crate::about::AboutBlock::snapshot(&about_config, &about_host, crate::about::now());
     let tray = KsniTray {
         model: initial_model.clone(),
         commands: inputs.commands.tray_sender(),
@@ -292,7 +296,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
                 models,
                 inputs.config.segment_interval,
                 inputs.clock,
-                tray_health,
+                (tray_health, about_host),
                 inputs.open_journal,
             ));
             let apply_task = tokio::spawn(run_tray_applier(
@@ -338,9 +342,11 @@ async fn run_tray_renderer(
     models: watch::Sender<TrayModel>,
     segment_interval: i64,
     clock: SystemClock,
-    health: TrayHealth,
+    health_and_host: (TrayHealth, crate::about::HostFacts),
     open_journal: crate::private_link::OpenJournalAccess,
 ) {
+    let (health, about_host) = health_and_host;
+    let about_config = component.config.clone();
     component
         .watch_until_lost(receiver, move |snapshot| {
             let health = health
@@ -348,13 +354,16 @@ async fn run_tray_renderer(
                 .lock()
                 .map(|value| value.clone())
                 .unwrap_or_else(|error| error.into_inner().clone());
-            models.send_replace(tray_model::build_with_open_journal(
+            let mut model = tray_model::build_with_open_journal(
                 snapshot,
                 segment_interval,
                 clock.monotonic_seconds(),
                 &health,
                 open_journal.available(),
-            ));
+            );
+            model.about =
+                crate::about::AboutBlock::snapshot(&about_config, &about_host, crate::about::now());
+            models.send_replace(model);
             Ok(())
         })
         .await;
