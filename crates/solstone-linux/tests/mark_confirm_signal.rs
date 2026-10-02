@@ -152,7 +152,7 @@ mod pair_listener {
         }
 
         pub(crate) async fn wait_for_requests(&self, count: usize) {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::time::timeout(super::HARNESS_TIMEOUT, async {
                 loop {
                     let notified = self.state.request_arrived.notified();
                     if self.requests().len() >= count {
@@ -387,12 +387,17 @@ mod pair_listener {
 
 use pair_listener::PairListener;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Stdio};
+use std::io::{self, Read, Write};
+use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tempfile::tempdir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt, unix::AsyncFd};
+use tokio::process::{Child, Command};
+
+// Concurrent CLI startup took over eight seconds on a CPU-loaded host. Keep
+// every harness wait finite while allowing that measured, correct progress.
+const HARNESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn generate_test_credential() -> spl_transport::credential::Credential {
     use rcgen::{
@@ -434,16 +439,99 @@ fn generate_test_credential() -> spl_transport::credential::Credential {
     }
 }
 
-fn create_fifo(path: &std::path::Path) {
-    let status = Command::new("mkfifo")
-        .arg(path)
-        .status()
-        .expect("mkfifo must succeed");
-    assert!(status.success());
+// A FIFO is one shared byte queue: both sides can read their own writes.
+// Use a PTY's separate input/output directions and reactor-driven reads instead
+// of tokio::fs, whose blocking reads survive timeout cancellation and can hold
+// runtime teardown open forever.
+struct MarkTerminal {
+    master: AsyncFd<fs::File>,
+    // Keep the slave alive before the CLI opens it, so the master has no EIO.
+    _slave: fs::File,
+    path: std::path::PathBuf,
+    pending: Vec<u8>,
 }
 
-#[test]
-fn confirm_prompt_traps_sigint_and_exits_5_with_held_guidance() {
+impl MarkTerminal {
+    fn new() -> Self {
+        use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+        let master =
+            openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
+        grantpt(&master).unwrap();
+        unlockpt(&master).unwrap();
+        let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            ptsname(&master, Vec::new()).unwrap().as_bytes(),
+        ));
+        let slave = fs::File::from(
+            rustix::fs::open(
+                &path,
+                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOCTTY,
+                rustix::fs::Mode::empty(),
+            )
+            .unwrap(),
+        );
+        let mut settings = rustix::termios::tcgetattr(&slave).unwrap();
+        settings
+            .local_modes
+            .remove(rustix::termios::LocalModes::ECHO);
+        rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &settings)
+            .unwrap();
+        rustix::fs::fcntl_setfl(&master, rustix::fs::OFlags::NONBLOCK).unwrap();
+        Self {
+            master: AsyncFd::new(fs::File::from(master)).unwrap(),
+            _slave: slave,
+            path,
+            pending: Vec::new(),
+        }
+    }
+
+    async fn wait_for_prompt(&mut self) -> io::Result<()> {
+        tokio::time::timeout(HARNESS_TIMEOUT, async {
+            let prompt = b"does this match your journal? type yes or no:";
+            loop {
+                if let Some(end) = self.pending.windows(prompt.len()).position(|s| s == prompt) {
+                    self.pending.drain(..end + prompt.len());
+                    return Ok(());
+                }
+                let mut ready = self.master.readable().await?;
+                let mut bytes = [0; 4096];
+                match ready.try_io(|fd| fd.get_ref().read(&mut bytes)) {
+                    Ok(Ok(0)) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+                    Ok(Ok(n)) => self.pending.extend_from_slice(&bytes[..n]),
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => continue,
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "mark prompt timed out"))?
+    }
+
+    async fn answer(&self, mut bytes: &[u8]) {
+        tokio::time::timeout(HARNESS_TIMEOUT, async {
+            while !bytes.is_empty() {
+                let mut ready = self.master.writable().await.unwrap();
+                match ready.try_io(|fd| fd.get_ref().write(bytes)) {
+                    Ok(Ok(0)) => panic!("terminal write returned zero"),
+                    Ok(Ok(n)) => bytes = &bytes[n..],
+                    Ok(Err(error)) => panic!("terminal write failed: {error}"),
+                    Err(_) => continue,
+                }
+            }
+        })
+        .await
+        .expect("terminal answer timed out");
+    }
+}
+
+async fn wait_for_exit(child: &mut Child) -> ExitStatus {
+    tokio::time::timeout(HARNESS_TIMEOUT, child.wait())
+        .await
+        .expect("child hung and did not exit within 15s")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn confirm_prompt_traps_sigint_and_exits_5_with_held_guidance() {
     let bin = env!("CARGO_BIN_EXE_solstone-linux");
     let temp = tempdir().unwrap();
     let xdg_config = temp.path().join("config");
@@ -462,51 +550,28 @@ fn confirm_prompt_traps_sigint_and_exits_5_with_held_guidance() {
     fs::write(&ans_path, br#"{"confirmed":""}"#).unwrap();
     fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-    let fifo_path = temp.path().join("mark_tty.fifo");
-    create_fifo(&fifo_path);
+    let mut terminal = MarkTerminal::new();
 
     let mut child = Command::new(bin)
         .arg("confirm")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
-        .env("SOLSTONE_LINUX_MARK_TTY", &fifo_path)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
-    drop(child.stdout.take());
-    let fifo = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&fifo_path)
-        .unwrap();
-    let mut reader = BufReader::new(fifo);
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap() > 0 {
-        if line.contains("does this match your journal?") {
-            break;
-        }
-        line.clear();
-    }
+    terminal.wait_for_prompt().await.unwrap();
 
     let _ = rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
         rustix::process::Signal::INT,
     );
 
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let status = wait_for_exit(&mut child).await;
 
     assert_eq!(status.code(), Some(5));
     assert!(cred_path.exists());
@@ -514,8 +579,8 @@ fn confirm_prompt_traps_sigint_and_exits_5_with_held_guidance() {
     assert!(answer_bytes.contains(r#""confirmed":"""#));
 }
 
-#[test]
-fn confirm_prompt_traps_sighup_and_exits_5_with_held_guidance() {
+#[tokio::test]
+async fn confirm_prompt_traps_sighup_and_exits_5_with_held_guidance() {
     let bin = env!("CARGO_BIN_EXE_solstone-linux");
     let temp = tempdir().unwrap();
     let xdg_config = temp.path().join("config");
@@ -534,51 +599,28 @@ fn confirm_prompt_traps_sighup_and_exits_5_with_held_guidance() {
     fs::write(&ans_path, br#"{"confirmed":""}"#).unwrap();
     fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-    let fifo_path = temp.path().join("mark_tty.fifo");
-    create_fifo(&fifo_path);
+    let mut terminal = MarkTerminal::new();
 
     let mut child = Command::new(bin)
         .arg("confirm")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
-        .env("SOLSTONE_LINUX_MARK_TTY", &fifo_path)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
-    drop(child.stdout.take());
-    let fifo = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&fifo_path)
-        .unwrap();
-    let mut reader = BufReader::new(fifo);
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap() > 0 {
-        if line.contains("does this match your journal?") {
-            break;
-        }
-        line.clear();
-    }
+    terminal.wait_for_prompt().await.unwrap();
 
     let _ = rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
         rustix::process::Signal::HUP,
     );
 
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let status = wait_for_exit(&mut child).await;
 
     assert_eq!(status.code(), Some(5));
     assert!(cred_path.exists());
@@ -586,8 +628,8 @@ fn confirm_prompt_traps_sighup_and_exits_5_with_held_guidance() {
     assert!(answer_bytes.contains(r#""confirmed":"""#));
 }
 
-#[test]
-fn setup_ceremony_sigint_kills_process_and_saves_nothing() {
+#[tokio::test]
+async fn setup_ceremony_sigint_kills_process_and_saves_nothing() {
     let bin = env!("CARGO_BIN_EXE_solstone-linux");
     let temp = tempdir().unwrap();
     let xdg_config = temp.path().join("config");
@@ -601,7 +643,9 @@ fn setup_ceremony_sigint_kills_process_and_saves_nothing() {
     let initial_config = br#"{"version":1}"#;
     fs::write(&config_path, initial_config).unwrap();
 
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
 
     let mut blob = vec![0x04, 0x01, 127, 0, 0, 1];
@@ -610,44 +654,37 @@ fn setup_ceremony_sigint_kills_process_and_saves_nothing() {
     blob.extend_from_slice(&[0x22; 16]);
     let link = spl_core::crockford::encode(&blob);
 
-    let fifo_path = temp.path().join("mark_tty.fifo");
-    create_fifo(&fifo_path);
+    let terminal = MarkTerminal::new();
 
     let mut child = Command::new(bin)
         .arg("setup")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
-        .env("SOLSTONE_LINUX_MARK_TTY", &fifo_path)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(link.as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        stdin.write_all(link.as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
     }
 
     // Accept TCP connection, then send SIGINT before question bytes
-    let (_sock, _) = listener.accept().unwrap();
+    let (_sock, _) = tokio::time::timeout(HARNESS_TIMEOUT, listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
 
     let _ = rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
         rustix::process::Signal::INT,
     );
 
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let status = wait_for_exit(&mut child).await;
 
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(status.signal(), Some(2));
@@ -670,63 +707,33 @@ async fn setup_prompt_traps_sigint_and_exits_5_with_held_guidance() {
     fs::create_dir_all(&app_data).unwrap();
 
     let peer = PairListener::start().await;
-    let fifo_path = temp.path().join("mark_tty.fifo");
-    create_fifo(&fifo_path);
+    let mut terminal = MarkTerminal::new();
 
     let mut child = Command::new(bin)
         .arg("setup")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
-        .env("SOLSTONE_LINUX_MARK_TTY", &fifo_path)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(peer.link().as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        stdin.write_all(peer.link().as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
     }
 
-    let fifo = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&fifo_path)
-        .await
-        .unwrap();
-    let mut reader = tokio::io::BufReader::new(fifo);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while reader.read_line(&mut line).await.unwrap() > 0 {
-            if line.contains("does this match your journal?") {
-                break;
-            }
-            line.clear();
-        }
-    })
-    .await
-    .unwrap();
-
-    drop(child.stdout.take());
-    drop(child.stderr.take());
+    terminal.wait_for_prompt().await.unwrap();
 
     let _ = rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
         rustix::process::Signal::INT,
     );
 
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let status = wait_for_exit(&mut child).await;
 
     assert_eq!(status.code(), Some(5));
     let cred_path = app_config.join("credentials.json");
@@ -750,63 +757,33 @@ async fn setup_prompt_traps_sighup_and_exits_5_with_held_guidance() {
     fs::create_dir_all(&app_data).unwrap();
 
     let peer = PairListener::start().await;
-    let fifo_path = temp.path().join("mark_tty.fifo");
-    create_fifo(&fifo_path);
+    let mut terminal = MarkTerminal::new();
 
     let mut child = Command::new(bin)
         .arg("setup")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
-        .env("SOLSTONE_LINUX_MARK_TTY", &fifo_path)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(peer.link().as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        stdin.write_all(peer.link().as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
     }
 
-    let fifo = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&fifo_path)
-        .await
-        .unwrap();
-    let mut reader = tokio::io::BufReader::new(fifo);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while reader.read_line(&mut line).await.unwrap() > 0 {
-            if line.contains("does this match your journal?") {
-                break;
-            }
-            line.clear();
-        }
-    })
-    .await
-    .unwrap();
-
-    drop(child.stdout.take());
-    drop(child.stderr.take());
+    terminal.wait_for_prompt().await.unwrap();
 
     let _ = rustix::process::kill_process(
-        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+        rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap(),
         rustix::process::Signal::HUP,
     );
 
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let status = wait_for_exit(&mut child).await;
 
     assert_eq!(status.code(), Some(5));
     let cred_path = app_config.join("credentials.json");
@@ -840,30 +817,18 @@ async fn setup_prompt_pty_read_error_exits_5_with_held_guidance() {
         .env("XDG_DATA_HOME", &xdg_data)
         .env("SOLSTONE_LINUX_MARK_TTY", &tty_path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(peer.link().as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        stdin.write_all(peer.link().as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
     }
 
-    drop(child.stdout.take());
-    drop(child.stderr.take());
-
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let status = wait_for_exit(&mut child).await;
 
     let content = fs::read_to_string(&tty_path).unwrap();
     assert!(content.contains("does this match your journal?"));
@@ -900,8 +865,7 @@ async fn setup_prompt_when_x_already_confirmed_re_pair_terminal_no_exits_1() {
     fs::write(&ans_path, format!(r#"{{"confirmed":"{id_x}"}}"#)).unwrap();
     fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-    let fifo_path = temp.path().join("mark_tty.fifo");
-    create_fifo(&fifo_path);
+    let mut terminal = MarkTerminal::new();
 
     let peer_y = PairListener::start().await;
 
@@ -909,51 +873,24 @@ async fn setup_prompt_when_x_already_confirmed_re_pair_terminal_no_exits_1() {
         .arg("setup")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
-        .env("SOLSTONE_LINUX_MARK_TTY", &fifo_path)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(peer_y.link().as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        stdin.write_all(peer_y.link().as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
     }
 
-    let fifo = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&fifo_path)
-        .await
-        .unwrap();
-    let (read_half, mut write_half) = tokio::io::split(fifo);
-    let mut reader = tokio::io::BufReader::new(read_half);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while reader.read_line(&mut line).await.unwrap() > 0 {
-            if line.contains("does this match your journal?") {
-                break;
-            }
-            line.clear();
-        }
-    })
-    .await
-    .unwrap();
+    terminal.wait_for_prompt().await.unwrap();
 
-    write_half.write_all(b"no\n").await.unwrap();
+    terminal.answer(b"no\n").await;
 
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let status = wait_for_exit(&mut child).await;
 
     assert_eq!(status.code(), Some(1));
     assert_eq!(fs::read(&cred_x_path).unwrap(), cred_x_bytes);
@@ -983,8 +920,7 @@ async fn setup_prompt_repeats_ask_line_on_empty_or_unknown_word() {
     fs::create_dir_all(&app_config).unwrap();
     fs::create_dir_all(&app_data).unwrap();
 
-    let fifo_path = temp.path().join("mark_tty.fifo");
-    create_fifo(&fifo_path);
+    let mut terminal = MarkTerminal::new();
 
     let peer = PairListener::start().await;
 
@@ -992,86 +928,37 @@ async fn setup_prompt_repeats_ask_line_on_empty_or_unknown_word() {
         .arg("setup")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)
-        .env("SOLSTONE_LINUX_MARK_TTY", &fifo_path)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(peer.link().as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        stdin.write_all(peer.link().as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
     }
 
-    let fifo = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&fifo_path)
-        .await
-        .unwrap();
-    let (read_half, mut write_half) = tokio::io::split(fifo);
-    let mut reader = tokio::io::BufReader::new(read_half);
-    let mut line = String::new();
-
-    // 1. Wait for first prompt
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while reader.read_line(&mut line).await.unwrap() > 0 {
-            if line.contains("does this match your journal?") {
-                break;
-            }
-            line.clear();
-        }
-    })
-    .await
-    .unwrap();
+    terminal.wait_for_prompt().await.unwrap();
 
     // Send empty line
-    write_half.write_all(b"\n").await.unwrap();
+    terminal.answer(b"\n").await;
 
     // 2. Wait for second prompt
-    line.clear();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while reader.read_line(&mut line).await.unwrap() > 0 {
-            if line.contains("does this match your journal?") {
-                break;
-            }
-            line.clear();
-        }
-    })
-    .await
-    .unwrap();
+    terminal.wait_for_prompt().await.unwrap();
 
     // Send unknown word
-    write_half.write_all(b"banana\n").await.unwrap();
+    terminal.answer(b"banana\n").await;
 
     // 3. Wait for third prompt
-    line.clear();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while reader.read_line(&mut line).await.unwrap() > 0 {
-            if line.contains("does this match your journal?") {
-                break;
-            }
-            line.clear();
-        }
-    })
-    .await
-    .unwrap();
+    terminal.wait_for_prompt().await.unwrap();
 
     // Send yes
-    write_half.write_all(b"yes\n").await.unwrap();
+    terminal.answer(b"yes\n").await;
 
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(5) {
-            let _ = child.kill();
-            panic!("child hung and did not exit within 5s");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let status = wait_for_exit(&mut child).await;
 
     assert_eq!(status.code(), Some(0));
     let ans_path = app_config.join("pairing-answer.json");
