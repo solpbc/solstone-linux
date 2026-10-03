@@ -74,6 +74,7 @@ enum Commands {
     UninstallService,
     #[command(about = "show status")]
     Status,
+    #[command(about = "show your app and journal versions")]
     About,
     #[command(
         name = "panel-icon",

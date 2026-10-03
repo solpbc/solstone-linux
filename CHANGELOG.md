@@ -6,6 +6,12 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.12] - 2026-10-03
+
+### Added
+
+- the panel icon's "about" menu now shows your journal's version next to the app's, with the system each runs on when it's known. "copy" puts them on your clipboard, `solstone-linux about` prints the same lines, and "report a problem" fills them in too.
+
 ## [2.0.11] - 2026-10-01
 
 ### Fixed
