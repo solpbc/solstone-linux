@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- after your computer wakes from sleep, new moments go into your journal at the right time and on the right day. before, they landed under a time that was off by however long the computer slept, until the solstone app restarted. browser pages that were open when the computer went to sleep no longer count the time it slept as time spent on them.
+
 ## [2.0.12] - 2026-10-03
 
 ### Added
