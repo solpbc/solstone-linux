@@ -822,25 +822,26 @@ impl<W: SyncWake> EventSink for UploadEventSink<W> {
     }
 }
 
+/// Wall time is read from the system clock on every call, so it stays right across
+/// suspend and clock corrections. Monotonic time measures how long capture ran and
+/// does not advance while the computer is suspended.
 #[derive(Clone)]
 pub(crate) struct SystemClock {
-    wall: f64,
     started: Instant,
 }
 impl SystemClock {
     pub(crate) fn new() -> Self {
         Self {
-            wall: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64(),
             started: Instant::now(),
         }
     }
 }
 impl Clock for SystemClock {
     fn wall_seconds(&self) -> f64 {
-        self.wall + self.started.elapsed().as_secs_f64()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
     }
     fn monotonic_seconds(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
@@ -883,6 +884,21 @@ mod tests {
             self.events.lock().unwrap().push("stopping");
             Ok(())
         }
+    }
+
+    // Wall time comes from the system clock, not from the monotonic origin: monotonic
+    // time stops during suspend, so wall time derived from it would fall behind.
+    #[test]
+    fn system_clock_wall_time_does_not_follow_the_monotonic_origin() {
+        let started = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
+        let clock = SystemClock { started };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        assert!((clock.wall_seconds() - now).abs() < 5.0);
     }
 
     // READY precedes the startup watchdog, which covers every blocking startup phase.

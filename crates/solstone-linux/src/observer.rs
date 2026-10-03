@@ -556,8 +556,10 @@ where
                 "invalid incomplete directory name".into(),
             ));
         };
+        // Length is how long capture ran, never a wall-clock difference: wall time
+        // keeps moving while the computer is suspended.
         let duration = clamp_duration(
-            self.backends.clock.wall_seconds() - self.state.segment_start_wall,
+            self.backends.clock.monotonic_seconds() - self.state.segment_start_mono,
             self.config.segment_interval.max(1) as u64,
         );
         let key = segment_key(time, duration);
@@ -1063,6 +1065,7 @@ pub(crate) mod tests {
         let metadata = fs::read(dir.join(".metadata")).unwrap();
         let zone = fs::read(dir.join(CAPTURE_ZONE_FILENAME)).unwrap();
         f.wall.set(f.wall.get() + 300.0);
+        f.mono.set(f.mono.get() + 300.0);
         let stem = dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -1128,6 +1131,63 @@ pub(crate) mod tests {
         f.mono.set(300.0);
         f.observer.tick().unwrap();
         assert_eq!(f.events.completed.borrow().len(), 1)
+    }
+    // A suspend stops monotonic time while wall time keeps going. The segment open
+    // across it keeps its own start and its length is the capture time; the next
+    // segment is named and filed by the real wall time.
+    #[test]
+    fn segment_after_suspend_uses_real_wall_time_and_capture_length() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        let opened = f.wall.get();
+        let first = f.observer.state.segment_dir.clone().unwrap();
+        f.mono.set(60.0);
+        f.wall.set(opened + 60.0);
+        f.observer.tick().unwrap();
+        // Eight hours suspended: wall time moves, monotonic time does not.
+        let suspend = 8.0 * 3600.0;
+        f.wall.set(opened + 60.0 + suspend);
+        f.observer.tick().unwrap();
+        assert!(f.events.completed.borrow().is_empty());
+        // Capture continues for another minute, then a mute change closes the segment.
+        f.mono.set(120.0);
+        let resumed_wall = opened + 120.0 + suspend;
+        f.wall.set(resumed_wall);
+        f.observer.backends.mute.0.push_back(Ok(true));
+        f.observer.tick().unwrap();
+
+        let completed = f.events.completed.borrow();
+        assert_eq!(completed.len(), 1);
+        let first_stem = first
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .strip_suffix(".incomplete")
+            .unwrap()
+            .to_owned();
+        let (stem, len) = completed[0].key.split_once('_').unwrap();
+        assert_eq!(stem, first_stem);
+        // Two minutes of capture, not eight hours of wall time.
+        assert_eq!(len, "120");
+
+        let expected = f.observer.zone.read_zone(resumed_wall);
+        assert_ne!(
+            expected.day,
+            f.observer.zone.read_zone(opened).day,
+            "the suspend crosses midnight"
+        );
+        let next = f.observer.state.segment_dir.clone().unwrap();
+        assert_eq!(
+            next,
+            f.observer
+                .config
+                .captures_dir()
+                .join(&expected.day)
+                .join("desk")
+                .join(format!("{}.incomplete", expected.hms))
+        );
+        assert_eq!(f.observer.state.segment_start_wall, resumed_wall);
     }
     // No 1:1 Python ancestor: interval+mute witness.
     #[test]
@@ -1216,9 +1276,9 @@ pub(crate) mod tests {
         assert!(f.observer.state.frames.is_empty());
         assert_eq!(f.drains.get(), 1)
     }
-    // No 1:1 Python ancestor: gated pause save, clamp, and timed resume.
+    // No 1:1 Python ancestor: gated pause save, capture length, and timed resume.
     #[test]
-    fn paused_finalize_saves_three_hits_clamps_and_timed_pause_resumes() {
+    fn paused_finalize_saves_three_hits_with_capture_length_and_timed_pause_resumes() {
         let mut f = fixture(false);
         initialize(&mut f);
         for _ in 0..3 {
@@ -1234,7 +1294,8 @@ pub(crate) mod tests {
         f.observer.tick().unwrap();
         assert!(!f.observer.state.paused);
         assert_eq!(f.writes.0.borrow().len(), 1);
-        assert!(f.events.completed.borrow()[0].key.ends_with("_300"))
+        // The wall jump does not stretch the length: four seconds of capture ran.
+        assert!(f.events.completed.borrow()[0].key.ends_with("_4"))
     }
     // No 1:1 test: observer.py:663-733 agrees watchdog restart is same-tick and fatal.
     #[test]
@@ -1848,6 +1909,7 @@ pub(crate) mod tests {
         fs::write(dir.join("screen.webm"), b"new video").unwrap();
 
         f.wall.set(1792891800.0 + 300.0);
+        f.mono.set(f.mono.get() + 300.0);
         f.observer.finalize_segment().unwrap();
 
         assert_eq!(
@@ -1888,6 +1950,7 @@ pub(crate) mod tests {
         );
         fs::write(dir1.join("screen.webm"), b"video1").unwrap();
         f.wall.set(1790706000.0 + 300.0);
+        f.mono.set(f.mono.get() + 300.0);
         f.observer.finalize_segment().unwrap();
 
         let final_dir1 = f
@@ -1999,6 +2062,7 @@ pub(crate) mod tests {
 
         fs::write(dir.join("screen.webm"), b"video").unwrap();
         f.wall.set(1798761599.0 + 300.0);
+        f.mono.set(f.mono.get() + 300.0);
         f.observer.finalize_segment().unwrap();
 
         let final_dir = f

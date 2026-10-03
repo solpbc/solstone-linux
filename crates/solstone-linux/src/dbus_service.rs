@@ -141,7 +141,7 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
 // TestPauseResume::test_pause_calls_observer -> dbus_service::tests::pause_calls_observer.
 // TestPauseResume::test_pause_indefinite_calls_observer -> dbus_service::tests::pause_indefinite_calls_observer.
 // TestPauseResume::test_resume_calls_observer -> dbus_service::tests::resume_calls_observer.
-// TestAutoResume::test_auto_resume_expiry -> observer::tests::paused_finalize_saves_three_hits_clamps_and_timed_pause_resumes.
+// TestAutoResume::test_auto_resume_expiry -> observer::tests::paused_finalize_saves_three_hits_with_capture_length_and_timed_pause_resumes.
 // TestSegmentTimerAndPauseRemaining::test_segment_timer_while_recording -> dbus_service::tests::segment_timer_while_recording.
 // TestSegmentTimerAndPauseRemaining::test_segment_timer_zero_when_paused -> dbus_service::tests::segment_timer_zero_when_paused.
 // TestSegmentTimerAndPauseRemaining::test_segment_timer_zero_when_no_segment -> dbus_service::tests::segment_timer_zero_when_no_segment.
