@@ -38,6 +38,8 @@ pub const PERIOD_FILE: &str = ".browser_period.json";
 pub const RECEIPTS_FILE: &str = ".browser_receipts.jsonl";
 const GENERATION_FILE: &str = "generation.json";
 const PERIOD_MINUTES: u32 = 5;
+/// The longest a finished period can be, and so the ceiling of its segment length.
+const PERIOD_MS: u64 = PERIOD_MINUTES as u64 * 60 * 1000;
 
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -449,17 +451,22 @@ impl Custody {
         if truncate_to_receipts(&directory)? == 0 {
             return remove_dir_all_if_present(&directory);
         }
-        let start_ms = period
-            .bucket
-            .start_ms()
+        let bucket_start = period.bucket.start_ms();
+        let start_ms = bucket_start
             .unwrap_or(period.created_at_ms)
             .max(period.created_at_ms);
+        // A period never runs past its own window, however late it is finished: the
+        // first tick after a suspend can come hours after the window closed.
+        let window_end = bucket_start
+            .map(|bucket_start| bucket_start + PERIOD_MS)
+            .filter(|window_end| *window_end > start_ms)
+            .unwrap_or(start_ms + PERIOD_MS);
         let captures = &self.layout.captures;
         move_period(
             &directory,
             |day| captures.join(day).join(super::STREAM_DIR),
             start_ms,
-            now_ms(&end),
+            now_ms(&end).min(window_end),
         )
     }
 
@@ -486,8 +493,9 @@ impl Custody {
                 let start_ms = record
                     .as_ref()
                     .map_or_else(|| now_ms(&now), |r| r.created_at_ms);
-                let end_ms =
-                    modified_ms(&directory.join(super::PAGES_FILENAME)).unwrap_or(start_ms);
+                let end_ms = last_accepted_ms(&directory)
+                    .or_else(|| modified_ms(&directory.join(super::PAGES_FILENAME)))
+                    .unwrap_or(start_ms);
                 let retired = self.layout.retired().join(safe_label(label));
                 move_period(
                     &directory,
@@ -571,7 +579,11 @@ impl Custody {
             if period.bucket == bucket && self.period.is_none() {
                 self.period = Some(period);
             } else {
-                let end = modified_ms(&directory.join(super::PAGES_FILENAME))
+                // The period ended no later than its last accepted batch. Reopening
+                // can rewrite the pages file, so its modified time is only a fallback,
+                // and the finish clamps the end to the period's window either way.
+                let end = last_accepted_ms(&directory)
+                    .or_else(|| modified_ms(&directory.join(super::PAGES_FILENAME)))
                     .and_then(|ms| Local.timestamp_millis_opt(ms as i64).single())
                     .unwrap_or(now);
                 if let Err(error) = self.finalize(&period, end) {
@@ -727,10 +739,13 @@ fn move_period(
         start.minute(),
         start.second()
     );
-    let length = (end_ms.saturating_sub(start_ms) / 1000).max(1);
+    let ceiling = PERIOD_MS / 1000;
+    let length = (end_ms.saturating_sub(start_ms) / 1000).clamp(1, ceiling);
     let parent = parent_for_day(&day);
-    for extra in 0..60 {
-        let target = parent.join(format!("{stem}_{}", length + extra));
+    // A taken name is resolved by ending the period a second earlier, never later,
+    // so the length stays within the period.
+    for length in (1..=length).rev().take(60) {
+        let target = parent.join(format!("{stem}_{length}"));
         if target.exists() {
             continue;
         }
@@ -871,6 +886,10 @@ fn safe_label(label: &str) -> String {
 
 fn file_len(path: &Path) -> u64 {
     fs::metadata(path).map_or(0, |meta| meta.len())
+}
+
+fn last_accepted_ms(directory: &Path) -> Option<u64> {
+    read_receipts(directory).last().map(|line| line.at_ms)
 }
 
 fn modified_ms(path: &Path) -> Option<u64> {
@@ -1308,6 +1327,107 @@ mod tests {
         let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
         // The text of batch 2 never reached disk, so it is not a duplicate.
         accepted(custody.accept(&batch(&custody, 2, delta("c1", "second"), now), now));
+    }
+
+    fn segment_names(captures: &Path) -> Vec<String> {
+        browser_segments(captures)
+            .iter()
+            .map(|segment| segment.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn assert_lengths_within_ceiling(names: &[String]) {
+        for name in names {
+            let (_, length) = name.split_once('_').unwrap();
+            let length: u64 = length.parse().unwrap();
+            assert!((1..=PERIOD_MS / 1000).contains(&length), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_period_finished_late_after_a_suspend_stays_within_its_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let captures = temp.path().join("captures");
+        let opened = at(10, 2, 30);
+        let mut custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "alpha"), opened), opened));
+        // The computer sleeps through the end of the window; the next tick is hours later.
+        assert!(custody.tick(at(18, 0, 0)).is_some());
+        assert_eq!(segment_names(&captures), ["100230_150"]);
+
+        let opened = at(18, 0, 0);
+        accepted(custody.accept(&batch(&custody, 2, snapshot("c2", "beta"), opened), opened));
+        assert!(custody.tick(at(23, 59, 0)).is_some());
+        let names = segment_names(&captures);
+        assert_eq!(names, ["100230_150", "180000_300"]);
+        assert_lengths_within_ceiling(&names);
+    }
+
+    #[test]
+    fn a_taken_segment_name_never_lengthens_a_period() {
+        let temp = tempfile::tempdir().unwrap();
+        let captures = temp.path().join("captures");
+        let opened = at(10, 0, 0);
+        let mut custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "alpha"), opened), opened));
+        fs::create_dir_all(captures.join("20261002/_browser/100000_300")).unwrap();
+        assert!(custody.tick(at(18, 0, 0)).is_some());
+        let names = segment_names(&captures);
+        assert_eq!(names, ["100000_299", "100000_300"]);
+        assert_lengths_within_ceiling(&names);
+    }
+
+    #[test]
+    fn a_period_recovered_after_a_suspend_ends_at_its_last_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let captures = temp.path().join("captures");
+        let opened = at(10, 1, 0);
+        let mut custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "alpha"), opened), opened));
+        let last = at(10, 3, 20);
+        accepted(custody.accept(&batch(&custody, 2, delta("c1", "beta"), last), last));
+        drop(custody);
+        // The pages file's time says nothing about when the period ended: here it was
+        // touched long after the window closed.
+        let open = sorted_dirs(&temp.path().join("browser/open"));
+        let late = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now_ms(&at(18, 0, 0)));
+        File::options()
+            .write(true)
+            .open(open[0].join(crate::browser::PAGES_FILENAME))
+            .unwrap()
+            .set_modified(late)
+            .unwrap();
+        Custody::open(layout(&temp), Some("journal-a"), at(18, 0, 0)).unwrap();
+        let names = segment_names(&captures);
+        assert_eq!(names, ["100100_140"]);
+        assert_lengths_within_ceiling(&names);
+    }
+
+    #[test]
+    fn a_period_without_a_known_end_is_bounded_by_its_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let captures = temp.path().join("captures");
+        let opened = at(10, 1, 0);
+        let custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        let mut period = new_period(&opened);
+        period.has_dir = true;
+        let directory = custody.layout.open().join(&period.id);
+        create_private_dir(&directory).unwrap();
+        let payload = "{}\n";
+        fs::write(directory.join(crate::browser::PAGES_FILENAME), payload).unwrap();
+        let receipt = serde_json::to_string(&ReceiptLine {
+            inst: "inst-a".into(),
+            batch_id: "b".into(),
+            end: payload.len() as u64,
+            at_ms: now_ms(&opened),
+        })
+        .unwrap();
+        fs::write(directory.join(RECEIPTS_FILE), receipt + "\n").unwrap();
+        // Recovery falls back to the time it runs when nothing else is known.
+        custody.finalize(&period, at(18, 0, 0)).unwrap();
+        let names = segment_names(&captures);
+        assert_eq!(names, ["100100_240"]);
+        assert_lengths_within_ceiling(&names);
     }
 
     #[test]
