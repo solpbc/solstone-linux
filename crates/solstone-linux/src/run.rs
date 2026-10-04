@@ -275,6 +275,20 @@ fn run_capture(
         None::<PrivateLinkCapability>,
         Arc::new(clock.clone()),
     ));
+    let browser_custody = if crate::browser::ENABLED {
+        match crate::browser::custody::Custody::open(
+            crate::browser::custody::Layout::new(&config.base_dir),
+            chrono::Local::now(),
+        ) {
+            Ok(custody) => Some(Arc::new(Mutex::new(custody))),
+            Err(error) => {
+                tracing::warn!(%error, "Browser pages are unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let open_journal = crate::private_link::OpenJournalAccess::default();
     if process_epoch.is_none() {
         upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
@@ -285,11 +299,12 @@ fn run_capture(
     let linked_state_lock = state_lock
         .try_clone()
         .map_err(|error| ObserverError::Io(format!("linked state lock clone failed: {error}")))?;
-    let sync = SyncService::start_with_epoch(
+    let sync = SyncService::start_with_browser_custody(
         config.clone(),
         Arc::clone(&upload),
         Arc::new(clock.clone()),
         process_epoch.clone(),
+        browser_custody.clone(),
     );
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
@@ -328,7 +343,14 @@ fn run_capture(
     let snapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
     let (states, tray_receiver) = WatchStateSink::channel(initial_snapshot);
     let browser = if crate::browser::ENABLED {
-        start_browser(&config, tray_receiver.clone(), sync_trigger.clone())
+        browser_custody.clone().and_then(|custody| {
+            start_browser(
+                &config,
+                tray_receiver.clone(),
+                sync_trigger.clone(),
+                custody,
+            )
+        })
     } else {
         None
     };
@@ -459,13 +481,13 @@ fn run_capture(
         .and(linked_shutdown)
 }
 
-/// Write the browser registrations and open the browser endpoint. Opening custody
-/// retires anything held for a journal this app is no longer paired with. A failure
-/// here leaves the rest of the app running.
+/// Write the browser registrations and open the browser endpoint. Pending pages stay
+/// available across pairing changes. A failure here leaves the rest of the app running.
 fn start_browser(
     config: &Config,
     paused: tokio::sync::watch::Receiver<StateSnapshot>,
     sync: SyncTrigger,
+    custody_handle: Arc<Mutex<crate::browser::custody::Custody>>,
 ) -> Option<crate::browser::server::ServerHandle> {
     use crate::browser::{custody, registration, server};
     match (env::var_os("HOME"), env::current_exe()) {
@@ -480,13 +502,6 @@ fn start_browser(
         }
         _ => tracing::warn!("Could not locate the browser registrations"),
     }
-    let journal = match load_credential(&config.config_dir) {
-        Ok(Some(credential)) => Some(custody::journal_identity(
-            &credential.instance_id,
-            &credential.ca_chain_pem,
-        )),
-        _ => None,
-    };
     let endpoint = match crate::browser::production_endpoint_path() {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -498,21 +513,26 @@ fn start_browser(
     let about_host = crate::about::host_facts();
     let about = Arc::new(move |facts: &custody::Facts| {
         let unknown = || crate::about::AboutBlock::unknown(about_host.clone()).native();
-        let current_generation = || {
-            let credential = load_credential(&about_config.config_dir).ok().flatten()?;
-            let identity =
-                custody::journal_identity(&credential.instance_id, &credential.ca_chain_pem);
-            custody::deliverable_generation(
-                &custody::Layout::new(&about_config.base_dir),
-                Some(&identity),
-            )
+        let Some(credential) = load_credential(&about_config.config_dir).ok().flatten() else {
+            return unknown();
         };
-        if facts.generation.is_none() || current_generation() != facts.generation {
+        let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
+        if !crate::journal_mark::is_pairing_confirmed(&about_config.config_dir, &pairing_id) {
             return unknown();
         }
         let block =
             crate::about::AboutBlock::snapshot(&about_config, &about_host, crate::about::now());
-        if current_generation() != facts.generation {
+        let still_confirmed = load_credential(&about_config.config_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|current| {
+                crate::private_link::compute_pairing_id(&current.client_cert_pem) == pairing_id
+                    && crate::journal_mark::is_pairing_confirmed(
+                        &about_config.config_dir,
+                        &pairing_id,
+                    )
+            });
+        if !still_confirmed || facts.generation.is_none() {
             return unknown();
         }
         block.native()
@@ -520,7 +540,16 @@ fn start_browser(
     match server::start(server::ServerConfig {
         base_dir: config.base_dir.clone(),
         endpoint,
-        journal,
+        custody: custody_handle,
+        generation_fingerprint: Arc::new({
+            let config_dir = config.config_dir.clone();
+            move || {
+                load_credential(&config_dir)
+                    .ok()
+                    .flatten()
+                    .map(|credential| crate::private_link::journal_identity_key(&credential))
+            }
+        }),
         dev_enabled: crate::browser::DEV_ENABLED,
         paused,
         on_period_finished: Arc::new(move || sync.trigger()),
@@ -535,7 +564,7 @@ fn start_browser(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn start_linked_owner(
+pub(crate) async fn start_linked_owner(
     upload: Arc<UploadClient>,
     config_root: PathBuf,
     stream: String,
@@ -545,7 +574,7 @@ async fn start_linked_owner(
     shutdown: Arc<tokio::sync::Notify>,
     on_confirmed: Option<crate::sync::SyncTrigger>,
 ) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
-    upload.begin_owner_generation();
+    upload.prepare_new_owner();
     if !transport_enabled {
         upload.publish_link_fact(crate::private_link::LinkFact::ConfigSanitationFailed);
         return Err(crate::private_link::PrivateStateError::BridgeUnavailable);

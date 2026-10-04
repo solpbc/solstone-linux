@@ -16,11 +16,18 @@ use std::{
         net::UnixStream,
     },
     path::Path,
+    sync::LazyLock,
     thread,
 };
 
 /// What the extension is told when the app is not running.
-pub const UNAVAILABLE_HELLO_ACK: &[u8] = br#"{"type":"hello_ack","capture":"unavailable","delivery":"unknown","freshness_ms":0,"destination_generation":null,"period_id":null,"custody":{"full":false,"stale":false},"version":"1.1.0"}"#;
+pub static UNAVAILABLE_HELLO_ACK: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    format!(
+        r#"{{"type":"hello_ack","capture":"unavailable","delivery":"unknown","freshness_ms":0,"destination_generation":null,"period_id":null,"custody":{{"full":false,"stale":false}},"version":"{}"}}"#,
+        native_browser_frame::BUNDLE_VERSION
+    )
+    .into_bytes()
+});
 const ARGV_REJECTED: &[u8] = br#"{"code":"argv_rejected"}"#;
 
 /// Exit code for a refused native-messaging launch.
@@ -45,14 +52,14 @@ pub fn run(invocation: HostInvocation) -> i32 {
     let endpoint = match super::production_endpoint_path() {
         Ok(endpoint) => endpoint,
         Err(_) => {
-            let _ = write_frame(&mut stdout, UNAVAILABLE_HELLO_ACK);
+            let _ = write_frame(&mut stdout, &UNAVAILABLE_HELLO_ACK);
             return 0;
         }
     };
     let socket = match connect(&endpoint, rustix::process::geteuid().as_raw()) {
         Ok(socket) => socket,
         Err(Connect::Unavailable) => {
-            let _ = write_frame(&mut stdout, UNAVAILABLE_HELLO_ACK);
+            let _ = write_frame(&mut stdout, &UNAVAILABLE_HELLO_ACK);
             return 0;
         }
         Err(Connect::Untrusted) => return 0,
@@ -217,7 +224,7 @@ mod tests {
     #[test]
     fn the_unavailable_answer_is_a_valid_hello_ack() {
         assert!(matches!(
-            decode(UNAVAILABLE_HELLO_ACK, Direction::HostToExtension),
+            decode(&UNAVAILABLE_HELLO_ACK, Direction::HostToExtension),
             DecodeOutcome::Accept(_)
         ));
     }

@@ -227,19 +227,30 @@ struct SyncControl {
 
 impl SyncService {
     #[cfg(test)]
-    pub fn start(
-        config: Config,
-        client: Arc<UploadClient>,
-        clock: Arc<dyn Clock + Send + Sync>,
-    ) -> Self {
-        Self::start_with_epoch(config, client, clock, ProcessEpoch::generate().ok())
-    }
-
     pub(crate) fn start_with_epoch(
         config: Config,
         client: Arc<UploadClient>,
         clock: Arc<dyn Clock + Send + Sync>,
         process_epoch: Option<ProcessEpoch>,
+    ) -> Self {
+        Self::start_with_browser_custody(config, client, clock, process_epoch, None)
+    }
+
+    #[cfg(test)]
+    pub fn start(
+        config: Config,
+        client: Arc<UploadClient>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Self {
+        Self::start_with_browser_custody(config, client, clock, ProcessEpoch::generate().ok(), None)
+    }
+
+    pub(crate) fn start_with_browser_custody(
+        config: Config,
+        client: Arc<UploadClient>,
+        clock: Arc<dyn Clock + Send + Sync>,
+        process_epoch: Option<ProcessEpoch>,
+        browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
     ) -> Self {
         let notify = Arc::new(Notify::new());
         let pending_trigger = Arc::new(AtomicBool::new(false));
@@ -288,6 +299,7 @@ impl SyncService {
             },
             Arc::clone(&facts),
             Arc::clone(&recent_error_count),
+            browser_custody,
         );
         let task = tokio::spawn(async move { worker.run().await });
         let abort = task.abort_handle();
@@ -380,6 +392,7 @@ struct SyncWorker {
     running: Arc<AtomicBool>,
     facts: Arc<Mutex<SyncFacts>>,
     recent_error_count: Arc<AtomicU8>,
+    browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
     link_facts: LinkFacts,
     consecutive_failures: u32,
     last_error_type: Option<ErrorType>,
@@ -395,6 +408,20 @@ struct SyncWorker {
     fail_next_pass: bool,
 }
 
+struct BrowserUploadReservation {
+    custody: Arc<Mutex<crate::browser::custody::Custody>>,
+    path: PathBuf,
+}
+
+impl Drop for BrowserUploadReservation {
+    fn drop(&mut self) {
+        self.custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release_upload(&self.path);
+    }
+}
+
 impl SyncWorker {
     fn new(
         config: Config,
@@ -403,6 +430,7 @@ impl SyncWorker {
         control: SyncControl,
         facts: Arc<Mutex<SyncFacts>>,
         recent_error_count: Arc<AtomicU8>,
+        browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
     ) -> Self {
         let link_facts = client.link_facts();
         Self {
@@ -414,6 +442,7 @@ impl SyncWorker {
             running: control.running,
             facts,
             recent_error_count,
+            browser_custody,
             link_facts,
             consecutive_failures: 0,
             last_error_type: None,
@@ -496,18 +525,29 @@ impl SyncWorker {
         self.is_running() || self.draining_shutdown
     }
 
-    /// The generation whose browser periods may go to the paired journal. Periods kept
-    /// for any other journal are never delivered.
-    fn browser_generation(&self) -> Option<String> {
-        let credential = crate::private_link::load_credential(&self.config.config_dir).ok()??;
-        let journal = crate::browser::custody::journal_identity(
-            &credential.instance_id,
-            &credential.ca_chain_pem,
-        );
-        crate::browser::custody::deliverable_generation(
-            &crate::browser::custody::Layout::new(&self.config.base_dir),
-            Some(&journal),
-        )
+    fn reserve_browser_segment(&self, path: &Path) -> io::Result<Option<BrowserUploadReservation>> {
+        if !crate::browser::is_browser_segment(path) {
+            return Ok(None);
+        }
+        let custody = self
+            .browser_custody
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| io::Error::other("browser custody is unavailable"))?;
+        if !custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .reserve_upload(path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "browser segment is already reserved",
+            ));
+        }
+        Ok(Some(BrowserUploadReservation {
+            custody,
+            path: path.to_path_buf(),
+        }))
     }
 
     fn current_identity_and_pairing(&self) -> (Option<String>, Option<String>) {
@@ -609,10 +649,7 @@ impl SyncWorker {
         ensure_cutover(&self.config.state_dir(), &self.config.captures_dir());
         let (current_identity, current_pairing) = self.current_identity_and_pairing();
         let cutover_segments = load_cutover_segments(&self.config.state_dir());
-        let segments_by_day = deliverable_segments(
-            collect_segments(&self.config.captures_dir()),
-            self.browser_generation().as_deref(),
-        );
+        let segments_by_day = collect_segments(&self.config.captures_dir());
         let mut days: Vec<String> = segments_by_day.keys().cloned().collect();
         days.sort_by(|a, b| b.cmp(a));
 
@@ -906,6 +943,11 @@ impl SyncWorker {
                                     should_upload = true;
                                 }
                                 Ok(true) => {
+                                    let _reservation =
+                                        match self.reserve_browser_segment(segment_dir) {
+                                            Ok(reservation) => reservation,
+                                            Err(_) => continue,
+                                        };
                                     let build_ack_and_unlink = || -> io::Result<()> {
                                         let stored_key = entry
                                             .key
@@ -936,7 +978,10 @@ impl SyncWorker {
                                         };
                                         write_ack(segment_dir, &ack)?;
                                         remove_retry(segment_dir);
-                                        let _ = remove_confirmed_segment(segment_dir);
+                                        let _ = remove_confirmed_segment(
+                                            segment_dir,
+                                            self.browser_custody.as_ref(),
+                                        );
                                         Ok(())
                                     };
                                     let _ = build_ack_and_unlink();
@@ -1030,6 +1075,10 @@ impl SyncWorker {
     }
 
     async fn upload_segment(&mut self, day: &str, segment_dir: &Path) -> UploadOutcome {
+        let _reservation = match self.reserve_browser_segment(segment_dir) {
+            Ok(reservation) => reservation,
+            Err(_) => return UploadOutcome::Stop,
+        };
         let files = match eligible_files(segment_dir) {
             Ok(files) => files,
             Err(error) => {
@@ -1071,7 +1120,9 @@ impl SyncWorker {
                 segment_source(segment_dir),
             )
             .await;
-        let (current_identity, current_pairing) = self.current_identity_and_pairing();
+        if !result.success && result.stale_capability {
+            return UploadOutcome::Stop;
+        }
 
         if result.success {
             if let Some(ref descriptors) = result.file_descriptors {
@@ -1118,8 +1169,8 @@ impl SyncWorker {
                         stream,
                         local_key: key.to_string(),
                         stored_key,
-                        identity_key: current_identity.unwrap_or_default(),
-                        pairing_id: current_pairing.unwrap_or_default(),
+                        identity_key: result.captured_identity_key.clone().unwrap_or_default(),
+                        pairing_id: result.captured_pairing_id.clone().unwrap_or_default(),
                         proof: "upload".to_string(),
                         files: ack_files,
                     };
@@ -1147,7 +1198,7 @@ impl SyncWorker {
                         self.record_bounded(None, segment_dir, 3600.0, result.status_code, None);
                         return UploadOutcome::Bounded;
                     }
-                    let _ = remove_confirmed_segment(segment_dir);
+                    let _ = remove_confirmed_segment(segment_dir, self.browser_custody.as_ref());
                     remove_retry(segment_dir);
                     self.record_contact(false);
                     self.reset_failures();
@@ -1325,6 +1376,10 @@ impl SyncWorker {
         let (current_identity, current_pairing) = self.current_identity_and_pairing();
         for segments in segments_by_day.values() {
             for segment_dir in segments {
+                let _reservation = match self.reserve_browser_segment(segment_dir) {
+                    Ok(reservation) => reservation,
+                    Err(_) => continue,
+                };
                 let ack = read_ack(segment_dir);
                 if is_ack_valid(
                     segment_dir,
@@ -1332,7 +1387,7 @@ impl SyncWorker {
                     current_identity.as_deref(),
                     current_pairing.as_deref(),
                 ) {
-                    let _ = remove_confirmed_segment(segment_dir);
+                    let _ = remove_confirmed_segment(segment_dir, self.browser_custody.as_ref());
                 } else {
                     let Ok(entries) = fs::read_dir(segment_dir) else {
                         continue;
@@ -1359,7 +1414,8 @@ impl SyncWorker {
                         }
                     }
                     if all_bookkeeping {
-                        let _ = remove_confirmed_segment(segment_dir);
+                        let _ =
+                            remove_confirmed_segment(segment_dir, self.browser_custody.as_ref());
                     }
                 }
             }
@@ -1534,8 +1590,12 @@ fn listing_ack_file(file: &Path, entry: &ListingEntry) -> io::Result<IngestAckFi
     })
 }
 
-fn remove_confirmed_segment(dir: &Path) -> io::Result<()> {
+fn remove_confirmed_segment(
+    dir: &Path,
+    browser_custody: Option<&Arc<Mutex<crate::browser::custody::Custody>>>,
+) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
+        let browser_segment = crate::browser::is_browser_segment(dir);
         let files = eligible_files(dir)?;
         let ack = read_ack(dir);
         let matches = |file: &Path| {
@@ -1563,6 +1623,16 @@ fn remove_confirmed_segment(dir: &Path) -> io::Result<()> {
                 "local payload no longer matches ingest acknowledgment",
             ));
         }
+        if browser_segment {
+            let Some(custody) = browser_custody else {
+                return Err(io::Error::other("browser custody is unavailable"));
+            };
+            let mut custody = custody
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            custody.remove_confirmed_segment(dir)?;
+            custody.refresh_held();
+        }
         for file in files {
             if !matches(&file) {
                 let _ = fs::remove_file(dir.join(INGEST_ACK_FILENAME));
@@ -1570,11 +1640,17 @@ fn remove_confirmed_segment(dir: &Path) -> io::Result<()> {
             }
             fs::remove_file(file)?;
         }
+        let period_path = dir.join(crate::browser::custody::PERIOD_FILE);
+        let receipts_path = dir.join(crate::browser::custody::RECEIPTS_FILE);
         let ack_path = dir.join(INGEST_ACK_FILENAME);
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path != ack_path && fs::metadata(&path)?.is_file() {
+            if path != ack_path
+                && path != period_path
+                && path != receipts_path
+                && fs::metadata(&path)?.is_file()
+            {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 if is_bookkeeping_file(&name_str) {
@@ -1582,10 +1658,18 @@ fn remove_confirmed_segment(dir: &Path) -> io::Result<()> {
                 }
             }
         }
-        if ack_path.exists() {
-            fs::remove_file(&ack_path)?;
+        for path in [&period_path, &ack_path, &receipts_path] {
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
         }
         fs::remove_dir(dir)?;
+        if browser_segment && let Some(custody) = browser_custody {
+            custody
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .refresh_held();
+        }
         Ok(())
     })();
     if let Err(ref error) = result {
@@ -1976,6 +2060,7 @@ pub(crate) async fn cleanup_synced_day_for_composition(
         },
         Arc::clone(&facts),
         Arc::new(AtomicU8::new(0)),
+        None,
     );
     worker.sync_pass().await;
     facts
@@ -2040,25 +2125,6 @@ fn collect_segments(root: &Path) -> HashMap<String, Vec<PathBuf>> {
 /// primary capture.
 fn segment_source(segment_dir: &Path) -> Option<&'static str> {
     crate::browser::is_browser_segment(segment_dir).then_some(crate::browser::SOURCE)
-}
-
-/// Drop browser periods that were not accepted for the journal this app is paired with
-/// now. They are retired when the app starts, so this only closes the window before.
-fn deliverable_segments(
-    mut segments_by_day: HashMap<String, Vec<PathBuf>>,
-    browser_generation: Option<&str>,
-) -> HashMap<String, Vec<PathBuf>> {
-    for segments in segments_by_day.values_mut() {
-        segments.retain(|segment| {
-            !crate::browser::is_browser_segment(segment)
-                || browser_generation.is_some_and(|generation| {
-                    crate::browser::custody::segment_generation(segment).as_deref()
-                        == Some(generation)
-                })
-        });
-    }
-    segments_by_day.retain(|_, segments| !segments.is_empty());
-    segments_by_day
 }
 
 fn remove_if_empty(path: &Path) {
@@ -2192,7 +2258,7 @@ mod tests {
         write_ack(&segment, &ack).unwrap();
         assert!(is_ack_valid(&segment, read_ack(&segment), None, None));
 
-        assert!(remove_confirmed_segment(&segment).is_err());
+        assert!(remove_confirmed_segment(&segment, None).is_err());
         assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"replaced");
         assert!(!segment.join(INGEST_ACK_FILENAME).exists());
     }
@@ -2205,7 +2271,7 @@ mod tests {
         write_ack(&segment, &ack).unwrap();
         fs::write(segment.join("mic.flac"), b"new audio").unwrap();
 
-        assert!(remove_confirmed_segment(&segment).is_err());
+        assert!(remove_confirmed_segment(&segment, None).is_err());
         assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"original");
         assert_eq!(fs::read(segment.join("mic.flac")).unwrap(), b"new audio");
     }
@@ -2220,7 +2286,7 @@ mod tests {
         write_ack(&segment, &ack).unwrap();
         fs::write(segment.join("screen.webm"), b"replaced").unwrap();
 
-        assert!(remove_confirmed_segment(&segment).is_err());
+        assert!(remove_confirmed_segment(&segment, None).is_err());
         assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"replaced");
     }
 
@@ -2240,7 +2306,7 @@ mod tests {
         ack.files = vec![listing_ack_file(&file, &remote).unwrap()];
         assert_eq!(ack.files[0].sha256, original_sha);
         write_ack(&segment, &ack).unwrap();
-        assert!(remove_confirmed_segment(&segment).is_err());
+        assert!(remove_confirmed_segment(&segment, None).is_err());
         assert_eq!(fs::read(file).unwrap(), b"replaced");
     }
 
@@ -2321,6 +2387,7 @@ mod tests {
             },
             Arc::new(Mutex::new(SyncFacts::default())),
             Arc::new(AtomicU8::new(0)),
+            None,
         );
         (server, worker)
     }
@@ -3258,7 +3325,7 @@ mod tests {
             ),
         ];
         for (fact, key) in cases {
-            client.begin_owner_generation();
+            client.link_facts().begin_owner_generation();
             let prior_file = File::open(&health_path).unwrap();
             let prior_inode = prior_file.metadata().unwrap().ino();
             client.publish_link_fact(fact);
@@ -3305,7 +3372,7 @@ mod tests {
             Arc::clone(&clock),
             Some(ProcessEpoch::for_test(10)),
         );
-        client.begin_owner_generation();
+        client.link_facts().begin_owner_generation();
         client.publish_link_fact(crate::private_link::LinkFact::TokenPersistenceFailure);
 
         let facts = [
@@ -3413,7 +3480,7 @@ mod tests {
             Arc::clone(&clock),
             Some(ProcessEpoch::for_test(9)),
         );
-        client.begin_owner_generation();
+        client.link_facts().begin_owner_generation();
         {
             let mut facts = service.facts.lock().unwrap();
             facts.last_successful_sync = Some(11.0);
@@ -3463,7 +3530,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
         assert_eq!(persisted["link"]["transport_unavailable"], true);
         assert_eq!(persisted["link"]["private_state_invalid"], false);
-        client.begin_owner_generation();
+        client.link_facts().begin_owner_generation();
         let persisted: serde_json::Value =
             serde_json::from_slice(&fs::read(&health_path).unwrap()).unwrap();
         assert_eq!(persisted["link"]["transport_unavailable"], false);
@@ -4129,6 +4196,7 @@ mod tests {
             },
             Arc::new(Mutex::new(SyncFacts::default())),
             Arc::new(AtomicU8::new(0)),
+            None,
         );
         peer.shutdown().await;
         worker.cleanup_synced_segments().await;
@@ -4883,6 +4951,7 @@ mod tests {
             },
             Arc::new(Mutex::new(SyncFacts::default())),
             Arc::new(AtomicU8::new(0)),
+            None,
         );
         let task = tokio::spawn(async move { worker.run().await });
         notify.notify_one();
@@ -6576,9 +6645,8 @@ mod tests {
         assert!(body.contains(&format!("\"segment\":\"{seg_name}\"")));
     }
 
-    /// Keep one browser batch for `journal` and finish its period into a capture
-    /// segment, the way the running app does.
-    fn browser_period(temp: &tempfile::TempDir, journal: &str) -> PathBuf {
+    /// Keep one browser batch and finish its period into a capture segment.
+    fn browser_period(temp: &tempfile::TempDir) -> PathBuf {
         use chrono::TimeZone;
         let layout = crate::browser::custody::Layout::new(temp.path());
         let at = |minute| {
@@ -6587,11 +6655,10 @@ mod tests {
                 .earliest()
                 .unwrap()
         };
-        let mut custody =
-            crate::browser::custody::Custody::open(layout, Some(journal), at(1)).unwrap();
+        let mut custody = crate::browser::custody::Custody::open(layout, at(1)).unwrap();
         let batch = json!({
             "type": "batch",
-            "destination_generation": custody.generation().unwrap(),
+            "destination_generation": "g1",
             "inst": "inst-a",
             "batch_id": "0123456789abcdef0123456789abcdef",
             "queued_at_ms": at(1).timestamp_millis() - 1000,
@@ -6608,20 +6675,26 @@ mod tests {
         segment
     }
 
-    fn paired_journal(temp: &tempfile::TempDir, server: &LinkedMockServer) -> String {
+    fn persist_test_credential(temp: &tempfile::TempDir, server: &LinkedMockServer) {
         let config_dir = temp.path().join("config");
         fs::create_dir_all(&config_dir).unwrap();
         let credential = server.credential();
         crate::private_link::persist_credential(&config_dir, &credential).unwrap();
-        crate::browser::custody::journal_identity(&credential.instance_id, &credential.ca_chain_pem)
     }
 
     #[tokio::test]
     async fn a_browser_period_goes_into_the_journal_as_the_browser_source() {
         let temp = tempfile::tempdir().unwrap();
         let (server, mut worker) = test_worker(&temp, Vec::new()).await;
-        let journal = paired_journal(&temp, &server);
-        let segment = browser_period(&temp, &journal);
+        persist_test_credential(&temp, &server);
+        let segment = browser_period(&temp);
+        worker.browser_custody = Some(Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(temp.path()),
+                chrono::Local::now(),
+            )
+            .unwrap(),
+        )));
         let pages = segment.join(crate::browser::PAGES_FILENAME);
         server.enqueue_response(
             200,
@@ -6682,26 +6755,674 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_browser_period_kept_for_another_journal_is_never_uploaded() {
+    async fn a_browser_period_from_another_pairing_remains_uploadable() {
         let temp = tempfile::tempdir().unwrap();
         let (server, mut worker) = test_worker(&temp, Vec::new()).await;
-        // Kept while paired with another journal; the app has not restarted since the
-        // credential changed, so nothing has retired it yet.
-        let segment = browser_period(&temp, "another-journal");
-        paired_journal(&temp, &server);
+        let segment = browser_period(&temp);
+        persist_test_credential(&temp, &server);
+        worker.browser_custody = Some(Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(temp.path()),
+                chrono::Local::now(),
+            )
+            .unwrap(),
+        )));
+        let pages = segment.join(crate::browser::PAGES_FILENAME);
+        server.enqueue_response(
+            200,
+            json!({
+                "status": "ok",
+                "segment": "100100_240",
+                "file_descriptors": [{
+                    "submitted": "browser_pages.jsonl",
+                    "written": "browser_pages.jsonl",
+                    "size": fs::metadata(&pages).unwrap().len(),
+                    "sha256": sha256_file(&pages).unwrap(),
+                    "disposition": "written"
+                }]
+            })
+            .to_string(),
+        );
         worker.sync_pass().await;
-        assert_eq!(upload_hits(&server), 0);
-        assert!(segment.join(crate::browser::PAGES_FILENAME).is_file());
+        assert_eq!(upload_hits(&server), 1);
+        assert!(!segment.exists());
     }
 
     #[tokio::test]
     async fn browser_periods_wait_while_the_journal_is_unpaired() {
         let temp = tempfile::tempdir().unwrap();
         let (server, mut worker) = test_worker(&temp, Vec::new()).await;
-        let segment = browser_period(&temp, "journal-a");
+        let segment = browser_period(&temp);
+        worker.client = Arc::new(UploadClient::new(
+            &worker.config,
+            None::<crate::private_link::PrivateLinkCapability>,
+            worker.clock.clone(),
+        ));
+        worker.browser_custody = Some(Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(temp.path()),
+                chrono::Local::now(),
+            )
+            .unwrap(),
+        )));
         worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 0);
         assert!(segment.exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_browser_period_moves_to_newly_confirmed_pairing_after_unpair() {
+        use chrono::TimeZone;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_root = temp.path().join("config");
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: config_root.clone(),
+            stream: "desktop".to_owned(),
+            ..Config::default()
+        };
+        config.ensure_dirs().unwrap();
+        let peer_a = PrivateLinkPeer::start().await;
+        let peer_b = PrivateLinkPeer::start().await;
+        let credential_a = peer_a.credential();
+        let pairing_a = crate::private_link::compute_pairing_id(&credential_a.client_cert_pem);
+        crate::private_link::persist_credential(&config_root, &credential_a).unwrap();
+        crate::journal_mark::write_pairing_answer(&config_root, &pairing_a).unwrap();
+
+        let clock = Arc::new(MutableClock::new(0.0, 0.0));
+        let upload = Arc::new(UploadClient::new(
+            &config,
+            None::<crate::private_link::PrivateLinkCapability>,
+            clock.clone(),
+        ));
+        let owner_a = crate::run::start_linked_owner(
+            Arc::clone(&upload),
+            config_root.clone(),
+            config.stream.clone(),
+            crate::private_link::PrivateStateLock::acquire(&config_root).unwrap(),
+            true,
+            crate::private_link::OpenJournalAccess::default(),
+            Arc::new(Notify::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(upload.has_capability());
+
+        let segment = browser_period(&temp);
+        let pages = segment.join(crate::browser::PAGES_FILENAME);
+        let original_bytes = fs::read(&pages).unwrap();
+        let period_path = segment.join(crate::browser::custody::PERIOD_FILE);
+        let original_period: Value =
+            serde_json::from_slice(&fs::read(&period_path).unwrap()).unwrap();
+        let original_period_id = original_period["period_id"].as_str().unwrap().to_owned();
+
+        owner_a.shutdown().await.unwrap();
+        fs::remove_file(config_root.join(crate::private_link::CREDENTIALS_FILENAME)).unwrap();
+        crate::journal_mark::write_pairing_answer(&config_root, "").unwrap();
+        assert!(
+            crate::run::start_linked_owner(
+                Arc::clone(&upload),
+                config_root.clone(),
+                config.stream.clone(),
+                crate::private_link::PrivateStateLock::acquire(&config_root).unwrap(),
+                true,
+                crate::private_link::OpenJournalAccess::default(),
+                Arc::new(Notify::new()),
+                None,
+            )
+            .await
+            .is_err()
+        );
+        assert!(!upload.has_capability());
+
+        let at = |minute| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 10, 2, 10, minute, 0)
+                .earliest()
+                .unwrap()
+        };
+        let custody = Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(&config.base_dir),
+                at(16),
+            )
+            .unwrap(),
+        ));
+        let recovered_period: Value =
+            serde_json::from_slice(&fs::read(&period_path).unwrap()).unwrap();
+        assert_eq!(recovered_period["period_id"], original_period_id);
+        assert_eq!(fs::read(&pages).unwrap(), original_bytes);
+        clock.set_wall(at(16).timestamp() as f64);
+
+        let control = SyncControl {
+            notify: Arc::new(Notify::new()),
+            pending_trigger: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let mut worker = SyncWorker::new(
+            config.clone(),
+            Arc::clone(&upload),
+            clock,
+            control,
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+            Some(Arc::clone(&custody)),
+        );
+        let no_capability_attempt = worker.upload_segment("20261002", &segment).await;
+        assert_ne!(no_capability_attempt, UploadOutcome::Acked);
+        assert!(peer_b.requests().is_empty());
+        assert_eq!(fs::read(&pages).unwrap(), original_bytes);
+
+        let credential_b = peer_b.credential();
+        let pairing_b = crate::private_link::compute_pairing_id(&credential_b.client_cert_pem);
+        crate::private_link::persist_credential(&config_root, &credential_b).unwrap();
+        crate::journal_mark::write_pairing_answer(&config_root, "rejected-mark").unwrap();
+        let owner_b_start = {
+            let upload = Arc::clone(&upload);
+            let config_root = config_root.clone();
+            let stream = config.stream.clone();
+            tokio::spawn(async move {
+                crate::run::start_linked_owner(
+                    upload,
+                    config_root.clone(),
+                    stream,
+                    crate::private_link::PrivateStateLock::acquire(&config_root).unwrap(),
+                    true,
+                    crate::private_link::OpenJournalAccess::default(),
+                    Arc::new(Notify::new()),
+                    None,
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!upload.has_capability());
+        assert!(worker.upload_segment("20261002", &segment).await != UploadOutcome::Acked);
+        assert!(peer_b.requests().is_empty());
+        assert_eq!(fs::read(&pages).unwrap(), original_bytes);
+
+        crate::journal_mark::write_pairing_answer(&config_root, &pairing_b).unwrap();
+        tokio::time::advance(crate::journal_mark::JOURNAL_MARK_RECHECK_INTERVAL).await;
+        let mut owner_b = None;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if upload.has_capability() {
+                owner_b = Some(owner_b_start.await.unwrap().unwrap());
+                break;
+            }
+        }
+        let owner_b = owner_b.expect("confirmed pairing B installs its capability");
+        assert!(crate::journal_mark::is_pairing_confirmed(
+            &config_root,
+            &pairing_b
+        ));
+        assert!(peer_b.requests().is_empty());
+        assert_eq!(fs::read(&pages).unwrap(), original_bytes);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&period_path).unwrap()).unwrap()["period_id"],
+            original_period_id
+        );
+
+        peer_b.enqueue_response(
+            200,
+            json!({
+                "status": "ok",
+                "segment": segment.file_name().unwrap().to_string_lossy(),
+                "file_descriptors": [{
+                    "submitted": crate::browser::PAGES_FILENAME,
+                    "written": crate::browser::PAGES_FILENAME,
+                    "size": original_bytes.len(),
+                    "sha256": sha256_file(&pages).unwrap(),
+                    "disposition": "written"
+                }]
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            worker.upload_segment("20261002", &segment).await,
+            UploadOutcome::Acked
+        );
+        let ingest = peer_b
+            .requests()
+            .into_iter()
+            .find(|request| request.path == "/app/devices/ingest")
+            .expect("pairing B receives the held browser period");
+        assert!(
+            ingest
+                .body
+                .windows(original_bytes.len())
+                .any(|window| window == original_bytes)
+        );
+        assert!(String::from_utf8_lossy(&ingest.body).contains("\"source\":\"browser\""));
+        assert!(!segment.exists());
+        assert!(
+            !peer_a
+                .requests()
+                .iter()
+                .any(|request| request.path == "/app/devices/ingest")
+        );
+
+        drop(custody);
+        let replay_time = chrono::Local
+            .timestamp_millis_opt(
+                at(1).timestamp_millis()
+                    + (3 * native_browser_frame::ACCEPTED_RETENTION_MS_MIN + 1) as i64,
+            )
+            .single()
+            .unwrap();
+        let mut recovered = crate::browser::custody::Custody::open(
+            crate::browser::custody::Layout::new(&config.base_dir),
+            replay_time,
+        )
+        .unwrap();
+        let replay = json!({
+            "type": "batch",
+            "destination_generation": "generation-after-restart",
+            "inst": "inst-a",
+            "batch_id": "0123456789abcdef0123456789abcdef",
+            "queued_at_ms": at(1).timestamp_millis() - 1000,
+            "records": [{
+                "t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
+                "blocks": [{"id": "b1", "text": "browser marker"}]
+            }]
+        });
+        assert!(matches!(
+            recovered.accept(&replay, replay_time).0,
+            crate::browser::custody::Outcome::Duplicate { .. }
+        ));
+
+        owner_b.shutdown().await.unwrap();
+        peer_a.shutdown().await;
+        peer_b.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_success_keeps_the_captured_ack_and_finishes_browser_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            stream: "desktop".to_owned(),
+            sync_max_retries: 1,
+            ..Config::default()
+        };
+        config.ensure_dirs().unwrap();
+        let peer_a = PrivateLinkPeer::start().await;
+        let peer_b = PrivateLinkPeer::start().await;
+        let session_a =
+            start_private_link_session(&config.config_dir, peer_a.credential(), "desktop")
+                .await
+                .unwrap();
+        let session_b = start_private_link_session(
+            &temp.path().join("config-b"),
+            peer_b.credential(),
+            "desktop",
+        )
+        .await
+        .unwrap();
+        let captured_writer = session_a.capability().writer();
+        let captured_identity = captured_writer.identity_key().to_owned();
+        let captured_pairing = captured_writer.pairing_id().to_owned();
+
+        let segment = browser_period(&temp);
+        let pages = segment.join(crate::browser::PAGES_FILENAME);
+        let bytes = fs::read(&pages).unwrap();
+        let response = json!({
+            "status": "ok",
+            "segment": segment.file_name().unwrap().to_string_lossy(),
+            "file_descriptors": [{
+                "submitted": crate::browser::PAGES_FILENAME,
+                "written": crate::browser::PAGES_FILENAME,
+                "size": bytes.len(),
+                "sha256": sha256_file(&pages).unwrap(),
+                "disposition": "written"
+            }]
+        });
+        let gate = Arc::new(Notify::new());
+        peer_a.enqueue_gated_response(200, response.to_string(), Arc::clone(&gate));
+
+        let custody = Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(&config.base_dir),
+                chrono::Local::now(),
+            )
+            .unwrap(),
+        ));
+        custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .evidence_fault = Some(crate::private_file::DurableWriteStage::Create);
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            Some(session_a.capability()),
+            clock.clone(),
+        ));
+        let worker = SyncWorker::new(
+            config,
+            Arc::clone(&client),
+            clock,
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+            Some(Arc::clone(&custody)),
+        );
+        let segment_path = segment.clone();
+        let upload = tokio::spawn(async move {
+            let mut worker = worker;
+            worker.upload_segment("20261002", &segment_path).await
+        });
+        peer_a.wait_for_requests(1).await;
+        client.install_capability(session_b.capability());
+        gate.notify_one();
+
+        assert_eq!(upload.await.unwrap(), UploadOutcome::Acked);
+        assert!(!client.is_revoked());
+        assert!(segment.exists());
+        assert_eq!(fs::read(&pages).unwrap(), bytes);
+        let ack = read_ack(&segment).unwrap();
+        assert_eq!(ack.identity_key, captured_identity);
+        assert_eq!(ack.pairing_id, captured_pairing);
+        custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .evidence_fault = None;
+        remove_confirmed_segment(&segment, Some(&custody)).unwrap();
+        assert!(!segment.exists());
+        assert!(peer_b.requests().is_empty());
+        session_a.shutdown().await.unwrap();
+        session_b.shutdown().await.unwrap();
+        peer_a.shutdown().await;
+        peer_b.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn browser_upload_reservations_release_on_failure_cancel_and_abort() {
+        use chrono::TimeZone;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            stream: "desktop".to_owned(),
+            sync_max_retries: 2,
+            sync_retry_delays: vec![30],
+            ..Config::default()
+        };
+        config.ensure_dirs().unwrap();
+        let at = |minute| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 10, 2, 10, minute, 0)
+                .earliest()
+                .unwrap()
+        };
+        let mut disk_custody = crate::browser::custody::Custody::open(
+            crate::browser::custody::Layout::new(&config.base_dir),
+            at(1),
+        )
+        .unwrap();
+        let (failed_segment, cancelled_segment, sending_segment) = {
+            let mut make_period = |id, minute, context: &str| {
+                let now = at(minute);
+                let batch = json!({
+                    "type": "batch",
+                    "destination_generation": "g1",
+                    "inst": "inst-a",
+                    "batch_id": format!("{id:032x}"),
+                    "queued_at_ms": now.timestamp_millis() - 1000,
+                    "records": [{
+                        "t": "segment_start", "ts": 1, "ctx": context, "inst": "inst-a",
+                        "blocks": [{"id": "b1", "text": context}]
+                    }]
+                });
+                assert!(matches!(
+                    disk_custody.accept(&batch, now).0,
+                    crate::browser::custody::Outcome::Accepted { .. }
+                ));
+                disk_custody.tick(at(((minute / 5) + 1) * 5));
+                let period_start_minute = if minute == 1 { minute } else { minute / 5 * 5 };
+                let period_length = if minute == 1 { 240 } else { 300 };
+                temp.path()
+                    .join("captures/20261002/_browser")
+                    .join(format!("10{period_start_minute:02}00_{period_length}"))
+            };
+            (
+                make_period(1, 1, "failed"),
+                make_period(2, 6, "cancelled"),
+                make_period(3, 11, "sending"),
+            )
+        };
+        drop(disk_custody);
+        let custody = Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(&config.base_dir),
+                at(12),
+            )
+            .unwrap(),
+        ));
+        let peer = PrivateLinkPeer::start().await;
+        let session = start_private_link_session(&config.config_dir, peer.credential(), "desktop")
+            .await
+            .unwrap();
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 0.0));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            Some(session.capability()),
+            clock.clone(),
+        ));
+        let mut worker = SyncWorker::new(
+            config.clone(),
+            Arc::clone(&client),
+            clock.clone(),
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+            Some(Arc::clone(&custody)),
+        );
+
+        peer.enqueue_response(400, b"{}".to_vec());
+        assert_ne!(
+            worker.upload_segment("20261002", &failed_segment).await,
+            UploadOutcome::Acked
+        );
+        assert!(
+            failed_segment
+                .join(crate::browser::PAGES_FILENAME)
+                .is_file()
+        );
+        assert!(
+            custody
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .reserve_upload(&failed_segment)
+        );
+        custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release_upload(&failed_segment);
+
+        peer.enqueue_response(500, b"{}".to_vec());
+        let cancel_client = Arc::new(UploadClient::new(
+            &config,
+            Some(session.capability()),
+            clock.clone(),
+        ));
+        worker.client = Arc::clone(&cancel_client);
+        assert!(
+            cancelled_segment
+                .join(crate::browser::PAGES_FILENAME)
+                .is_file(),
+            "expected {}, found {:?}",
+            cancelled_segment.display(),
+            collect_segments(&config.captures_dir())
+        );
+        let requests_before_cancel = peer.requests().len();
+        let cancelled_path = cancelled_segment.clone();
+        let cancelled =
+            tokio::spawn(async move { worker.upload_segment("20261002", &cancelled_path).await });
+        peer.wait_for_requests(requests_before_cancel + 1).await;
+        cancel_client.request_stop();
+        assert_ne!(cancelled.await.unwrap(), UploadOutcome::Acked);
+        assert!(
+            custody
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .reserve_upload(&cancelled_segment)
+        );
+        custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release_upload(&cancelled_segment);
+
+        let sending_bytes = fs::read(sending_segment.join(crate::browser::PAGES_FILENAME)).unwrap();
+        let response = json!({
+            "status": "ok",
+            "segment": sending_segment.file_name().unwrap().to_string_lossy(),
+            "file_descriptors": [{
+                "submitted": crate::browser::PAGES_FILENAME,
+                "written": crate::browser::PAGES_FILENAME,
+                "size": sending_bytes.len(),
+                "sha256": sha256_file(&sending_segment.join(crate::browser::PAGES_FILENAME)).unwrap(),
+                "disposition": "written"
+            }]
+        });
+        let gate = Arc::new(Notify::new());
+        peer.enqueue_gated_response(200, response.to_string(), Arc::clone(&gate));
+        let success_client = Arc::new(UploadClient::new(
+            &config,
+            Some(session.capability()),
+            clock.clone(),
+        ));
+        let success_worker = SyncWorker::new(
+            config.clone(),
+            success_client,
+            clock.clone(),
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+            Some(Arc::clone(&custody)),
+        );
+        let mut success_worker = success_worker;
+        let requests_before_success = peer.requests().len();
+        let sending_path = sending_segment.clone();
+        let upload = tokio::spawn(async move {
+            success_worker
+                .upload_segment("20261002", &sending_path)
+                .await
+        });
+        peer.wait_for_requests(requests_before_success + 1).await;
+        custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .discard_pending()
+            .unwrap();
+        assert!(sending_segment.exists());
+        assert_eq!(
+            fs::read(sending_segment.join(crate::browser::PAGES_FILENAME)).unwrap(),
+            sending_bytes
+        );
+        assert!(!failed_segment.exists());
+        assert!(!cancelled_segment.exists());
+        gate.notify_one();
+        assert_eq!(upload.await.unwrap(), UploadOutcome::Acked);
+        assert!(!sending_segment.exists());
+        assert!(
+            custody
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .reserve_upload(&sending_segment)
+        );
+        custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release_upload(&sending_segment);
+
+        let abort_temp = tempfile::tempdir().unwrap();
+        let aborted_segment = browser_period(&abort_temp);
+        let abort_custody = Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(abort_temp.path()),
+                at(12),
+            )
+            .unwrap(),
+        ));
+        let abort_bytes = fs::read(aborted_segment.join(crate::browser::PAGES_FILENAME)).unwrap();
+        let response = json!({
+            "status": "ok",
+            "segment": aborted_segment.file_name().unwrap().to_string_lossy(),
+            "file_descriptors": [{
+                "submitted": crate::browser::PAGES_FILENAME,
+                "written": crate::browser::PAGES_FILENAME,
+                "size": abort_bytes.len(),
+                "sha256": sha256_file(&aborted_segment.join(crate::browser::PAGES_FILENAME)).unwrap(),
+                "disposition": "written"
+            }]
+        });
+        let abort_gate = Arc::new(Notify::new());
+        peer.enqueue_gated_response(200, response.to_string(), Arc::clone(&abort_gate));
+        let abort_client = Arc::new(UploadClient::new(
+            &config,
+            Some(session.capability()),
+            clock,
+        ));
+        let mut abort_worker = SyncWorker::new(
+            config,
+            abort_client,
+            Arc::new(FixedClock {
+                wall: 0.0,
+                mono: 0.0,
+            }),
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+            Some(Arc::clone(&abort_custody)),
+        );
+        let aborted_path = aborted_segment.clone();
+        let requests_before_abort = peer.requests().len();
+        let abort =
+            tokio::spawn(
+                async move { abort_worker.upload_segment("20261002", &aborted_path).await },
+            );
+        peer.wait_for_requests(requests_before_abort + 1).await;
+        abort.abort();
+        assert!(abort.await.unwrap_err().is_cancelled());
+        assert!(aborted_segment.exists());
+        assert_eq!(
+            fs::read(aborted_segment.join(crate::browser::PAGES_FILENAME)).unwrap(),
+            abort_bytes
+        );
+        assert!(
+            abort_custody
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .reserve_upload(&aborted_segment)
+        );
+        abort_custody
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release_upload(&aborted_segment);
+        abort_gate.notify_one();
+
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     #[tokio::test]

@@ -1257,6 +1257,12 @@ impl LinkFacts {
         self.inner.association_epoch.load(Ordering::Acquire)
     }
 
+    pub(crate) fn publish_if_association_current(&self, fact: LinkFact, epoch: u64) -> bool {
+        static OPEN: AtomicBool = AtomicBool::new(false);
+        let generation = self.snapshot().dial_generation;
+        self.publish_with_source(fact, generation, false, Some((epoch, &OPEN)))
+    }
+
     pub(crate) fn metadata_owner_is_current(&self, epoch: u64) -> bool {
         let state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
         self.association_epoch() == epoch
@@ -1803,6 +1809,10 @@ pub(crate) struct PrivateLinkCapability {
 }
 
 impl PrivateLinkCapability {
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub(crate) fn facts(&self) -> LinkFacts {
         self.inner.opener.facts.clone()
     }

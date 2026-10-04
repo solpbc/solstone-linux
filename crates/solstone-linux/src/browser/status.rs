@@ -94,24 +94,7 @@ pub fn status_lines(base_dir: &Path, now_ms: i64) -> Vec<String> {
             }
         }
     }
-    lines.extend(retired_lines(&layout));
     lines
-}
-
-fn retired_lines(layout: &Layout) -> Vec<String> {
-    let retired = custody::retired_summary(layout);
-    if retired.periods == 0 {
-        return Vec::new();
-    }
-    vec![
-        format!(
-            "        {} of browser pages were kept for a journal this computer was paired with before.",
-            size(retired.bytes)
-        ),
-        "        they won't go into any journal, and they stay on this computer until you discard them:"
-            .to_owned(),
-        "        solstone-linux discard-browser-pages".to_owned(),
-    ]
 }
 
 /// What a browser install can and cannot do, for `doctor`.

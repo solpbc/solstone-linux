@@ -653,6 +653,9 @@ pub fn build_reply(receipt: &Value) -> Result<Value, &'static str> {
             .get("reason")
             .and_then(Value::as_str)
             .ok_or("invalid_receipt")?;
+        if LEGACY_PERMANENT_REASONS.contains(&reason) {
+            return Err("invalid_receipt");
+        }
         let class = if RETRYABLE_REASONS.contains(&reason) {
             "retryable"
         } else if PERMANENT_REASONS.contains(&reason) {

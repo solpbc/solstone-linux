@@ -54,10 +54,9 @@ struct Connected {
 }
 
 struct Shared {
-    custody: Mutex<Custody>,
-    /// The latest facts, refreshed after every change to custody, so a state renewal
-    /// never waits behind a disk write.
-    view: Mutex<Facts>,
+    custody: Arc<Mutex<Custody>>,
+    generation_fingerprint: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    live_generation: Mutex<Option<(String, String)>>,
     active: std::sync::atomic::AtomicUsize,
     layout: Layout,
     events: broadcast::Sender<Event>,
@@ -80,11 +79,37 @@ impl Shared {
     }
 
     fn facts(&self) -> Facts {
-        let mut facts = self.view.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if self.paused() && facts.generation.is_some() {
-            facts.capture = "paused";
+        let generation = self.current_generation();
+        self.custody
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .facts(generation.as_deref(), self.paused())
+    }
+
+    fn current_generation(&self) -> Option<String> {
+        let fingerprint = (self.generation_fingerprint)();
+        let Some(fingerprint) = fingerprint else {
+            *self
+                .live_generation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            return None;
+        };
+        let mut live = self
+            .live_generation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((current, generation)) = live.as_ref()
+            && current == &fingerprint
+        {
+            return Some(generation.clone());
         }
-        facts
+        let Ok(generation) = random_generation() else {
+            *live = None;
+            return None;
+        };
+        *live = Some((fingerprint, generation.clone()));
+        Some(generation)
     }
 
     /// Run `change` on custody off the async workers, then refresh the view.
@@ -96,7 +121,7 @@ impl Shared {
         tokio::task::spawn_blocking(move || {
             let mut custody = shared.custody.lock().unwrap_or_else(|e| e.into_inner());
             let result = change(&mut custody);
-            *shared.view.lock().unwrap_or_else(|e| e.into_inner()) = custody.facts(false);
+            custody.refresh_held();
             result
         })
         .await
@@ -125,6 +150,13 @@ impl Shared {
     }
 }
 
+fn random_generation() -> io::Result<String> {
+    let mut bytes = [0_u8; 16];
+    let mut random = fs::File::open("/dev/urandom")?;
+    std::io::Read::read_exact(&mut random, &mut bytes)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 pub struct ServerHandle {
     shared: Arc<Shared>,
     endpoint: PathBuf,
@@ -147,7 +179,8 @@ impl ServerHandle {
 pub struct ServerConfig {
     pub base_dir: PathBuf,
     pub endpoint: PathBuf,
-    pub journal: Option<String>,
+    pub custody: Arc<Mutex<Custody>>,
+    pub generation_fingerprint: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     pub dev_enabled: bool,
     pub paused: watch::Receiver<StateSnapshot>,
     pub on_period_finished: Arc<dyn Fn() + Send + Sync>,
@@ -157,15 +190,14 @@ pub struct ServerConfig {
 /// Open custody and publish the endpoint. Must be called inside a tokio runtime.
 pub fn start(config: ServerConfig) -> io::Result<ServerHandle> {
     let layout = Layout::new(&config.base_dir);
-    let custody = Custody::open(layout.clone(), config.journal.as_deref(), Local::now())?;
     let uid = rustix::process::geteuid().as_raw();
     let listener = bind(&config.endpoint, uid)?;
     let (events, _) = broadcast::channel(64);
-    let view = custody.facts(false);
     let shared = Arc::new(Shared {
-        view: Mutex::new(view),
+        custody: config.custody,
+        generation_fingerprint: config.generation_fingerprint,
+        live_generation: Mutex::new(None),
         active: std::sync::atomic::AtomicUsize::new(0),
-        custody: Mutex::new(custody),
         layout,
         events,
         paused: config.paused,
@@ -262,7 +294,7 @@ async fn clock_loop(shared: Arc<Shared>) {
                 if refresh {
                     custody.refresh_held();
                 }
-                new_period.zip(custody.generation().map(str::to_owned))
+                new_period
             })
             .await
         else {
@@ -272,7 +304,9 @@ async fn clock_loop(shared: Arc<Shared>) {
             let status = Arc::clone(&shared);
             let _ = tokio::task::spawn_blocking(move || status.write_status()).await;
         }
-        if let Some((period_id, generation)) = rotated {
+        if let Some(period_id) = rotated
+            && let Some(generation) = shared.current_generation()
+        {
             let _ = shared.events.send(Event::Boundary {
                 generation,
                 period_id,
@@ -344,6 +378,19 @@ impl Session {
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
     }
+
+    async fn send_local(&mut self, message: &Value) -> io::Result<()> {
+        let body = serde_json::to_vec(message).map_err(io::Error::other)?;
+        let mut frame = Vec::with_capacity(4 + body.len());
+        frame.extend_from_slice(&(body.len() as u32).to_ne_bytes());
+        frame.extend_from_slice(&body);
+        timeout(
+            Duration::from_millis(HANDSHAKE_MS_BUDGET),
+            self.stream.write_all(&frame),
+        )
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    }
 }
 
 pub fn state_message(kind: &str, facts: &Facts) -> Value {
@@ -379,11 +426,8 @@ struct Hello {
 
 /// The handshake: the host's `local_hello`, then the extension's `hello`, both within
 /// one budget. Anything unexpected closes the session without a reply.
-async fn handshake(shared: &Shared, session: &mut Session) -> Option<Hello> {
+async fn handshake(shared: &Shared, session: &mut Session, local: Vec<u8>) -> Option<Hello> {
     let deadline = Instant::now() + Duration::from_millis(HANDSHAKE_MS_BUDGET);
-    let local = tokio::time::timeout_at(deadline, session.next())
-        .await
-        .ok()??;
     if local.len() > LOCAL_HELLO_MAX {
         return None;
     }
@@ -438,7 +482,33 @@ async fn session(shared: Arc<Shared>, stream: UnixStream) {
         assembler: Assembler::new(Direction::HostToExtension),
         pending: Default::default(),
     };
-    let Some(hello) = handshake(&shared, &mut session).await else {
+    let Some(first) =
+        tokio::time::timeout(Duration::from_millis(HANDSHAKE_MS_BUDGET), session.next())
+            .await
+            .ok()
+            .flatten()
+    else {
+        return;
+    };
+    if serde_json::from_slice::<Value>(&first)
+        .ok()
+        .is_some_and(|message| message.get("type").and_then(Value::as_str) == Some("local_discard"))
+    {
+        let result = shared
+            .with_custody(|custody| custody.discard_pending())
+            .await
+            .and_then(|result| result);
+        shared.write_status();
+        let response = match result {
+            Ok(()) => json!({"type": "local_discard_result", "ok": true}),
+            Err(error) => {
+                json!({"type": "local_discard_result", "ok": false, "error": error.to_string()})
+            }
+        };
+        let _ = session.send_local(&response).await;
+        return;
+    }
+    let Some(hello) = handshake(&shared, &mut session, first).await else {
         return;
     };
     if session.assembler.retained() != 0 {
@@ -519,7 +589,11 @@ async fn run_session(
                     });
                     (shared.on_period_finished)();
                 }
-                session.send(&reply(&batch, outcome)?).await?;
+                let receipt_generation = shared
+                    .current_generation()
+                    .or_else(|| batch["destination_generation"].as_str().map(str::to_owned))
+                    .ok_or_else(|| io::Error::other("batch has no destination generation"))?;
+                session.send(&reply(&batch, outcome, &receipt_generation)?).await?;
                 session.send(&shared.state_message("state", &shared.facts())).await?;
             }
             _ = renewal.tick() => {
@@ -547,8 +621,9 @@ async fn run_session(
     }
 }
 
-fn reply(ids: &Value, outcome: Outcome) -> io::Result<Value> {
+fn reply(ids: &Value, outcome: Outcome, generation: &str) -> io::Result<Value> {
     let mut receipt = ids.clone();
+    receipt["destination_generation"] = json!(generation);
     match outcome {
         Outcome::Accepted { period_id } => {
             receipt["result"] = json!("accepted");
@@ -590,6 +665,7 @@ mod tests {
         _temp: tempfile::TempDir,
         endpoint: PathBuf,
         pause: watch::Sender<StateSnapshot>,
+        fingerprint: Arc<Mutex<Option<String>>>,
         handle: ServerHandle,
     }
 
@@ -598,10 +674,22 @@ mod tests {
         let endpoint = temp.path().join("run/solstone-linux/browser-host.sock");
         fs::create_dir_all(endpoint.parent().unwrap().parent().unwrap()).unwrap();
         let (pause, paused) = watch::channel(snapshot(false));
+        let base_dir = temp.path().join("data");
+        let custody = Arc::new(Mutex::new(
+            Custody::open(Layout::new(&base_dir), Local::now()).unwrap(),
+        ));
+        let fingerprint = Arc::new(Mutex::new(journal.map(str::to_owned)));
+        let fingerprint_source = Arc::clone(&fingerprint);
         let handle = start(ServerConfig {
-            base_dir: temp.path().join("data"),
+            base_dir,
             endpoint: endpoint.clone(),
-            journal: journal.map(str::to_owned),
+            custody,
+            generation_fingerprint: Arc::new(move || {
+                fingerprint_source
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            }),
             dev_enabled,
             paused,
             on_period_finished: Arc::new(|| {}),
@@ -614,6 +702,7 @@ mod tests {
             _temp: temp,
             endpoint,
             pause,
+            fingerprint,
             handle,
         }
     }
@@ -683,9 +772,13 @@ mod tests {
         frame(&mut stream, &bytes).await;
         let first = read_type(&mut stream, "accepted").await;
         assert_eq!(first["result"], "accepted");
-        frame(&mut stream, &bytes).await;
+        assert_eq!(first["destination_generation"], generation);
+        let mut replay_batch = batch.clone();
+        replay_batch["destination_generation"] = json!("older-extension-generation");
+        frame(&mut stream, &encode(&replay_batch).unwrap()).await;
         let replay = read_type(&mut stream, "accepted").await;
         assert_eq!(replay["result"], "duplicate");
+        assert_eq!(replay["destination_generation"], generation);
         assert_eq!(replay["period_id"], first["period_id"]);
 
         rig.pause.send_replace(snapshot(true));
@@ -709,7 +802,124 @@ mod tests {
         let ack = read(&mut stream).await;
         assert_eq!(ack["capture"], "not_paired");
         assert_eq!(ack["destination_generation"], Value::Null);
+        assert_eq!(ack["period_id"], Value::Null);
+        let batch = json!({
+            "type": "batch", "destination_generation": "extension-generation",
+            "inst": "inst-a", "batch_id": "0123456789abcdef0123456789abcdef",
+            "queued_at_ms": Local::now().timestamp_millis(),
+            "records": [{"t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
+                         "blocks": [{"id": "b", "text": "held while unpaired"}]}],
+        });
+        frame(&mut stream, &encode(&batch).unwrap()).await;
+        let accepted = read_type(&mut stream, "accepted").await;
+        assert_eq!(accepted["result"], "accepted");
+        assert_eq!(accepted["destination_generation"], "extension-generation");
         rig.handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_generation_tracks_only_the_loaded_credential_fingerprint() {
+        let rig = rig(Some("journal-a"), false);
+        let shared = &rig.handle.shared;
+        let first = shared.current_generation().unwrap();
+        assert_eq!(shared.current_generation().as_deref(), Some(first.as_str()));
+
+        *rig.fingerprint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("journal-b".to_owned());
+        let second = shared.current_generation().unwrap();
+        assert_ne!(first, second);
+
+        *rig.fingerprint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        assert_eq!(shared.current_generation(), None);
+        let facts = shared.facts();
+        assert_eq!(facts.capture, "not_paired");
+        assert_eq!(facts.generation, None);
+        assert_eq!(facts.period_id, None);
+
+        *rig.fingerprint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("journal-c".to_owned());
+        let third = shared.current_generation().unwrap();
+        assert_ne!(second, third);
+        assert!(!shared.layout.root.join("generation.json").exists());
+        rig.handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_discard_uses_the_existing_socket_without_extension_handshake() {
+        let rig = rig(None, false);
+        let pending_pages = {
+            let mut custody = rig
+                .handle
+                .shared
+                .custody
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = Local::now();
+            let batch = json!({
+                "type": "batch", "destination_generation": "g1", "inst": "inst-a",
+                "batch_id": "0123456789abcdef0123456789abcdef",
+                "queued_at_ms": now.timestamp_millis(),
+                "records": [{"t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
+                             "blocks": [{"id": "b", "text": "waiting"}]}],
+            });
+            let period_id = match custody.accept(&batch, now).0 {
+                Outcome::Accepted { period_id } => period_id,
+                outcome => panic!("expected accepted batch, got {outcome:?}"),
+            };
+            rig.handle
+                .shared
+                .layout
+                .root
+                .join("open")
+                .join(period_id)
+                .join(crate::browser::PAGES_FILENAME)
+        };
+        let mut stream = UnixStream::connect(&rig.endpoint).await.unwrap();
+        frame(&mut stream, br#"{"type":"local_discard"}"#).await;
+        let reply = read(&mut stream).await;
+        assert_eq!(reply["type"], "local_discard_result");
+        assert_eq!(reply["ok"], true);
+        let facts = rig.handle.shared.facts();
+        assert!(facts.held_bytes > 0);
+        assert!(!pending_pages.exists());
+        rig.handle.shutdown().await;
+    }
+
+    #[test]
+    fn built_receipts_decode_and_legacy_reasons_are_never_buildable() {
+        use native_browser_frame::{DecodeOutcome, Direction, decode};
+
+        let ids = json!({
+            "destination_generation":"g1",
+            "inst":"inst-a",
+            "batch_id":"0123456789abcdef0123456789abcdef"
+        });
+        for outcome in [
+            Outcome::Accepted {
+                period_id: "period-a".into(),
+            },
+            Outcome::Duplicate {
+                period_id: "period-a".into(),
+            },
+            Outcome::Rejected {
+                reason: "age_policy",
+            },
+        ] {
+            let receipt = reply(&ids, outcome, "live-generation").unwrap();
+            let encoded = encode(&receipt).unwrap();
+            assert!(matches!(
+                decode(&encoded, Direction::HostToExtension),
+                DecodeOutcome::Accept(_)
+            ));
+            assert_eq!(receipt["destination_generation"], "live-generation");
+        }
+        for reason in ["stale_generation", "expired_unaccepted"] {
+            assert!(reply(&ids, Outcome::Rejected { reason }, "g1").is_err());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

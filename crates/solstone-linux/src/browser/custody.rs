@@ -8,22 +8,17 @@
 //! - Text is kept in five-minute periods, one `browser_pages.jsonl` each. A finished
 //!   period becomes a capture segment under the `_browser` stream folder, and the sync
 //!   service delivers it as the `browser` source.
-//! - Everything is stamped with a destination generation, which belongs to exactly one
-//!   journal: the paired instance plus its CA chain. When the app finds itself paired
-//!   to a different journal, everything held for the old one is retired before
-//!   anything else runs. Retired text is kept and shown, never delivered or counted,
-//!   until the owner discards it.
+//! - Accepted pages stay here across pairing changes. The extension re-stamps pending
+//!   batches when a confirmed destination changes; generation is not an admission key.
 //! - One bound covers everything held: past it, new batches are refused as
 //!   `queue_full` and the extension is told custody is full.
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 use native_browser_frame::{
-    ACCEPTED_RETENTION_MS_MIN, FILE_MAX, FUTURE_SKEW_MS_MAX, OUTBOX_AGE_MS_MAX, SPOOL_BYTES_MAX,
-    canonical_stringify,
+    ACCEPTED_RETENTION_MS_MIN, FILE_MAX, FUTURE_SKEW_MS_MAX, SPOOL_BYTES_MAX, canonical_stringify,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
@@ -32,11 +27,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Sidecar naming the period and its generation. Dot files are never uploaded.
+/// Sidecar naming the period. Dot files are never uploaded.
 pub const PERIOD_FILE: &str = ".browser_period.json";
 /// The receipts that cover the period's payload, for duplicate answers.
 pub const RECEIPTS_FILE: &str = ".browser_receipts.jsonl";
-const GENERATION_FILE: &str = "generation.json";
+pub const EVIDENCE_FILE: &str = "batch-evidence.jsonl";
 const PERIOD_MINUTES: u32 = 5;
 /// The longest a finished period can be, and so the ceiling of its segment length.
 const PERIOD_MS: u64 = PERIOD_MINUTES as u64 * 60 * 1000;
@@ -57,45 +52,14 @@ impl Layout {
     fn open(&self) -> PathBuf {
         self.root.join("open")
     }
-    pub fn retired(&self) -> PathBuf {
-        self.root.join("retired")
+    pub fn evidence(&self) -> PathBuf {
+        self.root.join(EVIDENCE_FILE)
     }
-    fn generation(&self) -> PathBuf {
-        self.root.join(GENERATION_FILE)
-    }
-}
-
-/// The strict identity of a journal: the exact instance and its CA chain, with PEM
-/// formatting differences removed. Never instance alone.
-pub fn journal_identity(instance_id: &str, ca_chain_pem: &[String]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"solstone-browser-journal-v1\0");
-    digest.update(instance_id.as_bytes());
-    // One separator per certificate, however the chain's PEM text is split.
-    for line in ca_chain_pem
-        .iter()
-        .flat_map(|pem| pem.lines())
-        .map(str::trim)
-    {
-        if line.starts_with("-----BEGIN") {
-            digest.update(b"\0");
-        } else if !line.is_empty() && !line.starts_with("-----") {
-            digest.update(line.as_bytes());
-        }
-    }
-    format!("{:x}", digest.finalize())
-}
-
-#[derive(Serialize, Deserialize)]
-struct GenerationRecord {
-    journal: String,
-    generation: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PeriodRecord {
     period_id: String,
-    generation: String,
     created_at_ms: u64,
 }
 
@@ -105,6 +69,20 @@ struct ReceiptLine {
     batch_id: String,
     end: u64,
     at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceKind {
+    Accepted,
+    Removed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct EvidenceLine {
+    inst: String,
+    batch_id: String,
+    kind: EvidenceKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,42 +144,58 @@ pub struct Facts {
 
 pub struct Custody {
     layout: Layout,
-    generation: Option<String>,
     period: Option<Period>,
     receipts: HashMap<(String, String), Receipt>,
+    evidence: HashMap<(String, String), EvidenceKind>,
+    evidence_lines: Vec<EvidenceLine>,
+    reserved_uploads: HashSet<PathBuf>,
     /// Finished periods that could not yet be turned into segments; retried each tick.
     unfinished: Vec<(Period, DateTime<Local>)>,
     held_bytes: u64,
     bound: u64,
+    #[cfg(test)]
+    pub(crate) evidence_fault: Option<crate::private_file::DurableWriteStage>,
+    #[cfg(test)]
+    discard_remove_fault: Option<PathBuf>,
 }
 
 impl Custody {
-    /// Open custody for the journal this app is paired with (`None` when unpaired).
-    /// Retirement happens here, before the sync service can deliver anything.
-    pub fn open(layout: Layout, journal: Option<&str>, now: DateTime<Local>) -> io::Result<Self> {
+    /// Recover all pending browser pages without binding them to a journal.
+    pub fn open(layout: Layout, now: DateTime<Local>) -> io::Result<Self> {
         create_private_dir(&layout.root)?;
         create_private_dir(&layout.open())?;
-        create_private_dir(&layout.retired())?;
-        let generation = match journal {
-            None => None,
-            Some(journal) => Some(generation_for(&layout, journal)?),
-        };
+        // Legacy state is deliberately neither parsed nor imported. Failure to remove
+        // it cannot prevent recovery of the current pending store.
+        if let Err(error) = remove_dir_all_if_present(&layout.root.join("retired")) {
+            tracing::warn!(%error, "Could not remove legacy retired browser pages");
+        }
+        if let Err(error) = fs::remove_file(layout.root.join("generation.json"))
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "Could not remove legacy browser generation file");
+        }
         let mut custody = Self {
             layout,
-            generation,
             period: None,
             receipts: HashMap::new(),
+            evidence: HashMap::new(),
+            evidence_lines: Vec::new(),
+            reserved_uploads: HashSet::new(),
             unfinished: Vec::new(),
             held_bytes: 0,
             bound: SPOOL_BYTES_MAX as u64,
+            #[cfg(test)]
+            evidence_fault: None,
+            #[cfg(test)]
+            discard_remove_fault: None,
         };
-        if custody.generation.is_some() {
-            custody.retire_foreign(now);
-            custody.recover_open(now);
-            custody.load_finalized_receipts();
-            if custody.period.is_none() {
-                custody.period = Some(new_period(&now));
-            }
+        custody.load_evidence()?;
+        custody.finish_tombstoned_unlinks()?;
+        custody.recover_open(now);
+        custody.load_finalized_receipts();
+        custody.reconcile_evidence()?;
+        if custody.period.is_none() {
+            custody.period = Some(new_period(&now));
         }
         custody.refresh_held();
         Ok(custody)
@@ -213,28 +207,24 @@ impl Custody {
         self
     }
 
-    pub fn generation(&self) -> Option<&str> {
-        self.generation.as_deref()
-    }
-
     pub fn period_id(&self) -> Option<&str> {
         self.period.as_ref().map(|period| period.id.as_str())
     }
 
-    pub fn facts(&self, paused: bool) -> Facts {
+    pub fn facts(&self, generation: Option<&str>, paused: bool) -> Facts {
         let held = self.held_bytes > 0;
-        let Some(generation) = &self.generation else {
+        let full = self.held_bytes >= self.bound;
+        let Some(generation) = generation else {
             return Facts {
                 capture: "not_paired",
                 delivery: if held { "kept_locally" } else { "unknown" },
-                failure: None,
+                failure: full.then_some("queue_full"),
                 generation: None,
                 period_id: None,
-                full: false,
+                full,
                 held_bytes: self.held_bytes,
             };
         };
-        let full = self.held_bytes >= self.bound;
         Facts {
             capture: if paused {
                 "paused"
@@ -245,7 +235,7 @@ impl Custody {
             },
             delivery: if held { "kept_locally" } else { "idle" },
             failure: full.then_some("queue_full"),
-            generation: Some(generation.clone()),
+            generation: Some(generation.to_owned()),
             period_id: self.period_id().map(str::to_owned),
             full,
             held_bytes: self.held_bytes,
@@ -255,7 +245,6 @@ impl Custody {
     /// Start a new period when the five-minute local-clock bucket changes. Returns the
     /// new period id, which every connected browser must hear as a `boundary`.
     pub fn tick(&mut self, now: DateTime<Local>) -> Option<String> {
-        self.generation.as_ref()?;
         if !self.unfinished.is_empty() {
             let pending = std::mem::take(&mut self.unfinished);
             for (period, end) in pending {
@@ -295,24 +284,21 @@ impl Custody {
     /// had to start a new period.
     pub fn accept(&mut self, batch: &Value, now: DateTime<Local>) -> (Outcome, Option<String>) {
         let field = |name: &str| batch.get(name).and_then(Value::as_str).unwrap_or_default();
-        let (generation, inst, batch_id) = (
-            field("destination_generation"),
-            field("inst"),
-            field("batch_id"),
-        );
+        let (inst, batch_id) = (field("inst"), field("batch_id"));
         let key = (inst.to_owned(), batch_id.to_owned());
-        if self.generation.as_deref() == Some(generation)
-            && let Some(receipt) = self.receipts.get(&key)
-        {
+        if self.evidence.contains_key(&key) || self.receipts.contains_key(&key) {
             return (
                 Outcome::Duplicate {
-                    period_id: receipt.period_id.clone(),
+                    period_id: self
+                        .receipts
+                        .get(&key)
+                        .map(|receipt| receipt.period_id.clone())
+                        .or_else(|| self.period_for_identity(&key))
+                        .or_else(|| self.period_id().map(str::to_owned))
+                        .unwrap_or_default(),
                 },
                 None,
             );
-        }
-        if self.generation.as_deref() != Some(generation) || self.period.is_none() {
-            return (reject("stale_generation"), None);
         }
         let now_ms = now_ms(&now);
         let queued_at = batch
@@ -322,12 +308,12 @@ impl Custody {
         if queued_at > now_ms.saturating_add(FUTURE_SKEW_MS_MAX) {
             return (reject("age_policy"), None);
         }
-        if now_ms.saturating_sub(queued_at) >= OUTBOX_AGE_MS_MAX {
-            return (reject("expired_unaccepted"), None);
-        }
         let Some(records) = batch.get("records").and_then(Value::as_array) else {
             return (reject("malformed"), None);
         };
+        if records.is_empty() {
+            return (reject("malformed"), None);
+        }
         let mut payload = String::new();
         for record in records {
             if canonical_stringify(record, &mut payload).is_err() {
@@ -337,7 +323,7 @@ impl Custody {
         }
         let bytes = payload.len() as u64;
         if bytes > FILE_MAX as u64 {
-            return (reject("resource_exhausted"), None);
+            return (reject("oversize"), None);
         }
         let mut rotated = None;
         if self.period.as_ref().is_some_and(|period| {
@@ -355,18 +341,55 @@ impl Custody {
                 .to_owned(),
         );
         let snapshot = first.get("t").and_then(Value::as_str) == Some("segment_start");
-        let period = self
-            .period
-            .as_ref()
-            .expect("a generation always has a period");
+        if self.period.is_none() {
+            self.period = Some(new_period(&now));
+        }
+        let period = self.period.as_ref().expect("period initialized");
         if !snapshot && !period.contexts.contains(&context) {
             return (reject("snapshot_required"), rotated);
         }
-        if self.held_bytes + bytes > self.bound {
+        let evidence_line = EvidenceLine {
+            inst: inst.to_owned(),
+            batch_id: batch_id.to_owned(),
+            kind: EvidenceKind::Accepted,
+        };
+        let evidence_growth =
+            serde_json::to_vec(&evidence_line).map_or(0, |line| line.len() as u64 + 1);
+        let receipt_growth = self
+            .period
+            .as_ref()
+            .and_then(|period| {
+                serde_json::to_vec(&ReceiptLine {
+                    inst: inst.to_owned(),
+                    batch_id: batch_id.to_owned(),
+                    end: period.committed + bytes,
+                    at_ms: now_ms,
+                })
+                .ok()
+            })
+            .map_or(0, |line| line.len() as u64 + 1);
+        let period_growth = self.period.as_ref().map_or(0, |period| {
+            if period.has_dir {
+                0
+            } else {
+                serde_json::to_vec(&PeriodRecord {
+                    period_id: period.id.clone(),
+                    created_at_ms: period.created_at_ms,
+                })
+                .map_or(0, |line| line.len() as u64)
+            }
+        });
+        if self.held_bytes + bytes + evidence_growth + receipt_growth + period_growth > self.bound {
             return (reject("queue_full"), rotated);
         }
         match self.commit(&payload, inst, batch_id, now_ms) {
             Ok(period_id) => {
+                if let Err(error) = self.write_evidence(std::slice::from_ref(&evidence_line), false)
+                {
+                    tracing::warn!(%error, "Could not record a browser batch identity");
+                    self.evidence.insert(key.clone(), EvidenceKind::Accepted);
+                    self.evidence_lines.push(evidence_line.clone());
+                }
                 let period = self.period.as_mut().expect("committed into a period");
                 if snapshot {
                     period.contexts.insert(context);
@@ -378,12 +401,12 @@ impl Custody {
                         at_ms: now_ms,
                     },
                 );
-                self.held_bytes += bytes;
+                self.refresh_held();
                 (Outcome::Accepted { period_id }, rotated)
             }
             Err(error) => {
                 tracing::warn!(%error, "Could not keep a browser batch");
-                (reject("resource_exhausted"), rotated)
+                (reject("queue_full"), rotated)
             }
         }
     }
@@ -399,7 +422,6 @@ impl Custody {
         batch_id: &str,
         at_ms: u64,
     ) -> io::Result<String> {
-        let generation = self.generation.clone().expect("commit needs a generation");
         let open_root = self.layout.open();
         let period = self.period.as_mut().expect("commit needs a period");
         let directory = open_root.join(&period.id);
@@ -410,7 +432,6 @@ impl Custody {
                 &directory.join(PERIOD_FILE),
                 &serde_json::to_vec(&PeriodRecord {
                     period_id: period.id.clone(),
-                    generation,
                     created_at_ms: period.created_at_ms,
                 })
                 .map_err(io::Error::other)?,
@@ -470,82 +491,12 @@ impl Custody {
         )
     }
 
-    /// Move everything held for any other journal out of reach of delivery. Each item
-    /// is handled on its own: one that cannot be moved now stays where it is, and the
-    /// sync service still never delivers it, because it is not this generation's.
-    fn retire_foreign(&mut self, now: DateTime<Local>) {
-        let current = self.generation.clone().expect("retire needs a generation");
-        for directory in sorted_dirs(&self.layout.open()) {
-            let record = read_period(&directory);
-            if record
-                .as_ref()
-                .is_some_and(|record| record.generation == current)
-            {
-                continue;
-            }
-            let label = record
-                .as_ref()
-                .map_or("unknown", |record| record.generation.as_str());
-            let result = (|| -> io::Result<()> {
-                if truncate_to_receipts(&directory)? == 0 {
-                    return remove_dir_all_if_present(&directory);
-                }
-                let start_ms = record
-                    .as_ref()
-                    .map_or_else(|| now_ms(&now), |r| r.created_at_ms);
-                let end_ms = last_accepted_ms(&directory)
-                    .or_else(|| modified_ms(&directory.join(super::PAGES_FILENAME)))
-                    .unwrap_or(start_ms);
-                let retired = self.layout.retired().join(safe_label(label));
-                move_period(
-                    &directory,
-                    |day| retired.join(day),
-                    start_ms,
-                    end_ms.max(start_ms),
-                )
-            })();
-            if let Err(error) = result {
-                tracing::warn!(%error, "Could not retire an open browser period");
-            }
-        }
-        for segment in browser_segments(&self.layout.captures) {
-            let generation = read_period(&segment).map(|record| record.generation);
-            if generation.as_deref() == Some(current.as_str()) {
-                continue;
-            }
-            let (Some(key), Some(day)) = (
-                segment.file_name(),
-                segment
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::file_name),
-            ) else {
-                continue;
-            };
-            let parent = self
-                .layout
-                .retired()
-                .join(safe_label(generation.as_deref().unwrap_or("unknown")))
-                .join(day);
-            let result = fs::create_dir_all(&parent)
-                .and_then(|()| fs::rename(&segment, parent.join(key)))
-                .and_then(|()| sync_dir(&parent));
-            if let Err(error) = result {
-                tracing::warn!(%error, "Could not retire a browser period");
-            }
-        }
-    }
-
     fn recover_open(&mut self, now: DateTime<Local>) {
-        let current = self.generation.clone().expect("recover needs a generation");
         let bucket = Bucket::of(&now);
         for directory in sorted_dirs(&self.layout.open()) {
             let Some(record) = read_period(&directory) else {
                 continue;
             };
-            if record.generation != current {
-                continue;
-            }
             let committed = match truncate_to_receipts(&directory) {
                 Ok(committed) => committed,
                 Err(error) => {
@@ -595,14 +546,10 @@ impl Custody {
     }
 
     fn load_finalized_receipts(&mut self) {
-        let current = self.generation.clone();
         for segment in browser_segments(&self.layout.captures) {
             let Some(record) = read_period(&segment) else {
                 continue;
             };
-            if Some(&record.generation) != current.as_ref() {
-                continue;
-            }
             for line in read_receipts(&segment) {
                 self.receipts.insert(
                     (line.inst, line.batch_id),
@@ -619,8 +566,9 @@ impl Custody {
         // Keep receipts of the open period, and finished ones for at least the
         // contract's retention, so a replay after a lost reply is still a duplicate.
         let open = self.period_id().map(str::to_owned);
-        self.receipts.retain(|_, receipt| {
-            Some(&receipt.period_id) == open.as_ref()
+        self.receipts.retain(|key, receipt| {
+            self.evidence.get(key) == Some(&EvidenceKind::Removed)
+                || Some(&receipt.period_id) == open.as_ref()
                 || now_ms.saturating_sub(receipt.at_ms) < 3 * ACCEPTED_RETENTION_MS_MIN
         });
     }
@@ -630,82 +578,229 @@ impl Custody {
     pub fn refresh_held(&mut self) {
         self.held_bytes = held_bytes(&self.layout);
     }
+
+    fn period_for_identity(&self, key: &(String, String)) -> Option<String> {
+        sorted_dirs(&self.layout.open())
+            .into_iter()
+            .chain(browser_segments(&self.layout.captures))
+            .find_map(|directory| {
+                read_receipts(&directory)
+                    .iter()
+                    .any(|receipt| (&receipt.inst, &receipt.batch_id) == (&key.0, &key.1))
+                    .then(|| read_period(&directory).map(|record| record.period_id))
+                    .flatten()
+            })
+    }
+
+    fn load_evidence(&mut self) -> io::Result<()> {
+        let path = self.layout.evidence();
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if line.last() != Some(&b'\n') {
+                break;
+            }
+            let record: EvidenceLine = serde_json::from_slice(&line[..line.len() - 1])
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let key = (record.inst.clone(), record.batch_id.clone());
+            self.evidence.insert(key, record.kind);
+            self.evidence_lines.push(record);
+        }
+        Ok(())
+    }
+
+    fn write_evidence(&mut self, lines: &[EvidenceLine], removal: bool) -> io::Result<()> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let mut next = self.evidence_lines.clone();
+        next.extend_from_slice(lines);
+        let mut bytes = Vec::new();
+        for line in &next {
+            serde_json::to_writer(&mut bytes, line).map_err(io::Error::other)?;
+            bytes.push(b'\n');
+        }
+        let result = if removal {
+            #[cfg(test)]
+            {
+                let write = if let Some(stage) = self.evidence_fault {
+                    crate::private_file::atomic_write_bytes_with_fault(
+                        &self.layout.evidence(),
+                        &bytes,
+                        &EvidenceWriteFault(stage),
+                    )
+                } else {
+                    crate::private_file::atomic_write_bytes_with_fault(
+                        &self.layout.evidence(),
+                        &bytes,
+                        &crate::private_file::NoWriteFault,
+                    )
+                };
+                write.map_err(io::Error::other)
+            }
+            #[cfg(not(test))]
+            {
+                crate::private_file::atomic_write_bytes_with_fault(
+                    &self.layout.evidence(),
+                    &bytes,
+                    &crate::private_file::NoWriteFault,
+                )
+                .map_err(io::Error::other)
+            }
+        } else {
+            crate::private_file::atomic_write_bytes(&self.layout.evidence(), &bytes)
+                .map_err(io::Error::other)
+        };
+        result?;
+        for line in lines {
+            self.evidence
+                .insert((line.inst.clone(), line.batch_id.clone()), line.kind);
+        }
+        self.evidence_lines = next;
+        Ok(())
+    }
+
+    fn identities_in(&self, directory: &Path) -> Vec<EvidenceLine> {
+        read_receipts(directory)
+            .into_iter()
+            .map(|receipt| EvidenceLine {
+                inst: receipt.inst,
+                batch_id: receipt.batch_id,
+                kind: EvidenceKind::Removed,
+            })
+            .filter(|line| {
+                self.evidence
+                    .get(&(line.inst.clone(), line.batch_id.clone()))
+                    != Some(&EvidenceKind::Removed)
+            })
+            .collect()
+    }
+
+    fn tombstone_directory(&mut self, directory: &Path) -> io::Result<()> {
+        let identities = self.identities_in(directory);
+        self.write_evidence(&identities, true)
+    }
+
+    fn remove_discard_directory(&self, directory: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if self.discard_remove_fault.as_deref() == Some(directory) {
+            return Err(io::Error::other("injected browser directory removal fault"));
+        }
+        remove_tombstoned_directory(directory)
+    }
+
+    /// Reserve a finalized browser segment while sync reads and uploads it.
+    pub fn reserve_upload(&mut self, path: &Path) -> bool {
+        self.reserved_uploads.insert(path.to_path_buf())
+    }
+
+    pub fn release_upload(&mut self, path: &Path) {
+        self.reserved_uploads.remove(path);
+    }
+
+    pub fn remove_confirmed_segment(&mut self, path: &Path) -> io::Result<()> {
+        self.tombstone_directory(path)
+    }
+
+    pub fn discard_pending(&mut self) -> io::Result<()> {
+        for directory in sorted_dirs(&self.layout.open())
+            .into_iter()
+            .chain(browser_segments(&self.layout.captures))
+        {
+            if self.reserved_uploads.contains(&directory) {
+                continue;
+            }
+            if let Err(error) = self.tombstone_directory(&directory) {
+                self.refresh_held();
+                return Err(error);
+            }
+            if let Err(error) = self.remove_discard_directory(&directory) {
+                self.refresh_held();
+                return Err(error);
+            }
+            if self
+                .period
+                .as_ref()
+                .is_some_and(|period| self.layout.open().join(&period.id) == directory)
+            {
+                self.period = None;
+            }
+            self.unfinished
+                .retain(|(period, _)| self.layout.open().join(&period.id) != directory);
+        }
+        self.period = Some(new_period(&Local::now()));
+        self.refresh_held();
+        Ok(())
+    }
+
+    fn finish_tombstoned_unlinks(&self) -> io::Result<()> {
+        for directory in sorted_dirs(&self.layout.open())
+            .into_iter()
+            .chain(browser_segments(&self.layout.captures))
+        {
+            let receipts = read_receipts(&directory);
+            let tombstoned = !receipts.is_empty()
+                && receipts.iter().all(|receipt| {
+                    self.evidence
+                        .get(&(receipt.inst.clone(), receipt.batch_id.clone()))
+                        == Some(&EvidenceKind::Removed)
+                });
+            let empty = fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none());
+            if tombstoned || empty {
+                remove_tombstoned_directory(&directory)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_evidence(&mut self) -> io::Result<()> {
+        let mut found = HashSet::new();
+        for directory in sorted_dirs(&self.layout.open())
+            .into_iter()
+            .chain(browser_segments(&self.layout.captures))
+        {
+            for receipt in read_receipts(&directory) {
+                let key = (receipt.inst.clone(), receipt.batch_id.clone());
+                found.insert(key.clone());
+                if !self.evidence.contains_key(&key) {
+                    self.write_evidence(
+                        &[EvidenceLine {
+                            inst: receipt.inst,
+                            batch_id: receipt.batch_id,
+                            kind: EvidenceKind::Accepted,
+                        }],
+                        false,
+                    )?;
+                }
+            }
+        }
+        if self
+            .evidence
+            .iter()
+            .any(|(key, kind)| *kind == EvidenceKind::Accepted && !found.contains(key))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "accepted browser identity has no pending payload or removal tombstone",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub fn held_bytes(layout: &Layout) -> u64 {
-    let open: u64 = sorted_dirs(&layout.open())
-        .iter()
-        .map(|directory| file_len(&directory.join(super::PAGES_FILENAME)))
-        .sum();
-    let finished: u64 = browser_segments(&layout.captures)
-        .iter()
-        .map(|segment| file_len(&segment.join(super::PAGES_FILENAME)))
-        .sum();
-    open + finished
-}
-
-/// The generation the sync service may deliver browser periods for: the recorded
-/// generation, but only while the paired journal is still the one it belongs to.
-pub fn deliverable_generation(layout: &Layout, journal: Option<&str>) -> Option<String> {
-    let record: GenerationRecord =
-        serde_json::from_slice(&fs::read(layout.generation()).ok()?).ok()?;
-    (Some(record.journal.as_str()) == journal).then_some(record.generation)
-}
-
-/// The generation a finished browser period was accepted under.
-pub fn segment_generation(segment_dir: &Path) -> Option<String> {
-    read_period(segment_dir).map(|record| record.generation)
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RetiredSummary {
-    pub periods: usize,
-    pub bytes: u64,
-}
-
-pub fn retired_summary(layout: &Layout) -> RetiredSummary {
-    let mut summary = RetiredSummary::default();
-    for generation in sorted_dirs(&layout.retired()) {
-        for day in sorted_dirs(&generation) {
-            for period in sorted_dirs(&day) {
-                summary.periods += 1;
-                summary.bytes += file_len(&period.join(super::PAGES_FILENAME));
-            }
-        }
-    }
-    summary
-}
-
-/// Discard browser text kept for a journal this computer is no longer paired with.
-/// Nothing held for the current journal is touched.
-pub fn discard_retired(layout: &Layout) -> io::Result<RetiredSummary> {
-    let summary = retired_summary(layout);
-    for generation in sorted_dirs(&layout.retired()) {
-        fs::remove_dir_all(&generation)?;
-    }
-    if layout.retired().exists() {
-        sync_dir(&layout.retired())?;
-    }
-    Ok(summary)
-}
-
-fn generation_for(layout: &Layout, journal: &str) -> io::Result<String> {
-    if let Ok(bytes) = fs::read(layout.generation())
-        && let Ok(record) = serde_json::from_slice::<GenerationRecord>(&bytes)
-        && record.journal == journal
-    {
-        return Ok(record.generation);
-    }
-    let generation = random_id()?;
-    write_atomic(
-        &layout.generation(),
-        &serde_json::to_vec(&GenerationRecord {
-            journal: journal.to_owned(),
-            generation: generation.clone(),
-        })
-        .map_err(io::Error::other)?,
-    )?;
-    Ok(generation)
+    let dirs = sorted_dirs(&layout.open())
+        .into_iter()
+        .chain(browser_segments(&layout.captures));
+    let segments = dirs.fold(0_u64, |sum, directory| {
+        sum + file_len(&directory.join(super::PAGES_FILENAME))
+            + file_len(&directory.join(PERIOD_FILE))
+            + file_len(&directory.join(RECEIPTS_FILE))
+    });
+    segments + file_len(&layout.evidence())
 }
 
 fn new_period(now: &DateTime<Local>) -> Period {
@@ -871,19 +966,6 @@ fn sorted_dirs(root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn safe_label(label: &str) -> String {
-    let label: String = label
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(64)
-        .collect();
-    if label.is_empty() {
-        "unknown".to_owned()
-    } else {
-        label
-    }
-}
-
 fn file_len(path: &Path) -> u64 {
     fs::metadata(path).map_or(0, |meta| meta.len())
 }
@@ -964,11 +1046,53 @@ fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
+#[cfg(test)]
+struct EvidenceWriteFault(crate::private_file::DurableWriteStage);
+
+#[cfg(test)]
+impl crate::private_file::DurableWriteFault for EvidenceWriteFault {
+    fn before(&self, stage: crate::private_file::DurableWriteStage) -> io::Result<()> {
+        if stage == self.0 {
+            Err(io::Error::other("injected evidence write fault"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn remove_dir_all_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_dir_all(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
+}
+
+fn remove_tombstoned_directory(directory: &Path) -> io::Result<()> {
+    let receipts = directory.join(RECEIPTS_FILE);
+    match fs::remove_file(directory.join(super::PAGES_FILENAME)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == receipts {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(path)?;
+        } else {
+            match fs::remove_file(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+    }
+    match fs::remove_file(receipts) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    remove_dir_all_if_present(directory)
 }
 
 #[cfg(test)]
@@ -987,10 +1111,10 @@ mod tests {
         Layout::new(temp.path())
     }
 
-    fn batch(custody: &Custody, id: u8, records: Value, now: DateTime<Local>) -> Value {
+    fn batch(_custody: &Custody, id: u8, records: Value, now: DateTime<Local>) -> Value {
         json!({
             "type": "batch",
-            "destination_generation": custody.generation().unwrap(),
+            "destination_generation": "g1",
             "inst": "inst-a",
             "batch_id": format!("{id:032x}"),
             "queued_at_ms": now_ms(&now) - 1000,
@@ -1023,48 +1147,28 @@ mod tests {
     }
 
     #[test]
-    fn journal_identity_is_the_instance_and_the_normalised_ca_chain() {
-        let pem = "-----BEGIN CERTIFICATE-----\nAAAA\nBBBB\n-----END CERTIFICATE-----\n".to_owned();
-        let reflowed =
-            "-----BEGIN CERTIFICATE-----\r\nAAAABBBB\r\n-----END CERTIFICATE-----".to_owned();
-        assert_eq!(
-            journal_identity("i1", std::slice::from_ref(&pem)),
-            journal_identity("i1", &[reflowed])
-        );
-        assert_ne!(
-            journal_identity("i1", std::slice::from_ref(&pem)),
-            journal_identity("i2", std::slice::from_ref(&pem))
-        );
-        assert_ne!(
-            journal_identity("i1", std::slice::from_ref(&pem)),
-            journal_identity(
-                "i1",
-                &["-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE-----".to_owned()]
-            )
-        );
-    }
-
-    #[test]
-    fn unpaired_custody_reports_not_paired_and_accepts_nothing() {
+    fn unpaired_custody_reports_not_paired_and_accepts_valid_batches() {
         let temp = tempfile::tempdir().unwrap();
-        let mut custody = Custody::open(layout(&temp), None, at(10, 1, 0)).unwrap();
-        let facts = custody.facts(false);
+        let mut custody = Custody::open(layout(&temp), at(10, 1, 0)).unwrap();
+        let now = at(10, 1, 0);
+        let facts = custody.facts(None, false);
         assert_eq!((facts.capture, facts.delivery), ("not_paired", "unknown"));
         assert_eq!(facts.generation, None);
-        let batch =
-            json!({"destination_generation": "g", "inst": "i", "batch_id": "0", "records": []});
+        let batch = batch(&custody, 1, snapshot("c1", "kept"), now);
         assert_eq!(
-            custody.accept(&batch, at(10, 1, 0)).0,
-            reject("stale_generation")
+            custody.accept(&batch, now).0,
+            Outcome::Accepted {
+                period_id: custody.period_id().unwrap().to_owned()
+            }
         );
-        assert_eq!(custody.tick(at(10, 6, 0)), None);
+        assert!(custody.tick(at(10, 6, 0)).is_some());
     }
 
     #[test]
     fn a_batch_is_kept_once_and_a_replay_is_a_duplicate() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         let first = batch(&custody, 1, snapshot("c1", "hello"), now);
         let period = accepted(custody.accept(&first, now));
         assert_eq!(
@@ -1073,14 +1177,14 @@ mod tests {
                 period_id: period.clone()
             }
         );
-        let facts = custody.facts(false);
+        let facts = custody.facts(Some("g1"), false);
         assert_eq!(
             (facts.capture, facts.delivery),
             ("permitted", "kept_locally")
         );
         // A reopen (an app restart) still knows the receipt.
         drop(custody);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         assert_eq!(custody.period_id(), Some(period.as_str()));
         assert_eq!(
             custody.accept(&first, now).0,
@@ -1089,10 +1193,201 @@ mod tests {
     }
 
     #[test]
+    fn old_1_1_shaped_batches_are_accepted_and_pending_identity_survives_receipt_pruning() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = at(10, 1, 0);
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let mut old_shape = batch(&custody, 9, snapshot("old-context", "held"), now);
+        old_shape["destination_generation"] = json!("generation-from-journal-a");
+        old_shape["queued_at_ms"] = json!(now_ms(&now).saturating_sub(60 * 60 * 1000));
+        let period = accepted(custody.accept(&old_shape, now));
+        custody.tick(at(10, 5, 0));
+        let later = at(12, 2, 0);
+        custody.prune_receipts(now_ms(&later));
+        let mut replay = old_shape;
+        replay["destination_generation"] = json!("generation-from-journal-b");
+        assert_eq!(
+            custody.accept(&replay, later).0,
+            Outcome::Duplicate { period_id: period }
+        );
+    }
+
+    #[test]
+    fn with_bound_keeps_known_ids_duplicate_before_refusing_new_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = at(10, 1, 0);
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let known = batch(&custody, 1, snapshot("c1", "known"), now);
+        let period = accepted(custody.accept(&known, now));
+        let held = custody.facts(Some("live-generation"), false).held_bytes;
+        custody = custody.with_bound(held);
+        let mut replay = known;
+        replay["destination_generation"] = json!("old-generation");
+        assert_eq!(
+            custody.accept(&replay, now).0,
+            Outcome::Duplicate { period_id: period }
+        );
+        assert_eq!(
+            custody
+                .accept(&batch(&custody, 2, snapshot("c2", "new"), now), now)
+                .0,
+            reject("queue_full")
+        );
+    }
+
+    #[test]
+    fn discard_tombstone_survives_restart_and_late_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = at(10, 1, 0);
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let batch = batch(&custody, 5, snapshot("c1", "discarded"), now);
+        let period = accepted(custody.accept(&batch, now));
+        let open_dir = custody.layout.open().join(&period);
+        custody.discard_pending().unwrap();
+        assert!(!open_dir.exists());
+        drop(custody);
+
+        let late_ms =
+            now.timestamp_millis() + i64::try_from(3 * ACCEPTED_RETENTION_MS_MIN + 1).unwrap();
+        let late = Local.timestamp_millis_opt(late_ms).single().unwrap();
+        let mut custody = Custody::open(layout(&temp), late).unwrap();
+        let mut replay = batch;
+        replay["destination_generation"] = json!("different-live-generation");
+        replay["queued_at_ms"] = json!(now_ms(&now));
+        assert!(matches!(
+            custody.accept(&replay, late).0,
+            Outcome::Duplicate { .. }
+        ));
+        assert!(
+            custody
+                .evidence
+                .values()
+                .any(|kind| *kind == EvidenceKind::Removed)
+        );
+    }
+
+    #[test]
+    fn discard_skips_reserved_browser_segments_and_clears_open_contexts() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = at(10, 1, 0);
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let pending = batch(&custody, 1, snapshot("c1", "open"), now);
+        let open_id = accepted(custody.accept(&pending, now));
+        assert!(custody.tick(at(10, 5, 0)).is_some());
+        let segment = temp.path().join("captures/20261002/_browser/100100_240");
+        assert!(custody.reserve_upload(&segment));
+        custody.discard_pending().unwrap();
+        assert!(segment.join(crate::browser::PAGES_FILENAME).is_file());
+        assert!(custody.period.as_ref().unwrap().contexts.is_empty());
+        custody.release_upload(&segment);
+        custody.discard_pending().unwrap();
+        assert!(!segment.exists());
+        let next = at(10, 6, 0);
+        assert_eq!(
+            custody
+                .accept(
+                    &batch(&custody, 2, delta("c1", "needs snapshot"), next),
+                    next
+                )
+                .0,
+            reject("snapshot_required")
+        );
+        assert!(!custody.layout.open().join(open_id).exists());
+    }
+
+    #[test]
+    fn partial_discard_keeps_failed_segment_and_a_retry_finishes_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut custody = Custody::open(layout(&temp), at(10, 1, 0)).unwrap();
+        let first = batch(&custody, 1, snapshot("c1", "first"), at(10, 1, 0));
+        accepted(custody.accept(&first, at(10, 1, 0)));
+        custody.tick(at(10, 5, 0));
+        let second = batch(&custody, 2, snapshot("c2", "second"), at(10, 6, 0));
+        accepted(custody.accept(&second, at(10, 6, 0)));
+        custody.tick(at(10, 10, 0));
+
+        let segments = segment_files(&temp.path().join("captures"));
+        assert_eq!(segments.len(), 2);
+        let failed = segments[1].parent().unwrap().to_path_buf();
+        custody.discard_remove_fault = Some(failed.clone());
+        assert!(custody.discard_pending().is_err());
+        assert!(!segments[0].exists());
+        assert!(failed.exists());
+
+        custody.discard_remove_fault = None;
+        custody.discard_pending().unwrap();
+        assert!(!failed.exists());
+        drop(custody);
+
+        let mut recovered = Custody::open(layout(&temp), at(10, 11, 0)).unwrap();
+        assert!(matches!(
+            recovered.accept(&second, at(10, 11, 0)).0,
+            Outcome::Duplicate { .. }
+        ));
+    }
+
+    #[test]
+    fn removal_commit_faults_never_leave_payload_gone_without_identity_evidence() {
+        for stage in [
+            crate::private_file::DurableWriteStage::Create,
+            crate::private_file::DurableWriteStage::Write,
+            crate::private_file::DurableWriteStage::Fsync,
+            crate::private_file::DurableWriteStage::Rename,
+            crate::private_file::DurableWriteStage::DirSync,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let now = at(10, 1, 0);
+            let mut custody = Custody::open(layout(&temp), now).unwrap();
+            let batch = batch(&custody, 7, snapshot("c1", "durable"), now);
+            let period = accepted(custody.accept(&batch, now));
+            let pages = custody
+                .layout
+                .open()
+                .join(&period)
+                .join(crate::browser::PAGES_FILENAME);
+            let expected_payload = fs::read(&pages).unwrap();
+            custody.evidence_fault = Some(stage);
+            assert!(custody.discard_pending().is_err(), "{stage:?}");
+            assert!(
+                pages.exists(),
+                "{stage:?}: payload removed before durable tombstone"
+            );
+            drop(custody);
+
+            let mut recovered = Custody::open(layout(&temp), at(12, 2, 0)).unwrap();
+            let evidence: Vec<EvidenceLine> = recovered.evidence_lines.clone();
+            let still_held = sorted_dirs(&recovered.layout.open())
+                .into_iter()
+                .chain(browser_segments(&recovered.layout.captures))
+                .any(|directory| {
+                    fs::read(directory.join(crate::browser::PAGES_FILENAME))
+                        .is_ok_and(|payload| payload == expected_payload)
+                });
+            if !still_held {
+                assert!(
+                    evidence.iter().any(|line| {
+                        line.batch_id == format!("{:032x}", 7) && line.kind == EvidenceKind::Removed
+                    }),
+                    "{stage:?}: payload gone without tombstone"
+                );
+            }
+            let mut replay = batch;
+            replay["destination_generation"] = json!("replacement-generation");
+            assert!(
+                matches!(
+                    recovered.accept(&replay, at(12, 2, 0)).0,
+                    Outcome::Duplicate { .. }
+                ),
+                "{stage:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_delta_needs_a_snapshot_of_its_context_in_the_same_period() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         let orphan = batch(&custody, 1, delta("c1", "x"), now);
         assert_eq!(custody.accept(&orphan, now).0, reject("snapshot_required"));
         // Nothing was recorded, so the same batch id can come back as a snapshot.
@@ -1113,8 +1408,7 @@ mod tests {
     fn a_finished_period_becomes_one_browser_segment_named_by_its_start() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 2, 30);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
-        let generation = custody.generation().unwrap().to_owned();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "alpha"), now), now));
         accepted(custody.accept(&batch(&custody, 2, delta("c1", "beta"), now), now));
         assert!(custody.tick(at(10, 4, 59)).is_none());
@@ -1124,10 +1418,6 @@ mod tests {
         let pages = fs::read_to_string(segment.join(crate::browser::PAGES_FILENAME)).unwrap();
         assert_eq!(pages.lines().count(), 2);
         assert!(pages.contains("alpha") && pages.contains("beta"));
-        assert_eq!(
-            segment_generation(&segment).as_deref(),
-            Some(generation.as_str())
-        );
         // An empty period leaves nothing behind.
         assert!(custody.tick(at(10, 10, 0)).is_some());
         assert_eq!(segment_files(&temp.path().join("captures")).len(), 1);
@@ -1135,83 +1425,94 @@ mod tests {
     }
 
     #[test]
-    fn a_different_journal_retires_everything_held_for_the_old_one() {
+    fn pairing_independent_open_and_finalized_pages_survive_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
-        let old_generation = custody.generation().unwrap().to_owned();
-        accepted(custody.accept(
-            &batch(&custody, 1, snapshot("c1", "for-a-finished"), now),
-            now,
-        ));
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let finished = batch(&custody, 1, snapshot("c1", "for-finished"), now);
+        let finished_period = accepted(custody.accept(&finished, now));
         custody.tick(at(10, 5, 0));
         let later = at(10, 6, 0);
-        accepted(custody.accept(
-            &batch(&custody, 2, snapshot("c1", "for-a-open"), later),
-            later,
-        ));
+        let open = batch(&custody, 2, snapshot("c2", "for-open"), later);
+        let open_period = accepted(custody.accept(&open, later));
         drop(custody);
 
-        let custody = Custody::open(layout(&temp), Some("journal-b"), at(10, 7, 0)).unwrap();
-        assert_ne!(custody.generation(), Some(old_generation.as_str()));
+        let mut custody = Custody::open(layout(&temp), at(10, 7, 0)).unwrap();
+        assert_eq!(segment_files(&temp.path().join("captures")).len(), 1);
+        assert!(custody.facts(None, false).held_bytes > 0);
+        let mut replay = finished.clone();
+        replay["destination_generation"] = json!("generation-for-journal-b");
+        assert_eq!(
+            custody.accept(&replay, at(10, 7, 0)).0,
+            Outcome::Duplicate {
+                period_id: finished_period
+            }
+        );
+        let mut replay = open.clone();
+        replay["destination_generation"] = json!("generation-for-journal-b");
+        assert_eq!(
+            custody.accept(&replay, at(10, 7, 0)).0,
+            Outcome::Duplicate {
+                period_id: open_period
+            }
+        );
+    }
+
+    #[test]
+    fn leftover_retired_pages_are_deleted_without_importing_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("browser/retired/old/20260101/100000_300");
+        create_private_dir(&legacy).unwrap();
+        fs::write(legacy.join(crate::browser::PAGES_FILENAME), "old pages").unwrap();
+        let custody = Custody::open(layout(&temp), at(10, 1, 0)).unwrap();
         assert!(segment_files(&temp.path().join("captures")).is_empty());
-        assert_eq!(custody.facts(false).held_bytes, 0);
-        let summary = retired_summary(&custody.layout);
-        assert_eq!(summary.periods, 2);
-        assert!(summary.bytes > 0);
-        assert_eq!(
-            deliverable_generation(&custody.layout, Some("journal-a")),
-            None
-        );
-        assert_eq!(
-            deliverable_generation(&custody.layout, Some("journal-b")).as_deref(),
-            custody.generation()
-        );
-        assert_eq!(discard_retired(&custody.layout).unwrap(), summary);
-        assert_eq!(retired_summary(&custody.layout), RetiredSummary::default());
+        assert!(custody.evidence.is_empty());
+        assert!(!temp.path().join("browser/retired").exists());
     }
 
     #[test]
-    fn the_same_journal_keeps_its_generation() {
+    fn stale_generation_and_old_batches_are_accepted_but_future_skew_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
-        let generation = custody.generation().unwrap().to_owned();
-        drop(custody);
-        let custody = Custody::open(layout(&temp), Some("journal-a"), at(11, 0, 0)).unwrap();
-        assert_eq!(custody.generation(), Some(generation.as_str()));
-        // Unpairing does not retire anything: an unknown journal is not a different one.
-        drop(custody);
-        let custody = Custody::open(layout(&temp), None, at(11, 0, 0)).unwrap();
-        assert_eq!(custody.generation(), None);
-        let custody =
-            Custody::open(custody.layout.clone(), Some("journal-a"), at(11, 0, 0)).unwrap();
-        assert_eq!(custody.generation(), Some(generation.as_str()));
-    }
-
-    #[test]
-    fn a_stale_generation_and_aged_batches_are_refused() {
-        let temp = tempfile::tempdir().unwrap();
-        let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         let mut stale = batch(&custody, 1, snapshot("c1", "x"), now);
         stale["destination_generation"] = json!("someone-else");
-        assert_eq!(custody.accept(&stale, now).0, reject("stale_generation"));
-        let mut future = batch(&custody, 2, snapshot("c1", "x"), now);
+        accepted(custody.accept(&stale, now));
+        let mut old = batch(&custody, 2, snapshot("c2", "old"), now);
+        old["queued_at_ms"] = json!(now_ms(&now).saturating_sub(60 * 60 * 1000));
+        accepted(custody.accept(&old, now));
+        let mut future = batch(&custody, 3, snapshot("c1", "x"), now);
         future["queued_at_ms"] = json!(now_ms(&now) + FUTURE_SKEW_MS_MAX + 1);
         assert_eq!(custody.accept(&future, now).0, reject("age_policy"));
-        let mut old = batch(&custody, 3, snapshot("c1", "x"), now);
-        old["queued_at_ms"] = json!(now_ms(&now) - OUTBOX_AGE_MS_MAX);
-        assert_eq!(custody.accept(&old, now).0, reject("expired_unaccepted"));
+    }
+
+    #[test]
+    fn malformed_and_file_oversize_batches_are_refused_with_current_reasons() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = at(10, 1, 0);
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let mut malformed = batch(&custody, 1, snapshot("c1", "ok"), now);
+        malformed["records"] = json!([]);
+        assert_eq!(custody.accept(&malformed, now).0, reject("malformed"));
+
+        let large = "x".repeat(FILE_MAX + 1);
+        let oversized = batch(
+            &custody,
+            2,
+            json!([{"t":"segment_start", "ts":1, "ctx":"c1", "inst":"inst-a",
+                    "blocks":[{"id":"b1", "text":large}]}]),
+            now,
+        );
+        assert_eq!(custody.accept(&oversized, now).0, reject("oversize"));
     }
 
     #[test]
     fn a_full_queue_refuses_new_intake_by_name() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "first"), now), now));
-        let held = custody.facts(false).held_bytes;
+        let held = custody.facts(Some("g1"), false).held_bytes;
         custody = custody.with_bound(held + 50);
         assert_eq!(
             custody
@@ -1222,22 +1523,22 @@ mod tests {
                 .0,
             reject("queue_full")
         );
-        assert_eq!(custody.facts(false).capture, "permitted");
+        assert_eq!(custody.facts(Some("g1"), false).capture, "permitted");
         custody = custody.with_bound(held);
-        let facts = custody.facts(false);
+        let facts = custody.facts(Some("g1"), false);
         assert!(facts.full);
         assert_eq!(
             (facts.capture, facts.delivery, facts.failure),
             ("intake_off", "kept_locally", Some("queue_full"))
         );
-        assert_eq!(custody.facts(true).capture, "paused");
+        assert_eq!(custody.facts(Some("g1"), true).capture, "paused");
     }
 
     #[test]
     fn bytes_no_receipt_covers_are_dropped_on_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         let period =
             accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "kept"), now), now));
         drop(custody);
@@ -1253,16 +1554,20 @@ mod tests {
             .unwrap()
             .write_all(b"{\"t\":\"segme")
             .unwrap();
-        let custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let custody = Custody::open(layout(&temp), now).unwrap();
         assert_eq!(fs::read(&pages).unwrap(), committed);
-        assert_eq!(custody.facts(false).held_bytes, committed.len() as u64);
+        assert_eq!(
+            custody.facts(Some("g1"), false).held_bytes,
+            held_bytes(&layout(&temp))
+        );
+        assert!(custody.facts(Some("g1"), false).held_bytes >= committed.len() as u64);
     }
 
     #[test]
     fn bytes_left_by_a_failed_write_are_overwritten_and_never_covered() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         let period =
             accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "first"), now), now));
         let directory = temp.path().join("browser/open").join(&period);
@@ -1283,7 +1588,7 @@ mod tests {
         }
         accepted(custody.accept(&batch(&custody, 2, delta("c1", "second"), now), now));
         drop(custody);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         let pages = fs::read_to_string(directory.join(crate::browser::PAGES_FILENAME)).unwrap();
         assert_eq!(pages.lines().count(), 2);
         assert!(
@@ -1305,7 +1610,7 @@ mod tests {
     fn a_receipt_for_bytes_that_are_not_there_is_ignored() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         let period =
             accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "first"), now), now));
         drop(custody);
@@ -1324,7 +1629,7 @@ mod tests {
             .unwrap()
             .write_all(&line)
             .unwrap();
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         // The text of batch 2 never reached disk, so it is not a duplicate.
         accepted(custody.accept(&batch(&custody, 2, delta("c1", "second"), now), now));
     }
@@ -1349,7 +1654,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let captures = temp.path().join("captures");
         let opened = at(10, 2, 30);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        let mut custody = Custody::open(layout(&temp), opened).unwrap();
         accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "alpha"), opened), opened));
         // The computer sleeps through the end of the window; the next tick is hours later.
         assert!(custody.tick(at(18, 0, 0)).is_some());
@@ -1368,7 +1673,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let captures = temp.path().join("captures");
         let opened = at(10, 0, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        let mut custody = Custody::open(layout(&temp), opened).unwrap();
         accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "alpha"), opened), opened));
         fs::create_dir_all(captures.join("20261002/_browser/100000_300")).unwrap();
         assert!(custody.tick(at(18, 0, 0)).is_some());
@@ -1382,7 +1687,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let captures = temp.path().join("captures");
         let opened = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        let mut custody = Custody::open(layout(&temp), opened).unwrap();
         accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "alpha"), opened), opened));
         let last = at(10, 3, 20);
         accepted(custody.accept(&batch(&custody, 2, delta("c1", "beta"), last), last));
@@ -1397,7 +1702,7 @@ mod tests {
             .unwrap()
             .set_modified(late)
             .unwrap();
-        Custody::open(layout(&temp), Some("journal-a"), at(18, 0, 0)).unwrap();
+        Custody::open(layout(&temp), at(18, 0, 0)).unwrap();
         let names = segment_names(&captures);
         assert_eq!(names, ["100100_140"]);
         assert_lengths_within_ceiling(&names);
@@ -1408,7 +1713,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let captures = temp.path().join("captures");
         let opened = at(10, 1, 0);
-        let custody = Custody::open(layout(&temp), Some("journal-a"), opened).unwrap();
+        let custody = Custody::open(layout(&temp), opened).unwrap();
         let mut period = new_period(&opened);
         period.has_dir = true;
         let directory = custody.layout.open().join(&period.id);
@@ -1434,10 +1739,10 @@ mod tests {
     fn an_old_open_period_is_finished_on_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let now = at(10, 1, 0);
-        let mut custody = Custody::open(layout(&temp), Some("journal-a"), now).unwrap();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
         accepted(custody.accept(&batch(&custody, 1, snapshot("c1", "kept"), now), now));
         drop(custody);
-        let custody = Custody::open(layout(&temp), Some("journal-a"), at(12, 0, 0)).unwrap();
+        let custody = Custody::open(layout(&temp), at(12, 0, 0)).unwrap();
         assert_eq!(segment_files(&temp.path().join("captures")).len(), 1);
         assert!(custody.period_id().is_some());
     }

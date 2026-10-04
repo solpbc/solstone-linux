@@ -38,6 +38,10 @@ pub struct UploadResult {
     pub file_descriptors: Option<Vec<FileDescriptor>>,
     pub reason_code: Option<String>,
     pub is_local_failure: bool,
+    pub captured_identity_key: Option<String>,
+    pub captured_pairing_id: Option<String>,
+    pub association_epoch: Option<u64>,
+    pub stale_capability: bool,
 }
 
 impl UploadResult {
@@ -54,6 +58,10 @@ impl UploadResult {
             file_descriptors: None,
             reason_code,
             is_local_failure: false,
+            captured_identity_key: None,
+            captured_pairing_id: None,
+            association_epoch: None,
+            stale_capability: false,
         }
     }
 
@@ -66,6 +74,10 @@ impl UploadResult {
             file_descriptors: None,
             reason_code: None,
             is_local_failure: true,
+            captured_identity_key: None,
+            captured_pairing_id: None,
+            association_epoch: None,
+            stale_capability: false,
         }
     }
 }
@@ -121,6 +133,13 @@ pub(crate) struct Inner {
     cancellation: CancellationToken,
     retry_delays: Vec<i64>,
     immediate_attempts: usize,
+}
+
+struct CapturedCapability {
+    capability: PrivateLinkCapability,
+    identity_key: String,
+    pairing_id: String,
+    association_epoch: u64,
 }
 
 pub struct UploadClient {
@@ -198,8 +217,18 @@ impl UploadClient {
         self.inner.publish_link_fact(fact);
     }
 
-    pub(crate) fn begin_owner_generation(&self) {
-        self.link_facts().begin_owner_generation();
+    pub(crate) fn prepare_new_owner(&self) {
+        let previous = self
+            .inner
+            .capability
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.inner.revoked.store(false, Ordering::Release);
+        if let Some(capability) = previous {
+            capability.facts().begin_owner_generation();
+        }
+        self.inner.fallback_link_facts.begin_owner_generation();
     }
 
     pub fn request_stop(&self) {
@@ -212,6 +241,7 @@ impl UploadClient {
             .capability
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(capability);
+        self.inner.revoked.store(false, Ordering::Release);
         self.link_facts().republish_current();
     }
 
@@ -245,6 +275,37 @@ impl UploadClient {
         meta: Option<&crate::recovery::CaptureZone>,
         source: Option<&str>,
     ) -> UploadResult {
+        let Some(capability) = self.inner.capability() else {
+            return UploadResult::failure(Some(ErrorType::Transient), None, None);
+        };
+        let writer = capability.writer();
+        let captured = CapturedCapability {
+            capability: capability.clone(),
+            identity_key: writer.identity_key().to_owned(),
+            pairing_id: writer.pairing_id().to_owned(),
+            association_epoch: capability.facts().association_epoch(),
+        };
+        let mut result = self
+            .upload_with_capability(day, segment, files, meta, source, &captured)
+            .await;
+        result.captured_identity_key = Some(captured.identity_key.clone());
+        result.captured_pairing_id = Some(captured.pairing_id.clone());
+        result.association_epoch = Some(captured.association_epoch);
+        result.stale_capability = !self
+            .inner
+            .is_installed_for_epoch(&captured.capability, captured.association_epoch);
+        result
+    }
+
+    async fn upload_with_capability(
+        &self,
+        day: &str,
+        segment: &str,
+        files: &[PathBuf],
+        meta: Option<&crate::recovery::CaptureZone>,
+        source: Option<&str>,
+        captured: &CapturedCapability,
+    ) -> UploadResult {
         if self.is_revoked() {
             return UploadResult::failure(Some(ErrorType::Auth), None, None);
         }
@@ -271,8 +332,8 @@ impl UploadClient {
             };
             debug_assert!(framed_length <= MAX_REQUEST_BODY_BYTES);
 
-            if let Some(capability) = self.inner.capability() {
-                match capability.ingest(form).await {
+            {
+                match captured.capability.ingest(form).await {
                     LinkOutcome::Success { status, body, .. } if status == StatusCode::OK => {
                         match serde_json::from_slice::<Value>(&body) {
                             Ok(body) => {
@@ -330,9 +391,18 @@ impl UploadClient {
                         }
                     }
                     LinkOutcome::Forbidden => {
-                        self.inner.revoked.store(true, Ordering::Release);
-                        self.inner
-                            .publish_link_fact(crate::private_link::LinkFact::TerminalRevocation);
+                        let _ = self.inner.with_installed_for_epoch(
+                            &captured.capability,
+                            captured.association_epoch,
+                            || {
+                                if captured.capability.facts().publish_if_association_current(
+                                    crate::private_link::LinkFact::TerminalRevocation,
+                                    captured.association_epoch,
+                                ) {
+                                    self.inner.revoked.store(true, Ordering::Release);
+                                }
+                            },
+                        );
                         return UploadResult::failure(
                             Some(ErrorType::Auth),
                             Some(StatusCode::FORBIDDEN.as_u16()),
@@ -345,8 +415,6 @@ impl UploadClient {
                         last_reason_code = None;
                     }
                 }
-            } else {
-                return UploadResult::failure(Some(ErrorType::Transient), None, None);
             }
             if attempt + 1 < self.inner.immediate_attempts {
                 tokio::select! {
@@ -476,6 +544,36 @@ impl Inner {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
+
+    fn is_installed_for_epoch(&self, capability: &PrivateLinkCapability, epoch: u64) -> bool {
+        self.capability
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|installed| {
+                installed.same_instance(capability)
+                    && capability.facts().association_epoch() == epoch
+            })
+    }
+
+    fn with_installed_for_epoch(
+        &self,
+        capability: &PrivateLinkCapability,
+        epoch: u64,
+        action: impl FnOnce(),
+    ) -> bool {
+        let installed = self
+            .capability
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !installed.as_ref().is_some_and(|installed| {
+            installed.same_instance(capability) && capability.facts().association_epoch() == epoch
+        }) {
+            return false;
+        }
+        action();
+        true
+    }
 }
 
 fn parse_upload_body(body: Value) -> UploadResult {
@@ -498,6 +596,10 @@ fn parse_upload_body(body: Value) -> UploadResult {
                 file_descriptors,
                 reason_code: None,
                 is_local_failure: false,
+                captured_identity_key: None,
+                captured_pairing_id: None,
+                association_epoch: None,
+                stale_capability: false,
             }
         }
         Some("duplicate") => {
@@ -513,6 +615,10 @@ fn parse_upload_body(body: Value) -> UploadResult {
                 file_descriptors,
                 reason_code: None,
                 is_local_failure: false,
+                captured_identity_key: None,
+                captured_pairing_id: None,
+                association_epoch: None,
+                stale_capability: false,
             }
         }
         Some("failed") => UploadResult::failure(
@@ -1768,6 +1874,78 @@ mod tests {
     #[tokio::test]
     async fn upload_403_latches_revoked() {
         assert_403_latches("upload").await;
+    }
+
+    #[tokio::test]
+    async fn stale_forbidden_completion_does_not_revoke_replacement_capability() {
+        let old_temp = TempDir::new().unwrap();
+        let old_config = Config {
+            config_dir: old_temp.path().join("config"),
+            ..Config::default()
+        };
+        let old_peer = PrivateLinkPeer::start().await;
+        let old_session =
+            start_private_link_session(&old_config.config_dir, old_peer.credential(), "old-owner")
+                .await
+                .unwrap();
+        let client = Arc::new(UploadClient::new(
+            &old_config,
+            old_session.capability(),
+            Arc::new(MutableClock::new(0.0, 0.0)),
+        ));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        old_peer.enqueue_gated_response(403, br#"{}"#.to_vec(), Arc::clone(&gate));
+        let media = write_file(&old_temp, "audio.flac", b"audio");
+        let attempt = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.upload_segment("d", "s", &[media]).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if old_peer
+                    .requests()
+                    .iter()
+                    .any(|request| request.path == "/app/devices/ingest")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let new_temp = TempDir::new().unwrap();
+        let new_config = Config {
+            config_dir: new_temp.path().join("config"),
+            ..Config::default()
+        };
+        let new_peer = PrivateLinkPeer::start().await;
+        let new_session =
+            start_private_link_session(&new_config.config_dir, new_peer.credential(), "new-owner")
+                .await
+                .unwrap();
+        client.install_capability(new_session.capability());
+        gate.notify_one();
+
+        let result = attempt.await.unwrap();
+        assert!(result.stale_capability);
+        assert!(!client.is_revoked());
+        assert!(
+            !new_session
+                .capability()
+                .facts()
+                .snapshot()
+                .terminal_revocation
+        );
+        assert_eq!(
+            result.captured_pairing_id.as_deref(),
+            Some(old_session.capability().writer().pairing_id())
+        );
+        old_session.shutdown().await.unwrap();
+        new_session.shutdown().await.unwrap();
+        old_peer.shutdown().await;
+        new_peer.shutdown().await;
     }
     // listing 403 latches revoked
     #[tokio::test]

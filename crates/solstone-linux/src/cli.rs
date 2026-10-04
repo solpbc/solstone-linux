@@ -94,7 +94,7 @@ enum Commands {
     #[cfg(feature = "browser")]
     #[command(
         name = "discard-browser-pages",
-        about = "discard browser pages kept for a journal this computer was paired with before"
+        about = "discard waiting browser pages"
     )]
     DiscardBrowserPages,
 }
@@ -913,26 +913,13 @@ fn escape_display_version(raw: &str) -> String {
 #[cfg_attr(not(feature = "browser"), allow(dead_code))]
 fn cmd_discard_browser_pages(
     paths: ConfigPaths,
-    output: &mut dyn Write,
+    _output: &mut dyn Write,
     errors: &mut dyn Write,
 ) -> i32 {
     let config = load_config(paths).config;
-    let layout = crate::browser::custody::Layout::new(&config.base_dir);
-    match crate::browser::custody::discard_retired(&layout) {
-        Ok(summary) if summary.periods == 0 => {
-            let _ = write_line(
-                output,
-                "there are no browser pages kept for a journal this computer was paired with before",
-            );
-            0
-        }
-        Ok(_) => {
-            let _ = write_line(
-                output,
-                "discarded the browser pages kept for a journal this computer was paired with before",
-            );
-            0
-        }
+    let result = discard_browser_pages(&config);
+    match result {
+        Ok(()) => 0,
         Err(error) => {
             let _ = write_line(
                 errors,
@@ -940,6 +927,64 @@ fn cmd_discard_browser_pages(
             );
             1
         }
+    }
+}
+
+#[cfg_attr(not(feature = "browser"), allow(dead_code))]
+fn discard_browser_pages(config: &Config) -> io::Result<()> {
+    let endpoint = crate::browser::production_endpoint_path()?;
+    discard_browser_pages_at(config, &endpoint, rustix::process::geteuid().as_raw())
+}
+
+#[cfg_attr(not(feature = "browser"), allow(dead_code))]
+fn discard_browser_pages_at(
+    config: &Config,
+    endpoint: &std::path::Path,
+    uid: u32,
+) -> io::Result<()> {
+    use crate::browser::{
+        custody::{Custody, Layout},
+        host::{Connect, connect, write_frame},
+    };
+    match connect(endpoint, uid) {
+        Ok(mut stream) => {
+            write_frame(&mut stream, br#"{"type":"local_discard"}"#)?;
+            let mut length = [0_u8; 4];
+            stream.read_exact(&mut length)?;
+            let length = u32::from_ne_bytes(length) as usize;
+            if length > 4096 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "discard reply too large",
+                ));
+            }
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body)?;
+            let reply: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if reply["type"] != "local_discard_result" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid discard reply",
+                ));
+            }
+            if reply["ok"] == true {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    reply["error"].as_str().unwrap_or("discard failed"),
+                ))
+            }
+        }
+        Err(Connect::Unavailable) => {
+            let layout = Layout::new(&config.base_dir);
+            let mut custody = Custody::open(layout, chrono::Local::now())?;
+            custody.discard_pending()
+        }
+        Err(Connect::Untrusted) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "browser endpoint is not trusted",
+        )),
     }
 }
 
@@ -3263,5 +3308,99 @@ mod tests {
         let re_read_link = re_read.link.unwrap();
         assert!(re_read_link.carrier_proven);
         assert!(re_read_link.journal_version_observed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discard_browser_pages_uses_socket_when_running_and_disk_when_absent() {
+        fn store(base_dir: &Path) {
+            let now = chrono::Local::now();
+            let mut custody = crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(base_dir),
+                now,
+            )
+            .unwrap();
+            let batch = serde_json::json!({
+                "type": "batch", "destination_generation": "g1", "inst": "i1",
+                "batch_id": "0123456789abcdef0123456789abcdef",
+                "queued_at_ms": now.timestamp_millis(),
+                "records": [{"t":"segment_start", "ts":1, "ctx":"c1", "inst":"i1",
+                             "blocks":[{"id":"b1", "text":"pending"}]}]
+            });
+            assert!(matches!(
+                custody.accept(&batch, now).0,
+                crate::browser::custody::Outcome::Accepted { .. }
+            ));
+        }
+
+        let disk = tempfile::tempdir().unwrap();
+        let disk_config = Config {
+            base_dir: disk.path().join("data"),
+            ..Config::default()
+        };
+        store(&disk_config.base_dir);
+        let absent_endpoint = disk.path().join("absent/browser-host.sock");
+        discard_browser_pages_at(
+            &disk_config,
+            &absent_endpoint,
+            rustix::process::geteuid().as_raw(),
+        )
+        .unwrap();
+        assert!(
+            fs::read_dir(disk_config.base_dir.join("browser/open"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+
+        let running = tempfile::tempdir().unwrap();
+        let running_config = Config {
+            base_dir: running.path().join("data"),
+            ..Config::default()
+        };
+        store(&running_config.base_dir);
+        let layout = crate::browser::custody::Layout::new(&running_config.base_dir);
+        let custody = Arc::new(std::sync::Mutex::new(
+            crate::browser::custody::Custody::open(layout, chrono::Local::now()).unwrap(),
+        ));
+        let endpoint = running
+            .path()
+            .join("runtime/solstone-linux/browser-host.sock");
+        fs::create_dir_all(endpoint.parent().unwrap().parent().unwrap()).unwrap();
+        let (_pause, paused) = tokio::sync::watch::channel(crate::observer::StateSnapshot {
+            mode: crate::observer::Mode::Idle,
+            paused: false,
+            segment_open: false,
+            captures_today: 0,
+            total_size_mb: 0,
+            pause_until: None,
+            segment_start_mono: None,
+            process_start_mono: 0.0,
+        });
+        let handle = crate::browser::server::start(crate::browser::server::ServerConfig {
+            base_dir: running_config.base_dir.clone(),
+            endpoint: endpoint.clone(),
+            custody: Arc::clone(&custody),
+            generation_fingerprint: Arc::new(|| None),
+            dev_enabled: false,
+            paused,
+            on_period_finished: Arc::new(|| {}),
+            about: Arc::new(|_| {
+                crate::about::AboutBlock::unknown(crate::about::HostFacts::default()).native()
+            }),
+        })
+        .unwrap();
+        discard_browser_pages_at(
+            &running_config,
+            &endpoint,
+            rustix::process::geteuid().as_raw(),
+        )
+        .unwrap();
+        assert!(
+            fs::read_dir(running_config.base_dir.join("browser/open"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        handle.shutdown().await;
     }
 }
