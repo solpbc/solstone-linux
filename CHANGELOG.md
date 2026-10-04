@@ -6,10 +6,12 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.13] - 2026-10-04
+
 ### Fixed
 
-- after your computer wakes from sleep, new moments go into your journal at the right time and on the right day. before, they landed under a time that was off by however long the computer slept, until the solstone app restarted. browser pages that were open when the computer went to sleep no longer count the time it slept as time spent on them.
-- when this computer reaches a journal it doesn't recognize and can't read your journal's mark, the tray details now say your journal's mark is unavailable right now.
+- after your computer wakes from sleep, new moments go into your journal at the right time and on the right day. before, they landed under a time that was off by however long the computer slept, until the solstone app restarted.
+- when this computer reaches a journal it doesn't recognize and can't read your journal's mark, `solstone-linux status` now says your journal's mark is unavailable right now.
 
 ## [2.0.12] - 2026-10-03
 
