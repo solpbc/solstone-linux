@@ -300,6 +300,13 @@ impl Custody {
                 None,
             );
         }
+        if self
+            .period
+            .as_ref()
+            .is_some_and(|period| self.has_removed_identity(&self.layout.open().join(&period.id)))
+        {
+            return (reject("queue_full"), None);
+        }
         let now_ms = now_ms(&now);
         let queued_at = batch
             .get("queued_at_ms")
@@ -468,6 +475,9 @@ impl Custody {
         let directory = self.layout.open().join(&period.id);
         if !period.has_dir {
             return Ok(());
+        }
+        if self.has_removed_identity(&directory) {
+            return Err(io::Error::other("browser removal is awaiting unlink"));
         }
         if truncate_to_receipts(&directory)? == 0 {
             return remove_dir_all_if_present(&directory);
@@ -654,13 +664,16 @@ impl Custody {
             crate::private_file::atomic_write_bytes(&self.layout.evidence(), &bytes)
                 .map_err(io::Error::other)
         };
-        result?;
-        for line in lines {
-            self.evidence
-                .insert((line.inst.clone(), line.batch_id.clone()), line.kind);
+        if result.is_ok()
+            || fs::read(self.layout.evidence()).is_ok_and(|observed| observed == bytes)
+        {
+            for line in lines {
+                self.evidence
+                    .insert((line.inst.clone(), line.batch_id.clone()), line.kind);
+            }
+            self.evidence_lines = next;
         }
-        self.evidence_lines = next;
-        Ok(())
+        result
     }
 
     fn identities_in(&self, directory: &Path) -> Vec<EvidenceLine> {
@@ -694,7 +707,18 @@ impl Custody {
 
     /// Reserve a finalized browser segment while sync reads and uploads it.
     pub fn reserve_upload(&mut self, path: &Path) -> bool {
+        if self.has_removed_identity(path) {
+            return false;
+        }
         self.reserved_uploads.insert(path.to_path_buf())
+    }
+
+    fn has_removed_identity(&self, directory: &Path) -> bool {
+        read_receipt_identities(directory).is_some_and(|identities| {
+            identities
+                .iter()
+                .any(|identity| self.evidence.get(identity) == Some(&EvidenceKind::Removed))
+        })
     }
 
     pub fn release_upload(&mut self, path: &Path) {
@@ -915,7 +939,7 @@ fn read_receipts(directory: &Path) -> Vec<ReceiptLine> {
 }
 
 /// The complete receipt identities, without checking their byte coverage. This is
-/// only used to finish a removal whose payload may already have been unlinked.
+/// used to guard and finish a removal whose payload may already have been unlinked.
 fn read_receipt_identities(directory: &Path) -> Option<Vec<(String, String)>> {
     let bytes = fs::read(directory.join(RECEIPTS_FILE)).ok()?;
     let mut identities = Vec::new();
@@ -1339,6 +1363,96 @@ mod tests {
             reject("snapshot_required")
         );
         assert!(!custody.layout.open().join(open_id).exists());
+    }
+
+    #[test]
+    fn failed_open_discard_cannot_mix_removed_bytes_with_new_intake() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Local::now();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let first = batch(&custody, 201, snapshot("c1", "removed-before-unlink"), now);
+        let period = accepted(custody.accept(&first, now));
+        custody.discard_remove_fault = Some(custody.layout.open().join(period));
+        assert!(custody.discard_pending().is_err());
+        let next = batch(&custody, 202, snapshot("c1", "fresh-after-discard"), now);
+        let _ = custody.accept(&next, now);
+        custody.tick(now + chrono::Duration::minutes(6));
+        for pages in segment_files(&custody.layout.captures) {
+            let text = fs::read_to_string(pages).unwrap();
+            assert!(!text.contains("removed-before-unlink"));
+        }
+        custody.discard_remove_fault = None;
+        custody.discard_pending().unwrap();
+        let fresh = batch(&custody, 203, snapshot("c1", "fresh-after-retry"), now);
+        accepted(custody.accept(&fresh, now));
+        custody.tick(now + chrono::Duration::minutes(12));
+        let text = segment_files(&custody.layout.captures)
+            .into_iter()
+            .map(|pages| fs::read_to_string(pages).unwrap())
+            .collect::<String>();
+        assert!(text.contains("fresh-after-retry"));
+        assert!(!text.contains("removed-before-unlink"));
+    }
+
+    #[test]
+    fn partial_unlink_cannot_reopen_a_removed_period_for_intake() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Local::now();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let first = batch(
+            &custody,
+            207,
+            snapshot("c1", "removed-before-partial-unlink"),
+            now,
+        );
+        let period = accepted(custody.accept(&first, now));
+        let directory = custody.layout.open().join(period);
+        custody.discard_remove_fault = Some(directory.clone());
+        assert!(custody.discard_pending().is_err());
+        fs::remove_file(directory.join(super::super::PAGES_FILENAME)).unwrap();
+        let fresh = batch(&custody, 208, snapshot("c1", "new-payload"), now);
+        assert_eq!(custody.accept(&fresh, now).0, reject("queue_full"));
+        custody.discard_remove_fault = None;
+        custody.discard_pending().unwrap();
+        accepted(custody.accept(&fresh, now));
+    }
+
+    #[test]
+    fn failed_finalized_discard_prevents_upload_reservation() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Local::now();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let first = batch(&custody, 204, snapshot("c1", "removed-finalized"), now);
+        accepted(custody.accept(&first, now));
+        custody.tick(now + chrono::Duration::minutes(6));
+        let segment = segment_files(&custody.layout.captures)[0]
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        custody.discard_remove_fault = Some(segment.clone());
+        assert!(custody.discard_pending().is_err());
+        assert!(segment.is_dir());
+        assert!(!custody.reserve_upload(&segment));
+    }
+
+    #[test]
+    fn failed_removal_directory_sync_prevents_old_bytes_from_rotation() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Local::now();
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let first = batch(
+            &custody,
+            205,
+            snapshot("c1", "removed-before-dir-sync"),
+            now,
+        );
+        accepted(custody.accept(&first, now));
+        custody.evidence_fault = Some(crate::private_file::DurableWriteStage::DirSync);
+        assert!(custody.discard_pending().is_err());
+        let next = batch(&custody, 206, snapshot("c1", "fresh-after-dir-sync"), now);
+        assert_eq!(custody.accept(&next, now).0, reject("queue_full"));
+        custody.tick(now + chrono::Duration::minutes(6));
+        assert!(segment_files(&custody.layout.captures).is_empty());
     }
 
     #[test]
