@@ -741,15 +741,17 @@ impl Custody {
             .into_iter()
             .chain(browser_segments(&self.layout.captures))
         {
-            let receipts = read_receipts(&directory);
-            let tombstoned = !receipts.is_empty()
-                && receipts.iter().all(|receipt| {
-                    self.evidence
-                        .get(&(receipt.inst.clone(), receipt.batch_id.clone()))
-                        == Some(&EvidenceKind::Removed)
-                });
+            let identities = read_receipt_identities(&directory);
+            let tombstoned = identities.as_ref().is_some_and(|identities| {
+                !identities.is_empty()
+                    && identities
+                        .iter()
+                        .all(|identity| self.evidence.get(identity) == Some(&EvidenceKind::Removed))
+            });
             let empty = fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none());
-            if tombstoned || empty {
+            let sidecar_shell = !directory.join(super::PAGES_FILENAME).exists()
+                && !directory.join(RECEIPTS_FILE).exists();
+            if tombstoned || empty || sidecar_shell {
                 remove_tombstoned_directory(&directory)?;
             }
         }
@@ -910,6 +912,21 @@ fn read_receipts(directory: &Path) -> Vec<ReceiptLine> {
         out.push(receipt);
     }
     out
+}
+
+/// The complete receipt identities, without checking their byte coverage. This is
+/// only used to finish a removal whose payload may already have been unlinked.
+fn read_receipt_identities(directory: &Path) -> Option<Vec<(String, String)>> {
+    let bytes = fs::read(directory.join(RECEIPTS_FILE)).ok()?;
+    let mut identities = Vec::new();
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        let receipt = serde_json::from_slice::<ReceiptLine>(line).ok()?;
+        identities.push((receipt.inst, receipt.batch_id));
+    }
+    Some(identities)
 }
 
 /// The byte length of the receipts `read_receipts` accepts.
@@ -1264,6 +1281,35 @@ mod tests {
                 .values()
                 .any(|kind| *kind == EvidenceKind::Removed)
         );
+    }
+
+    #[test]
+    fn recovery_finishes_tombstoned_unlink_without_dropping_other_periods() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = at(10, 1, 0);
+        let mut custody = Custody::open(layout(&temp), now).unwrap();
+        let removed_batch = batch(&custody, 1, snapshot("c1", "removed"), now);
+        accepted(custody.accept(&removed_batch, now));
+        custody.tick(at(10, 5, 0));
+
+        let pending_batch = batch(&custody, 2, snapshot("c2", "pending"), at(10, 6, 0));
+        let pending_period = accepted(custody.accept(&pending_batch, at(10, 6, 0)));
+        let pending_dir = custody.layout.open().join(&pending_period);
+        let segment = custody.layout.captures.join("20261002/_browser/100100_240");
+        custody.tombstone_directory(&segment).unwrap();
+        fs::remove_file(segment.join(crate::browser::PAGES_FILENAME)).unwrap();
+        drop(custody);
+
+        let mut recovered = Custody::open(layout(&temp), at(10, 7, 0)).unwrap();
+        assert!(!segment.exists());
+        assert!(pending_dir.join(crate::browser::PAGES_FILENAME).is_file());
+
+        let mut replay = removed_batch;
+        replay["destination_generation"] = json!("different-generation");
+        assert!(matches!(
+            recovered.accept(&replay, at(10, 7, 0)).0,
+            Outcome::Duplicate { .. }
+        ));
     }
 
     #[test]
