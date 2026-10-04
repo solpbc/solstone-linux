@@ -526,7 +526,7 @@ fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) 
         let your_journal = if let Some(paired) = paired_spoken {
             paired.to_owned()
         } else {
-            "no mark available".to_owned()
+            "mark unavailable right now".to_owned()
         };
 
         if let Some(address) = &sighting.address {
