@@ -8,7 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
-- a pause now lasts until you resume it, or until the time you picked runs out, even if the solstone app quits, updates, or your computer restarts. before, a restart ended the pause.
+- a pause now lasts until you resume it, or until the time you picked runs out, even if the solstone app quits or your computer restarts. before, a restart ended the pause.
 
 ## [2.0.14] - 2026-10-05
 
