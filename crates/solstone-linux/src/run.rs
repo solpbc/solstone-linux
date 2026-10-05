@@ -330,13 +330,20 @@ fn run_capture(
             )
         })
     };
+    // Read before anything subscribes to state: the browser host and the panel
+    // must see a held pause from the first snapshot, not after initialization.
+    let starting_pause = crate::pause_hold::StartingPause::read(
+        &config,
+        clock.wall_seconds(),
+        clock.monotonic_seconds(),
+    );
     let initial_snapshot = StateSnapshot {
         mode: Mode::Idle,
-        paused: config.start_paused,
+        paused: starting_pause.paused,
         segment_open: false,
         captures_today: 0,
         total_size_mb: 0,
-        pause_until: None,
+        pause_until: starting_pause.until_mono,
         segment_start_mono: None,
         process_start_mono: clock.monotonic_seconds(),
     };
@@ -380,7 +387,7 @@ fn run_capture(
             .map(std::path::PathBuf::from)
             .collect(),
     ));
-    let mut observer = Observer::new(config, backends, zone);
+    let mut observer = Observer::with_starting_pause(config, backends, zone, starting_pause);
     let initialized = !stopped.load(Ordering::Acquire);
     let mut run_result = if initialized {
         observer.initialize()
@@ -1262,7 +1269,12 @@ mod tests {
                 }
             }
         }
-        let mut observer = Observer::new(Config::default(), backends, Box::new(DummyZone));
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            base_dir: temp.path().into(),
+            ..Config::default()
+        };
+        let mut observer = Observer::new(config, backends, Box::new(DummyZone));
         let open_journal = crate::private_link::OpenJournalAccess::default();
 
         let menu_items = tray.menu();

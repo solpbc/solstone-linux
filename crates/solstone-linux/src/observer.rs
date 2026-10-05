@@ -8,6 +8,7 @@ use crate::{
     chunking::{DrainedChunk, HitGate},
     config::Config,
     encoding::{AudioOutputPlan, audio_output_plan},
+    pause_hold::{self, HeldPause, StartingPause},
     recovery::{
         CAPTURE_ZONE_FILENAME, CaptureZone, SegmentProgress, is_segment_sidecar,
         scan_segment_progress, write_capture_zone, write_segment_metadata,
@@ -206,6 +207,9 @@ pub struct ObserverState {
     pub mode: Mode,
     pub paused: bool,
     pub pause_until: Option<f64>,
+    // The owner's deadline on the wall clock. A suspend stops the monotonic clock,
+    // so a timed pause also ends once wall time reaches the deadline.
+    pub pause_until_wall: Option<f64>,
     pub segment_dir: Option<PathBuf>,
     pub segment_start_wall: f64,
     pub segment_start_mono: f64,
@@ -243,22 +247,41 @@ where
     Q: CaptureStatsSource,
     N: StateSink,
 {
+    /// Build reading the held pause itself. The app reads it once up front
+    /// instead, so its first published state agrees (`with_starting_pause`).
+    #[cfg(test)]
     pub(crate) fn new(
         config: Config,
         backends: Backends<V, A, P, M, W, E, C, Q, N>,
         zone: Box<dyn ZoneSource>,
     ) -> Self {
+        let starting = StartingPause::read(
+            &config,
+            backends.clock.wall_seconds(),
+            backends.clock.monotonic_seconds(),
+        );
+        Self::with_starting_pause(config, backends, zone, starting)
+    }
+
+    /// Build with a starting pause already read, so the first published state
+    /// and the observer agree on it.
+    pub(crate) fn with_starting_pause(
+        config: Config,
+        backends: Backends<V, A, P, M, W, E, C, Q, N>,
+        zone: Box<dyn ZoneSource>,
+        starting: StartingPause,
+    ) -> Self {
         let wall = backends.clock.wall_seconds();
         let mono = backends.clock.monotonic_seconds();
-        let paused = config.start_paused;
         Self {
             config,
             backends,
             zone,
             state: ObserverState {
                 mode: Mode::Idle,
-                paused,
-                pause_until: None,
+                paused: starting.paused,
+                pause_until: starting.until_mono,
+                pause_until_wall: starting.until_wall,
                 segment_dir: None,
                 segment_start_wall: wall,
                 segment_start_mono: mono,
@@ -292,15 +315,31 @@ where
         Ok(())
     }
 
+    /// The owner's pause. `seconds == 0` is "until I resume". It is recorded so a
+    /// restart keeps it.
     pub fn pause(&mut self, seconds: u64) {
         self.state.paused = true;
         self.state.pause_until =
             (seconds > 0).then(|| self.backends.clock.monotonic_seconds() + seconds as f64);
+        self.state.pause_until_wall =
+            (seconds > 0).then(|| self.backends.clock.wall_seconds() + seconds as f64);
+        let held = match self.state.pause_until_wall {
+            Some(deadline) => HeldPause::Until(deadline),
+            None => HeldPause::UntilResumed,
+        };
+        if let Err(error) = pause_hold::save(&self.config.state_dir(), held) {
+            tracing::warn!(%error, "Could not record the pause; it holds until this app stops");
+        }
         self.publish();
     }
+    /// Ends the owner's pause, by the owner or at its deadline.
     pub fn resume(&mut self) {
         self.state.paused = false;
         self.state.pause_until = None;
+        self.state.pause_until_wall = None;
+        if let Err(error) = pause_hold::clear(&self.config.state_dir()) {
+            tracing::warn!(%error, "Could not remove the recorded pause");
+        }
         self.publish();
     }
 
@@ -312,10 +351,14 @@ where
             self.refresh_stats();
         }
         if self.state.paused
-            && self
+            && (self
                 .state
                 .pause_until
                 .is_some_and(|deadline| now >= deadline)
+                || self
+                    .state
+                    .pause_until_wall
+                    .is_some_and(|deadline| self.backends.clock.wall_seconds() >= deadline))
         {
             self.resume();
         }
@@ -1261,6 +1304,105 @@ pub(crate) mod tests {
         assert!(f.observer.state.paused);
         assert!(f.observer.state.segment_dir.is_none());
         assert!(f.states.0.borrow().last().unwrap().paused)
+    }
+    /// A second observer on the same data directory: the app after a restart.
+    fn restarted(previous: &Fixture) -> Fixture {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Config {
+            base_dir: temp.path().into(),
+            ..Config::default()
+        }
+        .state_dir();
+        let held = previous.observer.config.state_dir().join("pause.json");
+        if held.exists() {
+            fs::create_dir_all(&state).unwrap();
+            fs::copy(held, state.join("pause.json")).unwrap();
+        }
+        let zone_reads = Rc::new(Cell::new(0));
+        let zone = Box::new(CountingZone {
+            reads: zone_reads.clone(),
+        });
+        fixture_in(false, temp, zone, zone_reads)
+    }
+    #[test]
+    fn until_resumed_survives_a_restart_and_captures_nothing() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        f.observer.pause(0);
+        let mut after = restarted(&f);
+        assert!(after.observer.state.paused);
+        initialize(&mut after);
+        for _ in 0..3 {
+            after.mono.set(after.mono.get() + 3600.0);
+            after.wall.set(after.wall.get() + 3600.0);
+            after.observer.tick().unwrap();
+        }
+        assert_eq!(
+            after.starts.get(),
+            0,
+            "nothing starts while the pause is held"
+        );
+        assert!(after.observer.state.segment_dir.is_none());
+        let published = after.states.0.borrow().last().unwrap().clone();
+        assert!(published.paused);
+        assert_eq!(published.pause_until, None);
+        // Resume ends it, and the next restart observes.
+        after.observer.resume();
+        after.observer.tick().unwrap();
+        assert_eq!(after.starts.get(), 1);
+        let mut again = restarted(&after);
+        assert!(!again.observer.state.paused);
+        initialize(&mut again);
+        assert_eq!(again.starts.get(), 1);
+    }
+    #[test]
+    fn timed_pause_survives_a_restart_and_ends_at_its_original_deadline() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        // Paused for 15 minutes, 600 seconds before the restart below.
+        let restart_at = f.wall.get();
+        f.wall.set(restart_at - 600.0);
+        f.observer.pause(900);
+        let mut after = restarted(&f);
+        assert!(after.observer.state.paused);
+        assert_eq!(after.observer.state.pause_until, Some(300.0));
+        initialize(&mut after);
+        assert_eq!(after.starts.get(), 0);
+        after.wall.set(restart_at + 299.0);
+        after.observer.tick().unwrap();
+        assert!(after.observer.state.paused);
+        // The monotonic clock has not moved (a suspend, say); the wall deadline still ends it.
+        after.wall.set(restart_at + 300.0);
+        after.observer.tick().unwrap();
+        assert!(!after.observer.state.paused);
+        assert_eq!(after.starts.get(), 1);
+        assert!(
+            !after
+                .observer
+                .config
+                .state_dir()
+                .join("pause.json")
+                .exists()
+        );
+    }
+    #[test]
+    fn timed_pause_restarted_after_its_deadline_observes() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        f.wall.set(f.wall.get() - 1_000.0);
+        f.observer.pause(900);
+        let mut after = restarted(&f);
+        assert!(!after.observer.state.paused);
+        initialize(&mut after);
+        assert_eq!(after.starts.get(), 1);
+        assert!(
+            !after
+                .observer
+                .config
+                .state_dir()
+                .join("pause.json")
+                .exists()
+        );
     }
     // No 1:1 test: observer.py:611-634 agrees pause finalizes on the next tick.
     #[test]

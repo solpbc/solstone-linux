@@ -18,6 +18,7 @@ mod journal_mark;
 pub mod matching;
 pub mod observer;
 pub mod panel_icon;
+pub mod pause_hold;
 pub mod pipeline;
 pub mod positions;
 mod private_file;
