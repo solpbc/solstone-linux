@@ -6,6 +6,12 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.14] - 2026-10-05
+
+### Fixed
+
+- if you pair this computer with a different journal, a late refusal from the one you left no longer stops new moments from going to the journal you paired next.
+
 ## [2.0.13] - 2026-10-04
 
 ### Fixed
