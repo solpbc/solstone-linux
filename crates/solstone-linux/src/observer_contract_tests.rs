@@ -17,8 +17,8 @@ use std::{
 };
 use tempfile::TempDir;
 
-const MANIFEST_SHA256: &str = "6a38b9be1b4e0b9d93edff7120399a5ace0f6aa8edfecaa349e4c98d8100dbe3";
-const AUTHORITY_COMMIT: &str = "b78ba9eaac8228e65c4b5a3e64d27aefd3ad47cd";
+const MANIFEST_SHA256: &str = "86d4358916a0303c29a8e61c6d1e48ef1939d0b5a2f042ae617958b9d0c1a5a8";
+const AUTHORITY_COMMIT: &str = "1e432dba3ecdfa43789c25f97077fdc3e71fab59";
 
 const LINUX_FIXTURES: &[&str] = &[
     "declared.client.ingestUpload.status.collision",
@@ -233,7 +233,7 @@ fn assert_identities(
     vector_document: &Value,
     consumer_audit: &Value,
 ) {
-    assert_eq!(manifest["bundle_semver"], "12.2.0");
+    assert_eq!(manifest["bundle_semver"], "14.0.0");
     assert_eq!(manifest["openapi_document_version"], "1.0.0");
     assert_eq!(manifest["client_protocol_version"], 3);
     assert_eq!(manifest["supported_response_variants"], json!([3]));
@@ -260,7 +260,12 @@ fn assert_identities(
     );
     assert_eq!(
         manifest["consumer_identifiers"],
-        json!(["solstone-browser", "solstone-linux", "solstone-windows"])
+        json!([
+            "solstone-linux",
+            "solstone-macos",
+            "solstone-tmux",
+            "solstone-windows"
+        ])
     );
     assert_eq!(
         manifest["component_closure"],
@@ -309,15 +314,11 @@ fn assert_identities(
         })
     );
 
-    let linux_target = manifest["windows_linux_rollout_targets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|target| target["consumer_identifier"] == "solstone-linux")
-        .unwrap();
-    assert_eq!(
-        linux_target["adoption_blocker_ids"],
-        json!(["solstone-linux-legacy-v2-unmigrated"])
+    assert!(
+        manifest["windows_linux_rollout_targets"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
     let linux_revision = manifest["audited_consumer_revisions"]
         .as_array()
@@ -327,7 +328,7 @@ fn assert_identities(
         .unwrap();
     assert_eq!(
         linux_revision["revision"],
-        "1c679db1ce6f9a65db70c5aae0ca2fad677416ef"
+        "f33878fb6c608bf43654777c4a3b7772d7375e7c"
     );
     let linux_audit = consumer_audit["audited_commits"]
         .as_array()
@@ -337,17 +338,11 @@ fn assert_identities(
         .unwrap();
     assert_eq!(
         linux_audit["commit"],
-        "1c679db1ce6f9a65db70c5aae0ca2fad677416ef"
+        "f33878fb6c608bf43654777c4a3b7772d7375e7c"
     );
 
-    assert_eq!(
-        fixtures.keys().cloned().collect::<BTreeSet<_>>(),
-        set(LINUX_FIXTURES)
-    );
-    assert_eq!(
-        vectors.keys().cloned().collect::<BTreeSet<_>>(),
-        set(LINUX_VECTORS)
-    );
+    assert!(set(LINUX_FIXTURES).is_subset(&fixtures.keys().cloned().collect()));
+    assert!(set(LINUX_VECTORS).is_subset(&vectors.keys().cloned().collect()));
     for vector in vectors.values() {
         assert!(fixtures.contains_key(vector["fixture_id"].as_str().unwrap()));
     }
@@ -366,13 +361,58 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
     let expected = json!({
         "authority_repository":"https://github.com/solpbc/solstone-journal",
         "authority_commit":AUTHORITY_COMMIT,
-        "bundle_version":"12.2.0",
+        "bundle_version":"14.0.0",
         "manifest_path":"manifest.json",
         "manifest_sha256":MANIFEST_SHA256,
         "vendored_root":"vendor/observer-client-contract"
     });
     if value != expected {
         return Err("provenance mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn verify_authority_adoption(root: &Path) -> Result<(), String> {
+    let adoption_path = root.join("contracts/authority-adoption.json");
+    let value: Value =
+        serde_json::from_slice(&fs::read(&adoption_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let expected = json!({
+        "authority_repository":"https://github.com/solpbc/solstone-journal",
+        "authority_commit":AUTHORITY_COMMIT,
+        "device_migration":{
+            "artifacts":[
+                {"authority_path":"contracts/device-migration/v1.schema.json","local_path":"contracts/device-migration/v1.schema.json","sha256":"5ea0ce5bf0bc5f07233f05dda3334ccea3bf173363fcd4fd4cdcd9479130a373"},
+                {"authority_path":"contracts/device-migration/v1.vectors.json","local_path":"contracts/device-migration/v1.vectors.json","sha256":"3ba1bb508a0cd5756626c6246bfbff77573c54538db60c8e7f938e38b306ef9c"}
+            ]
+        },
+        "client_ingest_bundle":{
+            "bundle_version":"14.0.0",
+            "manifest":{"authority_path":"docs/openapi/client-ingest-contract/manifest.json","local_path":"vendor/observer-client-contract/manifest.json","sha256":MANIFEST_SHA256},
+            "generator_input":{"id":"openapi.client_ingest_authority","authority_path":"core/crates/solstone-core-repository-contracts/src/contracts/client_ingest_authority.json","sha256":"afe354e26827d431d4766289a91c9d421edd99e67006937f7ad8d955a23a8f53"},
+            "artifacts":[
+                {"authority_path":"docs/openapi/client-ingest-contract/consumer-audit.json","local_path":"vendor/observer-client-contract/consumer-audit.json","sha256":"31589211391a7feaafda6fa8514ffcf900f3acf3931a285e8712c646c6e9ab07"},
+                {"authority_path":"docs/openapi/client-ingest-contract/fixtures/wire-behavior.json","local_path":"vendor/observer-client-contract/fixtures/wire-behavior.json","sha256":"035e59297af21da998984910b4aa6a850d7e2e1225c79019045381bf3e17e708"},
+                {"authority_path":"docs/openapi/client-ingest-contract/projection.openapi.json","local_path":"vendor/observer-client-contract/projection.openapi.json","sha256":"db75a94ab97e83c56603e44d9313db86a94a2d9c4a920deaf090fe0f3358b8b0"},
+                {"authority_path":"docs/openapi/client-ingest-contract/vectors.json","local_path":"vendor/observer-client-contract/vectors.json","sha256":"7c61c1238184e1440110801478daf714aba05b2472338bd98c12cd508b303d0f"}
+            ]
+        }
+    });
+    if value != expected {
+        return Err("authority adoption provenance mismatch".to_owned());
+    }
+    for section in ["device_migration", "client_ingest_bundle"] {
+        for artifact in value[section]["artifacts"].as_array().unwrap() {
+            let local = root.join(artifact["local_path"].as_str().unwrap());
+            let actual = digest(&fs::read(&local).map_err(|error| error.to_string())?);
+            if actual != artifact["sha256"].as_str().unwrap() {
+                return Err(format!("authority artifact digest mismatch: {local:?}"));
+            }
+        }
+    }
+    let manifest_path = root.join("vendor/observer-client-contract/manifest.json");
+    if digest(&fs::read(&manifest_path).map_err(|error| error.to_string())?) != MANIFEST_SHA256 {
+        return Err("client-ingest manifest digest mismatch".to_owned());
     }
     Ok(())
 }
@@ -704,7 +744,7 @@ fn assert_mutations(
         );
     }
     let mut missing_fixture = fixtures.clone();
-    missing_fixture.pop_first();
+    missing_fixture.remove(LINUX_FIXTURES[0]);
     assert!(
         std::panic::catch_unwind(|| {
             assert_identities(
@@ -719,7 +759,7 @@ fn assert_mutations(
         .is_err()
     );
     let mut missing_vector = vectors.clone();
-    missing_vector.pop_first();
+    missing_vector.remove(LINUX_VECTORS[0]);
     assert!(
         std::panic::catch_unwind(|| {
             assert_identities(
@@ -757,6 +797,7 @@ async fn observer_contract_conformance() {
     let bundle = root.join("vendor/observer-client-contract");
     let manifest = verify_bundle(&bundle, MANIFEST_SHA256).unwrap();
     verify_provenance(&root.join("contracts/observer-client-import.json")).unwrap();
+    verify_authority_adoption(&root).unwrap();
     let projection = load_document(&bundle.join("projection.openapi.json"));
     let fixture_document = load_document(&bundle.join("fixtures/wire-behavior.json"));
     let vector_document = load_document(&bundle.join("vectors.json"));

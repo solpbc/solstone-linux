@@ -3,7 +3,7 @@
 
 use std::{
     env, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -520,6 +520,9 @@ fn start_browser(
     let about_host = crate::about::host_facts();
     let about = Arc::new(move |facts: &custody::Facts| {
         let unknown = || crate::about::AboutBlock::unknown(about_host.clone()).native();
+        if !crate::device_migration::credential_admission_allowed(&about_config.config_dir) {
+            return unknown();
+        }
         let Some(credential) = load_credential(&about_config.config_dir).ok().flatten() else {
             return unknown();
         };
@@ -539,7 +542,10 @@ fn start_browser(
                         &pairing_id,
                     )
             });
-        if !still_confirmed || facts.generation.is_none() {
+        if !still_confirmed
+            || facts.generation.is_none()
+            || !crate::device_migration::credential_admission_allowed(&about_config.config_dir)
+        {
             return unknown();
         }
         block.native()
@@ -581,14 +587,36 @@ pub(crate) async fn start_linked_owner(
     shutdown: Arc<tokio::sync::Notify>,
     on_confirmed: Option<crate::sync::SyncTrigger>,
 ) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
+    start_linked_owner_with_resolver(
+        upload,
+        config_root,
+        stream,
+        state_lock,
+        transport_enabled,
+        open_journal,
+        shutdown,
+        on_confirmed,
+        &crate::device_migration::SystemStartupResolver,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_linked_owner_with_resolver(
+    upload: Arc<UploadClient>,
+    config_root: PathBuf,
+    stream: String,
+    state_lock: PrivateStateLock,
+    transport_enabled: bool,
+    open_journal: crate::private_link::OpenJournalAccess,
+    shutdown: Arc<tokio::sync::Notify>,
+    on_confirmed: Option<crate::sync::SyncTrigger>,
+    resolver: &dyn crate::device_migration::StartupResolver,
+) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
     upload.prepare_new_owner();
     if !transport_enabled {
         upload.publish_link_fact(crate::private_link::LinkFact::ConfigSanitationFailed);
         return Err(crate::private_link::PrivateStateError::BridgeUnavailable);
-    }
-
-    if let Ok(_lock) = crate::journal_mark::AnswerLock::acquire(&config_root).await {
-        let _ = crate::journal_mark::grandfather_answer_file(&config_root);
     }
 
     let initial_cred = match load_credential(&config_root) {
@@ -604,16 +632,22 @@ pub(crate) async fn start_linked_owner(
         }
     };
 
-    let mut armed = true;
     let mut current_cred = Some(initial_cred);
     let confirmed_cred = loop {
-        if let Some(cred) = &current_cred {
-            let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
-            if crate::journal_mark::is_pairing_confirmed(&config_root, &pairing_id) {
-                upload.link_facts().set_journal_mark_held(false);
-                break cred.clone();
+        if let Some(cred) = current_cred.as_ref() {
+            match resolver.resolve(&config_root, cred.clone()).await {
+                Ok(resolved) if pairing_answer_allows_link(&config_root, &resolved) => {
+                    upload.link_facts().set_journal_mark_held(false);
+                    break resolved;
+                }
+                Ok(_) => {
+                    upload.link_facts().set_journal_mark_held(true);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Linked identity remains held by device migration");
+                    upload.link_facts().set_journal_mark_held(true);
+                }
             }
-            upload.link_facts().set_journal_mark_held(true);
         }
 
         tokio::select! {
@@ -624,24 +658,15 @@ pub(crate) async fn start_linked_owner(
         }
 
         match load_credential(&config_root) {
-            Ok(Some(cred)) => {
-                armed = true;
-                current_cred = Some(cred);
-            }
+            Ok(Some(cred)) => current_cred = Some(cred),
             Ok(None) => {
                 current_cred = None;
                 upload.link_facts().set_journal_mark_held(false);
                 upload.publish_link_fact(crate::private_link::LinkFact::PairingRequired);
-                if !armed {
-                    return Err(crate::private_link::PrivateStateError::MalformedCredential);
-                }
             }
             Err(error) => {
-                if !armed {
-                    upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
-                    return Err(error);
-                }
-                upload.link_facts().set_journal_mark_held(true);
+                upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
+                tracing::warn!(%error, "Linked credential remains unavailable");
             }
         }
     };
@@ -661,6 +686,18 @@ pub(crate) async fn start_linked_owner(
         trigger.trigger();
     }
     Ok(owner)
+}
+
+fn pairing_answer_allows_link(
+    config_root: &Path,
+    credential: &spl_transport::credential::Credential,
+) -> bool {
+    let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
+    match crate::journal_mark::read_pairing_answer(config_root) {
+        Ok(None) => true,
+        Ok(Some(answer)) => !answer.confirmed.is_empty() && answer.confirmed == pairing_id,
+        Err(_) => false,
+    }
 }
 
 fn apply_command<V, A, P, M, W, E, C, Q, N>(
@@ -2281,7 +2318,9 @@ mod tests {
                 day,
             )
             .await;
-            assert_pending_unchanged(&pending, &[false, false, false]);
+            // An unavailable listing route cannot prove server custody, so
+            // retain the migrated local backlog for a later supported pass.
+            assert_pending_unchanged(&pending, &[true, true, true]);
             assert_real_observer_ticks_advance();
             owner.shutdown().await.unwrap();
             drop(upload);

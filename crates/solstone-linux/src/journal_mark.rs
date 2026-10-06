@@ -258,10 +258,6 @@ pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
     }
 }
 
-pub(crate) fn grandfather_answer_file(config_root: &Path) -> Result<(), PrivateStateError> {
-    grandfather_answer_file_with_fault(config_root, &NoWriteFault)
-}
-
 pub(crate) fn grandfather_answer_file_with_fault(
     config_root: &Path,
     fault: &dyn DurableWriteFault,
@@ -639,7 +635,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         // Absent credential -> writes empty confirmed
-        grandfather_answer_file(&root).unwrap();
+        grandfather_answer_file_with_fault(&root, &NoWriteFault).unwrap();
         assert_eq!(
             read_pairing_answer(&root).unwrap(),
             Some(PairingAnswer {
@@ -653,7 +649,7 @@ mod tests {
         crate::private_link::persist_credential(&root, &cred).unwrap();
         let expected_id = compute_pairing_id(&cred.client_cert_pem);
 
-        grandfather_answer_file(&root).unwrap();
+        grandfather_answer_file_with_fault(&root, &NoWriteFault).unwrap();
         assert_eq!(
             read_pairing_answer(&root).unwrap(),
             Some(PairingAnswer {
@@ -663,7 +659,7 @@ mod tests {
 
         // Does not overwrite an existing answer file
         write_pairing_answer(&root, "custom").unwrap();
-        grandfather_answer_file(&root).unwrap();
+        grandfather_answer_file_with_fault(&root, &NoWriteFault).unwrap();
         assert_eq!(
             read_pairing_answer(&root).unwrap(),
             Some(PairingAnswer {
@@ -1036,7 +1032,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let _ = grandfather_answer_file(&root);
+        let _ = grandfather_answer_file_with_fault(&root, &NoWriteFault);
 
         let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
         tty_peer.write_all(b"yes\n").unwrap();
@@ -1396,7 +1392,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let _ = grandfather_answer_file(&root);
+        let _ = grandfather_answer_file_with_fault(&root, &NoWriteFault);
 
         assert!(journal_mark_held_on_disk(&root));
         fs::set_permissions(&ans_path, fs::Permissions::from_mode(0o600)).unwrap();

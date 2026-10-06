@@ -72,6 +72,7 @@ pub(crate) enum PrivateTargetKind {
     Observer,
     Lock,
     PairingAnswer,
+    Migration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -796,6 +797,33 @@ pub(crate) async fn setup_with_stream<R: Read>(
     .await
 }
 
+#[cfg(test)]
+struct SetupTestMarker;
+
+#[cfg(test)]
+impl crate::device_migration::MarkerProvider for SetupTestMarker {
+    fn read_marker(&self) -> Result<crate::device_migration::MachineMarker, ()> {
+        Ok(crate::device_migration::MachineMarker::Present(
+            "private-link-setup-test".to_owned(),
+        ))
+    }
+}
+
+fn finish_setup_migration(root: &Path, pairing_id: &str) -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        crate::device_migration::finish_setup_pairing_with_marker_at(
+            root,
+            &SetupTestMarker,
+            pairing_id,
+        )
+    }
+    #[cfg(not(test))]
+    {
+        crate::device_migration::finish_setup_pairing_at(root, pairing_id)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
     pairer: &dyn Pairer,
@@ -826,8 +854,13 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
 
     {
         let _answer_lock = crate::journal_mark::AnswerLock::acquire(state_lock.root()).await?;
-        let fault = grandfather_write_fault.unwrap_or(&NoWriteFault);
-        crate::journal_mark::grandfather_answer_file_with_fault(state_lock.root(), fault)?;
+        let should_grandfather =
+            crate::device_migration::should_grandfather_setup_answer_at(state_lock.root())
+                .map_err(|_| config_persist_error(io::Error::other("migration state read")))?;
+        if should_grandfather {
+            let fault = grandfather_write_fault.unwrap_or(&NoWriteFault);
+            crate::journal_mark::grandfather_answer_file_with_fault(state_lock.root(), fault)?;
+        }
     }
 
     let link = read_pair_link(input)?;
@@ -861,6 +894,11 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                     save_linked_stream(&private_config_paths(state_lock.root()), stream)
                         .map_err(config_persist_error)?;
                 }
+                crate::device_migration::prepare_setup_pairing_at(
+                    state_lock.root(),
+                    &new_pairing_id,
+                )
+                .map_err(|_| config_persist_error(io::Error::other("migration state persist")))?;
                 persist_credential(state_lock.root(), &credential)?;
                 let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
 
@@ -876,6 +914,9 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                     ),
                 };
                 if write_res.is_err() {
+                    return Ok(SetupOutcome::WalkedAwayHeld);
+                }
+                if finish_setup_migration(state_lock.root(), &new_pairing_id).is_err() {
                     return Ok(SetupOutcome::WalkedAwayHeld);
                 }
                 return Ok(SetupOutcome::Confirmed);
@@ -912,6 +953,8 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                 save_linked_stream(&private_config_paths(state_lock.root()), stream)
                     .map_err(config_persist_error)?;
             }
+            crate::device_migration::prepare_setup_pairing_at(state_lock.root(), &new_pairing_id)
+                .map_err(|_| config_persist_error(io::Error::other("migration state persist")))?;
             persist_credential(state_lock.root(), &credential)?;
             let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
 
@@ -926,6 +969,9 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                 }
             };
             if write_res.is_err() {
+                return Ok(SetupOutcome::WalkedAwayHeld);
+            }
+            if finish_setup_migration(state_lock.root(), &new_pairing_id).is_err() {
                 return Ok(SetupOutcome::WalkedAwayHeld);
             }
             Ok(SetupOutcome::Confirmed)
@@ -952,6 +998,11 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                     save_linked_stream(&private_config_paths(state_lock.root()), stream)
                         .map_err(config_persist_error)?;
                 }
+                crate::device_migration::prepare_setup_pairing_at(
+                    state_lock.root(),
+                    &new_pairing_id,
+                )
+                .map_err(|_| config_persist_error(io::Error::other("migration state persist")))?;
                 persist_credential(state_lock.root(), &credential)?;
                 let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
                 Ok(SetupOutcome::WalkedAwayHeld)

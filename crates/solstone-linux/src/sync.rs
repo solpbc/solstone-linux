@@ -26,7 +26,7 @@ use crate::{
     sync_health::{
         ErrorType, ProcessEpoch, SyncFacts, SyncHealth, derive_health, load_facts, save_facts,
     },
-    upload::{FileDescriptor, ListingEntry, UploadClient},
+    upload::{FileDescriptor, ListingEntry, ListingFile, UploadClient},
 };
 
 pub const CIRCUIT_THRESHOLD_AUTH: u32 = 1;
@@ -72,10 +72,13 @@ pub(crate) struct IngestAck {
     pub day: String,
     pub stream: String,
     pub local_key: String,
-    pub stored_key: String,
     pub identity_key: String,
     pub pairing_id: String,
     pub proof: String,
+    #[serde(default)]
+    pub physical_stream: Option<String>,
+    #[serde(default)]
+    pub physical_segment: Option<String>,
     pub files: Vec<IngestAckFile>,
 }
 
@@ -828,6 +831,11 @@ impl SyncWorker {
                     self.record_failure(custody.error_type, pass_error_code);
                     break;
                 }
+                if custody.error_type == Some(ErrorType::Incompatible) {
+                    // A malformed or unsupported listing cannot authorize any
+                    // reconciliation or deletion for this day/source.
+                    continue;
+                }
                 if custody.error_type.is_some() || !custody.proof_available || !custody.day_present
                 {
                     // Non-auth error or no proof: do not record_failure, do not stop pass.
@@ -892,7 +900,6 @@ impl SyncWorker {
                 }
 
                 self.record_contact(false);
-                let indexed = index_entries(&custody.items);
                 {
                     for segment_dir in day_segments.iter().copied() {
                         if uploaded_in_phase1.contains(segment_dir) {
@@ -933,8 +940,10 @@ impl SyncWorker {
                             continue;
                         }
 
+                        let physical_entries = lookup_physical_entries(&custody.items, segment_dir);
                         let mut should_upload = false;
-                        if let Some(entry) = lookup_entry(&indexed, segment_dir) {
+                        if physical_entries.len() == 1 {
+                            let entry = physical_entries[0];
                             match segment_custody_proven(segment_dir, entry) {
                                 Err(_) => {
                                     // Err skips
@@ -949,10 +958,6 @@ impl SyncWorker {
                                             Err(_) => continue,
                                         };
                                     let build_ack_and_unlink = || -> io::Result<()> {
-                                        let stored_key = entry
-                                            .key
-                                            .clone()
-                                            .unwrap_or_else(|| seg_name.to_string());
                                         let files = eligible_files(segment_dir)?;
                                         let mut ack_files = Vec::new();
                                         for f in &files {
@@ -968,12 +973,13 @@ impl SyncWorker {
                                             day: day.clone(),
                                             stream,
                                             local_key: seg_name.to_string(),
-                                            stored_key,
                                             identity_key: current_identity
                                                 .clone()
                                                 .unwrap_or_default(),
                                             pairing_id: current_pairing.clone().unwrap_or_default(),
                                             proof: "listing".to_string(),
+                                            physical_stream: entry.stream.clone(),
+                                            physical_segment: entry.segment.clone(),
                                             files: ack_files,
                                         };
                                         write_ack(segment_dir, &ack)?;
@@ -987,8 +993,14 @@ impl SyncWorker {
                                     let _ = build_ack_and_unlink();
                                 }
                             }
-                        } else {
+                        } else if physical_entries.is_empty() {
+                            // Alias-only entries cannot prove local custody.
                             should_upload = true;
+                        } else {
+                            // Duplicate physical rows are ambiguous even when
+                            // their bytes happen to be equal. Keep the local
+                            // segment and its unconfirmed state intact.
+                            continue;
                         }
 
                         if should_upload {
@@ -1130,12 +1142,6 @@ impl SyncWorker {
                     .iter()
                     .any(|d| d.disposition == "received_not_written");
                 if verify_receipt(&files, &precomputed, descriptors) {
-                    let stored_key = result.stored_key.clone().unwrap_or_else(|| key.to_string());
-                    if stored_key != key.as_ref()
-                        && let Err(error) = write_server_key(segment_dir, &stored_key)
-                    {
-                        tracing::warn!(%error, "Failed to write server key marker");
-                    }
                     let mut ack_files = Vec::with_capacity(descriptors.len());
                     for desc in descriptors {
                         let file_path = segment_dir.join(&desc.submitted);
@@ -1168,10 +1174,11 @@ impl SyncWorker {
                         day: day.to_string(),
                         stream,
                         local_key: key.to_string(),
-                        stored_key,
                         identity_key: result.captured_identity_key.clone().unwrap_or_default(),
                         pairing_id: result.captured_pairing_id.clone().unwrap_or_default(),
                         proof: "upload".to_string(),
+                        physical_stream: None,
+                        physical_segment: None,
                         files: ack_files,
                     };
                     #[cfg(test)]
@@ -1561,14 +1568,7 @@ fn listing_ack_file(file: &Path, entry: &ListingEntry) -> io::Result<IngestAckFi
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| io::Error::other("non-utf8 file name"))?;
-    let remote = entry
-        .files
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .find(|remote| {
-            remote.submitted_name.as_deref() == Some(name) || remote.name.as_deref() == Some(name)
-        })
+    let remote = unique_listing_file(entry, name)
         .ok_or_else(|| io::Error::other("file absent from custody listing"))?;
     // Keep the journal's identity: local bytes can change after the listing check.
     Ok(IngestAckFile {
@@ -1598,6 +1598,15 @@ fn remove_confirmed_segment(
         let browser_segment = crate::browser::is_browser_segment(dir);
         let files = eligible_files(dir)?;
         let ack = read_ack(dir);
+        if let Some(ack) = ack.as_ref()
+            && ack.proof == "listing"
+            && !ack_physical_coordinates_match(dir, ack)
+        {
+            let _ = fs::remove_file(dir.join(INGEST_ACK_FILENAME));
+            return Err(io::Error::other(
+                "listing acknowledgment physical identity changed",
+            ));
+        }
         let matches = |file: &Path| {
             let Some(ack) = ack.as_ref() else {
                 return false;
@@ -1721,6 +1730,9 @@ fn is_ack_valid(
         None => return false,
     };
     if ack.local_key != local_name {
+        return false;
+    }
+    if ack.proof == "listing" && !ack_physical_coordinates_match(segment_dir, &ack) {
         return false;
     }
     let Ok(files) = eligible_files(segment_dir) else {
@@ -1954,16 +1966,7 @@ fn segment_custody_proven(segment_dir: &Path, entry: &ListingEntry) -> io::Resul
         let Some(local_name) = local.file_name().and_then(|name| name.to_str()) else {
             return Err(io::Error::other("non-utf8 file name"));
         };
-        let Some(remote) = entry
-            .files
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .find(|remote| {
-                remote.submitted_name.as_deref() == Some(local_name)
-                    || remote.name.as_deref() == Some(local_name)
-            })
-        else {
+        let Some(remote) = unique_listing_file(entry, local_name) else {
             return Ok(false);
         };
         if !matches!(remote.status.as_deref(), Some("present" | "processed")) {
@@ -1987,39 +1990,61 @@ fn segment_custody_proven(segment_dir: &Path, entry: &ListingEntry) -> io::Resul
     Ok(true)
 }
 
-fn index_entries(items: &[ListingEntry]) -> HashMap<String, &ListingEntry> {
-    let mut indexed = HashMap::new();
-    for item in items {
-        if let Some(key) = item.key.as_ref().filter(|key| !key.is_empty()) {
-            indexed.insert(key.clone(), item);
-        }
-        if let Some(key) = item.original_key.as_ref().filter(|key| !key.is_empty()) {
-            indexed.insert(key.clone(), item);
-        }
-    }
-    indexed
+fn unique_listing_file<'a>(entry: &'a ListingEntry, name: &str) -> Option<&'a ListingFile> {
+    let mut matches = entry.files.as_deref()?.iter().filter(|remote| {
+        remote.submitted_name.as_deref() == Some(name) || remote.name.as_deref() == Some(name)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
-fn lookup_entry<'a>(
-    entries: &'a HashMap<String, &'a ListingEntry>,
+fn ack_physical_coordinates_match(segment_dir: &Path, ack: &IngestAck) -> bool {
+    let Some(segment) = segment_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(stream) = segment_dir
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let Some(day) = segment_dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    ack.day == day
+        && ack.stream == stream
+        && ack.physical_stream.as_deref() == Some(stream)
+        && ack.physical_segment.as_deref() == Some(segment)
+}
+
+fn physical_entry_matches(segment_dir: &Path, entry: &ListingEntry) -> bool {
+    let Some(segment) = segment_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(stream) = segment_dir
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    entry.stream.as_deref() == Some(stream) && entry.segment.as_deref() == Some(segment)
+}
+
+fn lookup_physical_entries<'a>(
+    items: &'a [ListingEntry],
     segment_dir: &Path,
-) -> Option<&'a ListingEntry> {
-    let name = segment_dir.file_name()?.to_str()?;
-    entries
-        .get(name)
-        .copied()
-        .or_else(|| read_server_key(segment_dir).and_then(|key| entries.get(&key).copied()))
-}
-
-fn read_server_key(segment_dir: &Path) -> Option<String> {
-    fs::read_to_string(segment_dir.join(SERVER_KEY_FILENAME))
-        .ok()
-        .map(|key| key.trim().to_owned())
-        .filter(|key| !key.is_empty())
-}
-
-fn write_server_key(segment_dir: &Path, key: &str) -> io::Result<()> {
-    fs::write(segment_dir.join(SERVER_KEY_FILENAME), format!("{key}\n"))
+) -> Vec<&'a ListingEntry> {
+    items
+        .iter()
+        .filter(|entry| physical_entry_matches(segment_dir, entry))
+        .collect()
 }
 
 fn quarantine_segment(now: f64, segment_dir: &Path, reason: &str) -> bool {
@@ -2199,7 +2224,8 @@ mod tests {
     fn entry(name: &str, status: &str, sha: &str) -> ListingEntry {
         ListingEntry {
             key: Some("120000_300".to_owned()),
-            original_key: None,
+            stream: None,
+            segment: None,
             files: Some(vec![ListingFile {
                 submitted_name: None,
                 name: Some(name.to_owned()),
@@ -2238,12 +2264,36 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: key.to_string(),
-            stored_key: key.to_string(),
             identity_key: cur_id.to_string(),
             pairing_id: cur_pair.to_string(),
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: ack_files,
         }
+    }
+
+    #[test]
+    fn legacy_ingest_ack_stored_key_is_ignored_when_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        let ack = create_test_ack(&segment, "120000_300", "identity", "pairing");
+        let mut legacy_json = serde_json::to_value(ack).unwrap();
+        legacy_json["stored_key"] = serde_json::json!("server-alias");
+        fs::write(
+            segment.join(INGEST_ACK_FILENAME),
+            serde_json::to_vec(&legacy_json).unwrap(),
+        )
+        .unwrap();
+
+        let restored = read_ack(&segment).unwrap();
+        assert_eq!(restored.local_key, "120000_300");
+        assert!(
+            serde_json::to_value(restored)
+                .unwrap()
+                .get("stored_key")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2336,7 +2386,7 @@ mod tests {
         }
         custody_for_day(
             "20260101",
-            vec![json!({"key":key,"observed":true,"files":[file]})],
+            vec![json!({"key":key,"observed":true,"stream":"archon","segment":key,"files":[file]})],
         )
     }
 
@@ -2491,7 +2541,8 @@ mod tests {
         fs::write(&audio, b"audio").unwrap();
         let item = ListingEntry {
             key: Some("120000_300".to_owned()),
-            original_key: None,
+            stream: None,
+            segment: None,
             files: Some(vec![
                 ListingFile {
                     submitted_name: None,
@@ -2520,7 +2571,8 @@ mod tests {
         fs::write(&file, b"screen").unwrap();
         let item = ListingEntry {
             key: Some("120000_300".to_owned()),
-            original_key: None,
+            stream: None,
+            segment: None,
             files: Some(vec![ListingFile {
                 submitted_name: Some("submitted.webm".to_owned()),
                 name: Some("stored.webm".to_owned()),
@@ -2701,10 +2753,12 @@ mod tests {
         .unwrap();
         let remote = custody_for_day(
             "20260101",
-            vec![json!({"key":"120000_300", "observed":true, "files":[
-                {"name":"screen.webm","size":6,"status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
-                {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
-            ]})],
+            vec![
+                json!({"key":"120000_300", "observed":true, "stream":"archon", "segment":"120000_300", "files":[
+                    {"name":"screen.webm","size":6,"status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
+                    {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
+                ]}),
+            ],
         );
         let (_server, mut worker) = test_worker(&temp, vec![(200, remote)]).await;
         worker.sync_pass().await;
@@ -2803,9 +2857,9 @@ mod tests {
         assert_eq!(upload_hits(&server), 1);
     }
 
-    // tests/test_sync.py::test_collision_marker_and_original_key_reconcile
+    // Upload cleanup follows the local segment name after a server collision.
     #[tokio::test]
-    async fn collision_marker_and_original_key_reconcile() {
+    async fn upload_collision_alias_does_not_change_local_segment_identity() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let (server, mut worker) = test_worker(
@@ -2987,22 +3041,214 @@ mod tests {
         assert!(!segment_custody_proven(temp.path(), &entry("x", "present", "x")).unwrap());
     }
 
-    // entry indexing and marker lookup cover key and original_key.
     #[test]
-    fn index_and_marker_lookup_cover_both_keys() {
+    fn duplicate_local_file_candidates_do_not_prove_listing_custody() {
         let temp = tempfile::tempdir().unwrap();
-        let segment = temp.path().join("original");
-        fs::create_dir(&segment).unwrap();
-        write_server_key(&segment, "stored").unwrap();
-        let item = ListingEntry {
+        let file = temp.path().join("screen.webm");
+        fs::write(&file, b"screen").unwrap();
+        let sha = sha256_file(&file).unwrap();
+        let mut item = entry("screen.webm", "present", &sha);
+        item.files.as_mut().unwrap().push(ListingFile {
+            submitted_name: Some("screen.webm".into()),
+            name: Some("renamed.webm".into()),
+            status: Some("processed".into()),
+            sha256: Some(sha),
+            size: Some(6),
+        });
+        assert!(!segment_custody_proven(temp.path(), &item).unwrap());
+    }
+
+    // Aliases never prove custody; physical coordinates select the proof rows.
+    #[test]
+    fn physical_listing_match_is_unique_and_aliases_do_not_prove() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = temp.path().join("captures/20260101/archon/original");
+        fs::create_dir_all(&segment).unwrap();
+        let alias_only = ListingEntry {
             key: Some("stored".to_owned()),
-            original_key: Some("original".to_owned()),
+            stream: None,
+            segment: None,
             files: None,
         };
-        let items = [item];
-        let indexed = index_entries(&items);
-        assert!(lookup_entry(&indexed, &segment).is_some());
-        assert_eq!(indexed.len(), 2);
+        let physical = ListingEntry {
+            key: Some("stored".to_owned()),
+            stream: Some("archon".to_owned()),
+            segment: Some("original".to_owned()),
+            files: None,
+        };
+        assert!(lookup_physical_entries(std::slice::from_ref(&alias_only), &segment).is_empty());
+        assert_eq!(
+            lookup_physical_entries(std::slice::from_ref(&physical), &segment).len(),
+            1
+        );
+        assert_eq!(
+            lookup_physical_entries(&[physical.clone(), physical], &segment).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn physical_listing_coordinates_survive_server_alias_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = temp.path().join("captures/20260101/archon/original");
+        fs::create_dir_all(&segment).unwrap();
+        fs::write(segment.join("screen.webm"), b"screen").unwrap();
+        let mut ack = create_test_ack(&segment, "original", "identity", "pairing");
+        ack.proof = "listing".into();
+        ack.physical_stream = Some("archon".into());
+        ack.physical_segment = Some("original".into());
+        ack.files[0].disposition = "present".into();
+        write_ack(&segment, &ack).unwrap();
+        fs::write(segment.join(SERVER_KEY_FILENAME), "new-alias\n").unwrap();
+        assert!(ack_physical_coordinates_match(
+            &segment,
+            &read_ack(&segment).unwrap()
+        ));
+        assert!(is_ack_valid(&segment, read_ack(&segment), None, None));
+        let mut reassigned_physical = ack.clone();
+        reassigned_physical.physical_segment = Some("new-alias".into());
+        assert!(!ack_physical_coordinates_match(
+            &segment,
+            &reassigned_physical
+        ));
+        assert!(!is_ack_valid(
+            &segment,
+            Some(reassigned_physical),
+            None,
+            None
+        ));
+        let mut reassigned_day = ack;
+        reassigned_day.day = "20260102".into();
+        assert!(!ack_physical_coordinates_match(&segment, &reassigned_day));
+        assert!(!is_ack_valid(&segment, Some(reassigned_day), None, None));
+        let mut reassigned_stream = read_ack(&segment).unwrap();
+        reassigned_stream.stream = "other-stream".into();
+        assert!(!ack_physical_coordinates_match(
+            &segment,
+            &reassigned_stream
+        ));
+    }
+
+    #[tokio::test]
+    async fn duplicate_physical_listing_rows_keep_local_segment_unconfirmed() {
+        let rows = vec![
+            json!({"key":"alias-a","observed":true,"stream":"archon","segment":"120000_300","files":[{"name":"screen.webm","size":6,"sha256":spl_core::ca::sha256_hex(b"screen"),"status":"present"}]}),
+            json!({"key":"alias-b","observed":true,"stream":"archon","segment":"120000_300","files":[{"name":"screen.webm","size":6,"sha256":spl_core::ca::sha256_hex(b"screen"),"status":"processed"}]}),
+        ];
+        for ordered_rows in [rows.clone(), vec![rows[1].clone(), rows[0].clone()]] {
+            let temp = tempfile::tempdir().unwrap();
+            let segment = create_segment(&temp, "120000_300", b"screen");
+            let duplicate_rows = custody_for_day("20260101", ordered_rows);
+            let (server, mut worker) = test_worker(&temp, vec![(200, duplicate_rows)]).await;
+            fs::write(
+                worker.config.state_dir().join(INGEST_CUTOVER_FILENAME),
+                b"{\"segments\":[\"20260101/archon/120000_300\"]}\n",
+            )
+            .unwrap();
+
+            worker.sync_pass().await;
+
+            assert!(segment.exists());
+            assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"screen");
+            assert!(!segment.join(INGEST_ACK_FILENAME).exists());
+            assert_eq!(upload_hits(&server), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_ack_cleanup_requires_the_same_day_physical_coordinates() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = temp.path().join("captures/20260101/archon/120000_300");
+        fs::create_dir_all(&segment).unwrap();
+        fs::write(segment.join("screen.webm"), b"screen").unwrap();
+        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
+        let listing = custody_for_day(
+            "20260101",
+            vec![
+                json!({"key":"server-alias","observed":true,"stream":"archon","segment":"120000_300","files":[{"name":"screen.webm","size":6,"sha256":sha,"status":"present"}]}),
+            ],
+        );
+        let (server, mut worker) = test_worker(&temp, vec![(200, listing)]).await;
+        fs::write(
+            worker.config.state_dir().join(INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[\"20260101/archon/120000_300\"]}\n",
+        )
+        .unwrap();
+
+        worker.sync_pass().await;
+
+        assert!(!segment.exists());
+        assert!(upload_hits(&server) == 0);
+    }
+
+    #[tokio::test]
+    async fn moved_day_listing_ack_retains_bytes_and_stays_unconfirmed() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = temp.path().join("captures/20260102/archon/120000_300");
+        fs::create_dir_all(&segment).unwrap();
+        fs::write(segment.join("screen.webm"), b"screen").unwrap();
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![(200, custody_for_day("20260102", vec![])), (500, json!({}))],
+        )
+        .await;
+        let (identity_key, pairing_id) = worker.current_identity_and_pairing();
+        let mut stale_ack = create_test_ack(&segment, "120000_300", "", "");
+        stale_ack.day = "20260101".into();
+        stale_ack.identity_key = identity_key.unwrap();
+        stale_ack.pairing_id = pairing_id.unwrap();
+        stale_ack.proof = "listing".into();
+        stale_ack.physical_stream = Some("archon".into());
+        stale_ack.physical_segment = Some("120000_300".into());
+        stale_ack.files[0].disposition = "present".into();
+        write_ack(&segment, &stale_ack).unwrap();
+
+        fs::write(
+            worker.config.state_dir().join(INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[\"20260102/archon/120000_300\"]}\n",
+        )
+        .unwrap();
+
+        worker.sync_pass().await;
+
+        assert!(segment.exists());
+        assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"screen");
+        assert!(!is_ack_valid(&segment, read_ack(&segment), None, None));
+        assert!(upload_hits(&server) > 0);
+    }
+
+    #[tokio::test]
+    async fn alias_only_listing_does_not_acknowledge_or_change_post_basename() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = create_segment(&temp, "120000_300", b"screen");
+        let sha = sha256_file(&segment.join("screen.webm")).unwrap();
+        let size = fs::metadata(segment.join("screen.webm")).unwrap().len();
+        let alias_only = custody_for_day(
+            "20260101",
+            vec![
+                json!({"key":"saved-alias","original_key":"120000_300","observed":true,"files":[{"name":"screen.webm","size":size,"sha256":sha,"status":"present"}]}),
+            ],
+        );
+        let (server, mut worker) =
+            test_worker(&temp, vec![(200, alias_only), (500, json!({}))]).await;
+        fs::write(
+            worker.config.state_dir().join(INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[\"20260101/archon/120000_300\"]}\n",
+        )
+        .unwrap();
+
+        worker.sync_pass().await;
+
+        assert!(segment.exists());
+        assert!(!segment.join(INGEST_ACK_FILENAME).exists());
+        let post = server
+            .requests()
+            .into_iter()
+            .find(|request| request.method == "POST" && request.uri == "/app/devices/ingest")
+            .unwrap();
+        let body = String::from_utf8_lossy(&post.body);
+        assert!(body.contains("\"segment\":\"120000_300\""));
+        assert!(!body.contains("\"segment\":\"saved-alias\""));
     }
 
     // ancient capture quarantined now survives thirty more days.
@@ -3100,10 +3346,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "120000_300".to_string(),
-            stored_key: "120000_300".to_string(),
             identity_key: cur_id,
             pairing_id: cur_pair,
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![IngestAckFile {
                 submitted: "screen.webm".to_owned(),
                 written: "screen.webm".to_owned(),
@@ -4093,10 +4340,11 @@ mod tests {
                 day: "20260101".to_string(),
                 stream: "archon".to_string(),
                 local_key: name.to_string(),
-                stored_key: name.to_string(),
                 identity_key: cur_id.unwrap_or_default(),
                 pairing_id: cur_pair.unwrap_or_default(),
                 proof: "upload".to_string(),
+                physical_stream: None,
+                physical_segment: None,
                 files: ack_files,
             };
             let _ = write_ack(&segment, &ack);
@@ -4336,20 +4584,20 @@ mod tests {
         assert!(!day.exists());
     }
 
-    // tests/test_sync.py::test_original_key_lookup
+    // Server aliases do not change the local segment identity used by cleanup.
     #[tokio::test]
-    async fn acknowledged_segment_with_renamed_stored_key_deletes_locally() {
+    async fn acknowledged_segment_cleanup_ignores_server_alias() {
         let temp = tempfile::tempdir().unwrap();
         let segment = create_segment(&temp, "120000_300", b"screen");
         let (server, mut worker) = test_worker(&temp, vec![]).await;
         let (cur_id, cur_pair) = worker.current_identity_and_pairing();
-        let mut ack = create_test_ack(
+        let ack = create_test_ack(
             &segment,
             "120000_300",
             &cur_id.unwrap_or_default(),
             &cur_pair.unwrap_or_default(),
         );
-        ack.stored_key = "renamed".to_string();
+        fs::write(segment.join(SERVER_KEY_FILENAME), "renamed\n").unwrap();
         write_ack(&segment, &ack).unwrap();
         worker.cleanup_synced_segments().await;
         assert!(!segment.exists());
@@ -5690,10 +5938,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "110000_300".to_string(),
-            stored_key: "110000_300".to_string(),
             identity_key: id.clone(),
             pairing_id: pair.clone(),
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![
                 IngestAckFile {
                     submitted: "screen.webm".to_owned(),
@@ -5719,10 +5968,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "120000_300".to_string(),
-            stored_key: "120000_300".to_string(),
             identity_key: id.clone(),
             pairing_id: pair.clone(),
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![
                 IngestAckFile {
                     submitted: "screen.webm".to_owned(),
@@ -5753,10 +6003,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "130000_300".to_string(),
-            stored_key: "130000_300".to_string(),
             identity_key: id.clone(),
             pairing_id: pair.clone(),
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![],
         };
         write_ack(&seg3, &ack3).unwrap();
@@ -6097,10 +6348,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "120000_300".to_string(),
-            stored_key: "120000_300".to_string(),
             identity_key: id,
             pairing_id: pair,
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![
                 IngestAckFile {
                     submitted: "screen.webm".to_owned(),
@@ -6283,10 +6535,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "110000_300".to_string(),
-            stored_key: "110000_300".to_string(),
             identity_key: id.clone(),
             pairing_id: pair.clone(),
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![IngestAckFile {
                 submitted: "screen.webm".to_owned(),
                 written: "screen.webm".to_owned(),
@@ -6306,10 +6559,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "120000_300".to_string(),
-            stored_key: "120000_300".to_string(),
             identity_key: id.clone(),
             pairing_id: pair.clone(),
             proof: "listing".to_string(),
+            physical_stream: Some("archon".to_string()),
+            physical_segment: Some("120000_300".to_string()),
             files: vec![IngestAckFile {
                 submitted: "screen.webm".to_owned(),
                 written: "screen.webm".to_owned(),
@@ -6329,10 +6583,11 @@ mod tests {
             day: "20260101".to_string(),
             stream: "archon".to_string(),
             local_key: "130000_300".to_string(),
-            stored_key: "130000_300".to_string(),
             identity_key: id.clone(),
             pairing_id: pair.clone(),
             proof: "upload".to_string(),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![IngestAckFile {
                 submitted: "screen.webm".to_owned(),
                 written: "screen.webm".to_owned(),
@@ -6486,6 +6741,8 @@ mod tests {
                 json!({
                     "key": "110000_300",
                     "observed": true,
+                    "stream": "archon",
+                    "segment": "110000_300",
                     "files": [{
                         "name": "screen.webm",
                         "size": size_proven,
@@ -6496,6 +6753,8 @@ mod tests {
                 json!({
                     "key": "120000_300",
                     "observed": false,
+                    "stream": "archon",
+                    "segment": "120000_300",
                     "files": [],
                 }),
             ],
@@ -6808,6 +7067,179 @@ mod tests {
         worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 0);
         assert!(segment.exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn migration_gate_keeps_browser_custody_local_then_delivers_with_fresh_key() {
+        struct GatedMigrationResolver {
+            ready: AtomicBool,
+            calls: AtomicUsize,
+            credential: spl_transport::credential::Credential,
+        }
+
+        impl crate::device_migration::StartupResolver for GatedMigrationResolver {
+            fn resolve<'a>(
+                &'a self,
+                root: &'a Path,
+                _old: spl_transport::credential::Credential,
+            ) -> crate::device_migration::StartupResolveFuture<'a> {
+                Box::pin(async move {
+                    self.calls.fetch_add(1, Ordering::AcqRel);
+                    if !self.ready.load(Ordering::Acquire) {
+                        return Err("test migration remains pending".to_owned());
+                    }
+                    crate::private_link::persist_credential(root, &self.credential)
+                        .map_err(|error| error.to_string())?;
+                    let pairing_id =
+                        crate::private_link::compute_pairing_id(&self.credential.client_cert_pem);
+                    crate::journal_mark::write_pairing_answer(root, &pairing_id)
+                        .map_err(|error| error.to_string())?;
+                    Ok(self.credential.clone())
+                })
+            }
+        }
+
+        use chrono::{Local, TimeZone};
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            stream: "desktop".to_owned(),
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        config.ensure_dirs().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let old = peer.credential();
+        let new = peer.fresh_client_credential();
+        assert_ne!(old.client_key_pem, new.client_key_pem);
+        assert_ne!(
+            crate::private_link::compute_pairing_id(&old.client_cert_pem),
+            crate::private_link::compute_pairing_id(&new.client_cert_pem)
+        );
+        crate::private_link::persist_credential(&config.config_dir, &old).unwrap();
+        let old_pairing = crate::private_link::compute_pairing_id(&old.client_cert_pem);
+        crate::journal_mark::write_pairing_answer(&config.config_dir, &old_pairing).unwrap();
+
+        let now = Local
+            .with_ymd_and_hms(2026, 10, 2, 10, 16, 0)
+            .earliest()
+            .unwrap();
+        let wall = now.timestamp() as f64;
+        let clock = Arc::new(FixedClock { wall, mono: 0.0 });
+        let upload = Arc::new(UploadClient::new(
+            &config,
+            None::<crate::private_link::PrivateLinkCapability>,
+            clock.clone(),
+        ));
+        let segment = browser_period(&temp);
+        let custody = Arc::new(Mutex::new(
+            crate::browser::custody::Custody::open(
+                crate::browser::custody::Layout::new(&config.base_dir),
+                now,
+            )
+            .unwrap(),
+        ));
+        let mut worker = SyncWorker::new(
+            config.clone(),
+            Arc::clone(&upload),
+            clock,
+            SyncControl {
+                notify: Arc::new(Notify::new()),
+                pending_trigger: Arc::new(AtomicBool::new(false)),
+                running: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(AtomicU8::new(0)),
+            Some(custody),
+        );
+        let resolver = Arc::new(GatedMigrationResolver {
+            ready: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+            credential: new.clone(),
+        });
+        let shutdown = Arc::new(Notify::new());
+        let owner_task = {
+            let upload = Arc::clone(&upload);
+            let config_root = config.config_dir.clone();
+            let shutdown = Arc::clone(&shutdown);
+            let resolver = Arc::clone(&resolver);
+            tokio::spawn(async move {
+                crate::run::start_linked_owner_with_resolver(
+                    upload,
+                    config_root.clone(),
+                    "desktop".to_owned(),
+                    crate::private_link::PrivateStateLock::acquire(&config_root).unwrap(),
+                    true,
+                    crate::private_link::OpenJournalAccess::default(),
+                    shutdown,
+                    None,
+                    resolver.as_ref(),
+                )
+                .await
+            })
+        };
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if resolver.calls.load(Ordering::Acquire) > 0 && !upload.has_capability() {
+                break;
+            }
+        }
+        assert!(!upload.has_capability());
+        assert!(resolver.calls.load(Ordering::Acquire) > 0);
+
+        worker.sync_pass().await;
+        assert!(segment.exists());
+        assert!(peer.requests().is_empty());
+
+        resolver.ready.store(true, Ordering::Release);
+        tokio::time::advance(crate::journal_mark::JOURNAL_MARK_RECHECK_INTERVAL).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if upload.has_capability() {
+                break;
+            }
+        }
+        assert!(upload.has_capability());
+        let owner = owner_task.await.unwrap().unwrap();
+        assert_eq!(
+            upload.capability().unwrap().writer().pairing_id(),
+            crate::private_link::compute_pairing_id(&new.client_cert_pem)
+        );
+
+        let pages = segment.join(crate::browser::PAGES_FILENAME);
+        peer.enqueue_day_custody(DayCustodyFixture::new("20261002", Vec::new()));
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&json!({
+                "status":"ok",
+                "segment":"100100_240",
+                "file_descriptors":[{
+                    "submitted":"browser_pages.jsonl",
+                    "written":"browser_pages.jsonl",
+                    "size":fs::metadata(&pages).unwrap().len(),
+                    "sha256":sha256_file(&pages).unwrap(),
+                    "disposition":"written"
+                }]
+            }))
+            .unwrap(),
+        );
+        worker.sync_pass().await;
+        let requests = peer.requests();
+        let request_paths: Vec<_> = requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect();
+        assert!(
+            request_paths.contains(&"/app/devices/ingest"),
+            "requests={request_paths:?}, segment_exists={}, error={:?}",
+            segment.exists(),
+            worker.last_error_type
+        );
+        assert!(!segment.exists());
+
+        owner.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
