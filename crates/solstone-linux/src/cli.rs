@@ -576,7 +576,10 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
         let _ = write_line(output, crate::journal_mark::CONFIRM_DONE);
         return 0;
     }
-    if !crate::device_migration::owner_identity_action_allowed(config_root) {
+    if !crate::device_migration::owner_identity_action_allowed(
+        config_root,
+        &crate::device_migration::SystemMarkerProvider,
+    ) {
         let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
         let _ = write_line(output, crate::journal_mark::RUN_LINE);
         return 5;
@@ -608,7 +611,10 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 0
             }
             Ok(false) => {
-                if !crate::device_migration::owner_identity_action_allowed(config_root) {
+                if !crate::device_migration::owner_identity_action_allowed(
+                    config_root,
+                    &crate::device_migration::SystemMarkerProvider,
+                ) {
                     let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
                     let _ = write_line(output, crate::journal_mark::RUN_LINE);
                     return 5;
@@ -659,7 +665,10 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 0
             }
             crate::journal_mark::QuestionOutcome::No => {
-                if !crate::device_migration::owner_identity_action_allowed(config_root) {
+                if !crate::device_migration::owner_identity_action_allowed(
+                    config_root,
+                    &crate::device_migration::SystemMarkerProvider,
+                ) {
                     let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
                     let _ = write_line(output, crate::journal_mark::RUN_LINE);
                     return 5;
@@ -681,7 +690,10 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 1
             }
             crate::journal_mark::QuestionOutcome::Cancel => {
-                if !crate::device_migration::owner_identity_action_allowed(config_root) {
+                if !crate::device_migration::owner_identity_action_allowed(
+                    config_root,
+                    &crate::device_migration::SystemMarkerProvider,
+                ) {
                     let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
                     let _ = write_line(output, crate::journal_mark::RUN_LINE);
                     return 5;
@@ -2026,7 +2038,7 @@ mod tests {
             let old_pairing_id = crate::private_link::compute_pairing_id(&old.client_cert_pem);
             crate::journal_mark::write_pairing_answer(root, &old_pairing_id).unwrap();
         }
-        crate::device_migration::seed_pending_for_setup_test(
+        crate::device_migration::test_support::seed_pending_for_setup_test(
             root,
             old.clone(),
             previously_confirmed,
@@ -2073,11 +2085,10 @@ mod tests {
             &fs::read(config.config_dir.join("device-migration.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(state["generation"], 1);
         assert!(state["pending"].is_null());
         assert!(state["setup_pairing_id"].is_null());
         assert!(state["adopted_marker_digest"].is_string());
-        crate::device_migration::resolve_setup_pairing_for_test(
+        crate::device_migration::test_support::resolve_setup_pairing_for_test(
             &config.config_dir,
             new.clone(),
             crate::device_migration::MachineMarker::Present("private-link-setup-test".to_owned()),
@@ -2215,6 +2226,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await
         .unwrap();
@@ -2302,6 +2314,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await
         .unwrap();
@@ -2353,6 +2366,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             Some(&FailAnswerWrite),
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await
         .unwrap();
@@ -2374,7 +2388,7 @@ mod tests {
             crate::private_link::compute_pairing_id("new-cert")
         );
         assert!(
-            crate::device_migration::resolve_setup_pairing_for_test(
+            crate::device_migration::test_support::resolve_setup_pairing_for_test(
                 &config.config_dir,
                 sample_credential("11234567-89ab-cdef-0123-456789abcdef", "new-cert"),
                 crate::device_migration::MachineMarker::Present(
@@ -2418,7 +2432,7 @@ mod tests {
         )
         .unwrap();
         assert!(finished["pending"].is_null());
-        crate::device_migration::resolve_setup_pairing_for_test(
+        crate::device_migration::test_support::resolve_setup_pairing_for_test(
             &config.config_dir,
             recovered,
             crate::device_migration::MachineMarker::Present("private-link-setup-test".to_owned()),
@@ -2841,6 +2855,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -2913,6 +2928,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -3121,6 +3137,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -3202,6 +3219,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -3266,6 +3284,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         let status = render_setup_result(res, &mut out, &mut err);
@@ -3301,6 +3320,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         let status2 = render_setup_result(res2, &mut out2, &mut err2);
@@ -3376,6 +3396,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         assert_eq!(
@@ -3406,6 +3427,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         assert_eq!(
@@ -3460,6 +3482,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         assert_eq!(

@@ -258,6 +258,10 @@ pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
     }
 }
 
+pub(crate) fn grandfather_answer_file(config_root: &Path) -> Result<(), PrivateStateError> {
+    grandfather_answer_file_with_fault(config_root, &NoWriteFault)
+}
+
 pub(crate) fn grandfather_answer_file_with_fault(
     config_root: &Path,
     fault: &dyn DurableWriteFault,

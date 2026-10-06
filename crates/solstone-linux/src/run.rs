@@ -322,6 +322,7 @@ fn run_capture(
             open_journal.clone(),
             shutdown_notify,
             on_confirmed,
+            &crate::device_migration::SystemStartupResolver,
         ))
     } else {
         runtime.spawn(async {
@@ -520,7 +521,10 @@ fn start_browser(
     let about_host = crate::about::host_facts();
     let about = Arc::new(move |facts: &custody::Facts| {
         let unknown = || crate::about::AboutBlock::unknown(about_host.clone()).native();
-        if !crate::device_migration::credential_admission_allowed(&about_config.config_dir) {
+        if !crate::device_migration::credential_admission_allowed(
+            &about_config.config_dir,
+            &crate::device_migration::SystemMarkerProvider,
+        ) {
             return unknown();
         }
         let Some(credential) = load_credential(&about_config.config_dir).ok().flatten() else {
@@ -544,7 +548,10 @@ fn start_browser(
             });
         if !still_confirmed
             || facts.generation.is_none()
-            || !crate::device_migration::credential_admission_allowed(&about_config.config_dir)
+            || !crate::device_migration::credential_admission_allowed(
+                &about_config.config_dir,
+                &crate::device_migration::SystemMarkerProvider,
+            )
         {
             return unknown();
         }
@@ -586,31 +593,6 @@ pub(crate) async fn start_linked_owner(
     open_journal: crate::private_link::OpenJournalAccess,
     shutdown: Arc<tokio::sync::Notify>,
     on_confirmed: Option<crate::sync::SyncTrigger>,
-) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
-    start_linked_owner_with_resolver(
-        upload,
-        config_root,
-        stream,
-        state_lock,
-        transport_enabled,
-        open_journal,
-        shutdown,
-        on_confirmed,
-        &crate::device_migration::SystemStartupResolver,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_linked_owner_with_resolver(
-    upload: Arc<UploadClient>,
-    config_root: PathBuf,
-    stream: String,
-    state_lock: PrivateStateLock,
-    transport_enabled: bool,
-    open_journal: crate::private_link::OpenJournalAccess,
-    shutdown: Arc<tokio::sync::Notify>,
-    on_confirmed: Option<crate::sync::SyncTrigger>,
     resolver: &dyn crate::device_migration::StartupResolver,
 ) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
     upload.prepare_new_owner();
@@ -636,7 +618,7 @@ pub(crate) async fn start_linked_owner_with_resolver(
     let confirmed_cred = loop {
         if let Some(cred) = current_cred.as_ref() {
             match resolver.resolve(&config_root, cred.clone()).await {
-                Ok(resolved) if pairing_answer_allows_link(&config_root, &resolved) => {
+                Ok(resolved) if pairing_answer_allows_link(&config_root, &resolved).await => {
                     upload.link_facts().set_journal_mark_held(false);
                     break resolved;
                 }
@@ -688,16 +670,18 @@ pub(crate) async fn start_linked_owner_with_resolver(
     Ok(owner)
 }
 
-fn pairing_answer_allows_link(
+// A genuinely absent answer is the legacy grandfathered state: it is recorded
+// as confirming the resolved credential, as before migration existed. An
+// explicit empty, rejected or unreadable answer stays held.
+async fn pairing_answer_allows_link(
     config_root: &Path,
     credential: &spl_transport::credential::Credential,
 ) -> bool {
-    let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
-    match crate::journal_mark::read_pairing_answer(config_root) {
-        Ok(None) => true,
-        Ok(Some(answer)) => !answer.confirmed.is_empty() && answer.confirmed == pairing_id,
-        Err(_) => false,
+    if let Ok(_lock) = crate::journal_mark::AnswerLock::acquire(config_root).await {
+        let _ = crate::journal_mark::grandfather_answer_file(config_root);
     }
+    let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
+    crate::journal_mark::is_pairing_confirmed(config_root, &pairing_id)
 }
 
 fn apply_command<V, A, P, M, W, E, C, Q, N>(
@@ -1563,6 +1547,7 @@ mod tests {
             crate::private_link::OpenJournalAccess::default(),
             Arc::new(tokio::sync::Notify::new()),
             None,
+            &crate::device_migration::test_support::TEST_RESOLVER,
         ));
         assert_real_observer_ticks_advance();
         let result = start.await.unwrap();
@@ -2101,6 +2086,7 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(tokio::sync::Notify::new()),
                 None,
+                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
             .unwrap();
@@ -2178,6 +2164,7 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(tokio::sync::Notify::new()),
                 None,
+                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await;
             assert!(first_start.is_err());
@@ -2287,6 +2274,7 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(tokio::sync::Notify::new()),
                 None,
+                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
             .unwrap();
@@ -2340,6 +2328,39 @@ mod tests {
         }
     }
 
+    // A legacy install has a credential but no answer file. Startup records
+    // that absence as confirming the current pairing, so linked work and the
+    // browser About block see a confirmed journal. An explicit empty answer
+    // stays held and unchanged.
+    #[tokio::test]
+    async fn legacy_absent_answer_is_grandfathered_and_explicit_empty_stays_held() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("config");
+        std::fs::create_dir_all(&root).unwrap();
+        let cred = crate::journal_mark::sample_credential(
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "legacy-cert",
+        );
+        crate::private_link::persist_credential(&root, &cred).unwrap();
+        let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
+
+        assert!(pairing_answer_allows_link(&root, &cred).await);
+        assert!(crate::journal_mark::is_pairing_confirmed(
+            &root,
+            &pairing_id
+        ));
+
+        crate::journal_mark::write_pairing_answer(&root, "").unwrap();
+        assert!(!pairing_answer_allows_link(&root, &cred).await);
+        assert_eq!(
+            crate::journal_mark::read_pairing_answer(&root)
+                .unwrap()
+                .unwrap()
+                .confirmed,
+            ""
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn held_wait_does_not_start_after_credential_disappears() {
         let temp = tempfile::tempdir().unwrap();
@@ -2382,6 +2403,7 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 shutdown_clone,
                 None,
+                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
         });
@@ -2507,6 +2529,7 @@ mod tests {
                 open_journal_clone,
                 shutdown_clone,
                 on_confirmed,
+                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
         });
@@ -2658,6 +2681,7 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
+            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         let status = crate::cli::render_setup_result(res, &mut out, &mut err);
@@ -2744,6 +2768,7 @@ mod tests {
                 open_journal_clone,
                 shutdown_clone,
                 on_confirmed,
+                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
         });

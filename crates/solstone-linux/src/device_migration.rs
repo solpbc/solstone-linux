@@ -32,6 +32,8 @@ const MIGRATION_PATH: &str = "/app/network/api/clients/self/migration";
 const REKEY_PATH: &str = "/app/network/api/clients/self/rekey";
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+// Hostnames stay out of persisted adoption metadata and migration requests.
+const DEVICE_LABEL: &str = "solstone-linux";
 
 pub(crate) type RequestFuture<'a> =
     Pin<Box<dyn Future<Output = Result<MigrationResponse, ()>> + Send + 'a>>;
@@ -56,8 +58,6 @@ impl StartupResolver for SystemStartupResolver {
 pub(crate) struct AdoptionState {
     version: u8,
     #[serde(default)]
-    generation: u64,
-    #[serde(default)]
     adopted_marker_digest: Option<String>,
     #[serde(default)]
     pending: Option<PendingMigration>,
@@ -69,7 +69,6 @@ impl Default for AdoptionState {
     fn default() -> Self {
         Self {
             version: 1,
-            generation: 0,
             adopted_marker_digest: None,
             pending: None,
             setup_pairing_id: None,
@@ -96,8 +95,6 @@ struct PendingMigration {
     decision_id: Option<String>,
     decision_bytes: Option<Vec<u8>>,
     decision_response_bytes: Option<Vec<u8>>,
-    copied_operation_decision_id: Option<String>,
-    copied_operation_decision_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,7 +142,6 @@ pub(crate) trait MigrationStore: Send + Sync {
         old_pairing_id: &'a str,
         new_pairing_id: &'a str,
         previously_confirmed: bool,
-        generation: u64,
     ) -> StoreFuture<'a>;
 }
 
@@ -252,13 +248,11 @@ impl MigrationStore for FileMigrationStore {
         old_pairing_id: &'a str,
         new_pairing_id: &'a str,
         previously_confirmed: bool,
-        generation: u64,
     ) -> StoreFuture<'a> {
         Box::pin(async move {
             let _answer_lock = crate::journal_mark::AnswerLock::acquire(&self.root)
                 .await
                 .map_err(|_| ())?;
-            ensure_store_generation(self, generation)?;
             let current = self.read_answer()?;
             match current.as_deref() {
                 Some(value) if value == new_pairing_id => Ok(()),
@@ -332,7 +326,6 @@ enum MigrationError {
     Protocol,
     Transport,
     Persistence,
-    Superseded,
 }
 
 impl std::fmt::Display for MigrationError {
@@ -345,7 +338,6 @@ impl std::fmt::Display for MigrationError {
             Self::Protocol => "device migration protocol rejected",
             Self::Transport => "device migration transport unavailable",
             Self::Persistence => "migration state could not be persisted",
-            Self::Superseded => "migration operation superseded",
         })
     }
 }
@@ -380,17 +372,7 @@ pub(crate) fn should_grandfather_setup_answer_at(root: &Path) -> Result<bool, ()
         .is_some_and(|pending| !pending.transfer_confirmed))
 }
 
-#[cfg(not(test))]
-pub(crate) fn finish_setup_pairing_at(root: &Path, pairing_id: &str) -> Result<(), ()> {
-    finish_setup_pairing(
-        &FileMigrationStore::new(root),
-        &SystemMarkerProvider,
-        pairing_id,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn finish_setup_pairing_with_marker_at(
+pub(crate) fn finish_setup_pairing_at(
     root: &Path,
     marker_provider: &dyn MarkerProvider,
     pairing_id: &str,
@@ -405,7 +387,6 @@ fn prepare_setup_pairing(store: &dyn MigrationStore, pairing_id: &str) -> Result
     if state.pending.is_none() {
         return Ok(());
     }
-    state.generation = state.generation.checked_add(1).ok_or(())?;
     state.setup_pairing_id = Some(pairing_id.to_owned());
     store.persist_state(&state)
 }
@@ -433,109 +414,9 @@ fn finish_setup_pairing(
     store.persist_state(&state)
 }
 
-#[cfg(test)]
-pub(crate) fn seed_pending_for_setup_test(
-    root: &Path,
-    credential: Credential,
-    previously_confirmed: bool,
-) -> Result<(), ()> {
-    struct SetupTestId;
-    impl OperationIdProvider for SetupTestId {
-        fn next_uuid(&self) -> Result<String, ()> {
-            Ok("123e4567-e89b-42d3-a456-426614174099".to_owned())
-        }
-    }
-
-    let old_pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
-    let old_cid = format!(
-        "sha256:{}",
-        spl_core::ca::sha256_hex(credential.client_cert_pem.as_bytes())
-    );
-    let previous_marker_digest = marker_digest(MachineMarker::Present("setup-old".to_owned()));
-    let pending = create_pending(
-        marker_digest(MachineMarker::Present("setup-new".to_owned())),
-        Some(previous_marker_digest.clone()),
-        credential,
-        old_cid,
-        old_pairing_id,
-        previously_confirmed,
-        &SetupTestId,
-    )
-    .map_err(|_| ())?;
-    FileMigrationStore::new(root).persist_state(&AdoptionState {
-        version: 1,
-        generation: 0,
-        adopted_marker_digest: Some(previous_marker_digest),
-        pending: Some(pending),
-        setup_pairing_id: None,
-    })
-}
-
-#[cfg(test)]
-pub(crate) async fn resolve_setup_pairing_for_test(
-    root: &Path,
-    credential: Credential,
-    marker: MachineMarker,
-) -> Result<(), ()> {
-    struct TestMarker(MachineMarker);
-    impl MarkerProvider for TestMarker {
-        fn read_marker(&self) -> Result<MachineMarker, ()> {
-            Ok(self.0.clone())
-        }
-    }
-    struct TestClock;
-    impl MigrationClock for TestClock {
-        fn unix_seconds(&self) -> i64 {
-            1_800_000_000
-        }
-    }
-    struct NoIds;
-    impl OperationIdProvider for NoIds {
-        fn next_uuid(&self) -> Result<String, ()> {
-            Err(())
-        }
-    }
-    struct NoRequests;
-    impl MigrationTransport for NoRequests {
-        fn request<'a>(
-            &'a self,
-            _: &'a Credential,
-            _: &'a str,
-            _: &'a str,
-            _: &'a [u8],
-        ) -> RequestFuture<'a> {
-            Box::pin(async { panic!("setup finalization must not make a migration request") })
-        }
-    }
-
-    resolve(
-        &FileMigrationStore::new(root),
-        &TestMarker(marker),
-        &NoIds,
-        &TestClock,
-        &NoRequests,
-        credential,
-    )
-    .await
-    .map(|_| ())
-    .map_err(|_| ())
-}
-
-fn ensure_store_generation(store: &dyn MigrationStore, generation: u64) -> Result<(), ()> {
-    let current = store.load_state()?.unwrap_or_default();
-    (current.generation == generation).then_some(()).ok_or(())
-}
-
-fn persist_at_generation(
-    store: &dyn MigrationStore,
-    generation: u64,
-    state: &AdoptionState,
-) -> Result<(), MigrationError> {
-    ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
-    let mut state = state.clone();
-    state.generation = generation;
+fn persist(store: &dyn MigrationStore, state: &AdoptionState) -> Result<(), MigrationError> {
     store
-        .persist_state(&state)
+        .persist_state(state)
         .map_err(|_| MigrationError::Persistence)
 }
 
@@ -559,7 +440,6 @@ async fn resolve(
     if state.version != 1 {
         return Err(MigrationError::State);
     }
-    let generation = state.generation;
 
     if let Some(setup_pairing_id) = state.setup_pairing_id.as_deref() {
         let current_pairing_id =
@@ -576,11 +456,11 @@ async fn resolve(
             state.adopted_marker_digest = Some(marker_digest);
             state.pending = None;
             state.setup_pairing_id = None;
-            persist_at_generation(store, generation, &state)?;
+            persist(store, &state)?;
             return Ok(credential);
         }
         state.setup_pairing_id = None;
-        persist_at_generation(store, generation, &state)?;
+        persist(store, &state)?;
     }
 
     if let Some(pending) = state.pending.as_mut() {
@@ -593,15 +473,17 @@ async fn resolve(
             return Err(MigrationError::Identity);
         }
         if pending.marker_digest != marker_digest {
-            reconcile_copied_operation(store, ids, clock, transport, pending, generation).await?;
+            // A move copied from another machine is never resumed here; this
+            // machine starts its own with a fresh key and operation. The
+            // journal does not refuse a new rekey while the copied one stays
+            // pending, so the copied key is never used.
             state.pending = None;
-            persist_at_generation(store, generation, &state)?;
+            persist(store, &state)?;
         } else {
-            let resolved =
-                resume_pending(store, ids, clock, transport, pending, generation).await?;
+            let resolved = resume_pending(store, ids, clock, transport, pending).await?;
             state.adopted_marker_digest = Some(marker_digest);
             state.pending = None;
-            persist_at_generation(store, generation, &state)?;
+            persist(store, &state)?;
             return Ok(resolved);
         }
     }
@@ -646,12 +528,12 @@ async fn resolve(
         ids,
     )?;
     state.pending = Some(pending);
-    persist_at_generation(store, generation, &state)?;
+    persist(store, &state)?;
     let pending = state.pending.as_mut().ok_or(MigrationError::State)?;
-    let resolved = resume_pending(store, ids, clock, transport, pending, generation).await?;
+    let resolved = resume_pending(store, ids, clock, transport, pending).await?;
     state.adopted_marker_digest = Some(marker_digest);
     state.pending = None;
-    persist_at_generation(store, generation, &state)?;
+    persist(store, &state)?;
     Ok(resolved)
 }
 
@@ -673,24 +555,13 @@ fn create_pending(
     transfer_confirmed: bool,
     ids: &dyn OperationIdProvider,
 ) -> Result<PendingMigration, MigrationError> {
-    // Keep hostnames out of persisted adoption metadata and migration requests.
-    let device_label = "solstone-linux".to_owned();
-    if device_label.is_empty() {
-        return Err(MigrationError::Protocol);
-    }
     let key =
         KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|_| MigrationError::Identity)?;
     let mut params =
         CertificateParams::new(Vec::<String>::new()).map_err(|_| MigrationError::Identity)?;
-    let cn_end = device_label
-        .char_indices()
-        .map(|(index, ch)| index + ch.len_utf8())
-        .take_while(|end| *end <= 64)
-        .last()
-        .unwrap_or(0);
     params
         .distinguished_name
-        .push(DnType::CommonName, &device_label[..cn_end]);
+        .push(DnType::CommonName, DEVICE_LABEL);
     let csr_pem = params
         .serialize_request(&key)
         .and_then(|csr| csr.pem())
@@ -703,8 +574,8 @@ fn create_pending(
         "protocol_version":1,
         "operation_id":operation_id,
         "csr":csr_pem,
-        "device_label":device_label,
-        "client_label":device_label,
+        "device_label":DEVICE_LABEL,
+        "client_label":DEVICE_LABEL,
         "platform":"linux"
     });
     let request_bytes = serde_json::to_vec(&request).map_err(|_| MigrationError::Protocol)?;
@@ -725,8 +596,6 @@ fn create_pending(
         decision_id: None,
         decision_bytes: None,
         decision_response_bytes: None,
-        copied_operation_decision_id: None,
-        copied_operation_decision_bytes: None,
     })
 }
 
@@ -736,7 +605,6 @@ async fn resume_pending(
     clock: &dyn MigrationClock,
     transport: &dyn MigrationTransport,
     pending: &mut PendingMigration,
-    generation: u64,
 ) -> Result<Credential, MigrationError> {
     validate_saved_request(pending)?;
     if credential_cid(&pending.old_credential)? != pending.old_cid
@@ -775,7 +643,6 @@ async fn resume_pending(
     if pending.decision_response_bytes.is_none() {
         if pending.rekey_response_bytes.is_none() {
             let state = get_migration_state(transport, &pending.old_credential).await?;
-            ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
             match state.state {
                 ProtocolState::None | ProtocolState::NewDevice | ProtocolState::SameDevice => {}
                 ProtocolState::Pending
@@ -792,7 +659,6 @@ async fn resume_pending(
                 )
                 .await
                 .map_err(|_| MigrationError::Transport)?;
-            ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
             if response.status != 200 && response.status != 201 {
                 return Err(MigrationError::Protocol);
             }
@@ -806,7 +672,7 @@ async fn resume_pending(
             pending.candidate_cid = Some(credential_cid(&candidate)?);
             pending.new_credential = Some(candidate);
             pending.rekey_response_bytes = Some(response.body);
-            persist_at_generation(store, generation, &state_from_pending(pending, generation))?;
+            persist(store, &state_from_pending(pending))?;
         }
         if pending.decision_id.is_none() {
             let decision_id = ids.next_uuid().map_err(|_| MigrationError::Identity)?;
@@ -821,14 +687,13 @@ async fn resume_pending(
             pending.decision_bytes =
                 Some(serde_json::to_vec(&request).map_err(|_| MigrationError::Protocol)?);
             pending.decision_id = Some(decision_id);
-            persist_at_generation(store, generation, &state_from_pending(pending, generation))?;
+            persist(store, &state_from_pending(pending))?;
         }
         let candidate = pending
             .new_credential
             .as_ref()
             .ok_or(MigrationError::State)?;
         let migration_state = get_migration_state(transport, candidate).await?;
-        ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
         if migration_state.state == ProtocolState::NewDevice
             && migration_state.rekey_operation_id.as_deref() == Some(&pending.operation_id)
             && migration_state.previous_cid.as_deref() == Some(&pending.old_cid)
@@ -845,7 +710,7 @@ async fn resume_pending(
                 }))
                 .map_err(|_| MigrationError::Protocol)?,
             );
-            persist_at_generation(store, generation, &state_from_pending(pending, generation))?;
+            persist(store, &state_from_pending(pending))?;
         } else if migration_state.state == ProtocolState::Pending
             && migration_state.rekey_operation_id.as_deref() == Some(&pending.operation_id)
             && migration_state.previous_cid.as_deref() == Some(&pending.old_cid)
@@ -862,13 +727,12 @@ async fn resume_pending(
                 )
                 .await
                 .map_err(|_| MigrationError::Transport)?;
-            ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
             if response.status != 200 && response.status != 201 {
                 return Err(MigrationError::Protocol);
             }
             validate_decision(&response.body, pending)?;
             pending.decision_response_bytes = Some(response.body);
-            persist_at_generation(store, generation, &state_from_pending(pending, generation))?;
+            persist(store, &state_from_pending(pending))?;
         } else {
             return Err(MigrationError::Protocol);
         }
@@ -889,7 +753,6 @@ async fn resume_pending(
     }
     // Re-publishing is intentional: it recovers a crash after credential rename
     // but before the migration checkpoint reached durable storage.
-    ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
     store
         .persist_credential(new_credential)
         .map_err(|_| MigrationError::Persistence)?;
@@ -898,138 +761,19 @@ async fn resume_pending(
             &pending.old_pairing_id,
             &new_pairing_id,
             pending.transfer_confirmed,
-            generation,
         )
         .await
-        .map_err(|_| {
-            if ensure_store_generation(store, generation).is_err() {
-                MigrationError::Superseded
-            } else {
-                MigrationError::Answer
-            }
-        })?;
+        .map_err(|_| MigrationError::Answer)?;
     Ok(new_credential.clone())
 }
 
-fn state_from_pending(pending: &PendingMigration, generation: u64) -> AdoptionState {
+fn state_from_pending(pending: &PendingMigration) -> AdoptionState {
     AdoptionState {
         version: 1,
-        generation,
         adopted_marker_digest: pending.previous_marker_digest.clone(),
         pending: Some(pending.clone()),
         setup_pairing_id: None,
     }
-}
-
-async fn reconcile_copied_operation(
-    store: &dyn MigrationStore,
-    ids: &dyn OperationIdProvider,
-    clock: &dyn MigrationClock,
-    transport: &dyn MigrationTransport,
-    pending: &mut PendingMigration,
-    generation: u64,
-) -> Result<(), MigrationError> {
-    validate_saved_request(pending)?;
-    let state = get_migration_state(transport, &pending.old_credential).await?;
-    ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
-    if state.state == ProtocolState::None {
-        return Ok(());
-    }
-    if state.state == ProtocolState::NewDevice
-        && state.rekey_operation_id.as_deref() == Some(&pending.operation_id)
-        && state.previous_cid.as_deref() == Some(&pending.old_cid)
-    {
-        return Ok(());
-    }
-    if state.state != ProtocolState::Pending
-        || state.rekey_operation_id.as_deref() != Some(&pending.operation_id)
-        || state.previous_cid.as_deref() != Some(&pending.old_cid)
-    {
-        return Err(MigrationError::Protocol);
-    }
-    let response = transport
-        .request(
-            &pending.old_credential,
-            "POST",
-            REKEY_PATH,
-            &pending.request_bytes,
-        )
-        .await
-        .map_err(|_| MigrationError::Transport)?;
-    ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
-    if response.status != 200 && response.status != 201 {
-        return Err(MigrationError::Protocol);
-    }
-    let rekey = parse_rekey(&response.body, pending)?;
-    let candidate = credential_from_pairing(
-        &pending.old_credential,
-        &pending.candidate_key_pem,
-        rekey,
-        clock.unix_seconds(),
-    )?;
-    if pending.copied_operation_decision_id.is_none() {
-        let id = ids.next_uuid().map_err(|_| MigrationError::Identity)?;
-        if !is_uuid(&id) {
-            return Err(MigrationError::Identity);
-        }
-        pending.copied_operation_decision_bytes = Some(
-            serde_json::to_vec(&json!({
-                "protocol_version":1,
-                "operation_id":id,
-                "choice":"new_device"
-            }))
-            .map_err(|_| MigrationError::Protocol)?,
-        );
-        pending.copied_operation_decision_id = Some(id);
-        persist_at_generation(store, generation, &state_from_pending(pending, generation))?;
-    }
-    // The copied key is used only to close its already-issued server operation
-    // with the contract's keep-both decision. It is discarded immediately and
-    // never becomes this machine's credential or candidate for its fresh move.
-    let migration_state = get_migration_state(transport, &candidate).await?;
-    ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
-    if migration_state.state == ProtocolState::NewDevice
-        && migration_state.rekey_operation_id.as_deref() == Some(&pending.operation_id)
-        && migration_state.previous_cid.as_deref() == Some(&pending.old_cid)
-    {
-        return Ok(());
-    }
-    if migration_state.state != ProtocolState::Pending
-        || migration_state.rekey_operation_id.as_deref() != Some(&pending.operation_id)
-        || migration_state.previous_cid.as_deref() != Some(&pending.old_cid)
-    {
-        return Err(MigrationError::Protocol);
-    }
-    let decision_body = pending
-        .copied_operation_decision_bytes
-        .as_deref()
-        .ok_or(MigrationError::State)?;
-    let result = transport
-        .request(&candidate, "PUT", MIGRATION_PATH, decision_body)
-        .await
-        .map_err(|_| MigrationError::Transport)?;
-    ensure_store_generation(store, generation).map_err(|_| MigrationError::Superseded)?;
-    if result.status != 200 && result.status != 201 {
-        return Err(MigrationError::Protocol);
-    }
-    let response: DecisionResponse =
-        parse_closed(&result.body).map_err(|_| MigrationError::Protocol)?;
-    if response.protocol_version != 1
-        || response.operation_id
-            != pending
-                .copied_operation_decision_id
-                .as_deref()
-                .unwrap_or_default()
-        || response.state != ProtocolState::NewDevice
-        || !response.previous_cid.present
-        || !response.replaced_cid.present
-        || response.previous_cid.as_deref() != Some(&pending.old_cid)
-        || response.cid != credential_cid(&candidate)?
-        || response.replaced_cid.as_deref().is_some()
-    {
-        return Err(MigrationError::Protocol);
-    }
-    Ok(())
 }
 
 async fn get_migration_state(
@@ -1216,40 +960,32 @@ fn validate_saved_request(pending: &PendingMigration) -> Result<(), MigrationErr
     if request.protocol_version != 1
         || request.operation_id != pending.operation_id
         || request.csr != pending.csr_pem
-        || request.device_label != "solstone-linux"
-        || request.client_label != "solstone-linux"
+        || request.device_label != DEVICE_LABEL
+        || request.client_label != DEVICE_LABEL
         || request.platform != ProtocolPlatform::Linux
         || key.algorithm() != &PKCS_ECDSA_P256_SHA256
     {
         return Err(MigrationError::Identity);
     }
-    for (id, bytes) in [
-        (
-            pending.decision_id.as_deref(),
-            pending.decision_bytes.as_deref(),
-        ),
-        (
-            pending.copied_operation_decision_id.as_deref(),
-            pending.copied_operation_decision_bytes.as_deref(),
-        ),
-    ] {
-        match (id, bytes) {
-            (Some(id), Some(bytes)) => {
-                let request: DecisionRequest =
-                    parse_closed(bytes).map_err(|_| MigrationError::Protocol)?;
-                if !is_uuid(id)
-                    || request.protocol_version != 1
-                    || request.operation_id != id
-                    || request.choice != DecisionChoice::New
-                {
-                    return Err(MigrationError::Protocol);
-                }
+    match (
+        pending.decision_id.as_deref(),
+        pending.decision_bytes.as_deref(),
+    ) {
+        (Some(id), Some(bytes)) => {
+            let request: DecisionRequest =
+                parse_closed(bytes).map_err(|_| MigrationError::Protocol)?;
+            if !is_uuid(id)
+                || request.protocol_version != 1
+                || request.operation_id != id
+                || request.choice != DecisionChoice::New
+            {
+                return Err(MigrationError::Protocol);
             }
-            (None, None) => {}
-            _ => return Err(MigrationError::State),
+            Ok(())
         }
+        (None, None) => Ok(()),
+        _ => Err(MigrationError::State),
     }
-    Ok(())
 }
 
 fn parse_rekey(bytes: &[u8], pending: &PendingMigration) -> Result<RekeyResponse, MigrationError> {
@@ -1459,29 +1195,38 @@ fn is_cid(value: &str) -> bool {
     })
 }
 
-pub(crate) fn owner_identity_action_allowed(root: &Path) -> bool {
-    let state = match FileMigrationStore::new(root).load_state() {
-        Ok(None) => return true,
-        Ok(Some(state)) => state,
-        Err(()) => return false,
-    };
-    let Ok(marker) = SystemMarkerProvider.read_marker() else {
+pub(crate) fn owner_identity_action_allowed(
+    root: &Path,
+    marker_provider: &dyn MarkerProvider,
+) -> bool {
+    match FileMigrationStore::new(root).load_state() {
+        Ok(None) => true,
+        Ok(Some(state)) => state_admits_credential(&state, marker_provider),
+        Err(()) => false,
+    }
+}
+
+pub(crate) fn credential_admission_allowed(
+    root: &Path,
+    marker_provider: &dyn MarkerProvider,
+) -> bool {
+    FileMigrationStore::new(root)
+        .load_state()
+        .is_ok_and(|state| {
+            state.is_some_and(|state| state_admits_credential(&state, marker_provider))
+        })
+}
+
+fn state_admits_credential(state: &AdoptionState, marker_provider: &dyn MarkerProvider) -> bool {
+    let Ok(marker) = marker_provider.read_marker() else {
         return false;
     };
     state.pending.is_none()
         && state.adopted_marker_digest.as_deref() == Some(marker_digest(marker).as_str())
 }
 
-pub(crate) fn credential_admission_allowed(root: &Path) -> bool {
-    let Ok(marker) = SystemMarkerProvider.read_marker() else {
-        return false;
-    };
-    let Ok(Some(state)) = FileMigrationStore::new(root).load_state() else {
-        return false;
-    };
-    state.pending.is_none()
-        && state.adopted_marker_digest.as_deref() == Some(marker_digest(marker).as_str())
-}
+#[cfg(test)]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests {
@@ -1615,13 +1360,11 @@ mod tests {
             old_pairing_id: &'a str,
             new_pairing_id: &'a str,
             previously_confirmed: bool,
-            generation: u64,
         ) -> StoreFuture<'a> {
             Box::pin(async move {
                 if self.fail_answer.load(Ordering::Acquire) {
                     return Err(());
                 }
-                ensure_store_generation(self, generation)?;
                 let mut answer = self.answer.lock().unwrap();
                 match answer.as_deref() {
                     Some(value) if value == new_pairing_id => Ok(()),
@@ -1799,18 +1542,14 @@ mod tests {
                     if let Some(body) = self.state_body_override.lock().unwrap().clone() {
                         return Ok(MigrationResponse { status: 200, body });
                     }
-                    if operation
+                    // Like the journal, a caller sees the operation that issued
+                    // its own certificate, never one it started.
+                    let issued = operation
                         .as_ref()
-                        .is_some_and(|value| value.candidate_cid == old_cid)
-                    {
-                        return Ok(MigrationResponse {
-                            status: 200,
-                            body: Self::state_body(operation.as_ref()),
-                        });
-                    }
+                        .filter(|value| value.candidate_cid == old_cid);
                     return Ok(MigrationResponse {
                         status: 200,
-                        body: Self::state_body(operation.as_ref()),
+                        body: Self::state_body(issued),
                     });
                 }
                 if method == "POST" && path == REKEY_PATH {
@@ -1833,9 +1572,6 @@ mod tests {
                     {
                         (existing.response.clone(), existing.candidate_cid.clone())
                     } else {
-                        if operation.as_ref().is_some_and(|value| !value.decided) {
-                            return Err(());
-                        }
                         let result = self.issue_response(credential, body)?;
                         let response_value: Value =
                             serde_json::from_slice(&result.0).map_err(|_| ())?;
@@ -2276,7 +2012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copied_pending_operation_is_closed_then_uses_fresh_candidate_and_operation() {
+    async fn copied_pending_operation_is_dropped_for_a_fresh_candidate_and_operation() {
         let ca = test_ca();
         let old = credential(&ca);
         let original_key = old.client_key_pem.clone();
@@ -2297,7 +2033,7 @@ mod tests {
         transport
             .lose_next_post_response
             .store(true, Ordering::Release);
-        let saved_ids = ids(&[OLD_ID, COPIED_DECISION_ID, NEW_ID, NEW_DECISION_ID]);
+        let saved_ids = ids(&[OLD_ID, NEW_ID, NEW_DECISION_ID]);
         assert!(
             resolve(
                 &store,
@@ -2322,15 +2058,15 @@ mod tests {
         )
         .await
         .unwrap();
+        // The copied operation is neither replayed nor closed with its key.
         let posts = transport.post_bodies.lock().unwrap();
-        assert_eq!(posts.len(), 3); // uncertain operation replay, then fresh operation
+        assert_eq!(posts.len(), 2);
         assert_eq!(posts[0], copied.request_bytes);
-        assert_eq!(posts[1], copied.request_bytes);
-        assert_ne!(posts[2], copied.request_bytes);
+        assert_ne!(posts[1], copied.request_bytes);
         assert_ne!(result.client_key_pem, copied.candidate_key_pem);
         assert_ne!(result.client_key_pem, original_key);
         let copied_request: Value = serde_json::from_slice(&copied.request_bytes).unwrap();
-        let fresh_request: Value = serde_json::from_slice(&posts[2]).unwrap();
+        let fresh_request: Value = serde_json::from_slice(&posts[1]).unwrap();
         assert_ne!(
             fresh_request["operation_id"],
             copied_request["operation_id"]
@@ -2351,7 +2087,6 @@ mod tests {
         let store = TestStore::default();
         *store.state.lock().unwrap() = Some(AdoptionState {
             version: 1,
-            generation: 0,
             adopted_marker_digest: Some(marker_digest(MachineMarker::Present("machine-a".into()))),
             pending: None,
             setup_pairing_id: None,
@@ -2505,7 +2240,7 @@ mod tests {
         crate::journal_mark::write_pairing_answer(root, old_pairing_id).unwrap();
         assert!(
             store
-                .transfer_answer(old_pairing_id, new_pairing_id, false, 0)
+                .transfer_answer(old_pairing_id, new_pairing_id, false)
                 .await
                 .is_err()
         );
@@ -2515,7 +2250,7 @@ mod tests {
         );
 
         store
-            .transfer_answer(old_pairing_id, new_pairing_id, true, 0)
+            .transfer_answer(old_pairing_id, new_pairing_id, true)
             .await
             .unwrap();
         assert_eq!(
@@ -2526,7 +2261,7 @@ mod tests {
         crate::journal_mark::write_pairing_answer(root, "").unwrap();
         assert!(
             store
-                .transfer_answer(old_pairing_id, new_pairing_id, true, 0)
+                .transfer_answer(old_pairing_id, new_pairing_id, true)
                 .await
                 .is_err()
         );
@@ -2535,7 +2270,7 @@ mod tests {
         crate::journal_mark::write_pairing_answer(root, "unrelated-pairing").unwrap();
         assert!(
             store
-                .transfer_answer(old_pairing_id, new_pairing_id, true, 0)
+                .transfer_answer(old_pairing_id, new_pairing_id, true)
                 .await
                 .is_err()
         );
@@ -2551,7 +2286,7 @@ mod tests {
         .unwrap();
         assert!(
             store
-                .transfer_answer(old_pairing_id, new_pairing_id, true, 0)
+                .transfer_answer(old_pairing_id, new_pairing_id, true)
                 .await
                 .is_err()
         );
@@ -2747,98 +2482,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_generation_fences_late_migration_response_before_publication() {
-        use std::sync::Arc;
-
-        let ca = test_ca();
-        let old = credential(&ca);
-        let pairing_id = crate::private_link::compute_pairing_id(&old.client_cert_pem);
-        let store = Arc::new(TestStore::default());
-        *store.answer.lock().unwrap() = Some(pairing_id);
-        resolve(
-            store.as_ref(),
-            &TestMarker(MachineMarker::Present("old-marker".into())),
-            &ids(&[]),
-            &TestClock,
-            &NoRequests,
-            old.clone(),
-        )
-        .await
-        .unwrap();
-
-        struct PausedTransport {
-            inner: TestTransport,
-            started: Arc<tokio::sync::Notify>,
-            release: Arc<tokio::sync::Notify>,
-            pause_first_get: AtomicBool,
-        }
-        impl MigrationTransport for PausedTransport {
-            fn request<'a>(
-                &'a self,
-                credential: &'a Credential,
-                method: &'a str,
-                path: &'a str,
-                body: &'a [u8],
-            ) -> RequestFuture<'a> {
-                let inner = self.inner.request(credential, method, path, body);
-                Box::pin(async move {
-                    if method == "GET" && self.pause_first_get.swap(false, Ordering::AcqRel) {
-                        self.started.notify_one();
-                        self.release.notified().await;
-                    }
-                    inner.await
-                })
-            }
-        }
-
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let transport = Arc::new(PausedTransport {
-            inner: TestTransport::new(ca),
-            started: started.clone(),
-            release: release.clone(),
-            pause_first_get: AtomicBool::new(true),
-        });
-        let callback_store = store.clone();
-        let callback_transport = transport.clone();
-        let callback = tokio::spawn(async move {
-            resolve(
-                callback_store.as_ref(),
-                &TestMarker(MachineMarker::Present("new-marker".into())),
-                &ids(&[OLD_ID, NEW_DECISION_ID]),
-                &TestClock,
-                callback_transport.as_ref(),
-                old,
-            )
-            .await
-        });
-        started.notified().await;
-
-        let new_pairing_id = crate::private_link::compute_pairing_id("new-journal-cert");
-        let generation_before = store.load_state().unwrap().unwrap().generation;
-        prepare_setup_pairing(store.as_ref(), &new_pairing_id).unwrap();
-        assert_eq!(
-            store.load_state().unwrap().unwrap().generation,
-            generation_before + 1
-        );
-        release.notify_one();
-
-        assert_eq!(
-            callback.await.unwrap().unwrap_err(),
-            MigrationError::Superseded
-        );
-        assert!(store.credential.lock().unwrap().is_none());
-        assert!(
-            store
-                .writes
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|write| *write != "credential")
-        );
-    }
-
-    #[tokio::test]
     async fn setup_finalization_recovers_after_credential_and_answer_are_durable() {
         let ca = test_ca();
         let old = credential(&ca);
@@ -2858,7 +2501,6 @@ mod tests {
         let store = TestStore::default();
         *store.state.lock().unwrap() = Some(AdoptionState {
             version: 1,
-            generation: 0,
             adopted_marker_digest: Some(marker_digest(previous_marker)),
             pending: Some(pending),
             setup_pairing_id: None,
@@ -3188,6 +2830,117 @@ mod tests {
         .await
         .unwrap();
         assert!(store.load_state().unwrap().unwrap().pending.is_none());
+    }
+
+    // The pinned contract vectors run through the typed parsers: each valid
+    // vector is accepted and a closed-shape or binding mutation is refused.
+    #[test]
+    fn pinned_contract_vectors_pass_typed_parsers_and_mutations_fail() {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../contracts/device-migration/v1.vectors.json"
+        ))
+        .unwrap();
+        let vectors = &document["vectors"];
+        let bytes = |value: &Value| serde_json::to_vec(value).unwrap();
+        let mutated = |value: &Value, pointer: &str, replacement: Option<Value>| {
+            let mut value = value.clone();
+            let (parent, field) = pointer.rsplit_once('/').unwrap();
+            let object = value.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+            match replacement {
+                Some(replacement) => object.insert(field.to_owned(), replacement),
+                None => object.remove(field),
+            };
+            bytes(&value)
+        };
+
+        let request = &vectors["rekey_request"];
+        assert!(parse_closed::<RekeyRequest>(&bytes(request)).is_ok());
+        for (pointer, replacement) in [
+            ("/unexpected", Some(json!(true))),
+            ("/csr", None),
+            ("/platform", Some(json!("plan9"))),
+        ] {
+            assert!(
+                parse_closed::<RekeyRequest>(&mutated(request, pointer, replacement)).is_err(),
+                "{pointer}"
+            );
+        }
+
+        let ca = test_ca();
+        let operation_id = request["operation_id"].as_str().unwrap();
+        let mut pending = create_pending(
+            "marker".into(),
+            None,
+            credential(&ca),
+            String::new(),
+            String::new(),
+            true,
+            &ids(&[operation_id]),
+        )
+        .unwrap();
+        for name in [
+            "rekey_created_201",
+            "rekey_replay_200",
+            "rekey_without_network_metadata",
+        ] {
+            let body = &vectors[name]["body"];
+            pending.old_cid = body["previous_cid"].as_str().unwrap().to_owned();
+            assert!(parse_rekey(&bytes(body), &pending).is_ok(), "{name}");
+            assert!(
+                parse_rekey(
+                    &mutated(body, "/pairing/future", Some(json!(true))),
+                    &pending
+                )
+                .is_ok(),
+                "{name} pairing stays additive"
+            );
+            for (pointer, replacement) in [
+                ("/unexpected", Some(json!(true))),
+                ("/state", Some(json!("new_device"))),
+                ("/operation_id", Some(json!(NEW_ID))),
+                (
+                    "/previous_cid",
+                    Some(json!(format!("sha256:{}", "c".repeat(64)))),
+                ),
+                (
+                    "/pairing/fingerprint",
+                    Some(json!(format!("sha256:{}", "c".repeat(64)))),
+                ),
+                ("/pairing/client_cert", None),
+            ] {
+                assert!(
+                    parse_rekey(&mutated(body, pointer, replacement), &pending).is_err(),
+                    "{name} {pointer}"
+                );
+            }
+        }
+
+        for state in vectors["migration_states"].as_array().unwrap() {
+            assert!(parse_migration_state(&bytes(state)).is_ok(), "{state}");
+            for (pointer, replacement) in [
+                ("/unexpected", Some(json!(true))),
+                ("/replaced_cid", None),
+                ("/protocol_version", Some(json!(2))),
+            ] {
+                assert!(
+                    parse_migration_state(&mutated(state, pointer, replacement)).is_err(),
+                    "{state} {pointer}"
+                );
+            }
+        }
+
+        let decision = &vectors["decision_response"];
+        assert!(parse_closed::<DecisionResponse>(&bytes(decision)).is_ok());
+        for (pointer, replacement) in [
+            ("/unexpected", Some(json!(true))),
+            ("/display_label", None),
+            ("/state", Some(json!("moved"))),
+        ] {
+            assert!(
+                parse_closed::<DecisionResponse>(&mutated(decision, pointer, replacement)).is_err(),
+                "{pointer}"
+            );
+        }
     }
 
     #[test]

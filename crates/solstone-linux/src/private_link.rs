@@ -745,6 +745,7 @@ pub(crate) async fn setup_with_pairer_and_mark<R: Read>(
         input,
         None,
         None,
+        &crate::device_migration::test_support::TEST_MACHINE,
     )
     .await
 }
@@ -769,6 +770,7 @@ pub(crate) async fn setup_with_pairer_and_stream<R: Read>(
         input,
         None,
         None,
+        &crate::device_migration::test_support::TEST_MACHINE,
     )
     .await
 }
@@ -793,35 +795,9 @@ pub(crate) async fn setup_with_stream<R: Read>(
         input,
         None,
         None,
+        &crate::device_migration::SystemMarkerProvider,
     )
     .await
-}
-
-#[cfg(test)]
-struct SetupTestMarker;
-
-#[cfg(test)]
-impl crate::device_migration::MarkerProvider for SetupTestMarker {
-    fn read_marker(&self) -> Result<crate::device_migration::MachineMarker, ()> {
-        Ok(crate::device_migration::MachineMarker::Present(
-            "private-link-setup-test".to_owned(),
-        ))
-    }
-}
-
-fn finish_setup_migration(root: &Path, pairing_id: &str) -> Result<(), ()> {
-    #[cfg(test)]
-    {
-        crate::device_migration::finish_setup_pairing_with_marker_at(
-            root,
-            &SetupTestMarker,
-            pairing_id,
-        )
-    }
-    #[cfg(not(test))]
-    {
-        crate::device_migration::finish_setup_pairing_at(root, pairing_id)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -836,6 +812,7 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
     input: R,
     confirmed_write_fault: Option<&dyn DurableWriteFault>,
     grandfather_write_fault: Option<&dyn DurableWriteFault>,
+    machine: &dyn crate::device_migration::MarkerProvider,
 ) -> Result<SetupOutcome, PrivateStateError> {
     let state_lock = PrivateStateLock::acquire(config_root)?;
 
@@ -916,7 +893,13 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                 if write_res.is_err() {
                     return Ok(SetupOutcome::WalkedAwayHeld);
                 }
-                if finish_setup_migration(state_lock.root(), &new_pairing_id).is_err() {
+                if crate::device_migration::finish_setup_pairing_at(
+                    state_lock.root(),
+                    machine,
+                    &new_pairing_id,
+                )
+                .is_err()
+                {
                     return Ok(SetupOutcome::WalkedAwayHeld);
                 }
                 return Ok(SetupOutcome::Confirmed);
@@ -971,7 +954,13 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
             if write_res.is_err() {
                 return Ok(SetupOutcome::WalkedAwayHeld);
             }
-            if finish_setup_migration(state_lock.root(), &new_pairing_id).is_err() {
+            if crate::device_migration::finish_setup_pairing_at(
+                state_lock.root(),
+                machine,
+                &new_pairing_id,
+            )
+            .is_err()
+            {
                 return Ok(SetupOutcome::WalkedAwayHeld);
             }
             Ok(SetupOutcome::Confirmed)
@@ -1032,6 +1021,7 @@ pub(crate) async fn setup_with_pairer_for_test<R: Read>(
         input,
         None,
         None,
+        &crate::device_migration::test_support::TEST_MACHINE,
     )
     .await
 }
@@ -4249,6 +4239,7 @@ pub(crate) mod tests {
                 Cursor::new(RELAY_PAIR_LINK.as_bytes()),
                 Some(&FailStage(stage)),
                 None,
+                &crate::device_migration::test_support::TEST_MACHINE,
             )
             .await
             .unwrap();

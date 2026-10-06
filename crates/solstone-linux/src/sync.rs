@@ -7220,7 +7220,7 @@ mod tests {
             let shutdown = Arc::clone(&shutdown);
             let resolver = Arc::clone(&resolver);
             tokio::spawn(async move {
-                crate::run::start_linked_owner_with_resolver(
+                crate::run::start_linked_owner(
                     upload,
                     config_root.clone(),
                     "desktop".to_owned(),
@@ -7332,6 +7332,7 @@ mod tests {
             crate::private_link::OpenJournalAccess::default(),
             Arc::new(Notify::new()),
             None,
+            &crate::device_migration::test_support::TEST_RESOLVER,
         )
         .await
         .unwrap();
@@ -7358,6 +7359,7 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(Notify::new()),
                 None,
+                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
             .is_err()
@@ -7420,6 +7422,7 @@ mod tests {
                     crate::private_link::OpenJournalAccess::default(),
                     Arc::new(Notify::new()),
                     None,
+                    &crate::device_migration::test_support::TEST_RESOLVER,
                 )
                 .await
             })
