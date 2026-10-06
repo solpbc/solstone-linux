@@ -1343,9 +1343,8 @@ fn credential_from_pairing(
     if let Some(access_value) = pairing.relay_access {
         let access: spl_core::relay_access::RelayAccess =
             serde_json::from_value(access_value).map_err(|_| MigrationError::Identity)?;
-        let claims = access
-            .claims(&old.instance_id, now)
-            .ok_or(MigrationError::Identity)?;
+        let claims =
+            relay_access_claims(&access, &old.instance_id, now).ok_or(MigrationError::Identity)?;
         relay_origin = Some(access.relay_origin);
         device_token = Some(access.device_token);
         device_token_expires_at = Some(claims.exp);
@@ -1378,6 +1377,20 @@ fn credential_from_pairing(
         TransportClient::new(credential.clone(), None).map_err(|_| MigrationError::Identity)?;
     }
     Ok(credential)
+}
+
+// The journal replays the relay access it issued with the rekey, and a saved
+// rekey reply is resumed later, so the token may have expired. Its shape and
+// home binding are still checked; relay renewal refreshes an expired token.
+fn relay_access_claims(
+    access: &spl_core::relay_access::RelayAccess,
+    instance_id: &str,
+    now: i64,
+) -> Option<spl_core::jwt::JwtClaims> {
+    let expires = spl_core::relay_access::unverified_payload(&access.device_token)?
+        .get("exp")?
+        .as_i64()?;
+    access.claims(instance_id, now.min(expires.checked_sub(1)?))
 }
 
 fn endpoints_from_local(value: Option<&Value>) -> Option<Vec<EndpointAddr>> {
@@ -1694,6 +1707,7 @@ mod tests {
         rekey_status: AtomicUsize,
         decision_status: AtomicUsize,
         post_bodies: Mutex<Vec<Vec<u8>>>,
+        relay_access: Mutex<Option<Value>>,
     }
 
     impl TestTransport {
@@ -1708,6 +1722,7 @@ mod tests {
                 rekey_status: AtomicUsize::new(0),
                 decision_status: AtomicUsize::new(0),
                 post_bodies: Mutex::new(Vec::new()),
+                relay_access: Mutex::new(None),
             }
         }
 
@@ -1739,7 +1754,7 @@ mod tests {
             let cert = csr.signed_by(&self.ca.cert, &self.ca.key).map_err(|_| ())?;
             let cid = format!("sha256:{}", spl_core::ca::sha256_hex(cert.der()));
             let old_cid = credential_cid(old).map_err(|_| ())?;
-            let pairing = json!({
+            let mut pairing = json!({
                 "client_cert":cert.pem(),
                 "ca_chain":[self.ca.cert.pem()],
                 "instance_id":old.instance_id,
@@ -1748,6 +1763,9 @@ mod tests {
                 "home_attestation":null,
                 "local_endpoints":null
             });
+            if let Some(access) = self.relay_access.lock().unwrap().clone() {
+                pairing["relay_access"] = access;
+            }
             Ok((
                 serde_json::to_vec(&json!({
                     "protocol_version":1,"operation_id":operation_id,"state":"pending",
@@ -2071,6 +2089,98 @@ mod tests {
         let adopted_index = writes.iter().rposition(|item| *item == "state").unwrap();
         assert!(credential_index < answer_index && answer_index < adopted_index);
         assert_eq!(first_candidate_key, result.client_key_pem);
+    }
+
+    struct SteppedClock(std::sync::atomic::AtomicI64);
+
+    impl MigrationClock for SteppedClock {
+        fn unix_seconds(&self) -> i64 {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    fn relay_access(instance_id: &str, iat: i64, exp: i64) -> Value {
+        let claims = json!({
+            "iss":"https://relay.example.com","sub":format!("instance:{instance_id}"),
+            "aud":"spl-relay","scope":"session.dial","ver":2,"instance_id":instance_id,
+            "iat":iat,"exp":exp,"jti":"migration-relay-access"
+        });
+        let token = format!(
+            "{}.{}.signature",
+            crate::private_link::tests::base64url_no_pad(b"{\"alg\":\"none\"}"),
+            crate::private_link::tests::base64url_no_pad(&serde_json::to_vec(&claims).unwrap())
+        );
+        json!({
+            "protocol_version":2,"status":"ready","relay_origin":"https://relay.example.com",
+            "instance_id":instance_id,"device_token":token,
+            "expires_at":chrono::DateTime::from_timestamp(exp, 0)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        })
+    }
+
+    // The journal replays the relay access it issued with the rekey, and a
+    // saved rekey reply is resumed after any outage, so the issued token can
+    // expire first. The move still completes; relay renewal refreshes it.
+    #[tokio::test]
+    async fn rekey_reply_stays_recoverable_after_its_relay_access_expires() {
+        const ISSUED_AT: i64 = 1_800_000_000;
+        const EXPIRES_AT: i64 = ISSUED_AT + 600;
+        for lose_put in [true, false] {
+            let ca = test_ca();
+            let old = credential(&ca);
+            let store = TestStore::default();
+            *store.answer.lock().unwrap() = Some(crate::private_link::compute_pairing_id(
+                &old.client_cert_pem,
+            ));
+            let clock = SteppedClock(std::sync::atomic::AtomicI64::new(ISSUED_AT));
+            resolve(
+                &store,
+                &TestMarker(MachineMarker::Present("machine-a".into())),
+                &ids(&[]),
+                &clock,
+                &NoRequests,
+                old.clone(),
+            )
+            .await
+            .unwrap();
+
+            let transport = TestTransport::new(ca);
+            *transport.relay_access.lock().unwrap() =
+                Some(relay_access(&old.instance_id, ISSUED_AT, EXPIRES_AT));
+            if lose_put {
+                transport
+                    .lose_next_put_response
+                    .store(true, Ordering::Release);
+            } else {
+                transport
+                    .lose_next_post_response
+                    .store(true, Ordering::Release);
+            }
+            let machine_b = TestMarker(MachineMarker::Present("machine-b".into()));
+            let op_ids = ids(&[OLD_ID, NEW_DECISION_ID]);
+            assert_eq!(
+                resolve(&store, &machine_b, &op_ids, &clock, &transport, old.clone())
+                    .await
+                    .unwrap_err(),
+                MigrationError::Transport
+            );
+            let saved = store.load_state().unwrap().unwrap().pending.unwrap();
+            assert_eq!(saved.rekey_response_bytes.is_some(), lose_put);
+
+            clock.0.store(EXPIRES_AT + 86_400, Ordering::Release);
+            let moved = resolve(&store, &machine_b, &op_ids, &clock, &transport, old.clone())
+                .await
+                .unwrap();
+            assert_eq!(moved.client_key_pem, saved.candidate_key_pem);
+            assert_eq!(moved.device_token_expires_at, Some(EXPIRES_AT));
+            assert_eq!(
+                moved.relay_origin.as_deref(),
+                Some("https://relay.example.com")
+            );
+            assert_eq!(store.credential.lock().unwrap().as_ref(), Some(&moved));
+            assert!(store.load_state().unwrap().unwrap().pending.is_none());
+        }
     }
 
     #[tokio::test]
