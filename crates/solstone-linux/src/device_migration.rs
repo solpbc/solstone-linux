@@ -78,7 +78,7 @@ impl Default for AdoptionState {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct PendingMigration {
+pub(crate) struct PendingMigration {
     marker_digest: String,
     previous_marker_digest: Option<String>,
     old_credential: Credential,
@@ -136,12 +136,12 @@ pub(crate) trait MigrationStore: Send + Sync {
     fn persist_state(&self, state: &AdoptionState) -> Result<(), ()>;
     fn read_answer(&self) -> Result<Option<String>, ()>;
     fn adopt_initial<'a>(&'a self, marker_digest: &'a str, pairing_id: &'a str) -> StoreFuture<'a>;
-    fn persist_credential(&self, credential: &Credential) -> Result<(), ()>;
-    fn transfer_answer<'a>(
+    /// Publish the new credential, then its carried answer, while the
+    /// credential on disk is still this move's old or new identity.
+    fn publish<'a>(
         &'a self,
-        old_pairing_id: &'a str,
-        new_pairing_id: &'a str,
-        previously_confirmed: bool,
+        pending: &'a PendingMigration,
+        new_credential: &'a Credential,
     ) -> StoreFuture<'a>;
 }
 
@@ -239,31 +239,52 @@ impl MigrationStore for FileMigrationStore {
         })
     }
 
-    fn persist_credential(&self, credential: &Credential) -> Result<(), ()> {
-        crate::private_link::persist_credential(&self.root, credential).map_err(|_| ())
-    }
-
-    fn transfer_answer<'a>(
+    // The answer lock is taken only after the journal requests have finished
+    // and is held through both writes. A confirm-mark rejection removes the
+    // credential under the same lock, so it can never be resurrected here.
+    fn publish<'a>(
         &'a self,
-        old_pairing_id: &'a str,
-        new_pairing_id: &'a str,
-        previously_confirmed: bool,
+        pending: &'a PendingMigration,
+        new_credential: &'a Credential,
     ) -> StoreFuture<'a> {
         Box::pin(async move {
             let _answer_lock = crate::journal_mark::AnswerLock::acquire(&self.root)
                 .await
                 .map_err(|_| ())?;
-            let current = self.read_answer()?;
-            match current.as_deref() {
-                Some(value) if value == new_pairing_id => Ok(()),
-                Some(value) if value == old_pairing_id && previously_confirmed => {
-                    crate::journal_mark::write_pairing_answer(&self.root, new_pairing_id)
-                        .map_err(|_| ())
-                }
-                None if !previously_confirmed => Ok(()),
-                _ => Err(()),
+            let current = crate::private_link::load_credential(&self.root)
+                .map_err(|_| ())?
+                .ok_or(())?;
+            if !credential_identity_matches(&current, &pending.old_credential)
+                && !credential_identity_matches(&current, new_credential)
+            {
+                return Err(());
             }
+            crate::private_link::persist_credential(&self.root, new_credential).map_err(|_| ())?;
+            self.transfer_answer(
+                &pending.old_pairing_id,
+                &crate::private_link::compute_pairing_id(&new_credential.client_cert_pem),
+                pending.transfer_confirmed,
+            )
         })
+    }
+}
+
+impl FileMigrationStore {
+    fn transfer_answer(
+        &self,
+        old_pairing_id: &str,
+        new_pairing_id: &str,
+        previously_confirmed: bool,
+    ) -> Result<(), ()> {
+        match self.read_answer()?.as_deref() {
+            Some(value) if value == new_pairing_id => Ok(()),
+            Some(value) if value == old_pairing_id && previously_confirmed => {
+                crate::journal_mark::write_pairing_answer(&self.root, new_pairing_id)
+                    .map_err(|_| ())
+            }
+            None if !previously_confirmed => Ok(()),
+            _ => Err(()),
+        }
     }
 }
 
@@ -642,14 +663,6 @@ async fn resume_pending(
     }
     if pending.decision_response_bytes.is_none() {
         if pending.rekey_response_bytes.is_none() {
-            let state = get_migration_state(transport, &pending.old_credential).await?;
-            match state.state {
-                ProtocolState::None | ProtocolState::NewDevice | ProtocolState::SameDevice => {}
-                ProtocolState::Pending
-                    if state.rekey_operation_id.as_deref() == Some(&pending.operation_id)
-                        && state.previous_cid.as_deref() == Some(&pending.old_cid) => {}
-                _ => return Err(MigrationError::Protocol),
-            }
             let response = transport
                 .request(
                     &pending.old_credential,
@@ -742,7 +755,6 @@ async fn resume_pending(
         .new_credential
         .as_ref()
         .ok_or(MigrationError::State)?;
-    let new_pairing_id = crate::private_link::compute_pairing_id(&new_credential.client_cert_pem);
     if let Some(response) = pending.decision_response_bytes.as_deref() {
         validate_decision(response, pending)?;
     } else {
@@ -754,14 +766,7 @@ async fn resume_pending(
     // Re-publishing is intentional: it recovers a crash after credential rename
     // but before the migration checkpoint reached durable storage.
     store
-        .persist_credential(new_credential)
-        .map_err(|_| MigrationError::Persistence)?;
-    store
-        .transfer_answer(
-            &pending.old_pairing_id,
-            &new_pairing_id,
-            pending.transfer_confirmed,
-        )
+        .publish(pending, new_credential)
         .await
         .map_err(|_| MigrationError::Answer)?;
     Ok(new_credential.clone())
@@ -1346,22 +1351,17 @@ mod tests {
             })
         }
 
-        fn persist_credential(&self, credential: &Credential) -> Result<(), ()> {
-            if self.fail_credential.load(Ordering::Acquire) {
-                return Err(());
-            }
-            self.writes.lock().unwrap().push("credential");
-            *self.credential.lock().unwrap() = Some(credential.clone());
-            Ok(())
-        }
-
-        fn transfer_answer<'a>(
+        fn publish<'a>(
             &'a self,
-            old_pairing_id: &'a str,
-            new_pairing_id: &'a str,
-            previously_confirmed: bool,
+            pending: &'a PendingMigration,
+            new_credential: &'a Credential,
         ) -> StoreFuture<'a> {
             Box::pin(async move {
+                self.persist_credential(new_credential)?;
+                let old_pairing_id = pending.old_pairing_id.as_str();
+                let new_pairing_id =
+                    &crate::private_link::compute_pairing_id(&new_credential.client_cert_pem);
+                let previously_confirmed = pending.transfer_confirmed;
                 if self.fail_answer.load(Ordering::Acquire) {
                     return Err(());
                 }
@@ -1377,6 +1377,17 @@ mod tests {
                     _ => Err(()),
                 }
             })
+        }
+    }
+
+    impl TestStore {
+        fn persist_credential(&self, credential: &Credential) -> Result<(), ()> {
+            if self.fail_credential.load(Ordering::Acquire) {
+                return Err(());
+            }
+            self.writes.lock().unwrap().push("credential");
+            *self.credential.lock().unwrap() = Some(credential.clone());
+            Ok(())
         }
     }
 
@@ -2165,12 +2176,140 @@ mod tests {
         assert_eq!(transport.post_bodies.lock().unwrap().len(), post_count);
     }
 
+    // The owner rejects the mark and removes the credential while the move's
+    // decision request is in flight. Publication re-checks ownership under the
+    // answer lock and leaves the removed pairing removed.
+    #[tokio::test]
+    async fn owner_unpair_during_migration_is_not_overwritten_by_publication() {
+        struct UnpairDuringDecision {
+            inner: TestTransport,
+            root: PathBuf,
+        }
+        impl MigrationTransport for UnpairDuringDecision {
+            fn request<'a>(
+                &'a self,
+                credential: &'a Credential,
+                method: &'a str,
+                path: &'a str,
+                body: &'a [u8],
+            ) -> RequestFuture<'a> {
+                if method == "PUT" {
+                    std::fs::remove_file(self.root.join(crate::private_link::CREDENTIALS_FILENAME))
+                        .unwrap();
+                }
+                self.inner.request(credential, method, path, body)
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let ca = test_ca();
+        let old = credential(&ca);
+        let old_pairing_id = crate::private_link::compute_pairing_id(&old.client_cert_pem);
+        crate::private_link::persist_credential(root, &old).unwrap();
+        crate::journal_mark::write_pairing_answer(root, &old_pairing_id).unwrap();
+        let store = FileMigrationStore::new(root);
+        resolve(
+            &store,
+            &TestMarker(MachineMarker::Present("machine-a".into())),
+            &ids(&[]),
+            &TestClock,
+            &NoRequests,
+            old.clone(),
+        )
+        .await
+        .unwrap();
+
+        let transport = UnpairDuringDecision {
+            inner: TestTransport::new(ca),
+            root: root.to_path_buf(),
+        };
+        assert_eq!(
+            resolve(
+                &store,
+                &TestMarker(MachineMarker::Present("machine-b".into())),
+                &ids(&[OLD_ID, NEW_DECISION_ID]),
+                &TestClock,
+                &transport,
+                old,
+            )
+            .await
+            .unwrap_err(),
+            MigrationError::Answer
+        );
+        assert!(
+            crate::private_link::load_credential(root)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.read_answer().unwrap().as_deref(),
+            Some(old_pairing_id.as_str())
+        );
+    }
+
+    // A certificate issued by a move whose keep-both decision never arrived
+    // (its machine died first) is still a paired certificate the journal
+    // rekeys, so a home carrying it moves and finalises on another machine.
+    #[tokio::test]
+    async fn home_with_certificate_from_an_undecided_move_still_rekeys_and_finalizes() {
+        let ca = test_ca();
+        let old = credential(&ca);
+        let store = TestStore::default();
+        *store.answer.lock().unwrap() = Some(crate::private_link::compute_pairing_id(
+            &old.client_cert_pem,
+        ));
+        resolve(
+            &store,
+            &TestMarker(MachineMarker::Present("machine-a".into())),
+            &ids(&[]),
+            &TestClock,
+            &NoRequests,
+            old.clone(),
+        )
+        .await
+        .unwrap();
+
+        let transport = TestTransport::new(ca);
+        *transport.operation.lock().unwrap() = Some(ServerOperation {
+            operation_id: COPIED_DECISION_ID.into(),
+            previous_cid: format!("sha256:{}", "a".repeat(64)),
+            response: Vec::new(),
+            candidate_cid: credential_cid(&old).unwrap(),
+            decision_id: None,
+            decided: false,
+        });
+        let moved = resolve(
+            &store,
+            &TestMarker(MachineMarker::Present("machine-c".into())),
+            &ids(&[OLD_ID, NEW_DECISION_ID]),
+            &TestClock,
+            &transport,
+            old.clone(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(moved.client_cert_pem, old.client_cert_pem);
+        assert_eq!(transport.post_bodies.lock().unwrap().len(), 1);
+        assert!(
+            transport
+                .operation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .decided
+        );
+        assert!(store.load_state().unwrap().unwrap().pending.is_none());
+    }
+
     #[tokio::test]
     async fn file_store_move_preserves_absent_legacy_answer_after_setup_gate() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let ca = test_ca();
         let old = credential(&ca);
+        crate::private_link::persist_credential(root, &old).unwrap();
         let store = FileMigrationStore::new(root);
         assert!(store.load_state().unwrap().is_none());
 
@@ -2241,7 +2380,6 @@ mod tests {
         assert!(
             store
                 .transfer_answer(old_pairing_id, new_pairing_id, false)
-                .await
                 .is_err()
         );
         assert_eq!(
@@ -2251,7 +2389,6 @@ mod tests {
 
         store
             .transfer_answer(old_pairing_id, new_pairing_id, true)
-            .await
             .unwrap();
         assert_eq!(
             store.read_answer().unwrap().as_deref(),
@@ -2262,7 +2399,6 @@ mod tests {
         assert!(
             store
                 .transfer_answer(old_pairing_id, new_pairing_id, true)
-                .await
                 .is_err()
         );
         assert_eq!(store.read_answer().unwrap().as_deref(), Some(""));
@@ -2271,7 +2407,6 @@ mod tests {
         assert!(
             store
                 .transfer_answer(old_pairing_id, new_pairing_id, true)
-                .await
                 .is_err()
         );
         assert_eq!(
@@ -2287,7 +2422,6 @@ mod tests {
         assert!(
             store
                 .transfer_answer(old_pairing_id, new_pairing_id, true)
-                .await
                 .is_err()
         );
     }
@@ -2323,7 +2457,7 @@ mod tests {
             )
             .await
             .unwrap_err(),
-            MigrationError::Persistence
+            MigrationError::Answer
         );
         assert!(store.credential.lock().unwrap().is_none());
         assert_eq!(
@@ -2714,7 +2848,8 @@ mod tests {
         .await
         .unwrap();
         let transport = TestTransport::new(ca);
-        transport.state_status.store(404, Ordering::Release);
+        // An unsupported journal refuses the rekey; the move stays pending.
+        transport.rekey_status.store(404, Ordering::Release);
         assert_eq!(
             resolve(
                 &store,
@@ -2726,10 +2861,9 @@ mod tests {
             )
             .await
             .unwrap_err(),
-            MigrationError::Transport
+            MigrationError::Protocol
         );
-        assert!(transport.post_bodies.lock().unwrap().is_empty());
-        transport.state_status.store(0, Ordering::Release);
+        assert!(store.credential.lock().unwrap().is_none());
         transport.rekey_status.store(400, Ordering::Release);
         assert_eq!(
             resolve(
@@ -2771,9 +2905,8 @@ mod tests {
         .await
         .unwrap();
         let posts = transport.post_bodies.lock().unwrap().clone();
-        assert_eq!(posts.len(), 3);
-        assert_eq!(posts[1], saved.request_bytes);
-        assert_eq!(posts[2], saved.request_bytes);
+        assert_eq!(posts.len(), 4);
+        assert!(posts.iter().all(|post| *post == saved.request_bytes));
 
         let ca = test_ca();
         let old = credential(&ca);

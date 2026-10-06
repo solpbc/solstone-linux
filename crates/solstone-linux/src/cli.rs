@@ -520,6 +520,48 @@ pub(crate) fn drop_same_pairing(
     })
 }
 
+// A device migration owns the credential while one is pending or unresolved.
+// The rejection checks that under the answer lock before the remote
+// retirement and again before the local deletion; migration publishes its
+// new credential under the same lock, so neither can undo the other.
+async fn retire_rejected_pairing(
+    config_root: &std::path::Path,
+    credential: &Credential,
+    pairing_id: &str,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> Result<(), i32> {
+    migration_idle_under_lock(config_root, output, errors).await?;
+    crate::journal_mark::retire_client_registration(credential).await;
+    let _lock = migration_idle_under_lock(config_root, output, errors).await?;
+    drop_same_pairing(config_root, pairing_id).map_err(|error| {
+        let _ = write_line(errors, format!("Error: {error}"));
+        1
+    })
+}
+
+async fn migration_idle_under_lock(
+    config_root: &std::path::Path,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> Result<crate::journal_mark::AnswerLock, i32> {
+    let lock = crate::journal_mark::AnswerLock::acquire(config_root)
+        .await
+        .map_err(|error| {
+            let _ = write_line(errors, format!("Error: {error}"));
+            1
+        })?;
+    if !crate::device_migration::owner_identity_action_allowed(
+        config_root,
+        &crate::device_migration::SystemMarkerProvider,
+    ) {
+        let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
+        let _ = write_line(output, crate::journal_mark::RUN_LINE);
+        return Err(5);
+    }
+    Ok(lock)
+}
+
 pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
     config_root: &std::path::Path,
     mark: Option<&str>,
@@ -611,27 +653,12 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 0
             }
             Ok(false) => {
-                if !crate::device_migration::owner_identity_action_allowed(
-                    config_root,
-                    &crate::device_migration::SystemMarkerProvider,
-                ) {
-                    let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
-                    let _ = write_line(output, crate::journal_mark::RUN_LINE);
-                    return 5;
-                }
                 drop(answer_lock);
-                crate::journal_mark::retire_client_registration(&credential).await;
-                let _reacquired_lock =
-                    match crate::journal_mark::AnswerLock::acquire(config_root).await {
-                        Ok(lock) => lock,
-                        Err(error) => {
-                            let _ = write_line(errors, format!("Error: {error}"));
-                            return 1;
-                        }
-                    };
-                if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
-                    return 1;
+                if let Err(status) =
+                    retire_rejected_pairing(config_root, &credential, &pairing_id, output, errors)
+                        .await
+                {
+                    return status;
                 }
                 let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
                 let _ = write_line(output, crate::journal_mark::MARK_MISMATCH_LINE);
@@ -665,50 +692,22 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 0
             }
             crate::journal_mark::QuestionOutcome::No => {
-                if !crate::device_migration::owner_identity_action_allowed(
-                    config_root,
-                    &crate::device_migration::SystemMarkerProvider,
-                ) {
-                    let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
-                    let _ = write_line(output, crate::journal_mark::RUN_LINE);
-                    return 5;
-                }
-                crate::journal_mark::retire_client_registration(&credential).await;
-                let _lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
-                    Ok(lock) => lock,
-                    Err(error) => {
-                        let _ = write_line(errors, format!("Error: {error}"));
-                        return 1;
-                    }
-                };
-                if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
-                    return 1;
+                if let Err(status) =
+                    retire_rejected_pairing(config_root, &credential, &pairing_id, output, errors)
+                        .await
+                {
+                    return status;
                 }
                 let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
                 let _ = write_line(output, crate::journal_mark::MISMATCH_BODY);
                 1
             }
             crate::journal_mark::QuestionOutcome::Cancel => {
-                if !crate::device_migration::owner_identity_action_allowed(
-                    config_root,
-                    &crate::device_migration::SystemMarkerProvider,
-                ) {
-                    let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
-                    let _ = write_line(output, crate::journal_mark::RUN_LINE);
-                    return 5;
-                }
-                crate::journal_mark::retire_client_registration(&credential).await;
-                let _lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
-                    Ok(lock) => lock,
-                    Err(error) => {
-                        let _ = write_line(errors, format!("Error: {error}"));
-                        return 1;
-                    }
-                };
-                if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
-                    return 1;
+                if let Err(status) =
+                    retire_rejected_pairing(config_root, &credential, &pairing_id, output, errors)
+                        .await
+                {
+                    return status;
                 }
                 let _ = write_line(output, crate::journal_mark::CANCEL_LINE);
                 1
