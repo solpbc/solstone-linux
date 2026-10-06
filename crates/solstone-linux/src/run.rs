@@ -2318,9 +2318,7 @@ mod tests {
                 day,
             )
             .await;
-            // An unavailable listing route cannot prove server custody, so
-            // retain the migrated local backlog for a later supported pass.
-            assert_pending_unchanged(&pending, &[true, true, true]);
+            assert_pending_unchanged(&pending, &[false, false, false]);
             assert_real_observer_ticks_advance();
             owner.shutdown().await.unwrap();
             drop(upload);

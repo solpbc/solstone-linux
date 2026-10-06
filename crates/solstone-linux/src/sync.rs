@@ -831,11 +831,6 @@ impl SyncWorker {
                     self.record_failure(custody.error_type, pass_error_code);
                     break;
                 }
-                if custody.error_type == Some(ErrorType::Incompatible) {
-                    // A malformed or unsupported listing cannot authorize any
-                    // reconciliation or deletion for this day/source.
-                    continue;
-                }
                 if custody.error_type.is_some() || !custody.proof_available || !custody.day_present
                 {
                     // Non-auth error or no proof: do not record_failure, do not stop pass.
@@ -994,7 +989,6 @@ impl SyncWorker {
                                 }
                             }
                         } else if physical_entries.is_empty() {
-                            // Alias-only entries cannot prove local custody.
                             should_upload = true;
                         } else {
                             // Duplicate physical rows are ambiguous even when
@@ -1998,43 +1992,47 @@ fn unique_listing_file<'a>(entry: &'a ListingEntry, name: &str) -> Option<&'a Li
     matches.next().is_none().then_some(first)
 }
 
+fn segment_coordinates(segment_dir: &Path) -> Option<(&str, &str, &str)> {
+    let segment = segment_dir.file_name()?.to_str()?;
+    let stream_dir = segment_dir.parent()?;
+    let stream = stream_dir.file_name()?.to_str()?;
+    let day = stream_dir.parent()?.file_name()?.to_str()?;
+    Some((day, stream, segment))
+}
+
+// A listing acknowledgment stays bound to the day and stream folder it proved.
+// Physical fields are recorded only from collided entries, so their absence
+// (including every acknowledgment written before they existed) is ordinary.
 fn ack_physical_coordinates_match(segment_dir: &Path, ack: &IngestAck) -> bool {
-    let Some(segment) = segment_dir.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let Some(stream) = segment_dir
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-    else {
-        return false;
-    };
-    let Some(day) = segment_dir
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-    else {
+    let Some((day, stream, segment)) = segment_coordinates(segment_dir) else {
         return false;
     };
     ack.day == day
         && ack.stream == stream
-        && ack.physical_stream.as_deref() == Some(stream)
-        && ack.physical_segment.as_deref() == Some(segment)
+        && match (
+            ack.physical_stream.as_deref(),
+            ack.physical_segment.as_deref(),
+        ) {
+            (None, None) => true,
+            (Some(physical_stream), Some(physical_segment)) => {
+                physical_stream == stream && physical_segment == segment
+            }
+            _ => false,
+        }
 }
 
+// Collided entries name their physical stream and segment; an ordinary entry's
+// key is the physical basename within this day/source listing.
 fn physical_entry_matches(segment_dir: &Path, entry: &ListingEntry) -> bool {
-    let Some(segment) = segment_dir.file_name().and_then(|name| name.to_str()) else {
+    let Some((_, stream, segment)) = segment_coordinates(segment_dir) else {
         return false;
     };
-    let Some(stream) = segment_dir
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-    else {
-        return false;
-    };
-    entry.stream.as_deref() == Some(stream) && entry.segment.as_deref() == Some(segment)
+    match (entry.stream.as_deref(), entry.segment.as_deref()) {
+        (Some(physical_stream), Some(physical_segment)) => {
+            physical_stream == stream && physical_segment == segment
+        }
+        _ => entry.key.as_deref() == Some(segment),
+    }
 }
 
 fn lookup_physical_entries<'a>(
@@ -2386,7 +2384,7 @@ mod tests {
         }
         custody_for_day(
             "20260101",
-            vec![json!({"key":key,"observed":true,"stream":"archon","segment":key,"files":[file]})],
+            vec![json!({"key":key,"observed":true,"files":[file]})],
         )
     }
 
@@ -2753,12 +2751,10 @@ mod tests {
         .unwrap();
         let remote = custody_for_day(
             "20260101",
-            vec![
-                json!({"key":"120000_300", "observed":true, "stream":"archon", "segment":"120000_300", "files":[
-                    {"name":"screen.webm","size":6,"status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
-                    {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
-                ]}),
-            ],
+            vec![json!({"key":"120000_300", "observed":true, "files":[
+                {"name":"screen.webm","size":6,"status":"present","sha256":format!("{:x}",Sha256::digest(b"screen"))},
+                {"name":"audio.flac","size":5,"status":"processed","sha256":format!("{:x}",Sha256::digest(b"audio"))}
+            ]})],
         );
         let (_server, mut worker) = test_worker(&temp, vec![(200, remote)]).await;
         worker.sync_pass().await;
@@ -3152,6 +3148,69 @@ mod tests {
             assert_eq!(fs::read(segment.join("screen.webm")).unwrap(), b"screen");
             assert!(!segment.join(INGEST_ACK_FILENAME).exists());
             assert_eq!(upload_hits(&server), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_collision_fixture_confirms_only_the_matching_stream_in_either_order() {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../vendor/observer-client-contract/fixtures/wire-behavior.json"
+        ))
+        .unwrap();
+        let mut items = document["fixtures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fixture| {
+                fixture["id"]
+                    == "declared.client.ingestSegments.collision.same_basename_distinct_streams"
+            })
+            .unwrap()["payload"]["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let held_a = b"pages, stream a.\n";
+        let held_b = b"pages for stream b\n";
+        assert_eq!(items[0]["files"][0]["size"], held_a.len());
+        assert_eq!(items[1]["files"][0]["size"], held_b.len());
+        // The pinned digests are placeholders: bind only stream a to its local
+        // bytes, leaving stream b's exact pinned row unable to prove custody.
+        items[0]["files"][0]["sha256"] = json!(spl_core::ca::sha256_hex(held_a));
+        for listing_items in [items.clone(), vec![items[1].clone(), items[0].clone()]] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut segments = Vec::new();
+            for (stream, bytes) in [("browser_a", &held_a[..]), ("browser_b", &held_b[..])] {
+                let segment = temp
+                    .path()
+                    .join("captures/20260101")
+                    .join(stream)
+                    .join("120000_10");
+                fs::create_dir_all(&segment).unwrap();
+                fs::write(segment.join("browser_pages.jsonl"), bytes).unwrap();
+                segments.push(segment);
+            }
+            let (_server, mut worker) = test_worker(
+                &temp,
+                vec![
+                    (200, custody_for_day("20260101", listing_items)),
+                    (500, json!({})),
+                ],
+            )
+            .await;
+            fs::write(
+                worker.config.state_dir().join(INGEST_CUTOVER_FILENAME),
+                b"{\"segments\":[\"20260101/browser_a/120000_10\",\"20260101/browser_b/120000_10\"]}\n",
+            )
+            .unwrap();
+
+            worker.sync_pass().await;
+
+            assert!(!segments[0].exists());
+            assert_eq!(
+                fs::read(segments[1].join("browser_pages.jsonl")).unwrap(),
+                held_b
+            );
+            assert!(!segments[1].join(INGEST_ACK_FILENAME).exists());
         }
     }
 
@@ -6562,8 +6621,8 @@ mod tests {
             identity_key: id.clone(),
             pairing_id: pair.clone(),
             proof: "listing".to_string(),
-            physical_stream: Some("archon".to_string()),
-            physical_segment: Some("120000_300".to_string()),
+            physical_stream: None,
+            physical_segment: None,
             files: vec![IngestAckFile {
                 submitted: "screen.webm".to_owned(),
                 written: "screen.webm".to_owned(),
@@ -6741,8 +6800,6 @@ mod tests {
                 json!({
                     "key": "110000_300",
                     "observed": true,
-                    "stream": "archon",
-                    "segment": "110000_300",
                     "files": [{
                         "name": "screen.webm",
                         "size": size_proven,
@@ -6753,8 +6810,6 @@ mod tests {
                 json!({
                     "key": "120000_300",
                     "observed": false,
-                    "stream": "archon",
-                    "segment": "120000_300",
                     "files": [],
                 }),
             ],

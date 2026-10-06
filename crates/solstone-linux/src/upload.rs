@@ -132,7 +132,6 @@ pub(crate) struct Inner {
     #[cfg(test)]
     expose_link_facts: AtomicBool,
     revoked: AtomicBool,
-    credential_admission: AtomicBool,
     cancellation: CancellationToken,
     retry_delays: Vec<i64>,
     immediate_attempts: usize,
@@ -156,20 +155,17 @@ impl UploadClient {
         capability: impl Into<Option<PrivateLinkCapability>>,
         _clock: Arc<dyn Clock + Send + Sync>,
     ) -> Self {
-        let capability = capability.into();
-        let admission_open = capability.is_some();
         let retry_delays = if config.sync_retry_delays.is_empty() {
             DEFAULT_RETRY_DELAYS.to_vec()
         } else {
             config.sync_retry_delays.clone()
         };
         let inner = Arc::new(Inner {
-            capability: std::sync::RwLock::new(capability),
+            capability: std::sync::RwLock::new(capability.into()),
             fallback_link_facts: crate::private_link::LinkFacts::default(),
             #[cfg(test)]
             expose_link_facts: AtomicBool::new(true),
             revoked: AtomicBool::new(false),
-            credential_admission: AtomicBool::new(admission_open),
             cancellation: CancellationToken::new(),
             retry_delays,
             immediate_attempts: config
@@ -189,15 +185,11 @@ impl UploadClient {
     }
 
     pub(crate) fn has_capability(&self) -> bool {
-        self.inner.credential_admission.load(Ordering::Acquire) && self.inner.capability().is_some()
+        self.inner.capability().is_some()
     }
 
     pub(crate) fn capability(&self) -> Option<PrivateLinkCapability> {
-        self.inner
-            .credential_admission
-            .load(Ordering::Acquire)
-            .then(|| self.inner.capability())
-            .flatten()
+        self.inner.capability()
     }
 
     pub(crate) fn link_fact_state(&self) -> Option<crate::private_link::LinkFactState> {
@@ -228,9 +220,6 @@ impl UploadClient {
     }
 
     pub(crate) fn prepare_new_owner(&self) {
-        self.inner
-            .credential_admission
-            .store(false, Ordering::Release);
         let previous = self
             .inner
             .capability
@@ -255,9 +244,6 @@ impl UploadClient {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(capability);
         self.inner.revoked.store(false, Ordering::Release);
-        self.inner
-            .credential_admission
-            .store(true, Ordering::Release);
         self.link_facts().republish_current();
     }
 
@@ -291,9 +277,6 @@ impl UploadClient {
         meta: Option<&crate::recovery::CaptureZone>,
         source: Option<&str>,
     ) -> UploadResult {
-        if !self.inner.credential_admission.load(Ordering::Acquire) {
-            return UploadResult::failure(Some(ErrorType::Transient), None, None);
-        }
         let Some(capability) = self.inner.capability() else {
             return UploadResult::failure(Some(ErrorType::Transient), None, None);
         };
@@ -332,13 +315,6 @@ impl UploadClient {
         let mut last_status = None;
         let mut last_reason_code = None;
         for attempt in 0..self.inner.immediate_attempts {
-            if !self.inner.credential_admission.load(Ordering::Acquire)
-                || !self
-                    .inner
-                    .is_installed_for_epoch(&captured.capability, captured.association_epoch)
-            {
-                return UploadResult::failure(Some(ErrorType::Transient), None, None);
-            }
             let (form, framed_length) = match build_multipart_form(
                 day, segment, files, meta, source,
             )
@@ -357,14 +333,6 @@ impl UploadClient {
                 }
             };
             debug_assert!(framed_length <= MAX_REQUEST_BODY_BYTES);
-
-            if !self.inner.credential_admission.load(Ordering::Acquire)
-                || !self
-                    .inner
-                    .is_installed_for_epoch(&captured.capability, captured.association_epoch)
-            {
-                return UploadResult::failure(Some(ErrorType::Transient), None, None);
-            }
 
             {
                 match captured.capability.ingest(form).await {
@@ -470,9 +438,6 @@ impl UploadClient {
         if self.is_revoked() {
             return custody_failure(ErrorType::Auth, None);
         }
-        if !self.inner.credential_admission.load(Ordering::Acquire) {
-            return custody_failure(ErrorType::Transient, None);
-        }
         let Some(capability) = self.inner.capability() else {
             return custody_failure(ErrorType::Transient, None);
         };
@@ -484,9 +449,6 @@ impl UploadClient {
             Ok(value) => value,
             Err(failure) => return failure,
         };
-        if !self.inner.credential_admission.load(Ordering::Acquire) {
-            return custody_failure(ErrorType::Transient, None);
-        }
         parse_segments_envelope(segments, status_code)
     }
 
@@ -912,14 +874,15 @@ fn parse_listing_items(values: &[Value]) -> Option<Vec<ListingEntry>> {
                 size: Some(size),
             });
         }
-        let stream = match object.get("stream") {
-            Some(value) => Some(value.as_str()?.to_owned()),
-            None => None,
+        // Physical fields are absent together or present together as nonempty strings.
+        let physical = |field: &str| match object.get(field) {
+            Some(value) => value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(|value| Some(value.to_owned())),
+            None => Some(None),
         };
-        let segment = match object.get("segment") {
-            Some(value) => Some(value.as_str()?.to_owned()),
-            None => None,
-        };
+        let (stream, segment) = (physical("stream")?, physical("segment")?);
         if stream.is_some() != segment.is_some() {
             return None;
         }
@@ -1782,16 +1745,60 @@ mod tests {
     }
 
     #[test]
-    fn v3_listing_rejects_half_physical_coordinates() {
+    fn v3_listing_rejects_malformed_physical_coordinates() {
         for item in [
             vec![json!({"key":"alias","observed":true,"files":[],"stream":"archon"})],
             vec![json!({"key":"alias","observed":true,"files":[],"segment":"original"})],
+            vec![
+                json!({"key":"alias","observed":true,"files":[],"stream":"","segment":"original"}),
+            ],
+            vec![json!({"key":"alias","observed":true,"files":[],"stream":"archon","segment":""})],
+            vec![json!({"key":"alias","observed":true,"files":[],"stream":"","segment":""})],
         ] {
             let parsed =
                 parse_segments_envelope(json!({"protocol_version":3,"total":1,"items":item}), 200);
             assert!(!parsed.proof_available);
             assert_eq!(parsed.error_type, Some(ErrorType::Incompatible));
         }
+    }
+
+    #[test]
+    fn pinned_collision_fixtures_keep_every_physical_entry_and_refuse_duplicate_keys() {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../vendor/observer-client-contract/fixtures/wire-behavior.json"
+        ))
+        .unwrap();
+        let fixture = |id: &str| {
+            document["fixtures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|fixture| fixture["id"] == id)
+                .unwrap()
+                .clone()
+        };
+
+        let distinct =
+            fixture("declared.client.ingestSegments.collision.same_basename_distinct_streams");
+        let parsed = parse_segments_envelope(distinct["payload"].clone(), 200);
+        assert!(parsed.proof_available);
+        let selected: Vec<Value> = parsed
+            .items
+            .iter()
+            .map(|item| json!({"key":item.key,"segment":item.segment,"stream":item.stream}))
+            .collect();
+        assert_eq!(
+            Value::from(selected),
+            distinct["consumer_decision"]["selected"]
+        );
+
+        let duplicate =
+            fixture("declared.client.ingestSegments.collision.duplicate_wire_key_refused");
+        assert_eq!(duplicate["consumer_decision"]["accepted"], false);
+        let parsed = parse_segments_envelope(duplicate["payload"].clone(), 200);
+        assert!(!parsed.proof_available);
+        assert!(parsed.items.is_empty());
+        assert_eq!(parsed.error_type, Some(ErrorType::Incompatible));
     }
 
     #[test]
