@@ -1667,32 +1667,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_preparation_closes_upload_and_listing_admission() {
-        let (temp, legacy, peer, session, client) =
-            linked_client(200, json!({"status":"ok","segment":"s"})).await;
-        let media = write_file(&temp, "audio.flac", b"audio");
-        assert!(client.has_capability());
-        client.prepare_new_owner();
-        assert!(!client.has_capability());
-        assert!(client.capability().is_none());
-        assert_eq!(
-            client
-                .upload_segment("20260101", "s", &[media])
-                .await
-                .error_type,
-            Some(ErrorType::Transient)
-        );
-        assert_eq!(
-            client.fetch_day_custody("20260101").await.error_type,
-            Some(ErrorType::Transient)
-        );
-        assert!(peer.requests().is_empty());
-        assert!(legacy.requests().is_empty());
-        session.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn v3_custody_requires_segments_response() {
         let server = MockServer::new(vec![]).await;
         let temp = TempDir::new().unwrap();

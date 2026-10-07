@@ -520,48 +520,6 @@ pub(crate) fn drop_same_pairing(
     })
 }
 
-// A device migration owns the credential while one is pending or unresolved.
-// The rejection checks that under the answer lock before the remote
-// retirement and again before the local deletion; migration publishes its
-// new credential under the same lock, so neither can undo the other.
-async fn retire_rejected_pairing(
-    config_root: &std::path::Path,
-    credential: &Credential,
-    pairing_id: &str,
-    output: &mut dyn Write,
-    errors: &mut dyn Write,
-) -> Result<(), i32> {
-    migration_idle_under_lock(config_root, output, errors).await?;
-    crate::journal_mark::retire_client_registration(credential).await;
-    let _lock = migration_idle_under_lock(config_root, output, errors).await?;
-    drop_same_pairing(config_root, pairing_id).map_err(|error| {
-        let _ = write_line(errors, format!("Error: {error}"));
-        1
-    })
-}
-
-async fn migration_idle_under_lock(
-    config_root: &std::path::Path,
-    output: &mut dyn Write,
-    errors: &mut dyn Write,
-) -> Result<crate::journal_mark::AnswerLock, i32> {
-    let lock = crate::journal_mark::AnswerLock::acquire(config_root)
-        .await
-        .map_err(|error| {
-            let _ = write_line(errors, format!("Error: {error}"));
-            1
-        })?;
-    if !crate::device_migration::owner_identity_action_allowed(
-        config_root,
-        &crate::device_migration::SystemMarkerProvider,
-    ) {
-        let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
-        let _ = write_line(output, crate::journal_mark::RUN_LINE);
-        return Err(5);
-    }
-    Ok(lock)
-}
-
 pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
     config_root: &std::path::Path,
     mark: Option<&str>,
@@ -589,6 +547,11 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
         }
     };
 
+    if let Err(error) = crate::journal_mark::grandfather_answer_file(config_root) {
+        let _ = write_line(errors, format!("Error: {error}"));
+        return 1;
+    }
+
     let credential = match load_credential(config_root) {
         Ok(Some(cred)) => cred,
         Ok(None) => {
@@ -602,29 +565,9 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
     };
 
     let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
-    match crate::journal_mark::read_pairing_answer(config_root) {
-        Ok(None) => {
-            // An absent answer is the legacy grandfathered state. Do not turn
-            // it into an explicit answer just because confirm was invoked.
-            let _ = write_line(output, crate::journal_mark::CONFIRM_DONE);
-            return 0;
-        }
-        // An unreadable or malformed answer can still be repaired through
-        // the existing explicit mark-confirmation flow below.
-        Err(_) => {}
-        Ok(Some(_)) => {}
-    }
     if crate::journal_mark::is_pairing_confirmed(config_root, &pairing_id) {
         let _ = write_line(output, crate::journal_mark::CONFIRM_DONE);
         return 0;
-    }
-    if !crate::device_migration::owner_identity_action_allowed(
-        config_root,
-        &crate::device_migration::SystemMarkerProvider,
-    ) {
-        let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
-        let _ = write_line(output, crate::journal_mark::RUN_LINE);
-        return 5;
     }
 
     if mark_words.is_none() && terminal_fd.is_none() {
@@ -654,11 +597,18 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
             }
             Ok(false) => {
                 drop(answer_lock);
-                if let Err(status) =
-                    retire_rejected_pairing(config_root, &credential, &pairing_id, output, errors)
-                        .await
-                {
-                    return status;
+                crate::journal_mark::retire_client_registration(&credential).await;
+                let _reacquired_lock =
+                    match crate::journal_mark::AnswerLock::acquire(config_root).await {
+                        Ok(lock) => lock,
+                        Err(error) => {
+                            let _ = write_line(errors, format!("Error: {error}"));
+                            return 1;
+                        }
+                    };
+                if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
+                    let _ = write_line(errors, format!("Error: {error}"));
+                    return 1;
                 }
                 let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
                 let _ = write_line(output, crate::journal_mark::MARK_MISMATCH_LINE);
@@ -692,22 +642,34 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 0
             }
             crate::journal_mark::QuestionOutcome::No => {
-                if let Err(status) =
-                    retire_rejected_pairing(config_root, &credential, &pairing_id, output, errors)
-                        .await
-                {
-                    return status;
+                crate::journal_mark::retire_client_registration(&credential).await;
+                let _lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        let _ = write_line(errors, format!("Error: {error}"));
+                        return 1;
+                    }
+                };
+                if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
+                    let _ = write_line(errors, format!("Error: {error}"));
+                    return 1;
                 }
                 let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
                 let _ = write_line(output, crate::journal_mark::MISMATCH_BODY);
                 1
             }
             crate::journal_mark::QuestionOutcome::Cancel => {
-                if let Err(status) =
-                    retire_rejected_pairing(config_root, &credential, &pairing_id, output, errors)
-                        .await
-                {
-                    return status;
+                crate::journal_mark::retire_client_registration(&credential).await;
+                let _lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        let _ = write_line(errors, format!("Error: {error}"));
+                        return 1;
+                    }
+                };
+                if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
+                    let _ = write_line(errors, format!("Error: {error}"));
+                    return 1;
                 }
                 let _ = write_line(output, crate::journal_mark::CANCEL_LINE);
                 1
@@ -1278,36 +1240,6 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
-
-    #[tokio::test]
-    async fn confirm_keeps_absent_legacy_answer_absent() {
-        let temp = tempfile::tempdir().unwrap();
-        let credential = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-pem");
-        crate::private_link::persist_credential(temp.path(), &credential).unwrap();
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-
-        let status = confirm_async(
-            temp.path(),
-            None,
-            None::<std::os::fd::BorrowedFd<'_>>,
-            &mut output,
-            &mut errors,
-        )
-        .await;
-
-        assert_eq!(status, 0);
-        assert_eq!(
-            output,
-            format!("{}\n", crate::journal_mark::CONFIRM_DONE).as_bytes()
-        );
-        assert!(errors.is_empty());
-        assert!(
-            crate::journal_mark::read_pairing_answer(temp.path())
-                .unwrap()
-                .is_none()
-        );
-    }
 
     struct FakeRunner {
         output: io::Result<Output>,
@@ -1996,450 +1928,6 @@ mod tests {
         config
     }
 
-    struct SetupPairer {
-        credential: spl_transport::credential::Credential,
-        fail: bool,
-    }
-
-    impl crate::private_link::Pairer for SetupPairer {
-        fn pair<'a>(
-            &'a self,
-            _link: &'a str,
-            _device_label: &'a str,
-            _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            spl_transport::credential::Credential,
-                            crate::private_link::PrivateStateError,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
-            if self.fail {
-                Box::pin(async { Err(crate::private_link::PrivateStateError::PairingFailed) })
-            } else {
-                let credential = self.credential.clone();
-                Box::pin(async move { Ok(credential) })
-            }
-        }
-    }
-
-    fn seed_pending_setup(
-        root: &Path,
-        previously_confirmed: bool,
-    ) -> spl_transport::credential::Credential {
-        let old = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "old-cert");
-        crate::private_link::persist_credential(root, &old).unwrap();
-        if previously_confirmed {
-            let old_pairing_id = crate::private_link::compute_pairing_id(&old.client_cert_pem);
-            crate::journal_mark::write_pairing_answer(root, &old_pairing_id).unwrap();
-        }
-        crate::device_migration::test_support::seed_pending_for_setup_test(
-            root,
-            old.clone(),
-            previously_confirmed,
-        )
-        .unwrap();
-        old
-    }
-
-    #[tokio::test]
-    async fn setup_success_supersedes_pending_migration_and_startup_accepts_new_pairing() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = status_config(&temp);
-        let old = seed_pending_setup(&config.config_dir, true);
-        let new = sample_credential("11234567-89ab-cdef-0123-456789abcdef", "new-cert");
-        let mark = spl_core::mark::mark_from_jid(&new.instance_id).unwrap();
-        let spec = mark.to_render_spec();
-        let mark_words = format!("{} {}", spec.words[0], spec.words[1]);
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-
-        let status = dispatch_setup_with_pairer_for_test(
-            &SetupPairer {
-                credential: new.clone(),
-                fail: false,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some(&mark_words),
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            &mut output,
-            &mut errors,
-        )
-        .await;
-
-        assert_eq!(status, 0, "{}", String::from_utf8_lossy(&errors));
-        assert_eq!(
-            crate::private_link::load_credential(&config.config_dir)
-                .unwrap()
-                .unwrap(),
-            new
-        );
-        let state: serde_json::Value = serde_json::from_slice(
-            &fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(state["pending"].is_null());
-        assert!(state["setup_pairing_id"].is_null());
-        assert!(state["adopted_marker_digest"].is_string());
-        crate::device_migration::test_support::resolve_setup_pairing_for_test(
-            &config.config_dir,
-            new.clone(),
-            crate::device_migration::MachineMarker::Present("private-link-setup-test".to_owned()),
-        )
-        .await
-        .unwrap();
-        let answer = crate::journal_mark::read_pairing_answer(&config.config_dir)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            answer.confirmed,
-            crate::private_link::compute_pairing_id(&new.client_cert_pem)
-        );
-        assert_ne!(
-            answer.confirmed,
-            crate::private_link::compute_pairing_id(&old.client_cert_pem)
-        );
-    }
-
-    #[tokio::test]
-    async fn setup_success_from_absent_legacy_answer_publishes_only_new_pairing() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = status_config(&temp);
-        let old = seed_pending_setup(&config.config_dir, false);
-        let new = sample_credential("11234567-89ab-cdef-0123-456789abcdef", "new-cert");
-        let mark = spl_core::mark::mark_from_jid(&new.instance_id).unwrap();
-        let spec = mark.to_render_spec();
-        let mark_words = format!("{} {}", spec.words[0], spec.words[1]);
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-
-        let status = dispatch_setup_with_pairer_for_test(
-            &SetupPairer {
-                credential: new.clone(),
-                fail: false,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some(&mark_words),
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            &mut output,
-            &mut errors,
-        )
-        .await;
-
-        assert_eq!(status, 0, "{}", String::from_utf8_lossy(&errors));
-        let answer = crate::journal_mark::read_pairing_answer(&config.config_dir)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            answer.confirmed,
-            crate::private_link::compute_pairing_id(&new.client_cert_pem)
-        );
-        assert_ne!(
-            answer.confirmed,
-            crate::private_link::compute_pairing_id(&old.client_cert_pem)
-        );
-        let state: serde_json::Value = serde_json::from_slice(
-            &fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(state["pending"].is_null());
-        assert!(state["setup_pairing_id"].is_null());
-    }
-
-    #[tokio::test]
-    async fn setup_pairing_failure_keeps_absent_legacy_answer_absent() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = status_config(&temp);
-        let old = seed_pending_setup(&config.config_dir, false);
-        let before = fs::read(config.config_dir.join("device-migration.json")).unwrap();
-        let new = sample_credential("11234567-89ab-cdef-0123-456789abcdef", "new-cert");
-        let mark = spl_core::mark::mark_from_jid(&new.instance_id).unwrap();
-        let spec = mark.to_render_spec();
-        let mark_words = format!("{} {}", spec.words[0], spec.words[1]);
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-
-        let status = dispatch_setup_with_pairer_for_test(
-            &SetupPairer {
-                credential: new,
-                fail: true,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some(&mark_words),
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            &mut output,
-            &mut errors,
-        )
-        .await;
-
-        assert_eq!(status, 1);
-        assert!(
-            !config
-                .config_dir
-                .join(crate::journal_mark::PAIRING_ANSWER_FILENAME)
-                .exists()
-        );
-        assert_eq!(
-            fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-            before
-        );
-        assert_eq!(
-            crate::private_link::load_credential(&config.config_dir)
-                .unwrap()
-                .unwrap(),
-            old
-        );
-    }
-
-    #[tokio::test]
-    async fn setup_cancellation_keeps_absent_legacy_answer_absent() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = status_config(&temp);
-        let old = seed_pending_setup(&config.config_dir, false);
-        let before = fs::read(config.config_dir.join("device-migration.json")).unwrap();
-        let new = sample_credential("invalid-jid", "invalid-cert");
-        let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
-        tty_peer.write_all(b"cancel\n").unwrap();
-
-        let result = crate::private_link::setup_with_pairer_and_stream_with_fault(
-            &SetupPairer {
-                credential: new,
-                fail: false,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some("desktop"),
-            None,
-            Some(tty_child.as_fd()),
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            None,
-            None,
-            &crate::device_migration::test_support::TEST_MACHINE,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, crate::private_link::SetupOutcome::TerminalCancel);
-        assert!(
-            !config
-                .config_dir
-                .join(crate::journal_mark::PAIRING_ANSWER_FILENAME)
-                .exists()
-        );
-        assert_eq!(
-            fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-            before
-        );
-        assert_eq!(
-            crate::private_link::load_credential(&config.config_dir)
-                .unwrap()
-                .unwrap(),
-            old
-        );
-    }
-
-    #[tokio::test]
-    async fn setup_pairing_failure_preserves_pending_migration() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = status_config(&temp);
-        let old = seed_pending_setup(&config.config_dir, true);
-        let before = fs::read(config.config_dir.join("device-migration.json")).unwrap();
-        let new = sample_credential("11234567-89ab-cdef-0123-456789abcdef", "new-cert");
-        let mark = spl_core::mark::mark_from_jid(&new.instance_id).unwrap();
-        let spec = mark.to_render_spec();
-        let mark_words = format!("{} {}", spec.words[0], spec.words[1]);
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-
-        let status = dispatch_setup_with_pairer_for_test(
-            &SetupPairer {
-                credential: new,
-                fail: true,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some(&mark_words),
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            &mut output,
-            &mut errors,
-        )
-        .await;
-
-        assert_eq!(status, 1);
-        assert_eq!(
-            fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-            before
-        );
-        assert_eq!(
-            crate::private_link::load_credential(&config.config_dir)
-                .unwrap()
-                .unwrap(),
-            old
-        );
-    }
-
-    #[tokio::test]
-    async fn setup_cancellation_preserves_pending_migration() {
-        let temp = tempfile::tempdir().unwrap();
-        let config = status_config(&temp);
-        let old = seed_pending_setup(&config.config_dir, true);
-        let before = fs::read(config.config_dir.join("device-migration.json")).unwrap();
-        let new = sample_credential("invalid-jid", "invalid-cert");
-        let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
-        tty_peer.write_all(b"cancel\n").unwrap();
-        let result = crate::private_link::setup_with_pairer_and_stream_with_fault(
-            &SetupPairer {
-                credential: new,
-                fail: false,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some("desktop"),
-            None,
-            Some(tty_child.as_fd()),
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            None,
-            None,
-            &crate::device_migration::test_support::TEST_MACHINE,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, crate::private_link::SetupOutcome::TerminalCancel);
-        assert_eq!(
-            fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-            before
-        );
-        assert_eq!(
-            crate::private_link::load_credential(&config.config_dir)
-                .unwrap()
-                .unwrap(),
-            old
-        );
-    }
-
-    #[tokio::test]
-    async fn interrupted_setup_answer_publication_holds_then_setup_can_recover() {
-        struct FailAnswerWrite;
-        impl crate::private_file::DurableWriteFault for FailAnswerWrite {
-            fn before(&self, stage: crate::private_file::DurableWriteStage) -> io::Result<()> {
-                if stage == crate::private_file::DurableWriteStage::Write {
-                    Err(io::Error::other("injected answer write failure"))
-                } else {
-                    Ok(())
-                }
-            }
-        }
-
-        let temp = tempfile::tempdir().unwrap();
-        let config = status_config(&temp);
-        let _old = seed_pending_setup(&config.config_dir, true);
-        let first_new = sample_credential("11234567-89ab-cdef-0123-456789abcdef", "new-cert");
-        let mark = spl_core::mark::mark_from_jid(&first_new.instance_id).unwrap();
-        let spec = mark.to_render_spec();
-        let mark_words = format!("{} {}", spec.words[0], spec.words[1]);
-        let outcome = crate::private_link::setup_with_pairer_and_stream_with_fault(
-            &SetupPairer {
-                credential: first_new.clone(),
-                fail: false,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some("desktop"),
-            Some(&mark_words),
-            None,
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            Some(&FailAnswerWrite),
-            None,
-            &crate::device_migration::test_support::TEST_MACHINE,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome, crate::private_link::SetupOutcome::WalkedAwayHeld);
-        assert_eq!(
-            crate::private_link::load_credential(&config.config_dir)
-                .unwrap()
-                .unwrap(),
-            first_new
-        );
-        let interrupted: serde_json::Value = serde_json::from_slice(
-            &fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(interrupted["pending"].is_object());
-        assert_eq!(
-            interrupted["setup_pairing_id"],
-            crate::private_link::compute_pairing_id("new-cert")
-        );
-        assert!(
-            crate::device_migration::test_support::resolve_setup_pairing_for_test(
-                &config.config_dir,
-                sample_credential("11234567-89ab-cdef-0123-456789abcdef", "new-cert"),
-                crate::device_migration::MachineMarker::Present(
-                    "private-link-setup-test".to_owned(),
-                ),
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(
-            crate::private_link::load_credential(&config.config_dir)
-                .unwrap()
-                .unwrap()
-                .client_cert_pem,
-            "new-cert"
-        );
-
-        let recovered = sample_credential("21234567-89ab-cdef-0123-456789abcdef", "recovered-cert");
-        let mark = spl_core::mark::mark_from_jid(&recovered.instance_id).unwrap();
-        let spec = mark.to_render_spec();
-        let recovered_mark = format!("{} {}", spec.words[0], spec.words[1]);
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-        let status = dispatch_setup_with_pairer_for_test(
-            &SetupPairer {
-                credential: recovered.clone(),
-                fail: false,
-            },
-            &config.config_dir,
-            &config.state_dir(),
-            "desktop",
-            Some(&recovered_mark),
-            std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
-            &mut output,
-            &mut errors,
-        )
-        .await;
-        assert_eq!(status, 0, "{}", String::from_utf8_lossy(&errors));
-        let finished: serde_json::Value = serde_json::from_slice(
-            &fs::read(config.config_dir.join("device-migration.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(finished["pending"].is_null());
-        crate::device_migration::test_support::resolve_setup_pairing_for_test(
-            &config.config_dir,
-            recovered,
-            crate::device_migration::MachineMarker::Present("private-link-setup-test".to_owned()),
-        )
-        .await
-        .unwrap();
-    }
-
     // tests/test_cli.py::test_cmd_status_prints_sync_health
     #[test]
     fn status_prints_sync_health_and_exact_layout() {
@@ -2854,7 +2342,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -2927,7 +2414,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -3136,7 +2622,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -3218,7 +2703,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
 
@@ -3283,7 +2767,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         let status = render_setup_result(res, &mut out, &mut err);
@@ -3319,7 +2802,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         let status2 = render_setup_result(res2, &mut out2, &mut err2);
@@ -3395,7 +2877,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         assert_eq!(
@@ -3426,7 +2907,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         assert_eq!(
@@ -3481,7 +2961,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         assert_eq!(

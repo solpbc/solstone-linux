@@ -372,51 +372,6 @@ fn verify_provenance(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_authority_adoption(root: &Path) -> Result<(), String> {
-    let adoption_path = root.join("contracts/authority-adoption.json");
-    let value: Value =
-        serde_json::from_slice(&fs::read(&adoption_path).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-    let expected = json!({
-        "authority_repository":"https://github.com/solpbc/solstone-journal",
-        "authority_commit":AUTHORITY_COMMIT,
-        "device_migration":{
-            "artifacts":[
-                {"authority_path":"contracts/device-migration/v1.schema.json","local_path":"contracts/device-migration/v1.schema.json","sha256":"5ea0ce5bf0bc5f07233f05dda3334ccea3bf173363fcd4fd4cdcd9479130a373"},
-                {"authority_path":"contracts/device-migration/v1.vectors.json","local_path":"contracts/device-migration/v1.vectors.json","sha256":"3ba1bb508a0cd5756626c6246bfbff77573c54538db60c8e7f938e38b306ef9c"}
-            ]
-        },
-        "client_ingest_bundle":{
-            "bundle_version":"14.0.0",
-            "manifest":{"authority_path":"docs/openapi/client-ingest-contract/manifest.json","local_path":"vendor/observer-client-contract/manifest.json","sha256":MANIFEST_SHA256},
-            "generator_input":{"id":"openapi.client_ingest_authority","authority_path":"core/crates/solstone-core-repository-contracts/src/contracts/client_ingest_authority.json","sha256":"afe354e26827d431d4766289a91c9d421edd99e67006937f7ad8d955a23a8f53"},
-            "artifacts":[
-                {"authority_path":"docs/openapi/client-ingest-contract/consumer-audit.json","local_path":"vendor/observer-client-contract/consumer-audit.json","sha256":"31589211391a7feaafda6fa8514ffcf900f3acf3931a285e8712c646c6e9ab07"},
-                {"authority_path":"docs/openapi/client-ingest-contract/fixtures/wire-behavior.json","local_path":"vendor/observer-client-contract/fixtures/wire-behavior.json","sha256":"035e59297af21da998984910b4aa6a850d7e2e1225c79019045381bf3e17e708"},
-                {"authority_path":"docs/openapi/client-ingest-contract/projection.openapi.json","local_path":"vendor/observer-client-contract/projection.openapi.json","sha256":"db75a94ab97e83c56603e44d9313db86a94a2d9c4a920deaf090fe0f3358b8b0"},
-                {"authority_path":"docs/openapi/client-ingest-contract/vectors.json","local_path":"vendor/observer-client-contract/vectors.json","sha256":"7c61c1238184e1440110801478daf714aba05b2472338bd98c12cd508b303d0f"}
-            ]
-        }
-    });
-    if value != expected {
-        return Err("authority adoption provenance mismatch".to_owned());
-    }
-    for section in ["device_migration", "client_ingest_bundle"] {
-        for artifact in value[section]["artifacts"].as_array().unwrap() {
-            let local = root.join(artifact["local_path"].as_str().unwrap());
-            let actual = digest(&fs::read(&local).map_err(|error| error.to_string())?);
-            if actual != artifact["sha256"].as_str().unwrap() {
-                return Err(format!("authority artifact digest mismatch: {local:?}"));
-            }
-        }
-    }
-    let manifest_path = root.join("vendor/observer-client-contract/manifest.json");
-    if digest(&fs::read(&manifest_path).map_err(|error| error.to_string())?) != MANIFEST_SHA256 {
-        return Err("client-ingest manifest digest mismatch".to_owned());
-    }
-    Ok(())
-}
-
 fn assert_protocol_three_parameter(operation: &Value) {
     let parameter = operation["parameters"]
         .as_array()
@@ -797,7 +752,6 @@ async fn observer_contract_conformance() {
     let bundle = root.join("vendor/observer-client-contract");
     let manifest = verify_bundle(&bundle, MANIFEST_SHA256).unwrap();
     verify_provenance(&root.join("contracts/observer-client-import.json")).unwrap();
-    verify_authority_adoption(&root).unwrap();
     let projection = load_document(&bundle.join("projection.openapi.json"));
     let fixture_document = load_document(&bundle.join("fixtures/wire-behavior.json"));
     let vector_document = load_document(&bundle.join("vectors.json"));

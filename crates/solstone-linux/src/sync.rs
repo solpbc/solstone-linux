@@ -7125,179 +7125,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn migration_gate_keeps_browser_custody_local_then_delivers_with_fresh_key() {
-        struct GatedMigrationResolver {
-            ready: AtomicBool,
-            calls: AtomicUsize,
-            credential: spl_transport::credential::Credential,
-        }
-
-        impl crate::device_migration::StartupResolver for GatedMigrationResolver {
-            fn resolve<'a>(
-                &'a self,
-                root: &'a Path,
-                _old: spl_transport::credential::Credential,
-            ) -> crate::device_migration::StartupResolveFuture<'a> {
-                Box::pin(async move {
-                    self.calls.fetch_add(1, Ordering::AcqRel);
-                    if !self.ready.load(Ordering::Acquire) {
-                        return Err("test migration remains pending".to_owned());
-                    }
-                    crate::private_link::persist_credential(root, &self.credential)
-                        .map_err(|error| error.to_string())?;
-                    let pairing_id =
-                        crate::private_link::compute_pairing_id(&self.credential.client_cert_pem);
-                    crate::journal_mark::write_pairing_answer(root, &pairing_id)
-                        .map_err(|error| error.to_string())?;
-                    Ok(self.credential.clone())
-                })
-            }
-        }
-
-        use chrono::{Local, TimeZone};
-
-        let temp = tempfile::tempdir().unwrap();
-        let config = Config {
-            stream: "desktop".to_owned(),
-            base_dir: temp.path().to_path_buf(),
-            config_dir: temp.path().join("config"),
-            ..Config::default()
-        };
-        config.ensure_dirs().unwrap();
-        let peer = PrivateLinkPeer::start().await;
-        let old = peer.credential();
-        let new = peer.fresh_client_credential();
-        assert_ne!(old.client_key_pem, new.client_key_pem);
-        assert_ne!(
-            crate::private_link::compute_pairing_id(&old.client_cert_pem),
-            crate::private_link::compute_pairing_id(&new.client_cert_pem)
-        );
-        crate::private_link::persist_credential(&config.config_dir, &old).unwrap();
-        let old_pairing = crate::private_link::compute_pairing_id(&old.client_cert_pem);
-        crate::journal_mark::write_pairing_answer(&config.config_dir, &old_pairing).unwrap();
-
-        let now = Local
-            .with_ymd_and_hms(2026, 10, 2, 10, 16, 0)
-            .earliest()
-            .unwrap();
-        let wall = now.timestamp() as f64;
-        let clock = Arc::new(FixedClock { wall, mono: 0.0 });
-        let upload = Arc::new(UploadClient::new(
-            &config,
-            None::<crate::private_link::PrivateLinkCapability>,
-            clock.clone(),
-        ));
-        let segment = browser_period(&temp);
-        let custody = Arc::new(Mutex::new(
-            crate::browser::custody::Custody::open(
-                crate::browser::custody::Layout::new(&config.base_dir),
-                now,
-            )
-            .unwrap(),
-        ));
-        let mut worker = SyncWorker::new(
-            config.clone(),
-            Arc::clone(&upload),
-            clock,
-            SyncControl {
-                notify: Arc::new(Notify::new()),
-                pending_trigger: Arc::new(AtomicBool::new(false)),
-                running: Arc::new(AtomicBool::new(true)),
-            },
-            Arc::new(Mutex::new(SyncFacts::default())),
-            Arc::new(AtomicU8::new(0)),
-            Some(custody),
-        );
-        let resolver = Arc::new(GatedMigrationResolver {
-            ready: AtomicBool::new(false),
-            calls: AtomicUsize::new(0),
-            credential: new.clone(),
-        });
-        let shutdown = Arc::new(Notify::new());
-        let owner_task = {
-            let upload = Arc::clone(&upload);
-            let config_root = config.config_dir.clone();
-            let shutdown = Arc::clone(&shutdown);
-            let resolver = Arc::clone(&resolver);
-            tokio::spawn(async move {
-                crate::run::start_linked_owner(
-                    upload,
-                    config_root.clone(),
-                    "desktop".to_owned(),
-                    crate::private_link::PrivateStateLock::acquire(&config_root).unwrap(),
-                    true,
-                    crate::private_link::OpenJournalAccess::default(),
-                    shutdown,
-                    None,
-                    resolver.as_ref(),
-                )
-                .await
-            })
-        };
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-            if resolver.calls.load(Ordering::Acquire) > 0 && !upload.has_capability() {
-                break;
-            }
-        }
-        assert!(!upload.has_capability());
-        assert!(resolver.calls.load(Ordering::Acquire) > 0);
-
-        worker.sync_pass().await;
-        assert!(segment.exists());
-        assert!(peer.requests().is_empty());
-
-        resolver.ready.store(true, Ordering::Release);
-        tokio::time::advance(crate::journal_mark::JOURNAL_MARK_RECHECK_INTERVAL).await;
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-            if upload.has_capability() {
-                break;
-            }
-        }
-        assert!(upload.has_capability());
-        let owner = owner_task.await.unwrap().unwrap();
-        assert_eq!(
-            upload.capability().unwrap().writer().pairing_id(),
-            crate::private_link::compute_pairing_id(&new.client_cert_pem)
-        );
-
-        let pages = segment.join(crate::browser::PAGES_FILENAME);
-        peer.enqueue_day_custody(DayCustodyFixture::new("20261002", Vec::new()));
-        peer.enqueue_response(
-            200,
-            serde_json::to_vec(&json!({
-                "status":"ok",
-                "segment":"100100_240",
-                "file_descriptors":[{
-                    "submitted":"browser_pages.jsonl",
-                    "written":"browser_pages.jsonl",
-                    "size":fs::metadata(&pages).unwrap().len(),
-                    "sha256":sha256_file(&pages).unwrap(),
-                    "disposition":"written"
-                }]
-            }))
-            .unwrap(),
-        );
-        worker.sync_pass().await;
-        let requests = peer.requests();
-        let request_paths: Vec<_> = requests
-            .iter()
-            .map(|request| request.path.as_str())
-            .collect();
-        assert!(
-            request_paths.contains(&"/app/devices/ingest"),
-            "requests={request_paths:?}, segment_exists={}, error={:?}",
-            segment.exists(),
-            worker.last_error_type
-        );
-        assert!(!segment.exists());
-
-        owner.shutdown().await.unwrap();
-        peer.shutdown().await;
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn held_browser_period_moves_to_newly_confirmed_pairing_after_unpair() {
         use chrono::TimeZone;
 
@@ -7332,7 +7159,6 @@ mod tests {
             crate::private_link::OpenJournalAccess::default(),
             Arc::new(Notify::new()),
             None,
-            &crate::device_migration::test_support::TEST_RESOLVER,
         )
         .await
         .unwrap();
@@ -7359,7 +7185,6 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(Notify::new()),
                 None,
-                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
             .is_err()
@@ -7422,7 +7247,6 @@ mod tests {
                     crate::private_link::OpenJournalAccess::default(),
                     Arc::new(Notify::new()),
                     None,
-                    &crate::device_migration::test_support::TEST_RESOLVER,
                 )
                 .await
             })

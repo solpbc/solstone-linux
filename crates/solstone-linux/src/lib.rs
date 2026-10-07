@@ -12,7 +12,6 @@ pub mod clipboard;
 pub mod config;
 pub mod dbus_service;
 pub mod desktop_component;
-mod device_migration;
 pub mod doctor;
 pub mod encoding;
 mod journal_mark;

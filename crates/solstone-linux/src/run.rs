@@ -3,7 +3,7 @@
 
 use std::{
     env, io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -322,7 +322,6 @@ fn run_capture(
             open_journal.clone(),
             shutdown_notify,
             on_confirmed,
-            &crate::device_migration::SystemStartupResolver,
         ))
     } else {
         runtime.spawn(async {
@@ -521,12 +520,6 @@ fn start_browser(
     let about_host = crate::about::host_facts();
     let about = Arc::new(move |facts: &custody::Facts| {
         let unknown = || crate::about::AboutBlock::unknown(about_host.clone()).native();
-        if !crate::device_migration::credential_admission_allowed(
-            &about_config.config_dir,
-            &crate::device_migration::SystemMarkerProvider,
-        ) {
-            return unknown();
-        }
         let Some(credential) = load_credential(&about_config.config_dir).ok().flatten() else {
             return unknown();
         };
@@ -546,13 +539,7 @@ fn start_browser(
                         &pairing_id,
                     )
             });
-        if !still_confirmed
-            || facts.generation.is_none()
-            || !crate::device_migration::credential_admission_allowed(
-                &about_config.config_dir,
-                &crate::device_migration::SystemMarkerProvider,
-            )
-        {
+        if !still_confirmed || facts.generation.is_none() {
             return unknown();
         }
         block.native()
@@ -593,12 +580,15 @@ pub(crate) async fn start_linked_owner(
     open_journal: crate::private_link::OpenJournalAccess,
     shutdown: Arc<tokio::sync::Notify>,
     on_confirmed: Option<crate::sync::SyncTrigger>,
-    resolver: &dyn crate::device_migration::StartupResolver,
 ) -> Result<crate::private_link::PrivateLinkOwner, crate::private_link::PrivateStateError> {
     upload.prepare_new_owner();
     if !transport_enabled {
         upload.publish_link_fact(crate::private_link::LinkFact::ConfigSanitationFailed);
         return Err(crate::private_link::PrivateStateError::BridgeUnavailable);
+    }
+
+    if let Ok(_lock) = crate::journal_mark::AnswerLock::acquire(&config_root).await {
+        let _ = crate::journal_mark::grandfather_answer_file(&config_root);
     }
 
     let initial_cred = match load_credential(&config_root) {
@@ -614,22 +604,16 @@ pub(crate) async fn start_linked_owner(
         }
     };
 
+    let mut armed = true;
     let mut current_cred = Some(initial_cred);
     let confirmed_cred = loop {
-        if let Some(cred) = current_cred.as_ref() {
-            match resolver.resolve(&config_root, cred.clone()).await {
-                Ok(resolved) if pairing_answer_allows_link(&config_root, &resolved).await => {
-                    upload.link_facts().set_journal_mark_held(false);
-                    break resolved;
-                }
-                Ok(_) => {
-                    upload.link_facts().set_journal_mark_held(true);
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Linked identity remains held by device migration");
-                    upload.link_facts().set_journal_mark_held(true);
-                }
+        if let Some(cred) = &current_cred {
+            let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
+            if crate::journal_mark::is_pairing_confirmed(&config_root, &pairing_id) {
+                upload.link_facts().set_journal_mark_held(false);
+                break cred.clone();
             }
+            upload.link_facts().set_journal_mark_held(true);
         }
 
         tokio::select! {
@@ -640,15 +624,24 @@ pub(crate) async fn start_linked_owner(
         }
 
         match load_credential(&config_root) {
-            Ok(Some(cred)) => current_cred = Some(cred),
+            Ok(Some(cred)) => {
+                armed = true;
+                current_cred = Some(cred);
+            }
             Ok(None) => {
                 current_cred = None;
                 upload.link_facts().set_journal_mark_held(false);
                 upload.publish_link_fact(crate::private_link::LinkFact::PairingRequired);
+                if !armed {
+                    return Err(crate::private_link::PrivateStateError::MalformedCredential);
+                }
             }
             Err(error) => {
-                upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
-                tracing::warn!(%error, "Linked credential remains unavailable");
+                if !armed {
+                    upload.publish_link_fact(crate::private_link::LinkFact::PrivateStateInvalid);
+                    return Err(error);
+                }
+                upload.link_facts().set_journal_mark_held(true);
             }
         }
     };
@@ -668,20 +661,6 @@ pub(crate) async fn start_linked_owner(
         trigger.trigger();
     }
     Ok(owner)
-}
-
-// A genuinely absent answer is the legacy grandfathered state: it is recorded
-// as confirming the resolved credential, as before migration existed. An
-// explicit empty, rejected or unreadable answer stays held.
-async fn pairing_answer_allows_link(
-    config_root: &Path,
-    credential: &spl_transport::credential::Credential,
-) -> bool {
-    if let Ok(_lock) = crate::journal_mark::AnswerLock::acquire(config_root).await {
-        let _ = crate::journal_mark::grandfather_answer_file(config_root);
-    }
-    let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
-    crate::journal_mark::is_pairing_confirmed(config_root, &pairing_id)
 }
 
 fn apply_command<V, A, P, M, W, E, C, Q, N>(
@@ -1547,7 +1526,6 @@ mod tests {
             crate::private_link::OpenJournalAccess::default(),
             Arc::new(tokio::sync::Notify::new()),
             None,
-            &crate::device_migration::test_support::TEST_RESOLVER,
         ));
         assert_real_observer_ticks_advance();
         let result = start.await.unwrap();
@@ -2086,7 +2064,6 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(tokio::sync::Notify::new()),
                 None,
-                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
             .unwrap();
@@ -2164,7 +2141,6 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(tokio::sync::Notify::new()),
                 None,
-                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await;
             assert!(first_start.is_err());
@@ -2274,7 +2250,6 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 Arc::new(tokio::sync::Notify::new()),
                 None,
-                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
             .unwrap();
@@ -2328,39 +2303,6 @@ mod tests {
         }
     }
 
-    // A legacy install has a credential but no answer file. Startup records
-    // that absence as confirming the current pairing, so linked work and the
-    // browser About block see a confirmed journal. An explicit empty answer
-    // stays held and unchanged.
-    #[tokio::test]
-    async fn legacy_absent_answer_is_grandfathered_and_explicit_empty_stays_held() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("config");
-        std::fs::create_dir_all(&root).unwrap();
-        let cred = crate::journal_mark::sample_credential(
-            "01234567-89ab-cdef-0123-456789abcdef",
-            "legacy-cert",
-        );
-        crate::private_link::persist_credential(&root, &cred).unwrap();
-        let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
-
-        assert!(pairing_answer_allows_link(&root, &cred).await);
-        assert!(crate::journal_mark::is_pairing_confirmed(
-            &root,
-            &pairing_id
-        ));
-
-        crate::journal_mark::write_pairing_answer(&root, "").unwrap();
-        assert!(!pairing_answer_allows_link(&root, &cred).await);
-        assert_eq!(
-            crate::journal_mark::read_pairing_answer(&root)
-                .unwrap()
-                .unwrap()
-                .confirmed,
-            ""
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn held_wait_does_not_start_after_credential_disappears() {
         let temp = tempfile::tempdir().unwrap();
@@ -2403,7 +2345,6 @@ mod tests {
                 crate::private_link::OpenJournalAccess::default(),
                 shutdown_clone,
                 None,
-                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
         });
@@ -2529,7 +2470,6 @@ mod tests {
                 open_journal_clone,
                 shutdown_clone,
                 on_confirmed,
-                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
         });
@@ -2681,7 +2621,6 @@ mod tests {
             std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
             None,
             None,
-            &crate::device_migration::test_support::TEST_MACHINE,
         )
         .await;
         let status = crate::cli::render_setup_result(res, &mut out, &mut err);
@@ -2768,7 +2707,6 @@ mod tests {
                 open_journal_clone,
                 shutdown_clone,
                 on_confirmed,
-                &crate::device_migration::test_support::TEST_RESOLVER,
             )
             .await
         });

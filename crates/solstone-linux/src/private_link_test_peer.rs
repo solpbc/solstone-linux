@@ -11,8 +11,8 @@ use std::{
 };
 
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    PKCS_ECDSA_P256_SHA256,
 };
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, OtherError, RootCertStore,
@@ -88,8 +88,6 @@ struct PeerState {
 
 pub(crate) struct PrivateLinkPeer {
     credential: Credential,
-    ca_cert: Certificate,
-    ca_key: KeyPair,
     client_der: Vec<u8>,
     state: PeerState,
     task: JoinHandle<()>,
@@ -99,7 +97,7 @@ impl PrivateLinkPeer {
     pub(crate) async fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let refusal_alert = Arc::new(AtomicU8::new(0));
-        let (credential, client_der, acceptor, ca_cert, ca_key) =
+        let (credential, client_der, acceptor) =
             credential_and_acceptor(listener.local_addr().unwrap().port(), refusal_alert.clone());
         let state = PeerState {
             routes: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -134,8 +132,6 @@ impl PrivateLinkPeer {
         });
         Self {
             credential,
-            ca_cert,
-            ca_key,
             client_der,
             state,
             task,
@@ -144,19 +140,6 @@ impl PrivateLinkPeer {
 
     pub(crate) fn credential(&self) -> Credential {
         self.credential.clone()
-    }
-
-    pub(crate) fn fresh_client_credential(&self) -> Credential {
-        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut params = CertificateParams::new(vec!["observer.test".into()]).unwrap();
-        params
-            .extended_key_usages
-            .push(ExtendedKeyUsagePurpose::ClientAuth);
-        let cert = params.signed_by(&key, &self.ca_cert, &self.ca_key).unwrap();
-        let mut credential = self.credential.clone();
-        credential.client_key_pem = key.serialize_pem();
-        credential.client_cert_pem = cert.pem();
-        credential
     }
     pub(crate) fn client_der(&self) -> &[u8] {
         &self.client_der
@@ -380,7 +363,7 @@ impl ClientCertVerifier for RefusingVerifier {
 fn credential_and_acceptor(
     port: u16,
     refusal: Arc<AtomicU8>,
-) -> (Credential, Vec<u8>, TlsAcceptor, Certificate, KeyPair) {
+) -> (Credential, Vec<u8>, TlsAcceptor) {
     let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -441,8 +424,6 @@ fn credential_and_acceptor(
         },
         client_der,
         TlsAcceptor::from(Arc::new(config)),
-        ca,
-        ca_key,
     )
 }
 
