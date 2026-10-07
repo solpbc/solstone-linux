@@ -6,6 +6,12 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.16] - 2026-10-07
+
+### Fixed
+
+- after you pair again, a segment still on this computer is removed only when your journal confirms it holds that same segment. if your journal holds two segments with the same name, the solstone app now tells them apart by where each came from, and keeps the segment on this computer when it can't tell which one is its own.
+
 ## [2.0.15] - 2026-10-06
 
 ### Fixed
