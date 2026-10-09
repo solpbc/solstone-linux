@@ -20,7 +20,7 @@ use reqwest::Method;
 use reqwest::{RequestBuilder, StatusCode, Url, multipart};
 use spl_core::bridge::{BridgeNames, RequestHead};
 use spl_core::pairlink::{self, ParsedPairLink};
-use spl_transport::credential::Credential;
+use spl_transport::credential::{Credential, EndpointAddr};
 use spl_transport::{
     TransportError,
     client::{DialedCarrier, TokenPersistHook, TransportClient},
@@ -1360,7 +1360,7 @@ impl LinkFacts {
 }
 
 pub(crate) struct PrivateLinkOpener {
-    lan_transport: Option<Arc<TransportClient>>,
+    lan_transport: Mutex<Option<Arc<TransportClient>>>,
     relay_transport: Mutex<Option<Arc<TransportClient>>>,
     admission: tokio::sync::Mutex<()>,
     transport_unavailable: Arc<AtomicBool>,
@@ -1378,7 +1378,7 @@ impl PrivateLinkOpener {
         facts: LinkFacts,
     ) -> Self {
         Self {
-            lan_transport: lan_transport.map(Arc::new),
+            lan_transport: Mutex::new(lan_transport.map(Arc::new)),
             relay_transport: Mutex::new(relay_transport.map(Arc::new)),
             admission: tokio::sync::Mutex::new(()),
             transport_unavailable,
@@ -1391,6 +1391,19 @@ impl PrivateLinkOpener {
 
     pub(crate) fn relay_incarnation(&self) -> u64 {
         self.relay_incarnation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn replace_lan_transport(&self, client: TransportClient) {
+        let mut guard = self.lan_transport.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some(Arc::new(client));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cloned_lan_transport(&self) -> Option<Arc<TransportClient>> {
+        self.lan_transport
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub(crate) fn replace_relay_transport(&self, client: TransportClient) {
@@ -1418,8 +1431,12 @@ impl PrivateLinkOpener {
     }
 
     pub(crate) fn unknown_journals(&self) -> Vec<spl_transport::UnknownJournal> {
-        let mut combined = self
+        let lan = self
             .lan_transport
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut combined = lan
             .as_ref()
             .map(|c| c.unknown_journals())
             .unwrap_or_default();
@@ -1442,12 +1459,19 @@ impl PrivateLinkOpener {
         combined
     }
 
+    fn has_lan_transport(&self) -> bool {
+        self.lan_transport
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
     async fn admit_dial<T>(
         &self,
         dial: impl Future<Output = Result<T, TransportError>>,
     ) -> Result<T, TransportError> {
         if self.shutdown_fenced.load(Ordering::Acquire)
-            || (self.lan_transport.is_none() && self.transport_unavailable.load(Ordering::Acquire))
+            || (!self.has_lan_transport() && self.transport_unavailable.load(Ordering::Acquire))
         {
             return Err(TransportError::Pairing(
                 "linked transport unavailable".into(),
@@ -1459,7 +1483,7 @@ impl PrivateLinkOpener {
         // There is no timer, background, or live-stream refresh path.
         let _admission = self.admission.lock().await;
         if self.shutdown_fenced.load(Ordering::Acquire)
-            || (self.lan_transport.is_none() && self.transport_unavailable.load(Ordering::Acquire))
+            || (!self.has_lan_transport() && self.transport_unavailable.load(Ordering::Acquire))
         {
             return Err(TransportError::Pairing(
                 "linked transport unavailable".into(),
@@ -1467,7 +1491,7 @@ impl PrivateLinkOpener {
         }
         let result = dial.await?;
         if self.shutdown_fenced.load(Ordering::Acquire)
-            || (self.lan_transport.is_none() && self.transport_unavailable.load(Ordering::Acquire))
+            || (!self.has_lan_transport() && self.transport_unavailable.load(Ordering::Acquire))
         {
             drop(result);
             return Err(TransportError::Pairing(
@@ -1524,7 +1548,12 @@ impl PrivateLinkOpener {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .is_some();
-                    if let Some(lan) = &self.lan_transport {
+                    let lan_client = self
+                        .lan_transport
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    if let Some(lan) = lan_client {
                         // Reserve time for the alternate relay leg only when it exists. A
                         // LAN-only credential keeps the pinned client's behavior unchanged.
                         let result = if has_relay {
@@ -1920,6 +1949,19 @@ impl PrivateLinkCapability {
 
     pub(crate) async fn relay_access_get(&self, timeout: Duration) -> LinkOutcome {
         let url = match confine_path(&self.inner.optional_origin, "/app/network/api/relay/access") {
+            Ok(u) => u,
+            Err(_) => {
+                return LinkOutcome::LocalRejected {
+                    status: StatusCode::BAD_REQUEST,
+                };
+            }
+        };
+        self.send_optional(self.inner.optional_client.get(url), timeout)
+            .await
+    }
+
+    pub(crate) async fn local_endpoints_get(&self, timeout: Duration) -> LinkOutcome {
+        let url = match confine_path(&self.inner.optional_origin, "/app/network/local-endpoints") {
             Ok(u) => u,
             Err(_) => {
                 return LinkOutcome::LocalRejected {
@@ -2375,6 +2417,13 @@ impl OptionalAttemptLease {
         tokio::time::Instant::now() < self.deadline
             && self.revision.load(Ordering::Acquire) == self.expected
     }
+
+    pub(crate) fn time_left(&self) -> Option<Duration> {
+        let now = tokio::time::Instant::now();
+        self.deadline
+            .checked_duration_since(now)
+            .filter(|d| !d.is_zero())
+    }
 }
 
 pub(crate) struct OrderedCredentialWriter {
@@ -2432,6 +2481,12 @@ impl OrderedCredentialWriter {
     pub(crate) fn identity_key(&self) -> &str {
         &self.identity_key
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_transport_unavailable(&self) -> bool {
+        self.transport_unavailable.load(Ordering::Acquire)
+    }
+
     pub(crate) fn instance_id(&self) -> &str {
         &self.instance_id
     }
@@ -2439,9 +2494,11 @@ impl OrderedCredentialWriter {
     pub(crate) fn metadata_attempt(&self, deadline: tokio::time::Instant) -> OptionalAttempt {
         OptionalAttempt::new(Arc::clone(&self.metadata_attempt), deadline)
     }
+
     pub(crate) fn access_attempt(&self, deadline: tokio::time::Instant) -> OptionalAttempt {
         OptionalAttempt::new(Arc::clone(&self.access_attempt), deadline)
     }
+
     pub(crate) fn invalidate_optional_attempts(&self) {
         self.metadata_attempt.fetch_add(1, Ordering::AcqRel);
         self.access_attempt.fetch_add(1, Ordering::AcqRel);
@@ -2451,7 +2508,6 @@ impl OrderedCredentialWriter {
         self.access_mutation_generation.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
     pub(crate) fn current_credential(&self) -> Credential {
         self.credential
             .lock()
@@ -2751,6 +2807,100 @@ impl OrderedCredentialWriter {
             });
             tracing::warn!(error = %PrivateStateError::TokenPersistenceFailed, optional = true);
             Err(())
+        }
+    }
+
+    pub(crate) fn commit_dial_endpoints_with_attempt(
+        &self,
+        attempt: &OptionalAttemptLease,
+        caller_pairing_id: &str,
+        listed: Vec<EndpointAddr>,
+        path: crate::private_link_access::EndpointPath,
+    ) -> crate::private_link_access::EndpointCommit {
+        use crate::private_link_access::{EndpointCommit, merge_dial_endpoints};
+
+        if self.shutdown_fenced.load(Ordering::Acquire) {
+            return EndpointCommit::Stale;
+        }
+        let mut current = self.credential.lock().unwrap_or_else(|p| p.into_inner());
+        if self.shutdown_fenced.load(Ordering::Acquire)
+            || !attempt.is_current()
+            || self.pairing_id != caller_pairing_id
+        {
+            return EndpointCommit::Stale;
+        }
+        if listed.is_empty() {
+            return EndpointCommit::Unchanged;
+        }
+        let merged = merge_dial_endpoints(&current.endpoints, &listed, path);
+        if merged == current.endpoints {
+            return EndpointCommit::Unchanged;
+        }
+
+        let mut ready_guard = self
+            .durable_ready_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let clear_guard = self
+            .durable_clear_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        let revision = self.access_mutation_generation();
+        let now_ts = chrono::Utc::now().timestamp();
+
+        let clear_live = clear_guard.as_ref().is_some_and(|c| {
+            c.pairing_id == self.pairing_id && c.access_mutation_generation == revision
+        });
+
+        let ready_live = ready_guard.as_ref().is_some_and(|r| {
+            r.pairing_id == self.pairing_id
+                && r.access_mutation_generation == revision
+                && r.credential
+                    .device_token_expires_at
+                    .is_some_and(|exp| exp > now_ts)
+        });
+
+        let (cred_to_write, is_ready_branch) = if clear_live {
+            let mut to_write = current.clone();
+            to_write.endpoints = merged.clone();
+            (to_write, false)
+        } else if ready_live {
+            let pending = ready_guard.as_ref().unwrap();
+            let mut to_write = pending.credential.clone();
+            to_write.endpoints = merged.clone();
+            (to_write, true)
+        } else {
+            let mut to_write = current.clone();
+            to_write.endpoints = merged.clone();
+            (to_write, false)
+        };
+
+        drop(clear_guard);
+
+        let bytes = match serde_json::to_vec(&cred_to_write) {
+            Ok(b) => b,
+            Err(_) => return EndpointCommit::Failed,
+        };
+        let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
+        let durable = atomic_write_bytes_guarded(&cred_path, &bytes, self.fault.as_ref(), &|| {
+            !self.shutdown_fenced.load(Ordering::Acquire) && attempt.is_current()
+        })
+        .is_ok();
+
+        if durable {
+            if is_ready_branch {
+                // Disk gets the snapshot's relay tuple so a later retry cannot put the previous
+                // endpoints back, and the generation is not bumped because that would make retry
+                // ignore the snapshot.
+                if let Some(r) = ready_guard.as_mut() {
+                    r.credential.endpoints = merged.clone();
+                }
+            }
+            current.endpoints = merged;
+            EndpointCommit::Committed
+        } else {
+            EndpointCommit::Failed
         }
     }
 
@@ -3109,6 +3259,18 @@ impl Default for SessionStartOptions {
     }
 }
 
+pub(crate) fn lan_dial_credential(credential: &Credential) -> Option<Credential> {
+    if credential.endpoints.is_empty() {
+        None
+    } else {
+        let mut lan_credential = credential.clone();
+        lan_credential.relay_origin = None;
+        lan_credential.device_token = None;
+        lan_credential.device_token_expires_at = None;
+        Some(lan_credential)
+    }
+}
+
 async fn start_private_link_session_inner(
     config_root: &Path,
     credential: Credential,
@@ -3147,17 +3309,12 @@ async fn start_private_link_session_inner(
         transport_unavailable.clone(),
         facts.clone(),
     );
-    let lan_transport = if credential.endpoints.is_empty() {
-        None
-    } else {
-        let mut lan_credential = credential.clone();
-        lan_credential.relay_origin = None;
-        lan_credential.device_token = None;
-        lan_credential.device_token_expires_at = None;
-        Some(
-            TransportClient::new(lan_credential, None)
+    let lan_transport = match lan_dial_credential(&credential) {
+        Some(lan_cred) => Some(
+            TransportClient::new(lan_cred, None)
                 .map_err(|_| PrivateStateError::BridgeUnavailable)?,
-        )
+        ),
+        None => None,
     };
     let relay_transport = if lan_transport.is_none() {
         Some(
@@ -6883,5 +7040,602 @@ pub(crate) mod tests {
         session.shutdown().await.unwrap();
         impostor_peer.shutdown().await;
         paired_peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_commit_dial_endpoints_reconciles_durable_ready_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let mut cred = peer.credential();
+        let sentinel = serde_json::json!([{"ip": "10.0.0.1", "port": 7657}]);
+        cred.local_endpoints = Some(sentinel.clone());
+        cred.relay_origin = Some("https://orig.example.com".into());
+        cred.device_token = Some("old_token".into());
+        cred.device_token_expires_at = Some(2000);
+        persist_credential(temp.path(), &cred).unwrap();
+
+        let transport_unavailable = Arc::new(AtomicBool::new(false));
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred.clone(),
+            Arc::new(NoWriteFault),
+            transport_unavailable.clone(),
+            LinkFacts::default(),
+        ));
+        let g = writer.access_mutation_generation();
+        let future_exp = chrono::Utc::now().timestamp() + 3600;
+
+        let mut pending_cred = cred.clone();
+        pending_cred.relay_origin = Some("https://pending.example.com".into());
+        pending_cred.device_token = Some("pending_token".into());
+        pending_cred.device_token_expires_at = Some(future_exp);
+        *writer.durable_ready_pending.lock().unwrap() = Some(DurableReadyPending {
+            pairing_id: writer.pairing_id().to_string(),
+            access_mutation_generation: g,
+            credential: pending_cred,
+        });
+
+        let attempt = writer.access_attempt(tokio::time::Instant::now() + Duration::from_secs(60));
+        let listed = vec![EndpointAddr {
+            host: "192.0.2.10".into(),
+            port: 7657,
+        }];
+        let outcome = writer.commit_dial_endpoints_with_attempt(
+            &attempt.lease,
+            writer.pairing_id(),
+            listed,
+            crate::private_link_access::EndpointPath::Unknown,
+        );
+        assert_eq!(
+            outcome,
+            crate::private_link_access::EndpointCommit::Committed
+        );
+        let new_endpoints = writer.current_credential().endpoints;
+
+        // After address commit and before retry:
+        // - Disk has pending relay tuple + new endpoints and not *current's old relay tuple
+        let on_disk = load_credential(temp.path()).unwrap().unwrap();
+        assert_eq!(
+            on_disk.relay_origin.as_deref(),
+            Some("https://pending.example.com")
+        );
+        assert_eq!(on_disk.device_token.as_deref(), Some("pending_token"));
+        assert_eq!(on_disk.device_token_expires_at, Some(future_exp));
+        assert_eq!(on_disk.endpoints, new_endpoints);
+        assert_eq!(on_disk.local_endpoints, Some(sentinel.clone()));
+
+        // - *current has its old relay tuple plus new endpoints
+        let current = writer.current_credential();
+        assert_eq!(
+            current.relay_origin.as_deref(),
+            Some("https://orig.example.com")
+        );
+        assert_eq!(current.device_token.as_deref(), Some("old_token"));
+        assert_eq!(current.endpoints, new_endpoints);
+        assert_eq!(current.local_endpoints, Some(sentinel.clone()));
+
+        // - generation is still G
+        assert_eq!(writer.access_mutation_generation(), g);
+
+        // - pending.credential.endpoints is the new set
+        assert_eq!(
+            writer
+                .durable_ready_pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .credential
+                .endpoints,
+            new_endpoints
+        );
+
+        // - local_endpoints on both unchanged
+        assert_eq!(
+            writer
+                .durable_ready_pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .credential
+                .local_endpoints,
+            Some(sentinel.clone())
+        );
+
+        // Then retry_durable_reconciliation_if_pending:
+        let opener = Arc::new(PrivateLinkOpener::new(
+            None,
+            None,
+            transport_unavailable,
+            LinkFacts::default(),
+        ));
+        assert!(
+            writer
+                .retry_durable_reconciliation_if_pending(&opener)
+                .unwrap()
+        );
+
+        // Disk and current_credential() agree on the pending relay tuple and the new endpoints:
+        let disk_after = load_credential(temp.path()).unwrap().unwrap();
+        let curr_after = writer.current_credential();
+        assert_eq!(
+            disk_after.relay_origin.as_deref(),
+            Some("https://pending.example.com")
+        );
+        assert_eq!(disk_after.device_token.as_deref(), Some("pending_token"));
+        assert_eq!(disk_after.endpoints, new_endpoints);
+        assert_eq!(
+            curr_after.relay_origin.as_deref(),
+            Some("https://pending.example.com")
+        );
+        assert_eq!(curr_after.device_token.as_deref(), Some("pending_token"));
+        assert_eq!(curr_after.endpoints, new_endpoints);
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_commit_dial_endpoints_ignores_stale_ready_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let mut cred = peer.credential();
+        cred.relay_origin = Some("https://orig.example.com".into());
+        cred.device_token = Some("old_token".into());
+        cred.device_token_expires_at = Some(2000);
+        persist_credential(temp.path(), &cred).unwrap();
+
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred.clone(),
+            Arc::new(NoWriteFault),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let g = writer.access_mutation_generation();
+        let stale_endpoints = vec![EndpointAddr {
+            host: "10.0.0.99".into(),
+            port: 7657,
+        }];
+        let mut stale_cred = cred.clone();
+        stale_cred.endpoints = stale_endpoints.clone();
+        stale_cred.relay_origin = Some("https://stale.example.com".into());
+        *writer.durable_ready_pending.lock().unwrap() = Some(DurableReadyPending {
+            pairing_id: writer.pairing_id().to_string(),
+            access_mutation_generation: g.wrapping_add(1),
+            credential: stale_cred,
+        });
+
+        let attempt = writer.access_attempt(tokio::time::Instant::now() + Duration::from_secs(60));
+        let listed = vec![EndpointAddr {
+            host: "192.0.2.10".into(),
+            port: 7657,
+        }];
+        let outcome = writer.commit_dial_endpoints_with_attempt(
+            &attempt.lease,
+            writer.pairing_id(),
+            listed,
+            crate::private_link_access::EndpointPath::Unknown,
+        );
+        assert_eq!(
+            outcome,
+            crate::private_link_access::EndpointCommit::Committed
+        );
+        let new_endpoints = writer.current_credential().endpoints;
+
+        // Snapshot endpoints unchanged
+        assert_eq!(
+            writer
+                .durable_ready_pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .credential
+                .endpoints,
+            stale_endpoints
+        );
+
+        // Disk and *current get *current's relay tuple plus new endpoints
+        let on_disk = load_credential(temp.path()).unwrap().unwrap();
+        let curr = writer.current_credential();
+        assert_eq!(
+            on_disk.relay_origin.as_deref(),
+            Some("https://orig.example.com")
+        );
+        assert_eq!(
+            curr.relay_origin.as_deref(),
+            Some("https://orig.example.com")
+        );
+        assert_eq!(on_disk.endpoints, new_endpoints);
+        assert_eq!(curr.endpoints, new_endpoints);
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_refresh_dial_endpoints_empty_stored_set_sends_get() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.set_route("/app/network/local-endpoints", 404, Vec::new());
+        peer.set_route(
+            "/app/network/api/relay/access",
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "protocol_version": 2,
+                "status": "not_configured"
+            }))
+            .unwrap(),
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let capability = session.capability();
+
+        let lan_before = capability.opener().cloned_lan_transport().unwrap();
+
+        // Clear endpoints on writer mutex only:
+        capability
+            .writer()
+            .credential
+            .lock()
+            .unwrap()
+            .endpoints
+            .clear();
+
+        // Predicate sends the GET, route returns 404:
+        let _ = crate::private_link_access::execute_relay_access_sync(
+            &capability,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let get_count = peer
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/app/network/local-endpoints")
+            .count();
+        assert_eq!(get_count, 1);
+
+        let lan_after = capability.opener().cloned_lan_transport().unwrap();
+        assert!(Arc::ptr_eq(&lan_before, &lan_after));
+
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_refresh_dial_endpoints_live_pickup_bind_another_listener() {
+        let peer = PrivateLinkPeer::start().await;
+        let extra = peer.bind_another_listener().await;
+        let extra_port = extra.port();
+
+        peer.set_route(
+            "/app/network/api/relay/access",
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "protocol_version": 2,
+                "status": "not_configured"
+            }))
+            .unwrap(),
+        );
+        let ep_v2 = serde_json::to_vec(&serde_json::json!({
+            "v": 2,
+            "endpoints": [{
+                "ip": "127.0.0.1",
+                "port": extra_port,
+                "scope": "lan"
+            }]
+        }))
+        .unwrap();
+        peer.set_route("/app/network/local-endpoints", 200, ep_v2);
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut cred = peer.credential();
+        cred.endpoints.push(EndpointAddr {
+            host: "192.0.2.9".into(),
+            port: 7657,
+        });
+
+        let captured = Arc::new(Mutex::new(None));
+        let session = start_private_link_session_inner(
+            temp.path(),
+            cred,
+            "stream",
+            SessionStartOptions {
+                test_capture: SessionTestCapture {
+                    capability: Some(captured.clone()),
+                },
+                ..SessionStartOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let capability = session.capability();
+        let cap_cookie = captured.lock().unwrap().clone().unwrap();
+
+        let res = crate::private_link_access::execute_relay_access_sync(
+            &capability,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(res.is_ok());
+
+        let extra_accepts_before = extra.accepts();
+        let peer_accepted_before = peer.accepted_carriers();
+
+        // Main-bridge request timeline pattern (no main-bridge request before this):
+        let port = session.handle.port();
+        let _response = raw_local_request(
+            port,
+            format!(
+                "GET /app/timeline HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: solstone_linux_cap={cap_cookie}\r\nAccept: text/html\r\n\r\n"
+            ),
+        )
+        .await;
+
+        if extra.accepts() == extra_accepts_before {
+            let _ = capability.opener().dial_carrier().await;
+        }
+
+        assert!(extra.accepts() > extra_accepts_before);
+        assert_eq!(peer.accepted_carriers(), peer_accepted_before);
+
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_refresh_dial_endpoints_relay_paired_opener_installs_lan() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let mut relay_cred = peer.credential();
+        relay_cred.endpoints.clear();
+        relay_cred.relay_origin = Some("https://relay.example.com".into());
+        relay_cred.device_token = Some("relay_token".into());
+        relay_cred.device_token_expires_at = Some(2000);
+        persist_credential(temp.path(), &relay_cred).unwrap();
+
+        let transport_unavailable = Arc::new(AtomicBool::new(false));
+        let facts = LinkFacts::default();
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            relay_cred.clone(),
+            Arc::new(NoWriteFault),
+            transport_unavailable.clone(),
+            facts.clone(),
+        ));
+
+        let relay_client = TransportClient::new_relay_only(relay_cred.clone(), None).unwrap();
+        let opener = Arc::new(PrivateLinkOpener::new(
+            None,
+            Some(relay_client),
+            transport_unavailable.clone(),
+            facts.clone(),
+        ));
+
+        assert!(!opener.has_lan_transport());
+        let relay_before = opener.relay_transport.lock().unwrap().clone().unwrap();
+        let inc_before = opener.relay_incarnation();
+        let epoch_before = writer.live_hook_epoch.load(Ordering::Acquire);
+
+        let attempt = writer.access_attempt(tokio::time::Instant::now() + Duration::from_secs(60));
+        let raw_v2 =
+            br#"{"v": 2, "endpoints": [{"ip": "192.0.2.70", "port": 7657, "scope": "lan"}]}"#;
+        let parsed = crate::private_link_access::parse_listed_endpoints(raw_v2);
+        let crate::private_link_access::ListedEndpoints::Listed(listed) = parsed else {
+            panic!("expected listed endpoints");
+        };
+
+        let outcome = writer.commit_dial_endpoints_with_attempt(
+            &attempt.lease,
+            writer.pairing_id(),
+            listed,
+            crate::private_link_access::EndpointPath::Unknown,
+        );
+        assert_eq!(
+            outcome,
+            crate::private_link_access::EndpointCommit::Committed
+        );
+        let new_endpoints = writer.current_credential().endpoints;
+
+        // Same install the lane uses:
+        let current = writer.current_credential();
+        let lan_cred = lan_dial_credential(&current).unwrap();
+        assert!(lan_cred.relay_origin.is_none());
+        assert!(lan_cred.device_token.is_none());
+        assert!(lan_cred.device_token_expires_at.is_none());
+        assert_eq!(lan_cred.endpoints, new_endpoints);
+
+        let lan_client = TransportClient::new(lan_cred, None).unwrap();
+        opener.replace_lan_transport(lan_client);
+
+        assert!(opener.has_lan_transport());
+        let relay_after = opener.relay_transport.lock().unwrap().clone().unwrap();
+        assert!(Arc::ptr_eq(&relay_before, &relay_after));
+        assert_eq!(opener.relay_incarnation(), inc_before);
+        assert_eq!(writer.live_hook_epoch.load(Ordering::Acquire), epoch_before);
+
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_start_session_from_refreshed_lan_allows_relay_token_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let relay_origin = format!("http://{}", listener.local_addr().unwrap());
+        let paired_inst = peer.credential().instance_id;
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 3600;
+        let expires_at_str = chrono::DateTime::<chrono::Utc>::from_timestamp(exp, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let refreshed = test_jwt_for_instance(&paired_inst, exp);
+        let relay_refreshed = refreshed.clone();
+        let relay_expires_at = expires_at_str.clone();
+        let relay = tokio::spawn(async move {
+            let (mut refresh, _) = listener.accept().await.unwrap();
+            let request = read_http_head(&mut refresh).await;
+            assert!(
+                request.starts_with(b"POST /token/refresh HTTP/1.1"),
+                "{}",
+                String::from_utf8_lossy(&request)
+            );
+            let body = serde_json::json!({
+                "protocol_version": 2,
+                "device_token": relay_refreshed,
+                "expires_at": relay_expires_at,
+            })
+            .to_string();
+            refresh
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let (mut dial, _) = listener.accept().await.unwrap();
+            let _ = read_http_head(&mut dial).await;
+            dial.write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut cred = peer.credential();
+        cred.endpoints.clear();
+        cred.relay_origin = Some(relay_origin);
+        cred.device_token = Some(test_jwt_for_instance(&paired_inst, 1));
+        cred.device_token_expires_at = Some(1);
+        persist_credential(temp.path(), &cred).unwrap();
+
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred.clone(),
+            Arc::new(NoWriteFault),
+            Arc::new(AtomicBool::new(false)),
+            LinkFacts::default(),
+        ));
+        let attempt = writer.access_attempt(tokio::time::Instant::now() + Duration::from_secs(60));
+        let listed = vec![EndpointAddr {
+            host: "127.0.0.1".into(),
+            port: 1,
+        }];
+        let outcome = writer.commit_dial_endpoints_with_attempt(
+            &attempt.lease,
+            writer.pairing_id(),
+            listed,
+            crate::private_link_access::EndpointPath::Unknown,
+        );
+        assert_eq!(
+            outcome,
+            crate::private_link_access::EndpointCommit::Committed
+        );
+
+        let persisted = load_credential(temp.path()).unwrap().unwrap();
+        assert_eq!(
+            persisted.endpoints,
+            vec![EndpointAddr {
+                host: "127.0.0.1".into(),
+                port: 1,
+            }]
+        );
+        let session = start_private_link_session(temp.path(), persisted, "stream")
+            .await
+            .unwrap();
+        assert!(session.opener.has_lan_transport());
+        assert!(session.opener.relay_transport.lock().unwrap().is_some());
+
+        assert!(matches!(
+            session.capability().system_status().await,
+            Err(LinkOutcome::Success { .. })
+        ));
+        relay.await.unwrap();
+
+        let updated = load_credential(temp.path()).unwrap().unwrap();
+        assert_eq!(updated.device_token.as_deref(), Some(refreshed.as_str()));
+        assert_eq!(
+            updated.endpoints,
+            vec![EndpointAddr {
+                host: "127.0.0.1".into(),
+                port: 1,
+            }]
+        );
+
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_commit_dial_endpoints_fault_injection_leaves_state_clean() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let mut cred = peer.credential();
+        cred.endpoints.clear();
+        cred.relay_origin = Some("https://relay.example.com".into());
+        cred.device_token = Some("token".into());
+        cred.device_token_expires_at = Some(2000);
+        persist_credential(temp.path(), &cred).unwrap();
+
+        let fault = Arc::new(RecordingFault {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            fail: Some(crate::private_file::DurableWriteStage::Rename),
+        });
+        let transport_unavailable = Arc::new(AtomicBool::new(false));
+        let facts = LinkFacts::default();
+        let writer = Arc::new(OrderedCredentialWriter::new(
+            temp.path().to_path_buf(),
+            cred.clone(),
+            fault,
+            transport_unavailable.clone(),
+            facts.clone(),
+        ));
+        let opener = Arc::new(PrivateLinkOpener::new(
+            None,
+            Some(TransportClient::new_relay_only(cred.clone(), None).unwrap()),
+            transport_unavailable,
+            facts.clone(),
+        ));
+
+        let raw_v2 =
+            br#"{"v": 2, "endpoints": [{"ip": "192.0.2.80", "port": 7657, "scope": "lan"}]}"#;
+        let parsed = crate::private_link_access::parse_listed_endpoints(raw_v2);
+        let crate::private_link_access::ListedEndpoints::Listed(listed) = parsed else {
+            panic!("expected listed endpoints");
+        };
+
+        let attempt = writer.access_attempt(tokio::time::Instant::now() + Duration::from_secs(60));
+        let outcome = writer.commit_dial_endpoints_with_attempt(
+            &attempt.lease,
+            writer.pairing_id(),
+            listed,
+            crate::private_link_access::EndpointPath::Unknown,
+        );
+        assert_eq!(outcome, crate::private_link_access::EndpointCommit::Failed);
+
+        let disk_cred = load_credential(temp.path()).unwrap().unwrap();
+        assert!(disk_cred.endpoints.is_empty());
+        assert!(writer.current_credential().endpoints.is_empty());
+        assert!(!writer.is_transport_unavailable());
+        assert!(!facts.snapshot().token_persistence_failure);
+        assert!(!writer.failed());
+        assert!(!opener.has_lan_transport());
+
+        let dial_timeout =
+            tokio::time::timeout(Duration::from_secs(2), opener.dial_carrier()).await;
+        if let Ok(Err(TransportError::Pairing(msg))) = dial_timeout {
+            assert!(!msg.contains("linked transport unavailable"));
+        }
+
+        peer.shutdown().await;
     }
 }

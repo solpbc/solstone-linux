@@ -2553,6 +2553,187 @@ mod tests {
         peer.shutdown().await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn held_pairing_sends_no_local_endpoints_until_confirm() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_root = temp.path().join("config");
+        let base_dir = temp.path().join("data");
+
+        let paths = crate::config::ConfigPaths {
+            base_dir: Some(base_dir),
+            config_dir: Some(config_root.clone()),
+        };
+        let mut config = crate::config::load_config(paths).config;
+        config.stream = "main".into();
+        config.ensure_dirs().unwrap();
+        std::fs::write(
+            config
+                .state_dir()
+                .join(crate::sync::INGEST_CUTOVER_FILENAME),
+            b"{\"segments\":[]}\n",
+        )
+        .unwrap();
+        let captures_dir = config.captures_dir();
+
+        let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+        let mut cred = peer.credential();
+        cred.endpoints
+            .push(spl_transport::credential::EndpointAddr {
+                host: "192.0.2.9".into(),
+                port: 7657,
+            });
+        let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
+        crate::private_link::persist_credential(&config_root, &cred).unwrap();
+        crate::journal_mark::write_pairing_answer(&config_root, "").unwrap();
+
+        let day = "2026-03-31";
+        let stream_dir = captures_dir.join(day).join(&config.stream);
+        std::fs::create_dir_all(&stream_dir).unwrap();
+        let seg1 = stream_dir.join("120000_300");
+        let seg2 = stream_dir.join("120500_300");
+        std::fs::create_dir_all(&seg1).unwrap();
+        std::fs::create_dir_all(&seg2).unwrap();
+        std::fs::write(seg1.join("screen.webm"), b"video").unwrap();
+        std::fs::write(seg2.join("screen.webm"), b"video").unwrap();
+
+        let sha = spl_core::ca::sha256_hex(b"video");
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "segment": "k1",
+                "file_descriptors": [{
+                    "submitted": "screen.webm",
+                    "written": "screen.webm",
+                    "size": 5,
+                    "sha256": sha,
+                    "disposition": "written",
+                }]
+            }))
+            .unwrap(),
+        );
+        peer.enqueue_response(
+            200,
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "segment": "k2",
+                "file_descriptors": [{
+                    "submitted": "screen.webm",
+                    "written": "screen.webm",
+                    "size": 5,
+                    "sha256": sha,
+                    "disposition": "written",
+                }]
+            }))
+            .unwrap(),
+        );
+
+        let state_lock = PrivateStateLock::acquire(&config_root).unwrap();
+        let upload = Arc::new(UploadClient::new(
+            &config,
+            None::<PrivateLinkCapability>,
+            Arc::new(SystemClock::new()),
+        ));
+        let open_journal = crate::private_link::OpenJournalAccess::default();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let sync = crate::sync::SyncService::start(
+            config.clone(),
+            upload.clone(),
+            Arc::new(SystemClock::new()),
+        );
+
+        let upload_clone = Arc::clone(&upload);
+        let config_root_clone = config_root.clone();
+        let open_journal_clone = open_journal.clone();
+        let shutdown_clone = Arc::clone(&shutdown);
+        let on_confirmed = Some(sync.trigger_handle());
+
+        let owner_handle = tokio::spawn(async move {
+            start_linked_owner(
+                upload_clone,
+                config_root_clone,
+                "main".to_string(),
+                state_lock,
+                true,
+                open_journal_clone,
+                shutdown_clone,
+                on_confirmed,
+            )
+            .await
+        });
+
+        let mut entered_wait = false;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if upload.link_facts().snapshot().journal_mark_held {
+                entered_wait = true;
+                break;
+            }
+        }
+        assert!(entered_wait, "owner must enter the held wait loop");
+
+        tokio::time::advance(Duration::from_secs(59)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!upload.has_capability());
+        assert!(!owner_handle.is_finished());
+
+        sync.trigger();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!upload.has_capability());
+        assert!(!owner_handle.is_finished());
+
+        let held_endpoints_count = peer
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/app/network/local-endpoints")
+            .count();
+        assert_eq!(held_endpoints_count, 0);
+
+        crate::journal_mark::write_pairing_answer(&config_root, &pairing_id).unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut has_cap = false;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if upload.has_capability() {
+                has_cap = true;
+                break;
+            }
+        }
+        assert!(has_cap, "upload must acquire capability after confirmation");
+
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let endpoints_count = peer
+                    .requests()
+                    .iter()
+                    .filter(|r| r.path == "/app/network/local-endpoints")
+                    .count();
+                if endpoints_count == 1 {
+                    break;
+                }
+                assert!(
+                    endpoints_count <= 1,
+                    "expected at most 1 local-endpoints request, got {endpoints_count}"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        shutdown.notify_waiters();
+        let owner = owner_handle.await.unwrap().unwrap();
+        owner.shutdown().await.unwrap();
+        sync.shutdown(Duration::from_secs(1)).await.unwrap();
+        peer.shutdown().await;
+    }
+
     #[tokio::test]
     async fn repair_grandfathers_and_syncs_to_original_peer() {
         use rustix::fd::AsFd;

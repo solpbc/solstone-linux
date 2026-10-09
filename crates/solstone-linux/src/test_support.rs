@@ -366,6 +366,7 @@ impl LinkedMockServer {
         let is_probe = |uri: &str| {
             uri == "/app/network/api/clients/self"
                 || uri == "/app/network/api/relay/access"
+                || uri == "/app/network/local-endpoints"
                 || uri == "/api/system/status"
                 || uri == "/api/system/about"
         };
@@ -529,6 +530,7 @@ impl MockServer {
         let is_probe = |uri: &str| {
             uri == "/app/network/api/clients/self"
                 || uri == "/app/network/api/relay/access"
+                || uri == "/app/network/local-endpoints"
                 || uri == "/api/system/status"
                 || uri == "/api/system/about"
         };

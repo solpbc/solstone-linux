@@ -86,11 +86,28 @@ struct PeerState {
     refusal_alert: Arc<AtomicU8>,
 }
 
+pub(crate) struct BoundListener {
+    port: u16,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl BoundListener {
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub(crate) fn accepts(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
 pub(crate) struct PrivateLinkPeer {
     credential: Credential,
     client_der: Vec<u8>,
+    acceptor: TlsAcceptor,
     state: PeerState,
     task: JoinHandle<()>,
+    extra_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl PrivateLinkPeer {
@@ -113,6 +130,7 @@ impl PrivateLinkPeer {
             refusal_alert,
         };
         let task_state = state.clone();
+        let task_acceptor = acceptor.clone();
         let task = tokio::spawn(async move {
             let mut carriers = tokio::task::JoinSet::new();
             loop {
@@ -120,7 +138,7 @@ impl PrivateLinkPeer {
                     accepted = listener.accept() => {
                         let Ok((stream, _)) = accepted else { break; };
                         task_state.accepted.fetch_add(1, Ordering::SeqCst);
-                        let acceptor = acceptor.clone();
+                        let acceptor = task_acceptor.clone();
                         let state = task_state.clone();
                         carriers.spawn(async move {
                             if let Ok(tls) = acceptor.accept(stream).await { let _ = serve_carrier(tls, &state).await; }
@@ -133,8 +151,10 @@ impl PrivateLinkPeer {
         Self {
             credential,
             client_der,
+            acceptor,
             state,
             task,
+            extra_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -150,6 +170,21 @@ impl PrivateLinkPeer {
             .lock()
             .unwrap()
             .insert(path.to_owned(), plain_response(status, body));
+    }
+    pub(crate) fn set_route_headers(
+        &self,
+        path: &str,
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) {
+        let mut response = plain_response(status, body);
+        response.headers = headers;
+        self.state
+            .routes
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), response);
     }
     pub(crate) fn set_pending_route(
         &self,
@@ -290,9 +325,44 @@ impl PrivateLinkPeer {
         .await
         .unwrap();
     }
+    pub(crate) async fn bind_another_listener(&self) -> BoundListener {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let task_accepted = Arc::clone(&accepted);
+        let acceptor = self.acceptor.clone();
+        let task_state = self.state.clone();
+        let task = tokio::spawn(async move {
+            let mut carriers = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    res = listener.accept() => {
+                        let Ok((stream, _)) = res else { break; };
+                        task_accepted.fetch_add(1, Ordering::SeqCst);
+                        let acceptor = acceptor.clone();
+                        let state = task_state.clone();
+                        carriers.spawn(async move {
+                            if let Ok(tls) = acceptor.accept(stream).await {
+                                let _ = serve_carrier(tls, &state).await;
+                            }
+                        });
+                    }
+                    _ = carriers.join_next(), if !carriers.is_empty() => {}
+                }
+            }
+        });
+        self.extra_tasks.lock().unwrap().push(task);
+        BoundListener { port, accepted }
+    }
+
     pub(crate) async fn shutdown(self) {
         self.task.abort();
         let _ = self.task.await;
+        let extra_tasks: Vec<_> = self.extra_tasks.lock().unwrap().drain(..).collect();
+        for task in extra_tasks {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     /// Refuse every later client certificate after the TLS 1.3 handshake, the way a journal
@@ -697,6 +767,9 @@ fn next_response(state: &PeerState, request: Option<&PeerRequest>) -> PeerRespon
                 .to_string()
                 .into_bytes(),
         );
+    }
+    if request.path == "/app/network/local-endpoints" {
+        return plain_response(404, Vec::new());
     }
     if request.path == "/app/network/api/clients/self"
         || request.path == "/app/network/api/relay/access"
