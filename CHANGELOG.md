@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- the solstone app now saves your journal's current addresses each time it connects, so once it has connected after your journal's address changes, it keeps using the new one without pairing again. a journal on this computer is unaffected.
+
 ## [2.0.16] - 2026-10-07
 
 ### Fixed
