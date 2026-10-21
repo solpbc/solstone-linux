@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- on Wayland, if the solstone app stops or restarts while screen sharing is still starting, for example during an update, your desktop now keeps the screens you chose to share instead of asking again. systemd also no longer reports that stop as a failure. thanks @dvanduzer.
+
 ## [2.0.26] - 2026-10-21
 
 ### Added
