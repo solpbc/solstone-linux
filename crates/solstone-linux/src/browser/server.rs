@@ -927,13 +927,25 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_development_launch_is_closed_unless_the_build_admits_it() {
         let rig = rig(Some("journal-a"), false);
-        let mut stream = connect(&rig, "chromium", "development", "chrome").await;
+        // The refusal comes on `local_hello` alone, before the server reads `hello`;
+        // sending `hello` as well races that close and can fail with a broken pipe.
+        let mut stream = UnixStream::connect(&rig.endpoint).await.unwrap();
+        frame(
+            &mut stream,
+            br#"{"brand":"chromium","mode":"development","type":"local_hello"}"#,
+        )
+        .await;
+        // Well inside the handshake budget, so a launch the server wrongly admits,
+        // which would wait for `hello` and only close at the budget, fails here.
         let mut byte = [0_u8; 1];
         assert_eq!(
-            timeout(Duration::from_secs(10), stream.read(&mut byte))
-                .await
-                .unwrap()
-                .unwrap(),
+            timeout(
+                Duration::from_millis(HANDSHAKE_MS_BUDGET / 2),
+                stream.read(&mut byte)
+            )
+            .await
+            .unwrap()
+            .unwrap(),
             0
         );
         rig.handle.shutdown().await;
