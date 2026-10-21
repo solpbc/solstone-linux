@@ -1378,8 +1378,17 @@ impl TargetEvidence {
 }
 
 impl Manifest {
+    /// A compiled manifest names its architecture by triple; a source manifest
+    /// takes it from its artifact names.
     pub fn arch(&self) -> Result<ReleaseArch> {
-        self.target.arch()
+        match &self.target {
+            TargetEvidence::Source => self
+                .artifacts
+                .first()
+                .ok_or_else(|| Error::new("artifact inventory mismatch: expected 3, actual 0"))
+                .and_then(|artifact| artifact_arch(&artifact.path)),
+            target => target.arch(),
+        }
     }
 }
 
@@ -2122,11 +2131,12 @@ fn validate_manifest_policy(root: &RepoRoot, manifest: &Manifest) -> Result<()> 
         &manifest.dependency_policy.advisory_checked_at,
     )?;
     let arch = manifest.arch()?;
-    if !manifest
-        .rust
-        .rustc_verbose
-        .lines()
-        .any(|line| line.strip_prefix("host: ") == Some(arch.triple()))
+    if matches!(manifest.target, TargetEvidence::Compiled { .. })
+        && !manifest
+            .rust
+            .rustc_verbose
+            .lines()
+            .any(|line| line.strip_prefix("host: ") == Some(arch.triple()))
     {
         return Err(Error::new(format!(
             "release target mismatch: expected rustc host {}, actual different",

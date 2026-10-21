@@ -8,11 +8,7 @@ const CANDIDATE_VECTOR: &str = "27e7dd62da4e0022b755f669dd00118a57715aaf088ff7f2
 const BUNDLE_VECTOR: &str = "cd214a005b2186a7eb25e9fd756561fb9c6e47e02004047c1cd5132106580a3e";
 
 fn proof_ids() -> [&'static str; 3] {
-    [
-        ReleaseArch::X86_64.proof_specs()[0].id,
-        ReleaseArch::X86_64.proof_specs()[1].id,
-        ReleaseArch::X86_64.proof_specs()[2].id,
-    ]
+    ReleaseArch::X86_64.proof_ids()
 }
 
 #[test]
@@ -63,7 +59,7 @@ fn candidate_schemas_are_digest_and_identity_pinned() {
     verify_candidate_schemas().unwrap();
     assert_eq!(digest(ledger_schema_bytes()), LEDGER_SCHEMA_SHA256);
     assert_eq!(digest(proof_schema_bytes()), PROOF_SCHEMA_SHA256);
-    let ids = proof_ids().map(str::to_owned).to_vec();
+    let ids = ALL_PROOF_SPECS.map(|spec| spec.id).to_vec();
     let proof_schema: Value = serde_json::from_slice(proof_schema_bytes()).unwrap();
     let ledger_schema: Value = serde_json::from_slice(ledger_schema_bytes()).unwrap();
     assert_eq!(
@@ -71,8 +67,16 @@ fn candidate_schemas_are_digest_and_identity_pinned() {
         serde_json::json!(ids)
     );
     assert_eq!(
-        ledger_schema["properties"]["expected_proof_ids"]["const"],
-        serde_json::json!(ids)
+        proof_schema["properties"]["architecture"]["enum"],
+        serde_json::json!(["amd64", "x86_64", "arm64", "aarch64"])
+    );
+    assert_eq!(
+        ledger_schema["properties"]["expected_proof_ids"]["enum"],
+        serde_json::json!(ReleaseArch::ALL.map(ReleaseArch::proof_ids))
+    );
+    assert_eq!(
+        ledger_schema["properties"]["target"]["properties"]["triple"]["enum"],
+        serde_json::json!(ReleaseArch::ALL.map(ReleaseArch::triple))
     );
     assert!(
         ledger_schema["required"]
