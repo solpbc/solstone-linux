@@ -4,6 +4,10 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+// The fake engines below answer for an x86_64 build host, whatever host runs
+// the suite.
+const FIXTURE_HOST: &str = "x86_64";
+
 const CANDIDATE_VECTOR: &str = "27e7dd62da4e0022b755f669dd00118a57715aaf088ff7f2a6c322951238494e";
 const BUNDLE_VECTOR: &str = "cd214a005b2186a7eb25e9fd756561fb9c6e47e02004047c1cd5132106580a3e";
 
@@ -1332,7 +1336,7 @@ pub(super) fn proof_processes(tripwire: &Path) -> (tempfile::TempDir, ProcessEnv
     let path = format!("{}:/usr/bin:/bin", temp.path().display());
     (
         temp,
-        ProcessEnvironment::with_path(OsStr::new(path.as_str())),
+        ProcessEnvironment::with_path(OsStr::new(path.as_str())).with_host_machine(FIXTURE_HOST),
     )
 }
 
@@ -1381,7 +1385,7 @@ cp '{templates}/'$platform.json "$output/proof.json"
     let path = format!("{}:/usr/bin:/bin", temp.path().display());
     (
         temp,
-        ProcessEnvironment::with_path(OsStr::new(path.as_str())),
+        ProcessEnvironment::with_path(OsStr::new(path.as_str())).with_host_machine(FIXTURE_HOST),
     )
 }
 
@@ -1425,7 +1429,7 @@ printf '%s\n' '{marker}' >&2
     let path = format!("{}:/usr/bin:/bin", temp.path().display());
     (
         temp,
-        ProcessEnvironment::with_path(OsStr::new(path.as_str())),
+        ProcessEnvironment::with_path(OsStr::new(path.as_str())).with_host_machine(FIXTURE_HOST),
     )
 }
 
@@ -1569,7 +1573,8 @@ printf '%s\n' '{marker}' >&2
         )
         .unwrap();
         fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
-        let processes = ProcessEnvironment::with_path(bin.path().as_os_str());
+        let processes =
+            ProcessEnvironment::with_path(bin.path().as_os_str()).with_host_machine(FIXTURE_HOST);
         let policy =
             ReleaseImages::from_root(fixture.repo.root.path(), ReleaseArch::X86_64).unwrap();
         let image = proof_image_identity(match platform {
@@ -1919,7 +1924,8 @@ fn docker_identity_is_normalized_and_retained_validation_is_provider_neutral() {
     )
     .unwrap();
     fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
-    let processes = ProcessEnvironment::with_path(bin.path().as_os_str());
+    let processes =
+        ProcessEnvironment::with_path(bin.path().as_os_str()).with_host_machine(FIXTURE_HOST);
     assert_eq!(
         crate::candidate_tests::retry_on_text_file_busy(|| {
             observe_container_engine(&processes, ContainerEngine::Docker)
@@ -2304,7 +2310,8 @@ exit 94
     for name in ["git", "cargo", "docker"] {
         fs::set_permissions(stubs.path().join(name), fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let processes = ProcessEnvironment::with_path(stubs.path().as_os_str());
+    let processes =
+        ProcessEnvironment::with_path(stubs.path().as_os_str()).with_host_machine(FIXTURE_HOST);
     if divergent.is_some() {
         let error = crate::candidate_tests::retry_on_text_file_busy(|| {
             create_candidate(&repo.root, &repo.commit, &descriptor, &processes)

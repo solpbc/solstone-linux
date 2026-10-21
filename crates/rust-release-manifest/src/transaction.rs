@@ -1703,7 +1703,7 @@ pub fn create_candidate(
 ) -> Result<CandidateStatus> {
     create_candidate_for_arch(
         root,
-        ReleaseArch::host()?,
+        processes.host_arch()?,
         expected_commit,
         descriptor,
         processes,
@@ -1717,7 +1717,7 @@ pub fn create_candidate_for_arch(
     descriptor: &Path,
     processes: &ProcessEnvironment,
 ) -> Result<CandidateStatus> {
-    arch.require_native()?;
+    arch.require_native_on(processes.host_arch()?)?;
     require_expected_commit(root, expected_commit)?;
     let lock = CandidateLock::acquire(root)?;
     let result = create_candidate_locked(root, arch, expected_commit, descriptor, processes, &lock);
@@ -1877,7 +1877,7 @@ fn prove_candidate_locked(
         .absolute;
     let (ledger, ledger_bytes) = read_ledger(root, version)?;
     let arch = ledger.arch()?;
-    arch.require_native()?;
+    arch.require_native_on(processes.host_arch()?)?;
     require_clean_tree(root.path(), &payload)?;
     let commit = command(root.path(), &["git", "rev-parse", "HEAD"])?;
     let lock_digest = digest(&fs::read(root.path().join("Cargo.lock")).map_err(display_error)?);

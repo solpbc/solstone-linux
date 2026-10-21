@@ -288,6 +288,9 @@ pub fn resolve_release_images(
 pub struct ProcessEnvironment {
     path: Option<OsString>,
     git_canaries: Option<(OsString, OsString)>,
+    // Tests stand in for `uname -m` so a fixture's architecture does not
+    // depend on the host running the suite; production always asks the host.
+    host_machine: Option<String>,
 }
 
 impl ProcessEnvironment {
@@ -295,6 +298,20 @@ impl ProcessEnvironment {
         Self {
             path: Some(path.to_owned()),
             git_canaries: None,
+            host_machine: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_host_machine(mut self, machine: &str) -> Self {
+        self.host_machine = Some(machine.to_owned());
+        self
+    }
+
+    pub(crate) fn host_arch(&self) -> Result<ReleaseArch> {
+        match &self.host_machine {
+            Some(machine) => ReleaseArch::from_name(machine),
+            None => ReleaseArch::host(),
         }
     }
 
