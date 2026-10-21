@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "34764258758882dd7451c0e595312a3617932adfa801504a6a3b5ff16560e44d",
+  "cargo_lock_sha256": "672a9ba571236eebbcc9e6a91ddc095b26654a554bcd8bb654a1294562781991",
   "notices_sha256": "8a260831821be7a4390ffa6f4b8fcf8c0a203f6f411312fec18a77773598e8d2",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux-window",
@@ -5739,7 +5739,7 @@
     },
     {
       "name": "rustls-webpki",
-      "version": "0.103.15",
+      "version": "0.103.16",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "ISC",
       "members": [
@@ -7783,7 +7783,7 @@
     },
     {
       "name": "webpki-roots",
-      "version": "1.0.8",
+      "version": "1.0.10",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "CDLA-Permissive-2.0",
       "members": [
