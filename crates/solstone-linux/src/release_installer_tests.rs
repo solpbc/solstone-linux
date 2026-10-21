@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-// scripts/install.sh refuses any machine that is not x86_64, the one shipped
-// release architecture, so these tests can only hold on an x86_64 host.
-// lib.rs compiles this module there and nowhere else.
+// scripts/install.sh accepts only an archive built for the machine it runs on,
+// so every fixture is named for the host architecture.
 
 use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::fs;
@@ -15,6 +14,7 @@ use std::process::{Command, Output};
 use crate::release_rail_tests::{command_path, workspace_root};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const ARCH: &str = std::env::consts::ARCH;
 
 fn copy_tree(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap();
@@ -50,7 +50,7 @@ fn add_window_payload(root: &Path) {
 }
 
 fn release_fixture(temp: &Path) -> PathBuf {
-    let root_name = format!("solstone-linux-{VERSION}-linux-x86_64");
+    let root_name = format!("solstone-linux-{VERSION}-linux-{ARCH}");
     let root = temp.join(&root_name);
     fs::create_dir_all(root.join("bin")).unwrap();
     fs::write(root.join("bin/solstone-linux"), b"fixture-binary\n").unwrap();
@@ -332,7 +332,7 @@ fn installer_preserves_foreign_hicolor_files() {
 #[test]
 fn installer_rejects_archive_missing_dependency_notices() {
     let temp = tempfile::tempdir().unwrap();
-    let root_name = format!("solstone-linux-{VERSION}-linux-x86_64");
+    let root_name = format!("solstone-linux-{VERSION}-linux-{ARCH}");
     let root = temp.path().join(&root_name);
     fs::create_dir_all(root.join("bin")).unwrap();
     fs::write(root.join("bin/solstone-linux"), b"fixture-binary\n").unwrap();
@@ -384,6 +384,47 @@ fn installer_rejects_archive_missing_dependency_notices() {
     assert!(
         stderr.contains("archive is missing") && stderr.contains("RUST_DEPENDENCY_NOTICES.txt"),
         "expected missing notice error, actual: {stderr}"
+    );
+    assert_eq!(snapshot(temp.path()), before);
+}
+
+// an archive built for the other architecture is refused by name before
+// anything is read or written.
+#[test]
+fn installer_rejects_archive_for_another_architecture() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = release_fixture(temp.path());
+    let other = if ARCH == "aarch64" {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
+    let foreign = temp
+        .path()
+        .join(format!("solstone-linux-{VERSION}-linux-{other}.tar.gz"));
+    fs::rename(&archive, &foreign).unwrap();
+    let home = temp.path().join("home");
+    let prefix = temp.path().join("prefix");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&prefix).unwrap();
+    let os_release = temp.path().join("os-release");
+    write_os_release(&os_release);
+
+    let before = snapshot(temp.path());
+
+    let output = installer_command(&foreign, &os_release)
+        .args(["--prefix"])
+        .arg(&prefix)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "this archive is for {other}, but this computer is {ARCH}"
+        )),
+        "expected architecture refusal, actual: {stderr}"
     );
     assert_eq!(snapshot(temp.path()), before);
 }

@@ -68,18 +68,22 @@ if [[ "$PREFIX" != /* ]]; then
 fi
 
 ARCH=$(uname -m)
-if [[ "$ARCH" != "x86_64" ]]; then
-  echo "error: unsupported architecture '$ARCH'; this release is x86_64 only" >&2
+if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
+  echo "error: unsupported architecture '$ARCH'; releases are x86_64 and aarch64 only" >&2
   exit 1
 fi
 
 ARCHIVE_NAME=${ARCHIVE##*/}
-if [[ ! "$ARCHIVE_NAME" =~ ^solstone-linux-([0-9][0-9A-Za-z.+-]*)-linux-x86_64\.tar\.gz$ ]]; then
+if [[ ! "$ARCHIVE_NAME" =~ ^solstone-linux-([0-9][0-9A-Za-z.+-]*)-linux-(x86_64|aarch64)\.tar\.gz$ ]]; then
   echo "error: unexpected archive name '$ARCHIVE_NAME'" >&2
   exit 1
 fi
 RELEASE_VERSION=${BASH_REMATCH[1]}
-TOP="solstone-linux-${RELEASE_VERSION}-linux-x86_64"
+if [[ "${BASH_REMATCH[2]}" != "$ARCH" ]]; then
+  echo "error: this archive is for ${BASH_REMATCH[2]}, but this computer is $ARCH" >&2
+  exit 1
+fi
+TOP="solstone-linux-${RELEASE_VERSION}-linux-${ARCH}"
 
 OS_RELEASE=${SOLSTONE_INSTALL_OS_RELEASE:-/etc/os-release}
 if [[ ! -r "$OS_RELEASE" ]]; then
@@ -142,7 +146,7 @@ for REQUIRED in \
   fi
 done
 
-echo "solstone-linux $RELEASE_VERSION install plan ($DISTRO_FAMILY, x86_64):"
+echo "solstone-linux $RELEASE_VERSION install plan ($DISTRO_FAMILY, $ARCH):"
 echo "  install binary: $PREFIX/bin/solstone-linux"
 echo "  install binary: $PREFIX/bin/solstone-linux-window"
 echo "  install icons:  $PREFIX/share/icons/hicolor/"
