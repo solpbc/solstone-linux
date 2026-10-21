@@ -2,16 +2,16 @@
 # marks an architecture whose images and proof values were not yet observed on
 # a native host; candidate commands for that architecture refuse it.
 [x86_64]
-build_ubuntu = "sha256:cfbaadf4d7f79e9c011ab8f13de794fb2b3f2c9765f2286d2211bac8e4ee6591"
-build_fedora = "sha256:6cfebf2dc085b84181c35eb8420f769e23cf21cf7eef0d698c66b7d5db604310"
-proof_debian = "sha256:187a40afeea1072c3d1c8e4542195c2bf205649541b4921c757885aebc91c9b7"
-proof_rpm = "sha256:42ba89ec682298f9e19a8b8706eb0e736b35e28a2e56ee21836a905156ebdef9"
-proof_tar = "sha256:187a40afeea1072c3d1c8e4542195c2bf205649541b4921c757885aebc91c9b7"
+build_ubuntu = "sha256:9e73afe4f1e46045c7b93faa30fa0926f1f5bc2f822feeffbc8f996681a156be"
+build_fedora = "sha256:358bec26b538e59c2fa7590834a459c11d72a3ee499691af2bc4d91dd0fa308b"
+proof_debian = "sha256:23c761dfbf5995c21fc43710ede62d45325212e6ebfc161f7e3358b95567f4f0"
+proof_rpm = "sha256:90534b8f40d8bdc234d67f7e6842e78b9c968c696d27030a48025838976cc2ee"
+proof_tar = "sha256:23c761dfbf5995c21fc43710ede62d45325212e6ebfc161f7e3358b95567f4f0"
 
 # Operator-owned values: verify these inside the provisioned digest images and
 # commit any corrections before selecting EXPECTED_RELEASE_COMMIT.
 [x86_64.debian-amd64]
-image_digest = "sha256:187a40afeea1072c3d1c8e4542195c2bf205649541b4921c757885aebc91c9b7"
+image_digest = "sha256:23c761dfbf5995c21fc43710ede62d45325212e6ebfc161f7e3358b95567f4f0"
 os_release = "Ubuntu 22.04.5 LTS"
 package_manager_version = "Debian 'dpkg' package management program version 1.21.1 (amd64)."
 install_command = ["dpkg", "--install", "/input/solstone-linux_2.0.25-1_amd64.deb"]
@@ -20,7 +20,7 @@ executable_path = "/usr/bin/solstone-linux"
 executable_mode = 493
 
 [x86_64.rpm-x86_64]
-image_digest = "sha256:42ba89ec682298f9e19a8b8706eb0e736b35e28a2e56ee21836a905156ebdef9"
+image_digest = "sha256:90534b8f40d8bdc234d67f7e6842e78b9c968c696d27030a48025838976cc2ee"
 os_release = "Fedora Linux 42 (Container Image)"
 package_manager_version = "RPM version 4.20.1"
 install_command = ["rpm", "--install", "/input/solstone-linux-2.0.25-1.x86_64.rpm"]
@@ -29,7 +29,7 @@ executable_path = "/usr/bin/solstone-linux"
 executable_mode = 493
 
 [x86_64.tar-x86_64]
-image_digest = "sha256:187a40afeea1072c3d1c8e4542195c2bf205649541b4921c757885aebc91c9b7"
+image_digest = "sha256:23c761dfbf5995c21fc43710ede62d45325212e6ebfc161f7e3358b95567f4f0"
 os_release = "Ubuntu 22.04.5 LTS"
 package_manager_version = "installer portable-tar"
 install_command = ["/input/install.sh", "--prefix", "/proof-root", "/input/solstone-linux-2.0.25-linux-x86_64.tar.gz"]
@@ -38,33 +38,33 @@ executable_path = "/bin/solstone-linux"
 executable_mode = 493
 
 [aarch64]
-build_ubuntu = "unpinned"
-build_fedora = "unpinned"
-proof_debian = "unpinned"
-proof_rpm = "unpinned"
-proof_tar = "unpinned"
+build_ubuntu = "sha256:d321f2353f443375eb305ab69544a8945a00850b39aed716a83526e3ba6da39e"
+build_fedora = "sha256:744658912e214b5a239f3da3607525f7040e7ac10a4d0b38b85d42d7fa50ab8f"
+proof_debian = "sha256:2864fcff17937aadebe841c3aba350027c6a9c48071faec061b6248cc4ab4cec"
+proof_rpm = "sha256:003838bb4ebd4ad7df81f2f1b3f3fd9e7475b189c2768f01ab5b6f86d7debada"
+proof_tar = "sha256:2864fcff17937aadebe841c3aba350027c6a9c48071faec061b6248cc4ab4cec"
 
 [aarch64.debian-arm64]
-image_digest = "unpinned"
-os_release = "unpinned"
-package_manager_version = "unpinned"
+image_digest = "sha256:2864fcff17937aadebe841c3aba350027c6a9c48071faec061b6248cc4ab4cec"
+os_release = "Ubuntu 22.04.5 LTS"
+package_manager_version = "Debian 'dpkg' package management program version 1.21.1 (arm64)."
 install_command = ["dpkg", "--install", "/input/solstone-linux_2.0.25-1_arm64.deb"]
 version_command = ["/usr/bin/solstone-linux", "--version"]
 executable_path = "/usr/bin/solstone-linux"
 executable_mode = 493
 
 [aarch64.rpm-aarch64]
-image_digest = "unpinned"
-os_release = "unpinned"
-package_manager_version = "unpinned"
+image_digest = "sha256:003838bb4ebd4ad7df81f2f1b3f3fd9e7475b189c2768f01ab5b6f86d7debada"
+os_release = "Fedora Linux 42 (Container Image)"
+package_manager_version = "RPM version 4.20.1"
 install_command = ["rpm", "--install", "/input/solstone-linux-2.0.25-1.aarch64.rpm"]
 version_command = ["/usr/bin/solstone-linux", "--version"]
 executable_path = "/usr/bin/solstone-linux"
 executable_mode = 493
 
 [aarch64.tar-aarch64]
-image_digest = "unpinned"
-os_release = "unpinned"
+image_digest = "sha256:2864fcff17937aadebe841c3aba350027c6a9c48071faec061b6248cc4ab4cec"
+os_release = "Ubuntu 22.04.5 LTS"
 package_manager_version = "installer portable-tar"
 install_command = ["/input/install.sh", "--prefix", "/proof-root", "/input/solstone-linux-2.0.25-linux-aarch64.tar.gz"]
 version_command = ["/bin/solstone-linux", "--version"]
