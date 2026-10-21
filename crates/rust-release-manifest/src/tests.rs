@@ -35,7 +35,11 @@ fn classify_release_dir(path: &Path) -> Result<()> {
 pub(super) fn write_rendered(evidence: Evidence, release_dir: &Path) -> Result<()> {
     let text = render_manifest(evidence, release_dir)?;
     let manifest = validate_manifest_bytes(text.as_bytes())?;
-    fs::write(release_dir.join(manifest_name(&manifest.version)), text).map_err(display_error)?;
+    fs::write(
+        release_dir.join(ReleaseArch::X86_64.manifest_name(&manifest.version)),
+        text,
+    )
+    .map_err(display_error)?;
     fs::write(
         release_dir.join(CHECKSUM_NAME),
         render_sha256sums(&manifest.artifacts)?,
@@ -86,7 +90,7 @@ pub(super) fn evidence() -> Evidence {
             cargo_version: "cargo 1.97.1 (c980f4866 2026-06-30)".into(),
         },
         target: TargetEvidence::Compiled {
-            triple: TARGET_TRIPLE.into(),
+            triple: ReleaseArch::X86_64.triple().into(),
             profile: "release".into(),
             features: vec![],
         },
@@ -1552,12 +1556,14 @@ fn named_manifest_requires_versioned_basename() {
     let temp = release_fixture();
     let version = evidence().version;
     write_rendered(evidence(), temp.path()).unwrap();
-    let correct = temp.path().join(manifest_name(&version));
+    let correct = temp
+        .path()
+        .join(ReleaseArch::X86_64.manifest_name(&version));
     verify_manifest(&correct, false).unwrap();
 
     for wrong_name in [
         "rust-release-manifest.json".to_owned(),
-        manifest_name("9.9.9"),
+        ReleaseArch::X86_64.manifest_name("9.9.9"),
     ] {
         let wrong = temp.path().join(wrong_name);
         fs::copy(&correct, &wrong).unwrap();
@@ -2149,7 +2155,9 @@ fn checksum_and_complete_inventory_mutations_fail() {
     let temp = release_fixture();
     let text = render_manifest(evidence(), temp.path()).unwrap();
     let manifest = validate_manifest_bytes(text.as_bytes()).unwrap();
-    let manifest_path = temp.path().join(manifest_name(&manifest.version));
+    let manifest_path = temp
+        .path()
+        .join(ReleaseArch::X86_64.manifest_name(&manifest.version));
     fs::write(&manifest_path, text).unwrap();
     fs::write(
         temp.path().join(CHECKSUM_NAME),
@@ -2161,7 +2169,7 @@ fn checksum_and_complete_inventory_mutations_fail() {
     }
     verify_checksums(&manifest, temp.path()).unwrap();
     classify_release(temp.path(), false).unwrap();
-    let stale_manifest = temp.path().join(manifest_name("2.0.0"));
+    let stale_manifest = temp.path().join(ReleaseArch::X86_64.manifest_name("2.0.0"));
     fs::rename(&manifest_path, &stale_manifest).unwrap();
     assert!(classify_release(temp.path(), false).is_err());
     fs::rename(stale_manifest, &manifest_path).unwrap();
@@ -2272,12 +2280,12 @@ fn live_semantic_drift_is_rejected_field_by_field() {
             features: vec![],
         },
         TargetEvidence::Compiled {
-            triple: TARGET_TRIPLE.into(),
+            triple: ReleaseArch::X86_64.triple().into(),
             profile: "debug".into(),
             features: vec![],
         },
         TargetEvidence::Compiled {
-            triple: TARGET_TRIPLE.into(),
+            triple: ReleaseArch::X86_64.triple().into(),
             profile: "release".into(),
             features: vec!["foo".into()],
         },
@@ -2351,7 +2359,8 @@ fn native_tool_exact_identity_and_digest_mutations_fail() {
 fn artifact_file_path_and_checksum_mutations_fail() {
     let (temp, manifest) = rendered_manifest();
     fs::write(
-        temp.path().join(manifest_name(&manifest.version)),
+        temp.path()
+            .join(ReleaseArch::X86_64.manifest_name(&manifest.version)),
         serde_json::to_string_pretty(&manifest).unwrap() + "\n",
     )
     .unwrap();
@@ -2410,8 +2419,8 @@ fn artifact_file_path_and_checksum_mutations_fail() {
 
     let mut directory_path = manifest.artifacts.clone();
     directory_path[0].path = "sub/file.tar.gz".into();
-    assert!(validate_artifact_set(&directory_path).is_err());
-    assert!(validate_artifact_set(&manifest.artifacts[..2]).is_err());
+    assert!(validate_artifact_set(&directory_path, ReleaseArch::X86_64).is_err());
+    assert!(validate_artifact_set(&manifest.artifacts[..2], ReleaseArch::X86_64).is_err());
 }
 
 #[test]
@@ -2425,8 +2434,8 @@ fn schema_target_commit_and_datetime_boundaries_are_enforced() {
     assert!(validate_manifest_bytes(serde_json::to_string(&source).unwrap().as_bytes()).is_ok());
 
     for target in [
-        serde_json::json!({"kind":"compiled","triple":TARGET_TRIPLE,"profile":"release"}),
-        serde_json::json!({"kind":"source","triple":TARGET_TRIPLE}),
+        serde_json::json!({"kind":"compiled","triple":ReleaseArch::X86_64.triple(),"profile":"release"}),
+        serde_json::json!({"kind":"source","triple":ReleaseArch::X86_64.triple()}),
     ] {
         let mut value = original.clone();
         value["target"] = target;

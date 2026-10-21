@@ -21,6 +21,8 @@ use std::process::Command;
 use tar::{Archive, Entry, EntryType};
 use xz2::read::XzDecoder;
 
+mod arch;
+pub use arch::*;
 mod candidate;
 pub use candidate::*;
 mod audit;
@@ -28,7 +30,7 @@ pub mod authority_vocabulary;
 mod elf64;
 mod package_audit;
 pub use audit::*;
-pub use package_audit::audit_packages;
+pub use package_audit::{audit_packages, audit_packages_for_arch};
 mod spl_pin;
 pub use spl_pin::validate_spl_pin;
 mod dependency_notices;
@@ -42,7 +44,6 @@ pub const SCHEMA_VERSION: u64 = 1;
 pub const SCHEMA_SHA256: &str = "45e12a73062eededbe4d47b1101425eeca7be03f55dbc75ce087f477ae3a8a72";
 pub const CHECKSUM_NAME: &str = "SHA256SUMS";
 pub const PRODUCT: &str = "solstone-linux";
-pub const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 pub const CARGO_DENY_VERSION: &str = "0.20.2";
 pub const RELEASE_PUBLIC_KEY_PATH: &str = "packaging/keys/solstone-linux-release.pub";
 pub(crate) const CONTEXT_BINDING_NAME: &str = ".release-context.json";
@@ -53,17 +54,9 @@ pub const SPL_PIN_OK_MESSAGE: &str = "SPL dependency pin verified.";
 pub const RELEASE_DIR_OK_MESSAGE: &str =
     "Release directory verified as a complete candidate; a present manifest signature is verified.";
 pub const LEDGER_SCHEMA_SHA256: &str =
-    "4b387f19d8018752c6d016a4c0c74343ed80d2b64a3ff9480aa75b04fa66882d";
+    "258eb46b54469c0fe8d30d7ecd0e2d1d41af89fd6afc863c60154693c16da41b";
 pub const PROOF_SCHEMA_SHA256: &str =
-    "3009eab983eea832961220406f19c7459ed1db7fffc352af6ffaf664f9cd7dcf";
-
-pub fn manifest_name(version: &str) -> String {
-    format!("solstone-linux-{version}-linux-x86_64.rust-release-manifest.json")
-}
-
-pub fn manifest_signature_name(version: &str) -> String {
-    format!("{}.minisig", manifest_name(version))
-}
+    "5f1242240e6b0dac176134dc8976f5ef2570453e03073af6ce3303c1a4552350";
 
 const SCHEMA_BYTES: &[u8] =
     include_bytes!("../../../vendor/rust-release-manifest/rust-release-manifest.schema.json");
@@ -180,28 +173,50 @@ pub struct ProofSpec {
     pub id: &'static str,
     pub artifact_kind: &'static str,
     pub architecture: &'static str,
+    pub arch: ReleaseArch,
 }
 
-pub const PROOF_SPECS: [ProofSpec; 3] = [
+pub const ALL_PROOF_SPECS: [ProofSpec; 6] = [
     ProofSpec {
         id: "debian-amd64",
         artifact_kind: "deb",
         architecture: "amd64",
+        arch: ReleaseArch::X86_64,
     },
     ProofSpec {
         id: "rpm-x86_64",
         artifact_kind: "rpm",
         architecture: "x86_64",
+        arch: ReleaseArch::X86_64,
     },
     ProofSpec {
         id: "tar-x86_64",
         artifact_kind: "tar",
         architecture: "x86_64",
+        arch: ReleaseArch::X86_64,
+    },
+    ProofSpec {
+        id: "debian-arm64",
+        artifact_kind: "deb",
+        architecture: "arm64",
+        arch: ReleaseArch::Aarch64,
+    },
+    ProofSpec {
+        id: "rpm-aarch64",
+        artifact_kind: "rpm",
+        architecture: "aarch64",
+        arch: ReleaseArch::Aarch64,
+    },
+    ProofSpec {
+        id: "tar-aarch64",
+        artifact_kind: "tar",
+        architecture: "aarch64",
+        arch: ReleaseArch::Aarch64,
     },
 ];
 
 pub fn proof_spec(id: &str) -> Result<ProofSpec> {
-    PROOF_SPECS
+    ALL_PROOF_SPECS
         .into_iter()
         .find(|spec| spec.id == id)
         .ok_or_else(|| Error::new("proof platform mismatch: expected known proof ID"))
@@ -1351,6 +1366,23 @@ pub struct Manifest {
     pub artifacts: Vec<Artifact>,
 }
 
+impl TargetEvidence {
+    pub fn arch(&self) -> Result<ReleaseArch> {
+        match self {
+            Self::Compiled { triple, .. } => ReleaseArch::from_triple(triple),
+            Self::Source => Err(Error::new(
+                "release target mismatch: expected compiled target, actual source",
+            )),
+        }
+    }
+}
+
+impl Manifest {
+    pub fn arch(&self) -> Result<ReleaseArch> {
+        self.target.arch()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct PackageIdentity {
     name: String,
@@ -1403,7 +1435,11 @@ pub(crate) fn render_manifest(
 pub fn render_sha256sums(artifacts: &[Artifact]) -> Result<String> {
     let mut sorted = artifacts.to_vec();
     sorted.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
-    validate_artifact_set(&sorted)?;
+    let arch = sorted
+        .first()
+        .ok_or_else(|| Error::new("artifact inventory mismatch: expected 3, actual 0"))
+        .and_then(|artifact| artifact_arch(&artifact.path))?;
+    validate_artifact_set(&sorted, arch)?;
     Ok(sorted
         .iter()
         .map(|item| format!("{}  {}\n", item.sha256, item.path))
@@ -1436,7 +1472,7 @@ fn verify_manifest(repo: &RepoRoot, path: &Path, bind_live: bool) -> Result<()> 
         .parent()
         .ok_or_else(|| Error::new("manifest parent missing"))?;
     let manifest = validate_manifest_bytes(repo, &fs::read(path).map_err(display_error)?)?;
-    let expected_name = manifest_name(&manifest.version);
+    let expected_name = manifest.arch()?.manifest_name(&manifest.version);
     if path.file_name().and_then(OsStr::to_str) != Some(expected_name.as_str()) {
         return Err(Error::new(format!(
             "manifest basename mismatch: expected {expected_name}"
@@ -1769,12 +1805,11 @@ pub fn bundle_digest_input(
             "candidate digest mismatch: expected sha256, actual invalid",
         ));
     }
-    let expected = PROOF_SPECS
-        .iter()
-        .map(|spec| spec.id)
-        .collect::<BTreeSet<_>>();
     let actual = proofs.keys().map(String::as_str).collect::<BTreeSet<_>>();
-    if actual != expected {
+    if !ReleaseArch::ALL
+        .into_iter()
+        .any(|arch| actual == BTreeSet::from(arch.proof_ids()))
+    {
         return Err(Error::new(format!(
             "proof inventory mismatch: expected 3 proof IDs, actual {}",
             actual.len()
@@ -1913,8 +1948,9 @@ pub fn validate_candidate_proof(value: &Value, expected: &ProofBindings) -> Resu
     let os_release = object["os_release"]
         .as_str()
         .ok_or_else(|| Error::new("proof os_release mismatch"))?;
+    let spec = proof_spec(&expected.platform)?;
     validate_identity(
-        if expected.platform == "rpm-x86_64" {
+        if spec.artifact_kind == "rpm" {
             "fedora_os"
         } else {
             "ubuntu_os"
@@ -1924,15 +1960,7 @@ pub fn validate_candidate_proof(value: &Value, expected: &ProofBindings) -> Resu
     let manager = object["package_manager_version"]
         .as_str()
         .ok_or_else(|| Error::new("proof package_manager_version mismatch"))?;
-    let manager_ok = match expected.platform.as_str() {
-        "debian-amd64" => {
-            manager.starts_with("Debian 'dpkg' package management program version ")
-                || manager.starts_with("dpkg ")
-        }
-        "rpm-x86_64" => manager.starts_with("RPM version ") || manager.starts_with("rpm "),
-        "tar-x86_64" => manager == "installer portable-tar",
-        _ => false,
-    };
+    let manager_ok = package_manager_matches(spec, manager);
     if !manager_ok {
         return Err(Error::new(
             "proof package manager mismatch: expected platform policy, actual different",
@@ -1955,6 +1983,18 @@ pub fn validate_candidate_proof(value: &Value, expected: &ProofBindings) -> Resu
         ));
     }
     Ok(())
+}
+
+pub(crate) fn package_manager_matches(spec: ProofSpec, manager: &str) -> bool {
+    match spec.artifact_kind {
+        "deb" => {
+            manager.starts_with("Debian 'dpkg' package management program version ")
+                || manager.starts_with("dpkg ")
+        }
+        "rpm" => manager.starts_with("RPM version ") || manager.starts_with("rpm "),
+        "tar" => manager == "installer portable-tar",
+        _ => false,
+    }
 }
 
 pub fn advisory_db_directory(url: &str) -> Result<String> {
@@ -2081,7 +2121,19 @@ fn validate_manifest_policy(root: &RepoRoot, manifest: &Manifest) -> Result<()> 
         "advisory checked_at",
         &manifest.dependency_policy.advisory_checked_at,
     )?;
-    validate_artifact_set(&manifest.artifacts)?;
+    let arch = manifest.arch()?;
+    if !manifest
+        .rust
+        .rustc_verbose
+        .lines()
+        .any(|line| line.strip_prefix("host: ") == Some(arch.triple()))
+    {
+        return Err(Error::new(format!(
+            "release target mismatch: expected rustc host {}, actual different",
+            arch.triple()
+        )));
+    }
+    validate_artifact_set(&manifest.artifacts, arch)?;
     for artifact in &manifest.artifacts {
         artifact_kind(&artifact.path, Some(&manifest.version))?;
     }
@@ -2204,7 +2256,9 @@ fn validate_privacy(
     let opaque_blob = tokens.iter().any(|token| {
         (token.len() >= 12 && token.chars().all(|character| character.is_ascii_digit()))
             || (token.len() >= 20
-                && *token != TARGET_TRIPLE
+                && !ReleaseArch::ALL
+                    .into_iter()
+                    .any(|arch| *token == arch.triple())
                 && Some(*token) != allowed_opaque
                 && token.chars().all(|character| {
                     character.is_ascii_alphanumeric()
@@ -2337,7 +2391,7 @@ pub(crate) fn validate_identity(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_artifact_set(artifacts: &[Artifact]) -> Result<()> {
+fn validate_artifact_set(artifacts: &[Artifact], arch: ReleaseArch) -> Result<()> {
     if artifacts.len() != 3 {
         return Err(Error::new(format!(
             "artifact inventory mismatch: expected 3, actual {}",
@@ -2361,7 +2415,15 @@ fn validate_artifact_set(artifacts: &[Artifact]) -> Result<()> {
             return Err(Error::new("artifact ordering mismatch"));
         }
         previous = Some(&artifact.path);
-        kinds.insert(artifact_kind(&artifact.path, None)?);
+        let (kind, artifact_arch, _) = parse_artifact_name(&artifact.path)?;
+        if artifact_arch != arch {
+            return Err(Error::new(format!(
+                "artifact architecture mismatch: expected {}, actual {}",
+                arch.name(),
+                artifact.path
+            )));
+        }
+        kinds.insert(kind);
     }
     if kinds != BTreeSet::from(["deb", "rpm", "tar"]) {
         return Err(Error::new("artifact type inventory mismatch"));
@@ -2369,25 +2431,36 @@ fn validate_artifact_set(artifacts: &[Artifact]) -> Result<()> {
     Ok(())
 }
 
+fn parse_artifact_name(name: &str) -> Result<(&'static str, ReleaseArch, &str)> {
+    for arch in ReleaseArch::ALL {
+        let parsed = if let Some(version) = name
+            .strip_prefix("solstone-linux-")
+            .and_then(|value| value.strip_suffix(&format!("-linux-{}.tar.gz", arch.name())))
+        {
+            Some(("tar", version))
+        } else if let Some(version) = name
+            .strip_prefix("solstone-linux_")
+            .and_then(|value| value.strip_suffix(&format!("-1_{}.deb", arch.deb_arch())))
+        {
+            Some(("deb", version))
+        } else {
+            name.strip_prefix("solstone-linux-")
+                .and_then(|value| value.strip_suffix(&format!("-1.{}.rpm", arch.rpm_arch())))
+                .map(|version| ("rpm", version))
+        };
+        if let Some((kind, version)) = parsed {
+            return Ok((kind, arch, version));
+        }
+    }
+    Err(Error::new("artifact basename mismatch"))
+}
+
+pub(crate) fn artifact_arch(name: &str) -> Result<ReleaseArch> {
+    Ok(parse_artifact_name(name)?.1)
+}
+
 fn artifact_kind(name: &str, expected_version: Option<&str>) -> Result<&'static str> {
-    let (kind, version) = if let Some(version) = name
-        .strip_prefix("solstone-linux-")
-        .and_then(|value| value.strip_suffix("-linux-x86_64.tar.gz"))
-    {
-        ("tar", version)
-    } else if let Some(version) = name
-        .strip_prefix("solstone-linux_")
-        .and_then(|value| value.strip_suffix("-1_amd64.deb"))
-    {
-        ("deb", version)
-    } else if let Some(version) = name
-        .strip_prefix("solstone-linux-")
-        .and_then(|value| value.strip_suffix("-1.x86_64.rpm"))
-    {
-        ("rpm", version)
-    } else {
-        return Err(Error::new("artifact basename mismatch"));
-    };
+    let (kind, _, version) = parse_artifact_name(name)?;
     validate_version(version)?;
     if expected_version.is_some_and(|expected| version != expected) {
         return Err(Error::new(format!(
@@ -2398,12 +2471,21 @@ fn artifact_kind(name: &str, expected_version: Option<&str>) -> Result<&'static 
     Ok(kind)
 }
 
-pub(crate) fn artifact_name(kind: &str, version: &str) -> Result<String> {
+pub(crate) fn artifact_name(kind: &str, version: &str, arch: ReleaseArch) -> Result<String> {
     validate_version(version)?;
     match kind {
-        "tar" => Ok(format!("solstone-linux-{version}-linux-x86_64.tar.gz")),
-        "deb" => Ok(format!("solstone-linux_{version}-1_amd64.deb")),
-        "rpm" => Ok(format!("solstone-linux-{version}-1.x86_64.rpm")),
+        "tar" => Ok(format!(
+            "solstone-linux-{version}-linux-{}.tar.gz",
+            arch.name()
+        )),
+        "deb" => Ok(format!(
+            "solstone-linux_{version}-1_{}.deb",
+            arch.deb_arch()
+        )),
+        "rpm" => Ok(format!(
+            "solstone-linux-{version}-1.{}.rpm",
+            arch.rpm_arch()
+        )),
         _ => Err(Error::new(
             "artifact kind mismatch: expected tar, deb, or rpm",
         )),
@@ -2481,8 +2563,9 @@ pub fn verify_checksums(manifest: &Manifest, root: &Path) -> Result<()> {
             )));
         }
     }
-    let path = root.join(CHECKSUM_NAME);
-    require_regular(&path, CHECKSUM_NAME)?;
+    let checksum_name = manifest.arch()?.checksum_name();
+    let path = root.join(checksum_name);
+    require_regular(&path, checksum_name)?;
     let actual = fs::read_to_string(path).map_err(display_error)?;
     let expected = render_sha256sums(&manifest.artifacts)?;
     if actual != expected {
@@ -2494,20 +2577,27 @@ pub fn verify_checksums(manifest: &Manifest, root: &Path) -> Result<()> {
 fn verify_package_identity(path: &Path, version: &str) -> Result<()> {
     let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
     validate_version(version)?;
-    let expected = match artifact_kind(name, Some(version))? {
-        "tar" => PackageIdentity {
-            name: PRODUCT.to_owned(),
-            version: tar_version(path)?,
-            release: None,
-            arch: "x86_64".to_owned(),
-        },
-        "deb" => deb_identity(path)?,
-        "rpm" => rpm_identity(path)?,
+    let arch = artifact_arch(name)?;
+    let (expected, expected_arch) = match artifact_kind(name, Some(version))? {
+        "tar" => {
+            let (tar_version, tar_arch) = tar_root_identity(path)?;
+            (
+                PackageIdentity {
+                    name: PRODUCT.to_owned(),
+                    version: tar_version,
+                    release: None,
+                    arch: tar_arch.name().to_owned(),
+                },
+                arch.name(),
+            )
+        }
+        "deb" => (deb_identity(path)?, arch.deb_arch()),
+        "rpm" => (rpm_identity(path)?, arch.rpm_arch()),
         _ => unreachable!(),
     };
     if expected.name != PRODUCT
         || expected.version != version
-        || !matches!(expected.arch.as_str(), "x86_64" | "amd64")
+        || expected.arch != expected_arch
         || expected
             .release
             .as_deref()
@@ -2518,7 +2608,13 @@ fn verify_package_identity(path: &Path, version: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn tar_version(path: &Path) -> Result<String> {
+    Ok(tar_root_identity(path)?.0)
+}
+
+/// The version and architecture named by the archive's single root directory.
+fn tar_root_identity(path: &Path) -> Result<(String, ReleaseArch)> {
     let file = File::open(path).map_err(display_error)?;
     let decoder = BufGzDecoder::new(BufReader::new(file));
     let mut archive = Archive::new(decoder);
@@ -2589,9 +2685,15 @@ fn tar_version(path: &Path) -> Result<String> {
         }
     }
 
-    root.strip_prefix("solstone-linux-")
-        .and_then(|value| value.strip_suffix("-linux-x86_64"))
-        .map(str::to_owned)
+    let body = root
+        .strip_prefix("solstone-linux-")
+        .ok_or_else(|| Error::new("tar embedded version mismatch"))?;
+    ReleaseArch::ALL
+        .into_iter()
+        .find_map(|arch| {
+            body.strip_suffix(&format!("-linux-{}", arch.name()))
+                .map(|version| (version.to_owned(), arch))
+        })
         .ok_or_else(|| Error::new("tar embedded version mismatch"))
 }
 
@@ -3006,7 +3108,7 @@ fn validate_live(repo: &RepoRoot, manifest: &Manifest, payload_root: &Path) -> R
         ),
         (
             matches!(&manifest.target, TargetEvidence::Compiled { triple, profile, features }
-                if triple == TARGET_TRIPLE && profile == "release" && features.is_empty()),
+                if ReleaseArch::from_triple(triple).is_ok() && profile == "release" && features.is_empty()),
             "target",
         ),
     ];

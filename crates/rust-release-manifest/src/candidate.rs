@@ -12,20 +12,23 @@ const DAY_SECONDS: i64 = 24 * 60 * 60;
 pub(crate) const LANE_EVIDENCE_NAME: &str = "lane-evidence.json";
 pub const LANE_HANDOFF: &str = ".lane-evidence-handoff.json";
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// The committed placeholder for an architecture whose images and proof values
+/// have not yet been observed on a native host. The rail refuses to use it.
+pub const UNPINNED_POLICY_VALUE: &str = "unpinned";
+
+/// One architecture's release roles and proof policies, selected from its own
+/// table in `packaging/release-policy.toml`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseImages {
+    pub arch: ReleaseArch,
     pub build_ubuntu: String,
     pub build_fedora: String,
     pub proof_debian: String,
     pub proof_rpm: String,
     pub proof_tar: String,
-    #[serde(rename = "debian-amd64")]
-    pub debian_amd64: ProofPlatformPolicy,
-    #[serde(rename = "rpm-x86_64")]
-    pub rpm_x86_64: ProofPlatformPolicy,
-    #[serde(rename = "tar-x86_64")]
-    pub tar_x86_64: ProofPlatformPolicy,
+    pub debian: ProofPlatformPolicy,
+    pub rpm: ProofPlatformPolicy,
+    pub tar: ProofPlatformPolicy,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -40,20 +43,84 @@ pub struct ProofPlatformPolicy {
     pub executable_mode: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleasePolicyFile {
+    x86_64: ArchPolicyTable,
+    aarch64: ArchPolicyTable,
+}
+
+#[derive(Deserialize)]
+struct ArchPolicyTable {
+    build_ubuntu: String,
+    build_fedora: String,
+    proof_debian: String,
+    proof_rpm: String,
+    proof_tar: String,
+    #[serde(flatten)]
+    proofs: BTreeMap<String, ProofPlatformPolicy>,
+}
+
+impl ArchPolicyTable {
+    fn select(mut self, arch: ReleaseArch) -> Result<ReleaseImages> {
+        let ids = arch.proof_ids();
+        if self
+            .proofs
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            != BTreeSet::from(ids)
+        {
+            return Err(release_policy_shape_error());
+        }
+        let mut take = |id: &str| {
+            self.proofs
+                .remove(id)
+                .ok_or_else(release_policy_shape_error)
+        };
+        Ok(ReleaseImages {
+            arch,
+            debian: take(ids[0])?,
+            rpm: take(ids[1])?,
+            tar: take(ids[2])?,
+            build_ubuntu: self.build_ubuntu,
+            build_fedora: self.build_fedora,
+            proof_debian: self.proof_debian,
+            proof_rpm: self.proof_rpm,
+            proof_tar: self.proof_tar,
+        })
+    }
+}
+
+fn release_policy_shape_error() -> Error {
+    Error::new(
+        "release policy mismatch: expected exact image and proof policy, actual invalid\nrepair: restore packaging/release-policy.toml from the release commit",
+    )
+}
+
 impl ReleaseImages {
-    pub fn from_context(context: &ImmutableContext) -> Result<Self> {
-        Self::from_root(&context.path)
+    pub fn from_context(context: &ImmutableContext, arch: ReleaseArch) -> Result<Self> {
+        Self::from_root(&context.path, arch)
     }
 
-    pub fn from_root(root: &Path) -> Result<Self> {
+    pub fn from_root(root: &Path, arch: ReleaseArch) -> Result<Self> {
         let path = root.join("packaging/release-policy.toml");
         require_regular(&path, "release policy authority")?;
-        let images: Self = toml::from_str(&fs::read_to_string(path).map_err(display_error)?)
-            .map_err(|_| {
-                Error::new(
-                    "release policy mismatch: expected exact image and proof policy, actual invalid\nrepair: restore packaging/release-policy.toml from the release commit",
-                )
-            })?;
+        let file: ReleasePolicyFile =
+            toml::from_str(&fs::read_to_string(path).map_err(display_error)?)
+                .map_err(|_| release_policy_shape_error())?;
+        let x86_64 = file.x86_64.select(ReleaseArch::X86_64)?;
+        let aarch64 = file.aarch64.select(ReleaseArch::Aarch64)?;
+        let images = match arch {
+            ReleaseArch::X86_64 => x86_64,
+            ReleaseArch::Aarch64 => aarch64,
+        };
+        if images.is_unpinned() {
+            return Err(Error::new(format!(
+                "release policy {name} unpinned: expected committed {name} image IDs and observed proof values, actual placeholder \"{UNPINNED_POLICY_VALUE}\"\nrepair: on a native {name} host run make release-images, observe each proof image, and commit the values in the [{name}] tables of packaging/release-policy.toml",
+                name = arch.name()
+            )));
+        }
         for (role, value) in images.roles() {
             validate_image_reference(role, value)?;
         }
@@ -94,11 +161,30 @@ impl ReleaseImages {
         Ok(images)
     }
 
+    fn is_unpinned(&self) -> bool {
+        self.roles()
+            .into_iter()
+            .any(|(_, value)| value == UNPINNED_POLICY_VALUE)
+            || self.proof_policies().into_iter().any(|(_, policy, _)| {
+                [
+                    policy.image_digest.as_str(),
+                    policy.os_release.as_str(),
+                    policy.package_manager_version.as_str(),
+                    policy.executable_path.as_str(),
+                ]
+                .into_iter()
+                .chain(policy.install_command.iter().map(String::as_str))
+                .chain(policy.version_command.iter().map(String::as_str))
+                .any(|value| value == UNPINNED_POLICY_VALUE)
+            })
+    }
+
     pub fn proof_policies(&self) -> [(&'static str, &ProofPlatformPolicy, &str); 3] {
+        let ids = self.arch.proof_ids();
         [
-            (PROOF_SPECS[0].id, &self.debian_amd64, &self.proof_debian),
-            (PROOF_SPECS[1].id, &self.rpm_x86_64, &self.proof_rpm),
-            (PROOF_SPECS[2].id, &self.tar_x86_64, &self.proof_tar),
+            (ids[0], &self.debian, &self.proof_debian),
+            (ids[1], &self.rpm, &self.proof_rpm),
+            (ids[2], &self.tar, &self.proof_tar),
         ]
     }
 
@@ -149,6 +235,7 @@ fn validate_image_reference(role: &str, value: &str) -> Result<()> {
 
 #[derive(Clone, Debug)]
 pub struct ResolvedImages {
+    pub arch: ReleaseArch,
     pub build_ubuntu: ImageIdentity,
     pub build_fedora: ImageIdentity,
     pub proof_debian: ImageIdentity,
@@ -158,10 +245,11 @@ pub struct ResolvedImages {
 
 impl ResolvedImages {
     pub fn proof_images(&self) -> [(&'static str, &ImageIdentity); 3] {
+        let ids = self.arch.proof_ids();
         [
-            (PROOF_SPECS[0].id, &self.proof_debian),
-            (PROOF_SPECS[1].id, &self.proof_rpm),
-            (PROOF_SPECS[2].id, &self.proof_tar),
+            (ids[0], &self.proof_debian),
+            (ids[1], &self.proof_rpm),
+            (ids[2], &self.proof_tar),
         ]
     }
 }
@@ -172,7 +260,7 @@ pub fn resolve_release_images(
     images: &ReleaseImages,
 ) -> Result<ResolvedImages> {
     let resolve = |role: &str, reference: &str| {
-        let identity = inspect_image(processes, engine, reference).map_err(|_| {
+        let identity = inspect_image(processes, engine, reference, images.arch).map_err(|_| {
             Error::new(format!(
                 "release image {role} mismatch: expected provisioned local image, actual unavailable\nrepair: provision {reference} locally before candidate entry"
             ))
@@ -187,6 +275,7 @@ pub fn resolve_release_images(
         Ok(identity)
     };
     Ok(ResolvedImages {
+        arch: images.arch,
         build_ubuntu: resolve("build_ubuntu", &images.build_ubuntu)?,
         build_fedora: resolve("build_fedora", &images.build_fedora)?,
         proof_debian: resolve("proof_debian", &images.proof_debian)?,
@@ -574,6 +663,7 @@ pub fn inspect_image(
     processes: &ProcessEnvironment,
     engine: ContainerEngine,
     reference: &str,
+    arch: ReleaseArch,
 ) -> Result<ImageIdentity> {
     validate_image_reference("inspect", reference)?;
     if engine == ContainerEngine::Docker {
@@ -603,9 +693,10 @@ pub fn inspect_image(
             "image ID mismatch: expected 64 lowercase hex, actual invalid",
         ));
     }
-    if image["Os"] != "linux" || image["Architecture"] != "amd64" {
+    if image["Os"] != "linux" || image["Architecture"] != arch.image_arch() {
         return Err(Error::new(format!(
-            "image platform mismatch: expected linux/amd64, actual {}/{}",
+            "image platform mismatch: expected linux/{}, actual {}/{}",
+            arch.image_arch(),
             image["Os"].as_str().unwrap_or("missing"),
             image["Architecture"].as_str().unwrap_or("missing")
         )));
@@ -726,6 +817,7 @@ pub struct FedoraLaneTools {
 pub struct LaneRequest<'a> {
     pub repo: &'a RepoRoot,
     pub context: &'a ImmutableContext,
+    pub arch: ReleaseArch,
     pub lane: Lane,
     pub engine: ContainerEngine,
     pub invocation_id: &'a str,
@@ -739,6 +831,7 @@ pub struct LaneRequest<'a> {
 pub struct ProofRunnerBuildRequest<'a> {
     pub repo: &'a RepoRoot,
     pub context: &'a ImmutableContext,
+    pub arch: ReleaseArch,
     pub engine: ContainerEngine,
     pub ubuntu: &'a ImageIdentity,
     pub fedora: &'a ImageIdentity,
@@ -1144,6 +1237,7 @@ pub fn build_lane(request: &LaneRequest<'_>) -> Result<LaneEvidence> {
             request.context.cargo_lock_sha256.as_str(),
         ),
         ("RELEASE_VERSION", request.version),
+        ("RELEASE_TARGET", request.arch.triple()),
     ] {
         args.extend(["--build-arg".into(), format!("{key}={value}")]);
     }
@@ -1216,6 +1310,7 @@ pub fn build_proof_runner(request: &ProofRunnerBuildRequest<'_>) -> Result<PathB
     for (key, value) in [
         ("UBUNTU_TOOL_BASE", request.ubuntu.digest.as_str()),
         ("FEDORA_TOOL_BASE", request.fedora.digest.as_str()),
+        ("RELEASE_TARGET", request.arch.triple()),
     ] {
         args.extend(["--build-arg".into(), format!("{key}={value}")]);
     }
@@ -1297,7 +1392,11 @@ fn validate_lane_inventory(request: &LaneRequest<'_>, evidence_name: &str) -> Re
         );
     }
     let mut expected = BTreeSet::from([evidence_name.to_owned()]);
-    expected.extend(expected_artifact_names(request.lane, request.version)?);
+    expected.extend(expected_artifact_names(
+        request.lane,
+        request.version,
+        request.arch,
+    )?);
     if actual != expected {
         return Err(Error::new(format!(
             "lane output inventory mismatch: expected {expected:?}, actual {actual:?}"
@@ -1306,14 +1405,15 @@ fn validate_lane_inventory(request: &LaneRequest<'_>, evidence_name: &str) -> Re
     Ok(())
 }
 
-fn expected_artifact_names(lane: Lane, version: &str) -> Result<[String; 2]> {
-    let tar = artifact_name("tar", version)?;
+fn expected_artifact_names(lane: Lane, version: &str, arch: ReleaseArch) -> Result<[String; 2]> {
+    let tar = artifact_name("tar", version, arch)?;
     let native = artifact_name(
         match lane {
             Lane::Deb => "deb",
             Lane::Rpm => "rpm",
         },
         version,
+        arch,
     )?;
     Ok([tar, native])
 }
@@ -1349,7 +1449,7 @@ pub(crate) fn validate_lane_evidence(
             "cargo_lock_sha256",
         ),
         (evidence.version == request.version, "version"),
-        (evidence.target == TARGET_TRIPLE, "target"),
+        (evidence.target == request.arch.triple(), "target"),
         (evidence.profile == "release", "profile"),
         (evidence.features.is_empty(), "features"),
         (&evidence.image_digest == expected_image, "image_digest"),
@@ -1362,12 +1462,13 @@ pub(crate) fn validate_lane_evidence(
     validate_evidence_text("lane cargo", &evidence.cargo)?;
     let rustc_lines = evidence.rustc_verbose.lines().collect::<BTreeSet<_>>();
     if !evidence.rustc_verbose.starts_with("rustc 1.97.1 (")
-        || !rustc_lines.contains("host: x86_64-unknown-linux-gnu")
+        || !rustc_lines.contains(format!("host: {}", request.arch.triple()).as_str())
         || !rustc_lines.contains("release: 1.97.1")
     {
-        return Err(Error::new(
-            "lane rustc identity mismatch: expected 1.97.1 linux/amd64 verbose banner, actual different",
-        ));
+        return Err(Error::new(format!(
+            "lane rustc identity mismatch: expected 1.97.1 {} verbose banner, actual different",
+            request.arch.triple()
+        )));
     }
     if !evidence.cargo.starts_with("cargo 1.97.1 (") {
         return Err(Error::new(
@@ -1385,6 +1486,13 @@ pub(crate) fn validate_lane_evidence(
     let mut kinds = BTreeSet::new();
     for artifact_record in &evidence.artifacts {
         let kind = artifact_kind(&artifact_record.path, Some(request.version))?;
+        if artifact_arch(&artifact_record.path)? != request.arch {
+            return Err(Error::new(format!(
+                "lane artifact architecture mismatch: expected {}, actual {}",
+                request.arch.name(),
+                artifact_record.path
+            )));
+        }
         require_regular(
             &request.output.join(&artifact_record.path),
             &artifact_record.path,
@@ -1604,10 +1712,11 @@ pub fn reconcile_lanes(
 pub fn recheck_images(
     processes: &ProcessEnvironment,
     engine: ContainerEngine,
+    arch: ReleaseArch,
     expected: [&ImageIdentity; 2],
 ) -> Result<()> {
     for identity in expected {
-        let actual = inspect_image(processes, engine, &identity.configured_reference)?;
+        let actual = inspect_image(processes, engine, &identity.configured_reference, arch)?;
         if actual.digest != identity.digest {
             return Err(Error::new(format!(
                 "image identity mismatch: expected {}, actual {}",

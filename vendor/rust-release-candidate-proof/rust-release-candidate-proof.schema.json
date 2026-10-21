@@ -33,7 +33,7 @@
   ],
   "properties": {
     "schema_version": {"const": 1},
-    "platform": {"enum": ["debian-amd64", "rpm-x86_64", "tar-x86_64"]},
+    "platform": {"enum": ["debian-amd64", "rpm-x86_64", "tar-x86_64", "debian-arm64", "rpm-aarch64", "tar-aarch64"]},
     "candidate_digest": {"$ref": "#/$defs/sha256"},
     "ledger_sha256": {"$ref": "#/$defs/sha256"},
     "source_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
@@ -54,7 +54,7 @@
     "version_output": {"type": "string", "minLength": 1},
     "result": {"const": "pass"},
     "proof_time": {"type": "string", "format": "date-time"},
-    "architecture": {"enum": ["amd64", "x86_64"]},
+    "architecture": {"enum": ["amd64", "x86_64", "arm64", "aarch64"]},
     "network": {"const": "none"},
     "isolation": {"type": "string", "minLength": 1},
     "dry_run_passed": {"type": "boolean"},

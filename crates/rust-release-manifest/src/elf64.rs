@@ -257,7 +257,9 @@ pub(crate) fn parse_elf64(input: &[u8]) -> Result<Elf64Linkage, Elf64Error> {
         return Err(Elf64Error::UnsupportedType { actual: elf_type });
     }
     let machine = u16_at(input, 18, "header")?;
-    if machine != 62 {
+    // EM_X86_64 and EM_AARCH64, the shipped targets. The package audit then
+    // requires the machine of the candidate's own architecture.
+    if !matches!(machine, 62 | 183) {
         return Err(Elf64Error::UnsupportedMachine { actual: machine });
     }
     let header_size = u16_at(input, 52, "header")?;
@@ -505,8 +507,14 @@ pub(crate) fn parse_elf64(input: &[u8]) -> Result<Elf64Linkage, Elf64Error> {
 
 #[cfg(test)]
 pub(crate) fn pinned_elf64_for_test() -> Vec<u8> {
-    linkage_elf64_for_test(
-        "/lib64/ld-linux-x86-64.so.2",
+    pinned_elf64_for_arch_test(crate::ReleaseArch::X86_64)
+}
+
+#[cfg(test)]
+pub(crate) fn pinned_elf64_for_arch_test(arch: crate::ReleaseArch) -> Vec<u8> {
+    machine_linkage_elf64_for_test(
+        arch.elf_machine(),
+        arch.interpreter(),
         &[
             "libgstreamer-1.0.so.0",
             "libgobject-2.0.so.0",
@@ -525,8 +533,14 @@ pub(crate) fn pinned_elf64_for_test() -> Vec<u8> {
 
 #[cfg(test)]
 pub(crate) fn window_elf64_for_test() -> Vec<u8> {
-    linkage_elf64_for_test(
-        "/lib64/ld-linux-x86-64.so.2",
+    window_elf64_for_arch_test(crate::ReleaseArch::X86_64)
+}
+
+#[cfg(test)]
+pub(crate) fn window_elf64_for_arch_test(arch: crate::ReleaseArch) -> Vec<u8> {
+    machine_linkage_elf64_for_test(
+        arch.elf_machine(),
+        arch.interpreter(),
         &["libgtk-4.so.1", "libc.so.6"],
         None,
         None,
@@ -536,6 +550,18 @@ pub(crate) fn window_elf64_for_test() -> Vec<u8> {
 
 #[cfg(test)]
 pub(crate) fn linkage_elf64_for_test(
+    interpreter_value: &str,
+    libraries: &[&str],
+    soname: Option<&str>,
+    rpath: Option<&str>,
+    runpath: Option<&str>,
+) -> Vec<u8> {
+    machine_linkage_elf64_for_test(62, interpreter_value, libraries, soname, rpath, runpath)
+}
+
+#[cfg(test)]
+pub(crate) fn machine_linkage_elf64_for_test(
+    machine: u16,
     interpreter_value: &str,
     libraries: &[&str],
     soname: Option<&str>,
@@ -572,7 +598,7 @@ pub(crate) fn linkage_elf64_for_test(
     let mut bytes = vec![0_u8; STRINGS + table.len()];
     bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
     bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
-    bytes[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    bytes[18..20].copy_from_slice(&machine.to_le_bytes());
     bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
     bytes[32..40].copy_from_slice(&(PH as u64).to_le_bytes());
     bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
@@ -1039,15 +1065,22 @@ mod tests {
         );
     }
 
-    // The parser accepts only x86_64 (EM_X86_64 = 62), the one shipped target, and
-    // this test parses its own executable, so it can only hold on an x86_64 host.
-    #[cfg(target_arch = "x86_64")]
+    // The parser accepts only the shipped targets (EM_X86_64 = 62, EM_AARCH64 =
+    // 183), and this test parses its own executable, so it holds only on those hosts.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
     fn parses_the_real_rustc_test_pie() {
         let bytes = fs::read(std::env::current_exe().unwrap()).unwrap();
         let parsed = parse_elf64(&bytes).unwrap();
         assert_eq!(parsed.elf_type, 3);
-        assert_eq!(parsed.machine, 62);
+        assert_eq!(
+            parsed.machine,
+            if cfg!(target_arch = "aarch64") {
+                183
+            } else {
+                62
+            }
+        );
         assert!(!parsed.interpreter.is_empty());
         assert!(!parsed.needed.is_empty());
     }

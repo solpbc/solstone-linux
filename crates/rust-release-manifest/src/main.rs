@@ -4,11 +4,12 @@
 use clap::{Args, Parser, Subcommand};
 use rust_release_manifest::{
     AuditRequest, DependencyNoticesPaths, Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE,
-    ProcessEnvironment, ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, RepoRoot, SPL_PIN_OK_MESSAGE,
-    audit_packages, check_dependency_notices, classify_release_dir, create_candidate,
-    emit_lane_handoff, emit_proof_handoff, generate_dependency_notices, prove_candidate,
-    publish_transparency, recover_candidate, resign_transparency_pointer, run_audit,
-    sign_release_manifest, validate_spl_pin, verify_manifest_mode, verify_release_signature,
+    ProcessEnvironment, ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, ReleaseArch, RepoRoot,
+    SPL_PIN_OK_MESSAGE, audit_packages, check_dependency_notices, classify_release_dir,
+    create_candidate_for_arch, emit_lane_handoff, emit_proof_handoff, generate_dependency_notices,
+    prove_candidate, publish_transparency, recover_candidate, resign_transparency_pointer,
+    run_audit, select_release_arch, sign_release_manifest, validate_spl_pin, verify_manifest_mode,
+    verify_release_signature,
 };
 use std::path::PathBuf;
 
@@ -99,6 +100,9 @@ enum CandidateCommand {
         expected_release_commit: String,
         #[arg(long)]
         advisory_descriptor: PathBuf,
+        /// Must equal the host architecture; defaults to it.
+        #[arg(long)]
+        arch: Option<String>,
     },
     Prove {
         #[arg(long)]
@@ -281,8 +285,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 CandidateCommand::Create {
                     expected_release_commit,
                     advisory_descriptor,
-                } => create_candidate(
+                    arch,
+                } => create_candidate_for_arch(
                     &root,
+                    select_release_arch(arch.as_deref(), ReleaseArch::host_machine()?.as_str())?,
                     &expected_release_commit,
                     &advisory_descriptor,
                     &processes,

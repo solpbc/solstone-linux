@@ -1340,14 +1340,22 @@ fn transparency_entry_derives_exact_candidate_and_proof_sets() {
         .map(|item| (item.name.clone(), item.sha256.clone(), item.bytes))
         .collect::<BTreeSet<_>>();
     assert_eq!(actual_artifacts, expected_artifacts);
-    let manifest_bytes = fs::read(snapshot.staging.join(manifest_name(&entry.version))).unwrap();
+    let manifest_bytes = fs::read(
+        snapshot
+            .staging
+            .join(ReleaseArch::X86_64.manifest_name(&entry.version)),
+    )
+    .unwrap();
     assert_eq!(
         entry
             .manifests
             .iter()
             .map(|item| (item.name.clone(), item.sha256.clone()))
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([(manifest_name(&entry.version), digest(&manifest_bytes))])
+        BTreeSet::from([(
+            ReleaseArch::X86_64.manifest_name(&entry.version),
+            digest(&manifest_bytes)
+        )])
     );
     assert_eq!(
         entry
@@ -1477,7 +1485,7 @@ fn transparency_publish_order_and_destination_set_are_locked() {
     )
     .unwrap();
     let log = transport.log.borrow();
-    let manifest_name = manifest_name("1.0.0");
+    let manifest_name = ReleaseArch::X86_64.manifest_name("1.0.0");
     let expected = vec![
         "GET-S3 releases/solstone-linux/v/1.0.0/ledger-entry.json".into(),
         "GET-S3 releases/solstone-linux/v/1.0.0/ledger-entry.json.minisig".into(),

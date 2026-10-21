@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use crate::{
-    Error, Result,
+    Error, ReleaseArch, Result,
     authority_vocabulary::{
         LEGACY_COMMANDS, LEGACY_ENVIRONMENT, LEGACY_OPTIONS, LEGACY_ORIGINS, PYTHON_SETUP,
     },
@@ -44,9 +44,9 @@ const PACKAGE_NOTE_PHRASES: &[&str] = &["observer key", "pipx"];
 // SOLSTONE_ELF_DERIVE=<workspace>/target/release/solstone-linux \
 //   cargo test --locked -p rust-release-manifest elf64::tests::derive_requested_release_binary -- --nocapture
 // Source commit: eacc273a1e97b8ad365feec745c082dae7f86607.
+// The machine and interpreter are the candidate architecture's own
+// (ReleaseArch::elf_machine and ReleaseArch::interpreter).
 const EXPECTED_ELF_TYPE: u16 = 3;
-const EXPECTED_MACHINE: u16 = 62;
-const EXPECTED_INTERPRETER: &str = "/lib64/ld-linux-x86-64.so.2";
 const EXPECTED_NEEDED: [&str; 8] = [
     "libgstreamer-1.0.so.0",
     "libgobject-2.0.so.0",
@@ -57,10 +57,11 @@ const EXPECTED_NEEDED: [&str; 8] = [
     "libm.so.6",
     "libc.so.6",
 ];
-// Closed GTK4/Cairo/GLib and Rust/C runtime surface. The optimized candidate's
-// actual imports are checked against this set; no other native library is
-// admitted just because GTK4 is present.
-const WINDOW_ALLOWED_NEEDED: [&str; 9] = [
+// Closed GTK4/Cairo/GLib and Rust/C runtime surface, plus the architecture's
+// own dynamic loader. The optimized candidate's actual imports are checked
+// against this set; no other native library is admitted just because GTK4 is
+// present.
+const WINDOW_ALLOWED_NEEDED: [&str; 8] = [
     "libgtk-4.so.1",
     "libcairo.so.2",
     "libgio-2.0.so.0",
@@ -69,8 +70,11 @@ const WINDOW_ALLOWED_NEEDED: [&str; 9] = [
     "libgcc_s.so.1",
     "libm.so.6",
     "libc.so.6",
-    "ld-linux-x86-64.so.2",
 ];
+
+fn window_needed_allowed(arch: ReleaseArch, library: &str) -> bool {
+    WINDOW_ALLOWED_NEEDED.contains(&library) || library == arch.interpreter_soname()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PayloadRole {
@@ -879,6 +883,7 @@ fn expected_path(format: Format, authority: PayloadAuthority) -> String {
 }
 
 fn inspect_payload(
+    arch: ReleaseArch,
     path: &Path,
     format: Format,
     members: Vec<Member>,
@@ -943,7 +948,7 @@ fn inspect_payload(
         match authority.role {
             PayloadRole::Executable => executable = Some(member.bytes),
             PayloadRole::WindowExecutable => {
-                inspect_window_elf(path, &member.bytes)?;
+                inspect_window_elf(arch, path, &member.bytes)?;
                 nonbinary.insert(authority.source.to_owned(), digest(&member.bytes));
             }
             PayloadRole::DesktopEntry => {
@@ -1035,7 +1040,7 @@ fn inspect_payload(
     ))
 }
 
-fn inspect_elf(path: &Path, bytes: &[u8]) -> Result<Elf64Linkage> {
+fn inspect_elf(arch: ReleaseArch, path: &Path, bytes: &[u8]) -> Result<Elf64Linkage> {
     let parsed = parse_elf64(bytes).map_err(|error| {
         audit_error(
             path,
@@ -1046,8 +1051,8 @@ fn inspect_elf(path: &Path, bytes: &[u8]) -> Result<Elf64Linkage> {
     })?;
     let expected_needed = EXPECTED_NEEDED.map(str::to_owned).to_vec();
     if parsed.elf_type != EXPECTED_ELF_TYPE
-        || parsed.machine != EXPECTED_MACHINE
-        || parsed.interpreter != EXPECTED_INTERPRETER
+        || parsed.machine != arch.elf_machine()
+        || parsed.interpreter != arch.interpreter()
         || parsed.needed != expected_needed
         || parsed.soname.is_some()
         || parsed.rpath.is_some()
@@ -1063,13 +1068,13 @@ fn inspect_elf(path: &Path, bytes: &[u8]) -> Result<Elf64Linkage> {
     Ok(parsed)
 }
 
-fn inspect_window_elf(path: &Path, bytes: &[u8]) -> Result<()> {
+fn inspect_window_elf(arch: ReleaseArch, path: &Path, bytes: &[u8]) -> Result<()> {
     let member = "/usr/bin/solstone-linux-window";
     let parsed = parse_elf64(bytes)
         .map_err(|error| audit_error(path, "MalformedElf", &error.to_string(), member))?;
     if parsed.elf_type != EXPECTED_ELF_TYPE
-        || parsed.machine != EXPECTED_MACHINE
-        || parsed.interpreter != EXPECTED_INTERPRETER
+        || parsed.machine != arch.elf_machine()
+        || parsed.interpreter != arch.interpreter()
         || !parsed
             .needed
             .iter()
@@ -1077,7 +1082,7 @@ fn inspect_window_elf(path: &Path, bytes: &[u8]) -> Result<()> {
         || parsed
             .needed
             .iter()
-            .any(|library| !WINDOW_ALLOWED_NEEDED.contains(&library.as_str()))
+            .any(|library| !window_needed_allowed(arch, library))
         || !parsed.needed.iter().any(|library| library == "libc.so.6")
         || parsed.needed.iter().collect::<BTreeSet<_>>().len() != parsed.needed.len()
         || parsed.soname.is_some()
@@ -1094,7 +1099,28 @@ fn inspect_window_elf(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Audit one candidate's three packages for the architecture named by the
+/// portable archive's own root directory.
 pub fn audit_packages(
+    tar: &Path,
+    deb: &Path,
+    rpm: &Path,
+    expected_executable_sha256: &str,
+) -> Result<()> {
+    regular_artifact(tar)?;
+    let (_, arch) = crate::tar_root_identity(tar).map_err(|error| {
+        audit_error(
+            tar,
+            "PackageIdentity",
+            &error.to_string(),
+            "filename-and-metadata",
+        )
+    })?;
+    audit_packages_for_arch(arch, tar, deb, rpm, expected_executable_sha256)
+}
+
+pub fn audit_packages_for_arch(
+    arch: ReleaseArch,
     tar: &Path,
     deb: &Path,
     rpm: &Path,
@@ -1115,7 +1141,7 @@ pub fn audit_packages(
     for artifact in [tar, deb, rpm] {
         regular_artifact(artifact)?;
     }
-    let tar_version = crate::tar_version(tar).map_err(|error| {
+    let (tar_version, tar_arch) = crate::tar_root_identity(tar).map_err(|error| {
         audit_error(
             tar,
             "PackageIdentity",
@@ -1133,8 +1159,9 @@ pub fn audit_packages(
         || rpm_identity.version != tar_version
         || deb_identity.release.as_deref() != Some("1")
         || rpm_identity.release != deb_identity.release
-        || deb_identity.arch != "amd64"
-        || rpm_identity.arch != "x86_64"
+        || tar_arch != arch
+        || deb_identity.arch != arch.deb_arch()
+        || rpm_identity.arch != arch.rpm_arch()
     {
         return Err(audit_error(
             deb,
@@ -1150,7 +1177,7 @@ pub fn audit_packages(
     ]
     .into_iter()
     .map(|(path, format, members)| {
-        inspect_payload(path, format, members).map(|result| (path, result))
+        inspect_payload(arch, path, format, members).map(|result| (path, result))
     })
     .collect::<Result<Vec<_>>>()?;
     let baseline = digest(&inspected[0].1.0);
@@ -1180,7 +1207,7 @@ pub fn audit_packages(
                 "payload",
             ));
         }
-        inspect_elf(path, binary)?;
+        inspect_elf(arch, path, binary)?;
     }
     Ok(())
 }
@@ -1245,9 +1272,14 @@ mod tests {
     #[test]
     fn clean_payload_control_passes_in_all_formats() {
         for format in [Format::Tar, Format::Deb, Format::Rpm] {
-            let (executable, nonbinary) =
-                inspect_payload(artifact(format), format, fixture_members(format)).unwrap();
-            inspect_elf(artifact(format), &executable).unwrap();
+            let (executable, nonbinary) = inspect_payload(
+                ReleaseArch::X86_64,
+                artifact(format),
+                format,
+                fixture_members(format),
+            )
+            .unwrap();
+            inspect_elf(ReleaseArch::X86_64, artifact(format), &executable).unwrap();
             assert_eq!(nonbinary.len(), PAYLOAD_AUTHORITY.len() - 1);
         }
     }
@@ -1262,7 +1294,13 @@ mod tests {
             "PayloadClosure",
             "missing",
             expected,
-            inspect_payload(artifact(Format::Deb), Format::Deb, missing).unwrap_err(),
+            inspect_payload(
+                ReleaseArch::X86_64,
+                artifact(Format::Deb),
+                Format::Deb,
+                missing,
+            )
+            .unwrap_err(),
         );
 
         let mut changed = fixture_members(Format::Deb);
@@ -1277,7 +1315,13 @@ mod tests {
             "DivergentPayload",
             "copyright",
             expected,
-            inspect_payload(artifact(Format::Deb), Format::Deb, changed).unwrap_err(),
+            inspect_payload(
+                ReleaseArch::X86_64,
+                artifact(Format::Deb),
+                Format::Deb,
+                changed,
+            )
+            .unwrap_err(),
         );
 
         let mut executable = fixture_members(Format::Deb);
@@ -1291,7 +1335,13 @@ mod tests {
             "PayloadClosure",
             "mode:0755",
             expected,
-            inspect_payload(artifact(Format::Deb), Format::Deb, executable).unwrap_err(),
+            inspect_payload(
+                ReleaseArch::X86_64,
+                artifact(Format::Deb),
+                Format::Deb,
+                executable,
+            )
+            .unwrap_err(),
         );
     }
 
@@ -1373,7 +1423,8 @@ mod tests {
                 mode: 0o644,
                 bytes: b"extra".to_vec(),
             });
-            let error = inspect_payload(artifact(format), format, members).unwrap_err();
+            let error = inspect_payload(ReleaseArch::X86_64, artifact(format), format, members)
+                .unwrap_err();
             exact(
                 format,
                 "ExtraPayload",
@@ -1406,7 +1457,8 @@ mod tests {
                     mode: 0o644,
                     bytes: bytes.clone(),
                 });
-                let error = inspect_payload(artifact(format), format, members).unwrap_err();
+                let error = inspect_payload(ReleaseArch::X86_64, artifact(format), format, members)
+                    .unwrap_err();
                 exact(format, "BundledSidecar", token, name, error);
             }
         }
@@ -1422,7 +1474,8 @@ mod tests {
                 .unwrap();
             icon.mode = 0o755;
             let member = icon.path.clone();
-            let error = inspect_payload(artifact(format), format, members).unwrap_err();
+            let error = inspect_payload(ReleaseArch::X86_64, artifact(format), format, members)
+                .unwrap_err();
             exact(format, "ExtraExecutable", "mode:0755", &member, error);
 
             let mut members = fixture_members(format);
@@ -1432,7 +1485,8 @@ mod tests {
                 .unwrap();
             license.mode = 0o600;
             let member = license.path.clone();
-            let error = inspect_payload(artifact(format), format, members).unwrap_err();
+            let error = inspect_payload(ReleaseArch::X86_64, artifact(format), format, members)
+                .unwrap_err();
             exact(format, "PayloadClosure", "mode:0600", &member, error);
         }
     }
@@ -1453,7 +1507,8 @@ mod tests {
                     .unwrap();
                 let expected = expected_path(format, *authority);
                 members.retain(|candidate| candidate.path != expected);
-                let error = inspect_payload(artifact(format), format, members).unwrap_err();
+                let error = inspect_payload(ReleaseArch::X86_64, artifact(format), format, members)
+                    .unwrap_err();
                 exact(format, "PayloadClosure", member, &expected, error);
             }
         }
@@ -1469,7 +1524,8 @@ mod tests {
                 .unwrap();
             notices.bytes = b"different notices\n".to_vec();
             let member = notices.path.clone();
-            let error = inspect_payload(artifact(format), format, members).unwrap_err();
+            let error = inspect_payload(ReleaseArch::X86_64, artifact(format), format, members)
+                .unwrap_err();
             exact(format, "DivergentPayload", "notices", &member, error);
         }
     }
@@ -1493,7 +1549,8 @@ mod tests {
                     .unwrap();
                 notes.bytes = mutation.to_vec();
                 let member = notes.path.clone();
-                let error = inspect_payload(artifact(format), format, members).unwrap_err();
+                let error = inspect_payload(ReleaseArch::X86_64, artifact(format), format, members)
+                    .unwrap_err();
                 let token = std::str::from_utf8(mutation).unwrap().to_ascii_lowercase();
                 exact(
                     format,
@@ -1525,14 +1582,16 @@ mod tests {
     #[test]
     fn window_accepts_only_its_declared_runtime_surface() {
         for format in [Format::Tar, Format::Deb, Format::Rpm] {
+            let mut allowed = WINDOW_ALLOWED_NEEDED.to_vec();
+            allowed.push(ReleaseArch::X86_64.interpreter_soname());
             let elf = crate::elf64::linkage_elf64_for_test(
-                EXPECTED_INTERPRETER,
-                &WINDOW_ALLOWED_NEEDED,
+                ReleaseArch::X86_64.interpreter(),
+                &allowed,
                 None,
                 None,
                 None,
             );
-            inspect_window_elf(artifact(format), &elf).unwrap();
+            inspect_window_elf(ReleaseArch::X86_64, artifact(format), &elf).unwrap();
             for libraries in [
                 vec!["libc.so.6"],
                 vec!["libgtk-4.so.1"],
@@ -1541,13 +1600,13 @@ mod tests {
                 vec!["libgtk-4.so.1", "libc.so.6", "libwebkitgtk-6.0.so.4"],
             ] {
                 let elf = crate::elf64::linkage_elf64_for_test(
-                    EXPECTED_INTERPRETER,
+                    ReleaseArch::X86_64.interpreter(),
                     &libraries,
                     None,
                     None,
                     None,
                 );
-                assert!(inspect_window_elf(artifact(format), &elf).is_err());
+                assert!(inspect_window_elf(ReleaseArch::X86_64, artifact(format), &elf).is_err());
             }
         }
     }
@@ -1556,13 +1615,14 @@ mod tests {
     fn window_rejects_unexpected_dynamic_libraries() {
         for format in [Format::Tar, Format::Deb, Format::Rpm] {
             let elf = crate::elf64::linkage_elf64_for_test(
-                EXPECTED_INTERPRETER,
+                ReleaseArch::X86_64.interpreter(),
                 &["libgtk-4.so.1", "libc.so.6", "libextra-codec.so.1"],
                 None,
                 None,
                 None,
             );
-            let error = inspect_window_elf(artifact(format), &elf).unwrap_err();
+            let error =
+                inspect_window_elf(ReleaseArch::X86_64, artifact(format), &elf).unwrap_err();
             assert!(error.to_string().contains("class=UnexpectedImport"));
             assert!(
                 error
@@ -1575,7 +1635,7 @@ mod tests {
     #[test]
     fn malformed_and_unexpected_elf_diagnostics_name_every_artifact() {
         for format in [Format::Tar, Format::Deb, Format::Rpm] {
-            let error = inspect_elf(artifact(format), b"not ELF").unwrap_err();
+            let error = inspect_elf(ReleaseArch::X86_64, artifact(format), b"not ELF").unwrap_err();
             assert!(error.to_string().starts_with(&format!(
                 "package audit: artifact={} class=MalformedElf token=",
                 artifact(format).file_name().unwrap().to_str().unwrap()
@@ -1596,14 +1656,14 @@ mod tests {
                     None,
                 ),
                 crate::elf64::linkage_elf64_for_test(
-                    EXPECTED_INTERPRETER,
+                    ReleaseArch::X86_64.interpreter(),
                     &expected[..expected.len() - 1],
                     None,
                     None,
                     None,
                 ),
                 crate::elf64::linkage_elf64_for_test(
-                    EXPECTED_INTERPRETER,
+                    ReleaseArch::X86_64.interpreter(),
                     &[
                         "libgstreamer-1.0.so.0",
                         "libgobject-2.0.so.0",
@@ -1620,28 +1680,28 @@ mod tests {
                     None,
                 ),
                 crate::elf64::linkage_elf64_for_test(
-                    EXPECTED_INTERPRETER,
+                    ReleaseArch::X86_64.interpreter(),
                     &expected,
                     Some("solstone-linux"),
                     None,
                     None,
                 ),
                 crate::elf64::linkage_elf64_for_test(
-                    EXPECTED_INTERPRETER,
+                    ReleaseArch::X86_64.interpreter(),
                     &expected,
                     None,
                     Some("/tmp"),
                     None,
                 ),
                 crate::elf64::linkage_elf64_for_test(
-                    EXPECTED_INTERPRETER,
+                    ReleaseArch::X86_64.interpreter(),
                     &expected,
                     None,
                     None,
                     Some("/tmp"),
                 ),
             ] {
-                let error = inspect_elf(artifact(format), &elf).unwrap_err();
+                let error = inspect_elf(ReleaseArch::X86_64, artifact(format), &elf).unwrap_err();
                 assert!(error.to_string().starts_with(&format!(
                     "package audit: artifact={} class=UnexpectedImport token=",
                     artifact(format).file_name().unwrap().to_str().unwrap()

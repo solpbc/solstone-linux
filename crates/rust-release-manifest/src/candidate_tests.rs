@@ -146,29 +146,38 @@ fn normalize_fixture_release_policy(path: &Path) {
             section = line;
         }
         let line = if line.starts_with("install_command = ") {
-            let normalized = match section {
-                "[debian-amd64]" => {
-                    "install_command = [\"dpkg\", \"--install\", \"/input/solstone-linux_1.0.0-1_amd64.deb\"]"
+            let spec = section
+                .trim_matches(['[', ']'])
+                .split_once('.')
+                .and_then(|(_, id)| proof_spec(id).ok());
+            let normalized = match spec {
+                Some(spec) => {
+                    let artifact = artifact_name(spec.artifact_kind, "1.0.0", spec.arch).unwrap();
+                    match spec.artifact_kind {
+                        "deb" => format!(
+                            "install_command = [\"dpkg\", \"--install\", \"/input/{artifact}\"]"
+                        ),
+                        "rpm" => format!(
+                            "install_command = [\"rpm\", \"--install\", \"/input/{artifact}\"]"
+                        ),
+                        _ => format!(
+                            "install_command = [\"/input/install.sh\", \"--prefix\", \"/proof-root\", \"/input/{artifact}\"]"
+                        ),
+                    }
                 }
-                "[rpm-x86_64]" => {
-                    "install_command = [\"rpm\", \"--install\", \"/input/solstone-linux-1.0.0-1.x86_64.rpm\"]"
-                }
-                "[tar-x86_64]" => {
-                    "install_command = [\"/input/install.sh\", \"--prefix\", \"/proof-root\", \"/input/solstone-linux-1.0.0-linux-x86_64.tar.gz\"]"
-                }
-                _ => line,
+                None => line.to_owned(),
             };
             if normalized != line {
                 replaced += 1;
             }
             normalized
         } else {
-            line
+            line.to_owned()
         };
-        normalized.push_str(line);
+        normalized.push_str(&line);
         normalized.push('\n');
     }
-    assert_eq!(replaced, 3, "fixture release proof path authorities");
+    assert_eq!(replaced, 6, "fixture release proof path authorities");
     fs::write(path, normalized).unwrap();
 }
 
@@ -434,7 +443,7 @@ fn lane_rejects_carried_source_that_disagrees_with_exported_context() {
             source_archive_sha256: &context.archive_sha256,
             expected_cargo_lock_sha256: &context.cargo_lock_sha256,
             version: "1.0.0",
-            target: TARGET_TRIPLE,
+            target: ReleaseArch::X86_64.triple(),
             profile: "release",
             features: Vec::new(),
             image_digest: &format!("sha256:{}", "f".repeat(64)),
@@ -662,38 +671,201 @@ fn immutable_context_uses_committed_archive() {
     assert!(!destination.path().join("UNTRACKED_CANARY").exists());
 }
 
+/// Rewrite one `key = value` line inside one policy table, or with `None`
+/// remove it; panics unless exactly one line matched.
+pub(super) fn edit_policy_line(text: &str, table: &str, key: &str, line: Option<&str>) -> String {
+    let mut section = String::new();
+    let mut edited = 0;
+    let mut output = String::new();
+    for current in text.lines() {
+        if current.starts_with('[') {
+            section = current.trim_matches(['[', ']']).to_owned();
+        }
+        if section == table && current.starts_with(&format!("{key} = ")) {
+            edited += 1;
+            if let Some(line) = line {
+                output.push_str(line);
+                output.push('\n');
+            }
+            continue;
+        }
+        output.push_str(current);
+        output.push('\n');
+    }
+    assert_eq!(edited, 1, "policy line {table}.{key}");
+    output
+}
+
+/// Copy the pinned x86_64 roles and proof observations into the aarch64
+/// tables, as an operator would after observing them on a native host.
+pub(super) fn pin_aarch64_policy(text: &str) -> String {
+    let mut text = text.to_owned();
+    for key in [
+        "build_ubuntu",
+        "build_fedora",
+        "proof_debian",
+        "proof_rpm",
+        "proof_tar",
+    ] {
+        let value = policy_line(&text, "x86_64", key);
+        text = edit_policy_line(&text, "aarch64", key, Some(&value));
+    }
+    for (x86, arm) in [
+        ("x86_64.debian-amd64", "aarch64.debian-arm64"),
+        ("x86_64.rpm-x86_64", "aarch64.rpm-aarch64"),
+        ("x86_64.tar-x86_64", "aarch64.tar-aarch64"),
+    ] {
+        for key in ["image_digest", "os_release", "package_manager_version"] {
+            let value = policy_line(&text, x86, key);
+            text = edit_policy_line(&text, arm, key, Some(&value));
+        }
+    }
+    text
+}
+
+fn policy_line(text: &str, table: &str, key: &str) -> String {
+    let mut section = "";
+    text.lines()
+        .find(|line| {
+            if line.starts_with('[') {
+                section = line.trim_matches(['[', ']']);
+            }
+            section == table && line.starts_with(&format!("{key} = "))
+        })
+        .unwrap()
+        .to_owned()
+}
+
 #[test]
 fn release_image_policy_is_digest_only_strict_and_immutable() {
     let repo = fixture();
     let destination = tempfile::tempdir().unwrap();
     let context = export_immutable_context(&repo.root, destination.path()).unwrap();
-    let expected = ReleaseImages::from_context(&context).unwrap();
+    let expected = ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap();
+    assert_eq!(expected.arch, ReleaseArch::X86_64);
     fs::write(
         repo.root.path().join("packaging/release-policy.toml"),
         "build_ubuntu = \"ubuntu:latest\"\n",
     )
     .unwrap();
-    assert_eq!(ReleaseImages::from_context(&context).unwrap(), expected);
+    assert_eq!(
+        ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap(),
+        expected
+    );
 
     let policy = context.path.join("packaging/release-policy.toml");
     let valid = fs::read(&policy).unwrap();
-    for invalid in [
-        "",
-        "build_ubuntu = \"ubuntu:22.04\"\nbuild_fedora = \"fedora:42\"\nproof_debian = \"ubuntu:22.04\"\nproof_rpm = \"fedora:42\"\nproof_tar = \"ubuntu:22.04\"\n",
-        "build_ubuntu = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
-        "build_ubuntu = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nbuild_fedora = \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nproof_debian = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nproof_rpm = \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nproof_tar = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nunknown = \"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"\n",
-        "build_ubuntu = \"--image\"\nbuild_fedora = \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nproof_debian = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\nproof_rpm = \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nproof_tar = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
-    ] {
-        fs::write(&policy, invalid).unwrap();
-        assert!(ReleaseImages::from_context(&context).is_err());
-    }
-    let obsolete_root = String::from_utf8(valid.clone()).unwrap().replace(
+    let text = String::from_utf8(valid.clone()).unwrap();
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    let mut invalid = vec![
+        String::new(),
+        // The pre-architecture flat layout is no longer an exact policy.
+        format!(
+            "build_ubuntu = \"{digest_a}\"\nbuild_fedora = \"{digest_a}\"\nproof_debian = \"{digest_a}\"\nproof_rpm = \"{digest_a}\"\nproof_tar = \"{digest_a}\"\n"
+        ),
+        edit_policy_line(
+            &text,
+            "x86_64",
+            "build_ubuntu",
+            Some("build_ubuntu = \"ubuntu:22.04\""),
+        ),
+        edit_policy_line(
+            &text,
+            "x86_64",
+            "build_ubuntu",
+            Some("build_ubuntu = \"--image\""),
+        ),
+        edit_policy_line(&text, "x86_64", "build_fedora", None),
+        edit_policy_line(
+            &text,
+            "x86_64",
+            "proof_tar",
+            Some(&format!(
+                "{}\nunknown = \"{digest_a}\"",
+                policy_line(&text, "x86_64", "proof_tar")
+            )),
+        ),
+        // Each architecture carries exactly its own three proof tables.
+        text.replace("[x86_64.tar-x86_64]", "[x86_64.tar-aarch64]"),
+        text.replace("[aarch64.rpm-aarch64]", "[aarch64.rpm-x86_64]"),
+        format!("{text}\n[riscv64]\nbuild_ubuntu = \"{digest_a}\"\n"),
+        text.split("[aarch64]").next().unwrap().to_owned(),
+    ];
+    invalid.push(text.replace(
         "\"dpkg\", \"--install\"",
         "\"dpkg\", \"--root=/proof-root\", \"--install\"",
-    );
-    fs::write(&policy, obsolete_root).unwrap();
-    assert!(ReleaseImages::from_context(&context).is_err());
+    ));
+    for invalid in invalid {
+        fs::write(&policy, invalid).unwrap();
+        assert!(ReleaseImages::from_context(&context, ReleaseArch::X86_64).is_err());
+    }
     fs::write(&policy, valid).unwrap();
+}
+
+#[test]
+fn unpinned_architecture_policy_is_refused_by_name() {
+    let repo = fixture();
+    let destination = tempfile::tempdir().unwrap();
+    let context = export_immutable_context(&repo.root, destination.path()).unwrap();
+    let policy = context.path.join("packaging/release-policy.toml");
+    let text = fs::read_to_string(&policy).unwrap();
+
+    // The committed aarch64 tables are placeholders until observed natively.
+    let error = ReleaseImages::from_context(&context, ReleaseArch::Aarch64).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("release policy aarch64 unpinned: "),
+        "{error}"
+    );
+    ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap();
+
+    // One remaining placeholder anywhere in the selected tables still refuses.
+    let pinned = pin_aarch64_policy(&text);
+    for (table, key) in [
+        ("aarch64", "proof_rpm"),
+        ("aarch64.debian-arm64", "os_release"),
+        ("aarch64.tar-aarch64", "image_digest"),
+    ] {
+        fs::write(
+            &policy,
+            edit_policy_line(&pinned, table, key, Some(&format!("{key} = \"unpinned\""))),
+        )
+        .unwrap();
+        let error = ReleaseImages::from_context(&context, ReleaseArch::Aarch64).unwrap_err();
+        assert!(error.to_string().contains("aarch64 unpinned"), "{error}");
+    }
+    fs::write(
+        &policy,
+        edit_policy_line(
+            &text,
+            "x86_64",
+            "build_ubuntu",
+            Some("build_ubuntu = \"unpinned\""),
+        ),
+    )
+    .unwrap();
+    let error = ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("release policy x86_64 unpinned: "),
+        "{error}"
+    );
+
+    // Once pinned, aarch64 selects its own roles and arm64 proof IDs.
+    fs::write(&policy, &pinned).unwrap();
+    let selected = ReleaseImages::from_context(&context, ReleaseArch::Aarch64).unwrap();
+    assert_eq!(selected.arch, ReleaseArch::Aarch64);
+    assert_eq!(
+        selected.proof_policies().map(|(id, _, _)| id),
+        ["debian-arm64", "rpm-aarch64", "tar-aarch64"]
+    );
+    assert_eq!(
+        selected.debian.install_command.last().unwrap(),
+        "/input/solstone-linux_1.0.0-1_arm64.deb"
+    );
+    assert!(selected.proof_policy("debian-amd64").is_err());
 }
 
 #[test]
@@ -701,13 +873,22 @@ fn typed_release_authorities_match_parallel_serialized_contracts() {
     let repo = fixture();
     let destination = tempfile::tempdir().unwrap();
     let context = export_immutable_context(&repo.root, destination.path()).unwrap();
-    let policy = ReleaseImages::from_context(&context).unwrap();
+    let policy = ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap();
     assert_eq!(
         policy.proof_policies().map(|(id, _, image)| (id, image)),
         [
-            (PROOF_SPECS[0].id, policy.proof_debian.as_str()),
-            (PROOF_SPECS[1].id, policy.proof_rpm.as_str()),
-            (PROOF_SPECS[2].id, policy.proof_tar.as_str()),
+            (
+                ReleaseArch::X86_64.proof_specs()[0].id,
+                policy.proof_debian.as_str()
+            ),
+            (
+                ReleaseArch::X86_64.proof_specs()[1].id,
+                policy.proof_rpm.as_str()
+            ),
+            (
+                ReleaseArch::X86_64.proof_specs()[2].id,
+                policy.proof_tar.as_str()
+            ),
         ]
     );
     let identity = |byte: char| ImageIdentity {
@@ -715,6 +896,7 @@ fn typed_release_authorities_match_parallel_serialized_contracts() {
         digest: format!("sha256:{}", byte.to_string().repeat(64)),
     };
     let resolved = ResolvedImages {
+        arch: ReleaseArch::X86_64,
         build_ubuntu: identity('a'),
         build_fedora: identity('b'),
         proof_debian: identity('c'),
@@ -726,18 +908,28 @@ fn typed_release_authorities_match_parallel_serialized_contracts() {
             .proof_images()
             .map(|(id, image)| (id, image.digest.as_str())),
         [
-            (PROOF_SPECS[0].id, resolved.proof_debian.digest.as_str()),
-            (PROOF_SPECS[1].id, resolved.proof_rpm.digest.as_str()),
-            (PROOF_SPECS[2].id, resolved.proof_tar.digest.as_str()),
+            (
+                ReleaseArch::X86_64.proof_specs()[0].id,
+                resolved.proof_debian.digest.as_str()
+            ),
+            (
+                ReleaseArch::X86_64.proof_specs()[1].id,
+                resolved.proof_rpm.digest.as_str()
+            ),
+            (
+                ReleaseArch::X86_64.proof_specs()[2].id,
+                resolved.proof_tar.digest.as_str()
+            ),
         ]
     );
 
-    for spec in PROOF_SPECS {
-        let name = artifact_name(spec.artifact_kind, "1.0.0").unwrap();
+    for spec in ALL_PROOF_SPECS {
+        let name = artifact_name(spec.artifact_kind, "1.0.0", spec.arch).unwrap();
         assert_eq!(
             artifact_kind(&name, Some("1.0.0")).unwrap(),
             spec.artifact_kind
         );
+        assert_eq!(artifact_arch(&name).unwrap(), spec.arch);
     }
 
     let tool_keys = crate::tests::tools().into_keys().collect::<BTreeSet<_>>();
@@ -770,14 +962,15 @@ fn release_image_resolution_rejects_absent_and_mismatched_local_ids() {
         executable_mode: 0o755,
     };
     let images = ReleaseImages {
+        arch: ReleaseArch::X86_64,
         build_ubuntu: format!("sha256:{}", "a".repeat(64)),
         build_fedora: format!("sha256:{}", "b".repeat(64)),
         proof_debian: format!("sha256:{}", "a".repeat(64)),
         proof_rpm: format!("sha256:{}", "b".repeat(64)),
         proof_tar: format!("sha256:{}", "a".repeat(64)),
-        debian_amd64: proof_policy(format!("sha256:{}", "a".repeat(64))),
-        rpm_x86_64: proof_policy(format!("sha256:{}", "b".repeat(64))),
-        tar_x86_64: proof_policy(format!("sha256:{}", "a".repeat(64))),
+        debian: proof_policy(format!("sha256:{}", "a".repeat(64))),
+        rpm: proof_policy(format!("sha256:{}", "b".repeat(64))),
+        tar: proof_policy(format!("sha256:{}", "a".repeat(64))),
     };
     let mismatch = format!("#!/bin/sh\nprintf '%s' '{}'\n", image_json('c'));
     let (_bin, processes) = process_bin("#!/bin/sh\nexit 97\n", Some(&mismatch));
@@ -1435,20 +1628,40 @@ fn image_inspection_and_recheck_are_immutable_and_local() {
         &processes,
         ContainerEngine::Podman,
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ReleaseArch::X86_64,
     )
     .unwrap();
     let fedora = inspect_image(
         &processes,
         ContainerEngine::Podman,
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ReleaseArch::X86_64,
     )
     .unwrap();
+    // An amd64 image is never accepted for an aarch64 candidate.
+    let error = inspect_image(
+        &processes,
+        ContainerEngine::Podman,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ReleaseArch::Aarch64,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "image platform mismatch: expected linux/arm64, actual linux/amd64"
+    );
     assert_eq!(ubuntu.digest, format!("sha256:{}", "a".repeat(64)));
     assert_eq!(
         observe_container_engine(&processes, ContainerEngine::Podman).unwrap(),
         "podman version 5.8.3"
     );
-    recheck_images(&processes, ContainerEngine::Podman, [&ubuntu, &fedora]).unwrap();
+    recheck_images(
+        &processes,
+        ContainerEngine::Podman,
+        ReleaseArch::X86_64,
+        [&ubuntu, &fedora],
+    )
+    .unwrap();
 
     let changed = format!("#!/bin/sh\nprintf '%s' '{}'\n", image_json('c'));
     let (_bin, changed_processes) = process_bin("#!/bin/sh\nexit 97\n", Some(&changed));
@@ -1456,6 +1669,7 @@ fn image_inspection_and_recheck_are_immutable_and_local() {
         recheck_images(
             &changed_processes,
             ContainerEngine::Podman,
+            ReleaseArch::X86_64,
             [&ubuntu, &fedora]
         )
         .is_err()
@@ -1465,7 +1679,8 @@ fn image_inspection_and_recheck_are_immutable_and_local() {
         inspect_image(
             &missing,
             ContainerEngine::Podman,
-            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ReleaseArch::X86_64,
         )
         .is_err()
     );
@@ -1494,7 +1709,7 @@ pub(super) fn lane_fixture(
         source_archive_sha256: context.archive_sha256.clone(),
         cargo_lock_sha256: context.cargo_lock_sha256.clone(),
         version: version.into(),
-        target: TARGET_TRIPLE.into(),
+        target: ReleaseArch::X86_64.triple().into(),
         profile: "release".into(),
         features: vec![],
         rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),
@@ -1562,10 +1777,11 @@ fn finalize_candidate_rolls_back_post_promotion_image_recheck_failure() {
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     stage_proof_runner(&staging);
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
-    let policy = ReleaseImages::from_root(&context.path).unwrap();
+    let policy = ReleaseImages::from_root(&context.path, ReleaseArch::X86_64).unwrap();
     let ubuntu = proof_image_identity(&policy.build_ubuntu);
     let fedora = proof_image_identity(&policy.build_fedora);
     let images = ResolvedImages {
+        arch: ReleaseArch::X86_64,
         build_ubuntu: ubuntu.clone(),
         build_fedora: fedora.clone(),
         proof_debian: proof_image_identity(&policy.proof_debian),
@@ -1591,6 +1807,7 @@ fn finalize_candidate_rolls_back_post_promotion_image_recheck_failure() {
     let canary = tempfile::NamedTempFile::new().unwrap();
     fs::write(canary.path(), b"outside allowlist").unwrap();
     let error = match finalize_candidate(FinalizeInput {
+        arch: ReleaseArch::X86_64,
         root: &repo.root,
         staging: &staging,
         context: &context,
@@ -1624,8 +1841,9 @@ fn finalize_candidate_rolls_back_post_promotion_ledger_write_failure() {
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     stage_proof_runner(&staging);
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
-    let policy = ReleaseImages::from_context(&context).unwrap();
+    let policy = ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap();
     let images = ResolvedImages {
+        arch: ReleaseArch::X86_64,
         build_ubuntu: proof_image_identity(&policy.build_ubuntu),
         build_fedora: proof_image_identity(&policy.build_fedora),
         proof_debian: proof_image_identity(&policy.proof_debian),
@@ -1656,6 +1874,7 @@ fn finalize_candidate_rolls_back_post_promotion_ledger_write_failure() {
     fs::create_dir(&sibling).unwrap();
     fs::write(sibling.join("canary"), b"foreign").unwrap();
     let result = finalize_candidate(FinalizeInput {
+        arch: ReleaseArch::X86_64,
         root: &repo.root,
         staging: &staging,
         context: &context,
@@ -1688,8 +1907,9 @@ fn finalize_candidate_rolls_back_promoted_classification_failure() {
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     stage_proof_runner(&staging);
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
-    let policy = ReleaseImages::from_context(&context).unwrap();
+    let policy = ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap();
     let images = ResolvedImages {
+        arch: ReleaseArch::X86_64,
         build_ubuntu: proof_image_identity(&policy.build_ubuntu),
         build_fedora: proof_image_identity(&policy.build_fedora),
         proof_debian: proof_image_identity(&policy.proof_debian),
@@ -1727,6 +1947,7 @@ fn finalize_candidate_rolls_back_promoted_classification_failure() {
     fs::create_dir(&sibling).unwrap();
     fs::write(sibling.join("canary"), b"foreign").unwrap();
     let result = finalize_candidate(FinalizeInput {
+        arch: ReleaseArch::X86_64,
         root: &repo.root,
         staging: &staging,
         context: &context,
@@ -1767,8 +1988,9 @@ fn production_finalizer_is_deterministic_for_fixed_lane_bytes_and_evidence() {
     let second_context = export_immutable_context(&second.root, &second_staging.context).unwrap();
     assert_eq!(first_context.commit, second_context.commit);
     assert_eq!(first_context.archive_sha256, second_context.archive_sha256);
-    let policy = ReleaseImages::from_context(&first_context).unwrap();
+    let policy = ReleaseImages::from_context(&first_context, ReleaseArch::X86_64).unwrap();
     let images = ResolvedImages {
+        arch: ReleaseArch::X86_64,
         build_ubuntu: proof_image_identity(&policy.build_ubuntu),
         build_fedora: proof_image_identity(&policy.build_fedora),
         proof_debian: proof_image_identity(&policy.proof_debian),
@@ -1874,6 +2096,7 @@ esac
         ))
         .unwrap();
         finalize_candidate(FinalizeInput {
+            arch: ReleaseArch::X86_64,
             root: &repo.root,
             staging,
             context,
@@ -1910,8 +2133,18 @@ esac
         fs::read(second_final.payload_root.join(CHECKSUM_NAME)).unwrap()
     );
     assert_eq!(
-        fs::read(first_final.payload_root.join(manifest_name("1.0.0"))).unwrap(),
-        fs::read(second_final.payload_root.join(manifest_name("1.0.0"))).unwrap()
+        fs::read(
+            first_final
+                .payload_root
+                .join(ReleaseArch::X86_64.manifest_name("1.0.0"))
+        )
+        .unwrap(),
+        fs::read(
+            second_final
+                .payload_root
+                .join(ReleaseArch::X86_64.manifest_name("1.0.0"))
+        )
+        .unwrap()
     );
 }
 
@@ -1945,7 +2178,7 @@ fn lane_handoff(
         source_archive_sha256: context.archive_sha256.clone(),
         cargo_lock_sha256: context.cargo_lock_sha256.clone(),
         version: version.into(),
-        target: TARGET_TRIPLE.into(),
+        target: ReleaseArch::X86_64.triple().into(),
         profile: "release".into(),
         features: Vec::new(),
         rustc_verbose: rustc_verbose.trim_end().into(),
@@ -1982,6 +2215,7 @@ fn lane_request<'a>(
     fedora: &'a ImageIdentity,
 ) -> LaneRequest<'a> {
     LaneRequest {
+        arch: ReleaseArch::X86_64,
         repo: &repo.root,
         context,
         lane,

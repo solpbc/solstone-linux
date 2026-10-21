@@ -148,27 +148,48 @@ fn package_metadata_and_resolved_licenses() {
 }
 
 // the committed proof policy names artifacts from the current workspace
-// version so an ordinary CI run catches a stale policy before candidate build.
+// version, for every architecture, so an ordinary CI run catches a stale
+// policy before candidate build.
 #[test]
 fn release_proof_install_commands_track_workspace_version() {
     let policy = read_toml(&workspace_root().join("packaging/release-policy.toml"));
     let expected = [
         (
+            "x86_64",
             "debian-amd64",
             format!("/input/solstone-linux_{VERSION}-1_amd64.deb"),
         ),
         (
+            "x86_64",
             "rpm-x86_64",
             format!("/input/solstone-linux-{VERSION}-1.x86_64.rpm"),
         ),
         (
+            "x86_64",
             "tar-x86_64",
             format!("/input/solstone-linux-{VERSION}-linux-x86_64.tar.gz"),
         ),
+        (
+            "aarch64",
+            "debian-arm64",
+            format!("/input/solstone-linux_{VERSION}-1_arm64.deb"),
+        ),
+        (
+            "aarch64",
+            "rpm-aarch64",
+            format!("/input/solstone-linux-{VERSION}-1.aarch64.rpm"),
+        ),
+        (
+            "aarch64",
+            "tar-aarch64",
+            format!("/input/solstone-linux-{VERSION}-linux-aarch64.tar.gz"),
+        ),
     ];
 
-    for (platform, artifact) in expected {
-        let command = policy[platform]["install_command"].as_array().unwrap();
+    for (arch, platform, artifact) in expected {
+        let command = policy[arch][platform]["install_command"]
+            .as_array()
+            .unwrap();
         assert_eq!(
             command.last().and_then(Value::as_str),
             Some(artifact.as_str())

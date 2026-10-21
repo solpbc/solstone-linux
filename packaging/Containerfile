@@ -8,6 +8,8 @@ FROM ${UBUNTU_TOOL_BASE} AS baseline
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_VERSION=1.97.1
 ARG UBUNTU_TOOL_BASE
+# The candidate's native target; artifact names follow from it.
+ARG RELEASE_TARGET
 RUN case "$UBUNTU_TOOL_BASE" in \
         sha256:*) suffix="${UBUNTU_TOOL_BASE#sha256:}" ;; \
         *@sha256:*) suffix="${UBUNTU_TOOL_BASE##*@sha256:}" ;; \
@@ -23,11 +25,15 @@ WORKDIR /src
 # deliberately panics if those canonical source files cannot be read.
 COPY . .
 
-RUN rustc --version --verbose > /tmp/rustc-verbose \
+RUN case "$RELEASE_TARGET" in \
+        x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu) ;; \
+        *) echo "error: release target mismatch: expected x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu, actual '${RELEASE_TARGET}'" >&2; exit 1 ;; \
+    esac \
+    && rustc --version --verbose > /tmp/rustc-verbose \
     && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
-    && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
+    && grep -Fx "host: ${RELEASE_TARGET}" /tmp/rustc-verbose \
     && grep -Eq "^rustc ${RUST_VERSION} \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)$" /tmp/rustc-verbose \
-    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} ${RELEASE_TARGET} verbose banner, actual different" >&2; \
          echo "repair: rustup toolchain install ${RUST_VERSION} --profile minimal" >&2; exit 1; }
 
 # Cargo currently serializes package name immediately before version. Keep the
@@ -38,7 +44,8 @@ RUN cargo build --locked --release -p solstone-linux -p solstone-linux-window -p
     && { test -n "$VERSION" \
         || { echo "error: package version mismatch: expected a nonempty solstone-linux version, actual empty" >&2; \
              echo "repair: cargo metadata --locked --format-version 1 --no-deps" >&2; exit 1; }; } \
-    && ROOT="solstone-linux-${VERSION}-linux-x86_64" \
+    && ARCH="${RELEASE_TARGET%%-*}" \
+    && ROOT="solstone-linux-${VERSION}-linux-${ARCH}" \
     && install -D -m 0755 target/release/solstone-linux "/release-tree/${ROOT}/bin/solstone-linux" \
     && install -D -m 0755 target/release/solstone-linux-window "/release-tree/${ROOT}/bin/solstone-linux-window" \
     && install -D -m 0644 packaging/org.solpbc.solstone.Window.desktop "/release-tree/${ROOT}/share/applications/org.solpbc.solstone.Window.desktop" \
@@ -64,6 +71,7 @@ ARG SOURCE_ARCHIVE_SHA256
 ARG CARGO_LOCK_SHA256
 ARG RELEASE_VERSION
 ARG UBUNTU_TOOL_BASE
+ARG RELEASE_TARGET
 RUN actual="$(cargo deb --version)" \
     && { test "${actual}" = "cargo-deb ${CARGO_DEB_VERSION}" \
         || { echo "error: cargo-deb mismatch: expected 'cargo-deb ${CARGO_DEB_VERSION}', actual '${actual:-unavailable}'" >&2; \
@@ -71,7 +79,11 @@ RUN actual="$(cargo deb --version)" \
     && cargo deb --locked --no-build -p solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && test "$VERSION" = "$RELEASE_VERSION" \
-    && DEB="/src/target/debian/solstone-linux_${VERSION}-1_amd64.deb" \
+    && ARCH="${RELEASE_TARGET%%-*}" \
+    && DEB_ARCH="$(dpkg --print-architecture)" \
+    && { test "${ARCH}:${DEB_ARCH}" = "x86_64:amd64" || test "${ARCH}:${DEB_ARCH}" = "aarch64:arm64" \
+        || { echo "error: Debian architecture mismatch: expected the ${RELEASE_TARGET} package architecture, actual ${DEB_ARCH}" >&2; exit 1; }; } \
+    && DEB="/src/target/debian/solstone-linux_${VERSION}-1_${DEB_ARCH}.deb" \
     && { test -f "$DEB" \
         || { echo "error: Debian artifact mismatch: expected ${DEB}, actual missing" >&2; \
              echo "repair: cargo deb --locked --no-build -p solstone-linux" >&2; exit 1; }; } \
@@ -89,8 +101,8 @@ RUN actual="$(cargo deb --version)" \
     && dpkg-deb --root-owner-group -Zxz -z9 --build "$DEB_ROOT" "${DEB}.sealed" >/dev/null \
     && mv "${DEB}.sealed" "$DEB" \
     && cd /src \
-    && DEB_OUT="/release/solstone-linux_${VERSION}-1_amd64.deb" \
-    && TAR_OUT="/release/solstone-linux-${VERSION}-linux-x86_64.tar.gz" \
+    && DEB_OUT="/release/solstone-linux_${VERSION}-1_${DEB_ARCH}.deb" \
+    && TAR_OUT="/release/solstone-linux-${VERSION}-linux-${ARCH}.tar.gz" \
     && cp "$DEB" "$DEB_OUT" \
     && target/release/rust-release-manifest lane-handoff \
         --lane deb \
@@ -99,7 +111,7 @@ RUN actual="$(cargo deb --version)" \
         --source-archive-sha256 "$SOURCE_ARCHIVE_SHA256" \
         --cargo-lock-sha256 "$CARGO_LOCK_SHA256" \
         --version "$VERSION" \
-        --target x86_64-unknown-linux-gnu \
+        --target "$RELEASE_TARGET" \
         --profile release \
         --image-digest "$UBUNTU_TOOL_BASE" \
         --baseline-executable target/release/solstone-linux \
@@ -116,6 +128,7 @@ FROM ${FEDORA_TOOL_BASE} AS rpm-build
 ARG RUST_VERSION=1.97.1
 ARG CARGO_GENERATE_RPM_VERSION=0.21.0
 ARG FEDORA_TOOL_BASE
+ARG RELEASE_TARGET
 RUN case "$FEDORA_TOOL_BASE" in \
         sha256:*) suffix="${FEDORA_TOOL_BASE#sha256:}" ;; \
         *@sha256:*) suffix="${FEDORA_TOOL_BASE##*@sha256:}" ;; \
@@ -131,9 +144,9 @@ COPY --from=baseline /release /release
 
 RUN rustc --version --verbose > /tmp/rustc-verbose \
     && grep -Fx "release: ${RUST_VERSION}" /tmp/rustc-verbose \
-    && grep -Fx "host: x86_64-unknown-linux-gnu" /tmp/rustc-verbose \
+    && grep -Fx "host: ${RELEASE_TARGET}" /tmp/rustc-verbose \
     && grep -Eq "^rustc ${RUST_VERSION} \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)$" /tmp/rustc-verbose \
-    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} x86_64-unknown-linux-gnu verbose banner, actual different" >&2; \
+    || { echo "error: Rust compiler mismatch: expected ${RUST_VERSION} ${RELEASE_TARGET} verbose banner, actual different" >&2; \
          echo "repair: rustup toolchain install ${RUST_VERSION} --profile minimal" >&2; exit 1; }
 
 ARG INVOCATION_ID
@@ -148,12 +161,13 @@ RUN actual="$(CARGO_NET_OFFLINE=true cargo-generate-rpm --version)" \
     && CARGO_NET_OFFLINE=true cargo-generate-rpm -p crates/solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && test "$VERSION" = "$RELEASE_VERSION" \
-    && RPM="target/generate-rpm/solstone-linux-${VERSION}-1.x86_64.rpm" \
+    && ARCH="${RELEASE_TARGET%%-*}" \
+    && RPM="target/generate-rpm/solstone-linux-${VERSION}-1.${ARCH}.rpm" \
     && { test -f "$RPM" \
         || { echo "error: RPM artifact mismatch: expected ${RPM}, actual missing" >&2; \
              echo "repair: CARGO_NET_OFFLINE=true cargo-generate-rpm -p crates/solstone-linux" >&2; exit 1; }; } \
-    && RPM_OUT="/release/solstone-linux-${VERSION}-1.x86_64.rpm" \
-    && TAR_OUT="/release/solstone-linux-${VERSION}-linux-x86_64.tar.gz" \
+    && RPM_OUT="/release/solstone-linux-${VERSION}-1.${ARCH}.rpm" \
+    && TAR_OUT="/release/solstone-linux-${VERSION}-linux-${ARCH}.tar.gz" \
     && cp "$RPM" "$RPM_OUT" \
     && target/release/rust-release-manifest lane-handoff \
         --lane rpm \
@@ -162,7 +176,7 @@ RUN actual="$(CARGO_NET_OFFLINE=true cargo-generate-rpm --version)" \
         --source-archive-sha256 "$SOURCE_ARCHIVE_SHA256" \
         --cargo-lock-sha256 "$CARGO_LOCK_SHA256" \
         --version "$VERSION" \
-        --target x86_64-unknown-linux-gnu \
+        --target "$RELEASE_TARGET" \
         --profile release \
         --image-digest "$FEDORA_TOOL_BASE" \
         --baseline-executable target/release/solstone-linux \

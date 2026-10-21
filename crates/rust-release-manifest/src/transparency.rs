@@ -1824,7 +1824,17 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
             "restore the rail ledger for this candidate",
         ));
     }
-    let policies = ReleaseImages::from_root(root.path())?;
+    let arch = manifest.arch()?;
+    if rail_ledger.arch()? != arch {
+        return Err(transparency_error(
+            "terminal",
+            "rail ledger candidate binding",
+            arch.triple(),
+            rail_ledger.target.triple.clone(),
+            "restore the rail ledger for this candidate",
+        ));
+    }
+    let policies = ReleaseImages::from_root(root.path(), arch)?;
     let staging = root
         .path()
         .join(".transparency-staging")
@@ -1832,7 +1842,7 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
         .join(&manifest.version);
     let existing_staging = staging.exists();
     let mut proofs = BTreeMap::new();
-    for spec in PROOF_SPECS {
+    for spec in arch.proof_specs() {
         let name = format!("{}.json", spec.id);
         let path = if existing_staging {
             staging.join(&name)
@@ -1843,7 +1853,7 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
             transparency_error(
                 "terminal",
                 "transparency proof inventory",
-                "debian-amd64, rpm-x86_64, and tar-x86_64",
+                arch.proof_ids().join(", "),
                 format!("{} missing", spec.id),
                 format!(
                     "retain complete evidence for version {} and retry",
@@ -1906,13 +1916,13 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
         .map_err(display_error)?;
     }
     fs::copy(
-        release_dir.join(CHECKSUM_NAME),
-        temporary.join(CHECKSUM_NAME),
+        release_dir.join(arch.checksum_name()),
+        temporary.join(arch.checksum_name()),
     )
     .map_err(display_error)?;
     fs::copy(
         &manifest_path,
-        temporary.join(manifest_name(&manifest.version)),
+        temporary.join(arch.manifest_name(&manifest.version)),
     )
     .map_err(display_error)?;
     validate_staged_candidate(root, &temporary, &manifest)?;
@@ -1929,7 +1939,8 @@ pub(crate) fn snapshot_candidate(root: &RepoRoot, release_dir: &Path) -> Result<
 }
 
 fn validate_staged_candidate(root: &RepoRoot, staging: &Path, manifest: &Manifest) -> Result<()> {
-    let manifest_file = manifest_name(&manifest.version);
+    let arch = manifest.arch()?;
+    let manifest_file = arch.manifest_name(&manifest.version);
     let staged_manifest_bytes = fs::read(staging.join(&manifest_file)).map_err(|error| {
         transparency_error(
             "terminal",
@@ -1978,7 +1989,8 @@ fn validate_staged_candidate(root: &RepoRoot, staging: &Path, manifest: &Manifes
             ));
         }
     }
-    let checksums = fs::read_to_string(staging.join(CHECKSUM_NAME)).map_err(display_error)?;
+    let checksums =
+        fs::read_to_string(staging.join(arch.checksum_name())).map_err(display_error)?;
     let expected_checksums = render_sha256sums(&manifest.artifacts)?;
     if checksums != expected_checksums {
         return Err(transparency_error(
@@ -2006,15 +2018,16 @@ pub(crate) fn candidate_transparency_inventory(
             sha256: artifact.sha256.clone(),
         })
         .collect::<Vec<_>>();
-    let checksum = fs::read(staging.join(CHECKSUM_NAME)).map_err(display_error)?;
+    let arch = manifest.arch()?;
+    let checksum = fs::read(staging.join(arch.checksum_name())).map_err(display_error)?;
     artifacts.push(TransparencyArtifact {
         bytes: checksum.len() as u64,
-        name: CHECKSUM_NAME.into(),
+        name: arch.checksum_name().into(),
         sha256: digest(&checksum),
     });
     artifacts.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
     let manifest_bytes =
-        fs::read(staging.join(manifest_name(&manifest.version))).map_err(display_error)?;
+        fs::read(staging.join(arch.manifest_name(&manifest.version))).map_err(display_error)?;
     let mut proof_inventory = proofs
         .iter()
         .map(|(name, bytes)| TransparencyNamedDigest {
@@ -2026,7 +2039,7 @@ pub(crate) fn candidate_transparency_inventory(
     Ok(CandidateTransparencyInventory {
         artifacts,
         manifests: vec![TransparencyNamedDigest {
-            name: manifest_name(&manifest.version),
+            name: arch.manifest_name(&manifest.version),
             sha256: digest(&manifest_bytes),
         }],
         proofs: proof_inventory,
@@ -2279,7 +2292,7 @@ pub(crate) fn immutable_objects(
     let mut objects = BTreeMap::new();
     objects.insert("ledger-entry.json".into(), entry.to_vec());
     objects.insert("ledger-entry.json.minisig".into(), signature.to_vec());
-    let name = manifest_name(&manifest.version);
+    let name = manifest.arch()?.manifest_name(&manifest.version);
     objects.insert(
         name.clone(),
         fs::read(staging.join(name)).map_err(display_error)?,

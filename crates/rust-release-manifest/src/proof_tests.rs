@@ -8,7 +8,11 @@ const CANDIDATE_VECTOR: &str = "27e7dd62da4e0022b755f669dd00118a57715aaf088ff7f2
 const BUNDLE_VECTOR: &str = "cd214a005b2186a7eb25e9fd756561fb9c6e47e02004047c1cd5132106580a3e";
 
 fn proof_ids() -> [&'static str; 3] {
-    [PROOF_SPECS[0].id, PROOF_SPECS[1].id, PROOF_SPECS[2].id]
+    [
+        ReleaseArch::X86_64.proof_specs()[0].id,
+        ReleaseArch::X86_64.proof_specs()[1].id,
+        ReleaseArch::X86_64.proof_specs()[2].id,
+    ]
 }
 
 #[test]
@@ -488,7 +492,7 @@ fn fixed_payload_and_ledger_serialization_are_reproducible() {
             version: env!("CARGO_PKG_VERSION").into(),
         },
         target: LedgerTarget {
-            triple: TARGET_TRIPLE.into(),
+            triple: ReleaseArch::X86_64.triple().into(),
             profile: "release".into(),
             features: Vec::new(),
         },
@@ -604,7 +608,7 @@ fn retained_fixture_from_products(
         None,
         "2026-01-01T00:00:00Z",
     );
-    let policy = ReleaseImages::from_root(repo.root.path()).unwrap();
+    let policy = ReleaseImages::from_root(repo.root.path(), ReleaseArch::X86_64).unwrap();
     let ubuntu = proof_image_identity(&policy.build_ubuntu).digest;
     let fedora = proof_image_identity(&policy.build_fedora).digest;
     let mut tools = crate::tests::tools();
@@ -640,7 +644,7 @@ fn retained_fixture_from_products(
             version: env!("CARGO_PKG_VERSION").into(),
         },
         target: LedgerTarget {
-            triple: TARGET_TRIPLE.into(),
+            triple: ReleaseArch::X86_64.triple().into(),
             profile: "release".into(),
             features: vec![],
         },
@@ -723,9 +727,10 @@ fn creation_rejects_divergence(index: usize) {
     let (_bin, processes) =
         crate::candidate_tests::process_bin(&crate::candidate_tests::cargo_deny_assertions(), None);
     let cohort = run_advisory_cohort(&context, &staging, &descriptor, &processes).unwrap();
-    let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
+    let policy = ReleaseImages::from_root(fixture.repo.root.path(), ReleaseArch::X86_64).unwrap();
     let members = fixture.ledger.package_members.clone();
     let error = construct_ledger(LedgerInput {
+        arch: ReleaseArch::X86_64,
         root: &fixture.repo.root,
         context: &context,
         version: "1.0.0",
@@ -872,7 +877,7 @@ fn lane_reconciliation_rejects_declared_baseline_not_matching_staged_tar() {
 }
 
 fn write_valid_proof(root: &RepoRoot, ledger: &CandidateLedger, ledger_bytes: &[u8], id: &str) {
-    let policy = ReleaseImages::from_root(root.path()).unwrap();
+    let policy = ReleaseImages::from_root(root.path(), ReleaseArch::X86_64).unwrap();
     let platform = policy.proof_policy(id).unwrap();
     let artifact = proof_artifact(ledger, id).unwrap();
     let member = proof_member(ledger, id).unwrap();
@@ -1424,7 +1429,8 @@ fn proof_runner_path_rejects_symlink_directory_and_non_executable_before_podman(
         }
         let tripwire = external.path().join("podman-called");
         let (_bin, processes) = proof_processes(&tripwire);
-        let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
+        let policy =
+            ReleaseImages::from_root(fixture.repo.root.path(), ReleaseArch::X86_64).unwrap();
         let image = proof_image_identity(&policy.proof_debian);
         assert!(
             crate::candidate_tests::retry_on_text_file_busy(|| {
@@ -1483,7 +1489,8 @@ printf '%s\n' '{marker}' >&2
         .unwrap();
         fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
         let processes = ProcessEnvironment::with_path(bin.path().as_os_str());
-        let policy = ReleaseImages::from_root(fixture.repo.root.path()).unwrap();
+        let policy =
+            ReleaseImages::from_root(fixture.repo.root.path(), ReleaseArch::X86_64).unwrap();
         let image = proof_image_identity(match platform {
             "debian-amd64" => &policy.proof_debian,
             "tar-x86_64" => &policy.proof_tar,
@@ -1942,7 +1949,7 @@ fn sha256_git_fixture_flows_through_context_lane_status_and_recovery() {
     let staging = StagingLayout::create(&repo.root, &lock).unwrap();
     let context = export_immutable_context(&repo.root, &staging.context).unwrap();
     assert_eq!(context.commit, repo.commit);
-    let policy = ReleaseImages::from_context(&context).unwrap();
+    let policy = ReleaseImages::from_context(&context, ReleaseArch::X86_64).unwrap();
     let ubuntu = proof_image_identity(&policy.build_ubuntu);
     let fedora = proof_image_identity(&policy.build_fedora);
     let lane = crate::candidate_tests::lane_fixture(
@@ -1956,6 +1963,7 @@ fn sha256_git_fixture_flows_through_context_lane_status_and_recovery() {
     validate_lane_evidence(
         &lane,
         &LaneRequest {
+            arch: ReleaseArch::X86_64,
             repo: &repo.root,
             context: &context,
             lane: Lane::Deb,
@@ -2001,7 +2009,7 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path, divergent: Option<
         let entry = entry.unwrap();
         fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
     }
-    let policy = ReleaseImages::from_root(root.path()).unwrap();
+    let policy = ReleaseImages::from_root(root.path(), ReleaseArch::X86_64).unwrap();
     let tar = directory.join("solstone-linux-1.0.0-linux-x86_64.tar.gz");
     let baseline = package_member_evidence(&tar, "1.0.0").unwrap();
     for (lane, image, name) in [
@@ -2019,7 +2027,7 @@ fn docker_create_templates(root: &RepoRoot, directory: &Path, divergent: Option<
             source_archive_sha256: "@ARCHIVE@".into(),
             cargo_lock_sha256: "@LOCK@".into(),
             version: "1.0.0".into(),
-            target: TARGET_TRIPLE.into(),
+            target: ReleaseArch::X86_64.triple().into(),
             profile: "release".into(),
             features: vec![],
             rustc_verbose: "rustc 1.97.1 (abcdef012 2026-06-30)\nbinary: rustc\ncommit-hash: abcdef0123456789abcdef0123456789abcdef01\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 18.1.0".into(),

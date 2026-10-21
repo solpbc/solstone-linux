@@ -24,9 +24,18 @@ CARGO_GENERATE_RPM_VERSION := 0.21.0
 # record covers the journal only; this product has no transparency adapter yet.
 # Turning it on needs that adapter, not just flipping this checked-in flag.
 TRANSPARENCY_ACTIVATED ?= 0
+# The release rail builds and proves natively for the host architecture only.
+RELEASE_ARCH ?= $(shell uname -m)
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
-UBUNTU_STOCK_BASE := sha256:bf7f4568d95723d2148bb19c688526d1404ef3302ef024bc1513ad8f533d46c8
-FEDORA_STOCK_BASE := sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56
+# Each architecture's pin is its platform image ID from the same multi-arch
+# tags: docker.io/library/ubuntu:jammy-20260901.2 and
+# registry.fedoraproject.org/fedora:42.
+UBUNTU_STOCK_BASE_x86_64 := sha256:bf7f4568d95723d2148bb19c688526d1404ef3302ef024bc1513ad8f533d46c8
+FEDORA_STOCK_BASE_x86_64 := sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56
+UBUNTU_STOCK_BASE_aarch64 := sha256:80d8dd83c66bb85511514da010a61b49af58a6cd9ce4541f5e964acdcd7aea5b
+FEDORA_STOCK_BASE_aarch64 := sha256:36c733c50e07ae9840ae6982fbbc032ecb48f2f68f4316942fef9026bf78e0d5
+UBUNTU_STOCK_BASE := $(UBUNTU_STOCK_BASE_$(RELEASE_ARCH))
+FEDORA_STOCK_BASE := $(FEDORA_STOCK_BASE_$(RELEASE_ARCH))
 SHELLCHECK_SCRIPTS := scripts/build-release.sh scripts/extract_changelog.sh scripts/install.sh scripts/publish-origin.sh scripts/publish-release.sh
 
 all: install
@@ -148,9 +157,9 @@ check-rust-release-manifest: rust-preflight
 	@echo "Rust release manifest schema: 1"
 	@echo "Rust release manifest schema SHA-256: 45e12a73062eededbe4d47b1101425eeca7be03f55dbc75ce087f477ae3a8a72"
 	@echo "Rust release candidate ledger schema: 1"
-	@echo "Rust release candidate ledger schema SHA-256: 4b387f19d8018752c6d016a4c0c74343ed80d2b64a3ff9480aa75b04fa66882d"
+	@echo "Rust release candidate ledger schema SHA-256: 258eb46b54469c0fe8d30d7ecd0e2d1d41af89fd6afc863c60154693c16da41b"
 	@echo "Rust release candidate proof schema: 1"
-	@echo "Rust release candidate proof schema SHA-256: 3009eab983eea832961220406f19c7459ed1db7fffc352af6ffaf664f9cd7dcf"
+	@echo "Rust release candidate proof schema SHA-256: 5f1242240e6b0dac176134dc8976f5ef2570453e03073af6ce3303c1a4552350"
 	@manifest_set=$(if $(filter environment%,$(origin MANIFEST)),1,$(if $(findstring command line,$(origin MANIFEST)),1,0)); \
 	release_dir_set=$(if $(filter environment%,$(origin RELEASE_DIR)),1,$(if $(findstring command line,$(origin RELEASE_DIR)),1,0)); \
 	if { [ "$$manifest_set" -eq 1 ] && [ -z "$(strip $(MANIFEST))" ]; } || { [ "$$release_dir_set" -eq 1 ] && [ -z "$(strip $(RELEASE_DIR))" ]; }; then echo "error: release manifest selector empty" >&2; exit 1; \
@@ -255,13 +264,17 @@ versions: rust-preflight check-cargo-deny
 release: release-candidate
 
 release-images:
+	@test -n "$(UBUNTU_STOCK_BASE)" && test -n "$(FEDORA_STOCK_BASE)" || { echo "error: release architecture mismatch: expected x86_64 or aarch64, actual '$(RELEASE_ARCH)'" >&2; exit 1; }
+	@test "$(RELEASE_ARCH)" = "$$(uname -m)" || { echo "error: release architecture mismatch: expected native host architecture $$(uname -m), actual requested $(RELEASE_ARCH)" >&2; echo "repair: run make release-images on a native $(RELEASE_ARCH) host" >&2; exit 1; }
 	@# Build and proof images share the same explicitly pinned stock bases.
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target ubuntu-tools --tag localhost/solstone-linux-build-ubuntu \
 		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" \
-		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_DEB_VERSION=$(CARGO_DEB_VERSION)" .
+		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_DEB_VERSION=$(CARGO_DEB_VERSION)" \
+		--build-arg "RELEASE_TARGET=$(RELEASE_ARCH)-unknown-linux-gnu" .
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target fedora-tools --tag localhost/solstone-linux-build-fedora \
 		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" \
-		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_GENERATE_RPM_VERSION=$(CARGO_GENERATE_RPM_VERSION)" .
+		--build-arg "RUST_VERSION=$(RUST_VERSION)" --build-arg "CARGO_GENERATE_RPM_VERSION=$(CARGO_GENERATE_RPM_VERSION)" \
+		--build-arg "RELEASE_TARGET=$(RELEASE_ARCH)-unknown-linux-gnu" .
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target ubuntu-proof --tag localhost/solstone-linux-proof-ubuntu \
 		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" .
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target fedora-proof --tag localhost/solstone-linux-proof-fedora \
@@ -270,7 +283,7 @@ release-images:
 release-candidate: rust-preflight
 	@test -n "$(strip $(EXPECTED_RELEASE_COMMIT))" || { echo "error: expected release commit mismatch: expected EXPECTED_RELEASE_COMMIT, actual missing" >&2; echo "repair: make release-candidate EXPECTED_RELEASE_COMMIT=<full-commit> ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }
 	@test -n "$(strip $(ADVISORY_DESCRIPTOR))" || { echo "error: advisory descriptor mismatch: expected ADVISORY_DESCRIPTOR, actual missing" >&2; echo "repair: make release-candidate EXPECTED_RELEASE_COMMIT=$(EXPECTED_RELEASE_COMMIT) ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }
-	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- candidate create --expected-release-commit "$(EXPECTED_RELEASE_COMMIT)" --advisory-descriptor "$(ADVISORY_DESCRIPTOR)"
+	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- candidate create --expected-release-commit "$(EXPECTED_RELEASE_COMMIT)" --advisory-descriptor "$(ADVISORY_DESCRIPTOR)" --arch "$(RELEASE_ARCH)"
 
 release-candidate-prove: rust-preflight
 	@test -n "$(strip $(VERSION))" || { echo "error: candidate version mismatch: expected VERSION, actual missing" >&2; echo "repair: make release-candidate-prove VERSION=<version> ADVISORY_DESCRIPTOR=<descriptor.json>" >&2; exit 1; }

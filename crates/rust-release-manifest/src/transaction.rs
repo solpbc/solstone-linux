@@ -85,6 +85,7 @@ pub struct LedgerImages {
 pub struct LedgerInput<'a> {
     pub root: &'a RepoRoot,
     pub context: &'a ImmutableContext,
+    pub arch: ReleaseArch,
     pub version: &'a str,
     pub payload_root: &'a Path,
     pub package_members: Vec<PackageMemberEvidence>,
@@ -126,7 +127,7 @@ pub fn construct_ledger(input: LedgerInput<'_>) -> Result<CandidateLedger> {
             version: env!("CARGO_PKG_VERSION").into(),
         },
         target: LedgerTarget {
-            triple: TARGET_TRIPLE.into(),
+            triple: input.arch.triple().into(),
             profile: "release".into(),
             features: Vec::new(),
         },
@@ -158,7 +159,12 @@ pub fn construct_ledger(input: LedgerInput<'_>) -> Result<CandidateLedger> {
         payload,
         package_members: members,
         baseline_executable: input.baseline_executable,
-        expected_proof_ids: PROOF_SPECS.iter().map(|spec| spec.id.to_owned()).collect(),
+        expected_proof_ids: input
+            .arch
+            .proof_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         candidate_digest: candidate,
     };
     validate_ledger(input.root, input.payload_root, &ledger)?;
@@ -241,9 +247,9 @@ pub fn validate_ledger(
             "ledger payload digest mismatch: expected promoted bytes, actual different",
         ));
     }
-    let expected_proofs = PROOF_SPECS.iter().map(|spec| spec.id).collect::<Vec<_>>();
-    if ledger.package_members.len() != PROOF_SPECS.len()
-        || ledger.expected_proof_ids != expected_proofs
+    let arch = ledger.arch()?;
+    if ledger.package_members.len() != arch.proof_specs().len()
+        || ledger.expected_proof_ids != arch.proof_ids()
     {
         return Err(Error::new(
             "ledger evidence inventory mismatch: expected three package members and three proof IDs, actual different",
@@ -256,26 +262,32 @@ pub fn validate_ledger(
             "ledger package member mismatch: expected package bytes, actual different",
         ));
     }
-    validate_shared_executable(ledger)?;
+    validate_shared_executable(ledger, arch)?;
     Ok(())
 }
 
-fn validate_shared_executable(ledger: &CandidateLedger) -> Result<()> {
+impl CandidateLedger {
+    pub fn arch(&self) -> Result<ReleaseArch> {
+        ReleaseArch::from_triple(&self.target.triple)
+    }
+}
+
+fn validate_shared_executable(ledger: &CandidateLedger, arch: ReleaseArch) -> Result<()> {
     let expected = [
         (
             "tar",
             "/bin/solstone-linux",
-            format!("solstone-linux-{}-linux-x86_64.tar.gz", ledger.version),
+            artifact_name("tar", &ledger.version, arch)?,
         ),
         (
             "deb",
             "/usr/bin/solstone-linux",
-            format!("solstone-linux_{}-1_amd64.deb", ledger.version),
+            artifact_name("deb", &ledger.version, arch)?,
         ),
         (
             "rpm",
             "/usr/bin/solstone-linux",
-            format!("solstone-linux-{}-1.x86_64.rpm", ledger.version),
+            artifact_name("rpm", &ledger.version, arch)?,
         ),
     ];
     let mut identities = Vec::new();
@@ -472,6 +484,7 @@ pub struct FinalizeInput<'a> {
     pub root: &'a RepoRoot,
     pub staging: &'a StagingLayout,
     pub context: &'a ImmutableContext,
+    pub arch: ReleaseArch,
     pub version: &'a str,
     pub deb: &'a LaneEvidence,
     pub rpm: &'a LaneEvidence,
@@ -523,6 +536,7 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
     recheck_images(
         input.processes,
         input.engine,
+        input.arch,
         [&input.images.build_ubuntu, &input.images.build_fedora],
     )?;
     recheck_advisory_cohort(input.cohort, input.processes, Utc::now())?;
@@ -563,6 +577,7 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
         let ledger = construct_ledger(LedgerInput {
             root: input.root,
             context: input.context,
+            arch: input.arch,
             version: input.version,
             payload_root: &payload_root,
             package_members: members,
@@ -629,6 +644,7 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
         recheck_images(
             input.processes,
             input.engine,
+            input.arch,
             [&input.images.build_ubuntu, &input.images.build_fedora],
         )?;
         recheck_advisory_cohort(input.cohort, input.processes, Utc::now())?;
@@ -670,6 +686,12 @@ fn stage_payload(input: &FinalizeInput<'_>) -> Result<()> {
         return Err(Error::new(
             "staged payload mismatch: expected empty, actual populated",
         ));
+    }
+    if input.deb.target != input.arch.triple() || input.rpm.target != input.arch.triple() {
+        return Err(Error::new(format!(
+            "staged payload target mismatch: expected {}, actual lane evidence differs",
+            input.arch.triple()
+        )));
     }
     let tar = artifact_by_kind(&input.deb.artifacts, "tar")?;
     let deb = artifact_by_kind(&input.deb.artifacts, "deb")?;
@@ -717,9 +739,15 @@ fn stage_payload(input: &FinalizeInput<'_>) -> Result<()> {
     let manifest = render_manifest(input.root, evidence, &input.staging.payload)?;
     let parsed: Manifest = serde_json::from_str(&manifest).map_err(display_error)?;
     let sums = render_sha256sums(&parsed.artifacts)?;
-    atomic_write_0644(&input.staging.payload.join(CHECKSUM_NAME), sums.as_bytes())?;
     atomic_write_0644(
-        &input.staging.payload.join(manifest_name(input.version)),
+        &input.staging.payload.join(input.arch.checksum_name()),
+        sums.as_bytes(),
+    )?;
+    atomic_write_0644(
+        &input
+            .staging
+            .payload
+            .join(input.arch.manifest_name(input.version)),
         manifest.as_bytes(),
     )?;
     for entry in fs::read_dir(&input.staging.payload).map_err(display_error)? {
@@ -894,7 +922,7 @@ pub fn produce_or_retain_proof(request: &ProofRequest<'_>) -> Result<PathBuf> {
             "--mount".into(),
             runner_arg,
         ];
-        if request.platform == "tar-x86_64" {
+        if proof_spec(request.platform)?.artifact_kind == "tar" {
             args.extend([
                 "--mount".into(),
                 format!(
@@ -1114,7 +1142,15 @@ pub fn validate_proof_file(request: &ProofRequest<'_>, path: &Path) -> Result<Ca
     }
     let artifact = proof_artifact(request.ledger, request.platform)?;
     let member = proof_member(request.ledger, request.platform)?;
-    let release_policy = ReleaseImages::from_root(request.root.path())?;
+    let arch = request.ledger.arch()?;
+    if proof_spec(request.platform)?.arch != arch {
+        return Err(Error::new(format!(
+            "proof platform mismatch: expected a {} proof ID, actual {}",
+            arch.name(),
+            request.platform
+        )));
+    }
+    let release_policy = ReleaseImages::from_root(request.root.path(), arch)?;
     let policy = release_policy.proof_policy(request.platform)?;
     if policy.image_digest != request.image.digest
         || policy.executable_path != member.installed_path
@@ -1170,28 +1206,14 @@ pub fn validate_proof_file(request: &ProofRequest<'_>, path: &Path) -> Result<Ca
         return Err(Error::new("native proof fields mismatch"));
     }
     validate_identity(
-        if request.platform == "rpm-x86_64" {
+        if spec.artifact_kind == "rpm" {
             "fedora_os"
         } else {
             "ubuntu_os"
         },
         &proof.os_release,
     )?;
-    let manager_ok = match request.platform {
-        "debian-amd64" => {
-            proof
-                .package_manager_version
-                .starts_with("Debian 'dpkg' package management program version ")
-                || proof.package_manager_version.starts_with("dpkg ")
-        }
-        "rpm-x86_64" => {
-            proof.package_manager_version.starts_with("RPM version ")
-                || proof.package_manager_version.starts_with("rpm ")
-        }
-        "tar-x86_64" => proof.package_manager_version == "installer portable-tar",
-        _ => false,
-    };
-    if !manager_ok {
+    if !package_manager_matches(spec, &proof.package_manager_version) {
         return Err(Error::new(
             "proof package manager mismatch: expected approved identity, actual different",
         ));
@@ -1232,7 +1254,8 @@ pub fn candidate_status(
     }
     let ledger = &disk_ledger;
     let promoted_ledger_bytes = disk_ledger_bytes.as_slice();
-    let policy = ReleaseImages::from_root(root.path())?;
+    let arch = ledger.arch()?;
+    let policy = ReleaseImages::from_root(root.path(), arch)?;
     if proof_image_identity(&policy.build_ubuntu).digest != ledger.images.ubuntu_image_id
         || proof_image_identity(&policy.build_fedora).digest != ledger.images.fedora_image_id
     {
@@ -1261,9 +1284,10 @@ pub fn candidate_status(
         ));
     }
     resolve_proof_runner(&boundary, version.clone())?;
-    let expected_proof_names = PROOF_SPECS
-        .iter()
-        .map(|spec| format!("{}.json", spec.id))
+    let expected_proof_names = arch
+        .proof_ids()
+        .into_iter()
+        .map(|id| format!("{id}.json"))
         .collect::<BTreeSet<_>>();
     if directory_names(&proofs_root, "candidate proofs")? != expected_proof_names {
         return Err(Error::new(
@@ -1433,16 +1457,16 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
         .ok_or_else(|| Error::new("proof artifact basename mismatch"))?
         .to_owned();
     let artifact_record = artifact(input.artifact)?;
+    let spec = proof_spec(input.platform)?;
     let (
         install_command,
         executable_path,
         actual_executable,
         package_manager_version,
-        architecture,
         dry,
         isolated,
-    ) = match input.platform {
-        "debian-amd64" => {
+    ) = match spec.artifact_kind {
+        "deb" => {
             let command = vec![
                 "dpkg".into(),
                 "--install".into(),
@@ -1454,12 +1478,11 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
                 "/usr/bin/solstone-linux",
                 Path::new("/usr/bin/solstone-linux").to_path_buf(),
                 command_line("dpkg", &["--version"])?,
-                "amd64",
                 None,
                 None,
             )
         }
-        "rpm-x86_64" => {
+        "rpm" => {
             let command = vec![
                 "rpm".into(),
                 "--install".into(),
@@ -1471,12 +1494,11 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
                 "/usr/bin/solstone-linux",
                 Path::new("/usr/bin/solstone-linux").to_path_buf(),
                 command_line("rpm", &["--version"])?,
-                "x86_64",
                 None,
                 None,
             )
         }
-        "tar-x86_64" => {
+        "tar" => {
             if root.symlink_metadata().is_ok() {
                 return Err(Error::new(
                     "proof isolation root mismatch: expected absent, actual present",
@@ -1506,7 +1528,6 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
                 "/bin/solstone-linux",
                 root.join("bin/solstone-linux"),
                 "installer portable-tar".into(),
-                "x86_64",
                 Some(true),
                 Some(true),
             )
@@ -1570,7 +1591,7 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
         version_output,
         result: "pass".into(),
         proof_time: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        architecture: architecture.into(),
+        architecture: spec.architecture.into(),
         network: "none".into(),
         isolation: "fresh-container".into(),
         dry_run_passed: dry,
@@ -1680,14 +1701,32 @@ pub fn create_candidate(
     descriptor: &Path,
     processes: &ProcessEnvironment,
 ) -> Result<CandidateStatus> {
+    create_candidate_for_arch(
+        root,
+        ReleaseArch::host()?,
+        expected_commit,
+        descriptor,
+        processes,
+    )
+}
+
+pub fn create_candidate_for_arch(
+    root: &RepoRoot,
+    arch: ReleaseArch,
+    expected_commit: &str,
+    descriptor: &Path,
+    processes: &ProcessEnvironment,
+) -> Result<CandidateStatus> {
+    arch.require_native()?;
     require_expected_commit(root, expected_commit)?;
     let lock = CandidateLock::acquire(root)?;
-    let result = create_candidate_locked(root, expected_commit, descriptor, processes, &lock);
+    let result = create_candidate_locked(root, arch, expected_commit, descriptor, processes, &lock);
     finish_candidate_lock(lock, result)
 }
 
 fn create_candidate_locked(
     root: &RepoRoot,
+    arch: ReleaseArch,
     expected_commit: &str,
     descriptor: &Path,
     processes: &ProcessEnvironment,
@@ -1709,7 +1748,7 @@ fn create_candidate_locked(
                 context.commit
             )));
         }
-        let image_policy = ReleaseImages::from_context(&context)?;
+        let image_policy = ReleaseImages::from_context(&context, arch)?;
         let engine = detect_container_engine(processes)?;
         let engine_identity = observe_container_engine(processes, engine)?;
         let images = resolve_release_images(processes, engine, &image_policy)?;
@@ -1717,6 +1756,7 @@ fn create_candidate_locked(
         build_proof_runner(&ProofRunnerBuildRequest {
             repo: root,
             context: &context,
+            arch,
             engine,
             ubuntu: &images.build_ubuntu,
             fedora: &images.build_fedora,
@@ -1731,6 +1771,7 @@ fn create_candidate_locked(
         let deb = build_lane(&LaneRequest {
             repo: root,
             context: &context,
+            arch,
             lane: Lane::Deb,
             engine,
             invocation_id: invocation,
@@ -1743,6 +1784,7 @@ fn create_candidate_locked(
         let rpm = build_lane(&LaneRequest {
             repo: root,
             context: &context,
+            arch,
             lane: Lane::Rpm,
             engine,
             invocation_id: invocation,
@@ -1754,7 +1796,8 @@ fn create_candidate_locked(
         })?;
         let baseline_executable =
             reconcile_lanes(&deb, &rpm, &staging.deb_lane, &staging.rpm_lane, &version)?;
-        audit_packages(
+        audit_packages_for_arch(
+            arch,
             &staging
                 .deb_lane
                 .join(&artifact_by_kind(&deb.artifacts, "tar")?.path),
@@ -1770,6 +1813,7 @@ fn create_candidate_locked(
             root,
             staging: &staging,
             context: &context,
+            arch,
             version: &version,
             deb: &deb,
             rpm: &rpm,
@@ -1832,6 +1876,8 @@ fn prove_candidate_locked(
         .resolve_for_read(ReservedPath::Payload, ExpectedLeaf::Directory)?
         .absolute;
     let (ledger, ledger_bytes) = read_ledger(root, version)?;
+    let arch = ledger.arch()?;
+    arch.require_native()?;
     require_clean_tree(root.path(), &payload)?;
     let commit = command(root.path(), &["git", "rev-parse", "HEAD"])?;
     let lock_digest = digest(&fs::read(root.path().join("Cargo.lock")).map_err(display_error)?);
@@ -1857,7 +1903,7 @@ fn prove_candidate_locked(
             "candidate resume advisory cohort mismatch: expected retained identity, actual descriptor differs\nrepair: provide the exact retained advisory database",
         ));
     }
-    let policy = ReleaseImages::from_root(root.path())?;
+    let policy = ReleaseImages::from_root(root.path(), arch)?;
     let engine = detect_container_engine(processes)?;
     let images = resolve_release_images(processes, engine, &policy)?;
     if images.build_ubuntu.digest != ledger.images.ubuntu_image_id
@@ -1924,9 +1970,11 @@ fn preflight_existing_proofs(
         ReservedPathPresence::Absent(_) => return Ok(()),
         ReservedPathPresence::Present(path) => path.absolute,
     };
-    let allowed = PROOF_SPECS
-        .iter()
-        .map(|spec| format!("{}.json", spec.id))
+    let allowed = images
+        .arch
+        .proof_ids()
+        .into_iter()
+        .map(|id| format!("{id}.json"))
         .collect::<BTreeSet<_>>();
     for entry in fs::read_dir(&proofs_root).map_err(display_error)? {
         let name = entry
@@ -1974,7 +2022,7 @@ fn recheck_all_images(
         &images.proof_rpm,
         &images.proof_tar,
     ] {
-        let actual = inspect_image(processes, engine, &image.configured_reference)?;
+        let actual = inspect_image(processes, engine, &image.configured_reference, images.arch)?;
         if actual.digest != image.digest {
             return Err(Error::new(format!(
                 "image identity mismatch: expected {}, actual {}",
@@ -2109,10 +2157,12 @@ fn validate_retained_status_structure(
         ));
     }
     resolve_proof_runner(&boundary, version.clone())?;
-    let policy = ReleaseImages::from_root(root.path())?;
-    let allowed = PROOF_SPECS
-        .iter()
-        .map(|spec| format!("{}.json", spec.id))
+    let policy = ReleaseImages::from_root(root.path(), ledger.arch()?)?;
+    let allowed = policy
+        .arch
+        .proof_ids()
+        .into_iter()
+        .map(|id| format!("{id}.json"))
         .collect::<BTreeSet<_>>();
     let present = directory_names(&proofs, "candidate proofs")?;
     if !present.is_subset(&allowed) {

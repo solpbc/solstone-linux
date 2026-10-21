@@ -11,7 +11,7 @@
     "version": {"type":"string","minLength":1},
     "source": {"type":"object","additionalProperties":false,"required":["commit","archive_sha256","cargo_lock_sha256"],"properties":{"commit":{"type":"string","pattern":"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},"archive_sha256":{"$ref":"#/$defs/sha256"},"cargo_lock_sha256":{"$ref":"#/$defs/sha256"}}},
     "validator": {"type":"object","additionalProperties":false,"required":["version"],"properties":{"version":{"type":"string","minLength":1}}},
-    "target": {"type":"object","additionalProperties":false,"required":["triple","profile","features"],"properties":{"triple":{"const":"x86_64-unknown-linux-gnu"},"profile":{"const":"release"},"features":{"type":"array","items":{"type":"string"},"uniqueItems":true}}},
+    "target": {"type":"object","additionalProperties":false,"required":["triple","profile","features"],"properties":{"triple":{"enum":["x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu"]},"profile":{"const":"release"},"features":{"type":"array","items":{"type":"string"},"uniqueItems":true}}},
     "policy": {"type":"object","additionalProperties":false,"required":["cargo_deny_version","deterministic_gate","licenses_bans_sources","advisories","checked_at","active_exceptions"],"properties":{"cargo_deny_version":{"const":"0.20.2"},"deterministic_gate":{"const":"pass"},"licenses_bans_sources":{"const":"pass"},"advisories":{"const":"pass"},"checked_at":{"type":"string","format":"date-time"},"active_exceptions":{"type":"array","items":{"type":"string"},"uniqueItems":true}}},
     "advisory_cohort": {"type":"object","additionalProperties":false,"required":["source_id","commit","archive_sha256","acquired_at"],"properties":{"source_id":{"type":"string","minLength":1},"commit":{"type":"string","pattern":"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},"archive_sha256":{"$ref":"#/$defs/sha256"},"acquired_at":{"type":"string","format":"date-time"}}},
     "images": {"type":"object","additionalProperties":false,"required":["engine","engine_version","ubuntu_image_id","fedora_image_id"],"properties":{"engine":{"enum":["podman","docker"]},"engine_version":{"type":"string","minLength":1},"ubuntu_image_id":{"$ref":"#/$defs/image_id"},"fedora_image_id":{"$ref":"#/$defs/image_id"}}},
@@ -19,7 +19,7 @@
     "payload": {"type":"array","minItems":5,"maxItems":5,"items":{"$ref":"#/$defs/file"},"uniqueItems":true},
     "package_members": {"type":"array","minItems":3,"maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["package_file","format","installed_path","mode","bytes","sha256"],"properties":{"package_file":{"type":"string","minLength":1},"format":{"enum":["tar","deb","rpm"]},"installed_path":{"type":"string","minLength":1},"mode":{"type":"integer","minimum":0,"maximum":4095},"bytes":{"type":"integer","minimum":1},"sha256":{"$ref":"#/$defs/sha256"}}}},
     "baseline_executable": {"type":"object","additionalProperties":false,"required":["sha256","bytes"],"properties":{"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"bytes":{"type":"integer","minimum":1}}},
-    "expected_proof_ids": {"const":["debian-amd64","rpm-x86_64","tar-x86_64"]},
+    "expected_proof_ids": {"enum":[["debian-amd64","rpm-x86_64","tar-x86_64"],["debian-arm64","rpm-aarch64","tar-aarch64"]]},
     "candidate_digest": {"$ref":"#/$defs/sha256"}
   },
   "$defs": {

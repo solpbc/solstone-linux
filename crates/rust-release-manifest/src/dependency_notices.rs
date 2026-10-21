@@ -19,6 +19,11 @@ pub const VENDORED_PREBUILTS_SCHEMA: &str = "solstone-linux.vendored-prebuilts.v
 pub const ROOT_PACKAGE: &str = "solstone-linux-window";
 pub const FILTER_PLATFORM: &str = "x86_64-unknown-linux-gnu";
 pub const POPULATION_QUERY: &str = "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu";
+// One notices file ships in every architecture's packages. It is generated from
+// the x86_64 population, and the check requires each other shipped platform's
+// population to be a subset of it, so no package can ship a crate without its
+// notice. A platform-only crate fails the check rather than being omitted.
+pub const COVERED_PLATFORMS: [&str; 1] = ["aarch64-unknown-linux-gnu"];
 
 pub const NOTICES_HEADER: &str = "Rust dependency notices\n\nthis file reproduces the license texts of the crates statically linked into\nthe solstone app for linux. solstone's own code is agpl-3.0-only; see LICENSE.\n";
 
@@ -146,7 +151,7 @@ fn digest_file(path: &Path) -> Result<String> {
     Ok(digest_bytes(&bytes))
 }
 
-fn query_metadata(workspace_root: &Path) -> Result<Value> {
+fn query_metadata(workspace_root: &Path, platform: &str) -> Result<Value> {
     let output = Command::new("cargo")
         .args([
             "metadata",
@@ -155,7 +160,7 @@ fn query_metadata(workspace_root: &Path) -> Result<Value> {
             "--format-version",
             "1",
             "--filter-platform",
-            FILTER_PLATFORM,
+            platform,
         ])
         .current_dir(workspace_root)
         .output()
@@ -568,7 +573,7 @@ pub fn verify_prebuilts_allowlist(
 }
 
 pub fn generate_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()> {
-    let metadata = query_metadata(&paths.workspace_root)?;
+    let metadata = query_metadata(&paths.workspace_root, FILTER_PLATFORM)?;
     let external_crates = resolve_external_crates(&metadata)?;
 
     let prebuilt_targets: Vec<PrebuiltScanTarget> = external_crates
@@ -775,7 +780,7 @@ pub fn check_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()> {
     }
 
     // Re-query metadata and re-read crate dirs
-    let metadata = query_metadata(&paths.workspace_root)?;
+    let metadata = query_metadata(&paths.workspace_root, FILTER_PLATFORM)?;
     let external_crates = resolve_external_crates(&metadata)?;
 
     let prebuilt_targets: Vec<PrebuiltScanTarget> = external_crates
@@ -876,5 +881,31 @@ pub fn check_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()> {
         }
     }
 
+    let identity = |c: &ExternalCrate| (c.name.clone(), c.version.clone(), c.source.clone());
+    let primary = external_crates
+        .iter()
+        .map(identity)
+        .collect::<BTreeSet<_>>();
+    for platform in COVERED_PLATFORMS {
+        let covered = resolve_external_crates(&query_metadata(&paths.workspace_root, platform)?)?;
+        verify_covered_population(platform, &primary, covered.iter().map(identity))?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn verify_covered_population(
+    platform: &str,
+    primary: &BTreeSet<(String, String, String)>,
+    covered: impl IntoIterator<Item = (String, String, String)>,
+) -> Result<()> {
+    for package in covered {
+        if !primary.contains(&package) {
+            return Err(Error::new(format!(
+                "dependency notices coverage mismatch: package {} {} is in the {platform} closure but absent from the {FILTER_PLATFORM} notices population\nrepair: generate the notices from the union of every shipped platform's closure",
+                package.0, package.1
+            )));
+        }
+    }
     Ok(())
 }
