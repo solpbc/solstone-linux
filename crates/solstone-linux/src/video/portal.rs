@@ -63,7 +63,8 @@ const COMMAND_TIMEOUT: Duration =
     Duration::from_secs(START_OPERATION_BUDGET.as_secs() + DISPATCH_MARGIN.as_secs());
 const SHUTDOWN_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-const STARTUP_CANCELLED: &str = "portal startup cancelled";
+const SHUTDOWN_START_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const STARTUP_CANCELLED: &str = "portal startup cancelled";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortalOperation {
@@ -159,31 +160,59 @@ async fn close_after_error<O: PortalOps>(ops: &mut O, original: String) -> Strin
     }
 }
 
+async fn cancelled_after(cancellation: &CancellationToken, grace: Duration) {
+    cancellation.cancelled().await;
+    tokio::time::sleep(grace).await;
+}
+
 async fn open_session<O: PortalOps, T: TokenStore, G: PortalGeometry>(
     ops: &mut O,
     tokens: &T,
     geometry: &mut G,
     draw_cursor: bool,
+    cancellation: &CancellationToken,
 ) -> Result<PortalSession, String> {
-    ops.create_session().await?;
-    if let Err(error) = ops
-        .select_sources(tokens.load(), cursor_mode(draw_cursor))
-        .await
-    {
-        return Err(close_after_error(ops, error).await);
+    tokio::select! {
+        result = ops.create_session() => result?,
+        () = cancellation.cancelled() => return Err(STARTUP_CANCELLED.to_owned()),
     }
-    let streams = match ops.start().await {
-        Ok(result) => result,
-        Err(error) => return Err(close_after_error(ops, error).await),
+    let restore_token = tokens.load();
+    // The portal spends a restore token once SelectSources hands it over, and stores the
+    // grant again only when Start answers. A shutdown between the two would keep a token
+    // the desktop no longer honours, so a start that carries one gets a short grace.
+    let grace = if restore_token.is_some() {
+        SHUTDOWN_START_GRACE
+    } else {
+        Duration::ZERO
     };
-    if let Some(token) = streams
-        .restore_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        && let Err(error) = tokens.save(token)
-    {
-        warn!(%error, "could not save rotated portal restore token");
+    let exchange = async {
+        if let Err(error) = ops
+            .select_sources(restore_token, cursor_mode(draw_cursor))
+            .await
+        {
+            return Err(close_after_error(ops, error).await);
+        }
+        let streams = match ops.start().await {
+            Ok(result) => result,
+            Err(error) => return Err(close_after_error(ops, error).await),
+        };
+        if let Some(token) = streams
+            .restore_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            && let Err(error) = tokens.save(token)
+        {
+            warn!(%error, "could not save rotated portal restore token");
+        }
+        Ok(streams)
+    };
+    let streams = tokio::select! {
+        result = exchange => result?,
+        () = cancelled_after(cancellation, grace) => return Err(STARTUP_CANCELLED.to_owned()),
+    };
+    if cancellation.is_cancelled() {
+        return Err(STARTUP_CANCELLED.to_owned());
     }
     let monitors = match geometry.monitors() {
         Ok(monitors) => monitors,
@@ -433,12 +462,7 @@ impl PortalVideoCapture {
                         }
                         let attempt = catch_unwind(AssertUnwindSafe(|| {
                             if portal_session.is_none() {
-                                let session = runtime.block_on(async {
-                                    tokio::select! {
-                                        result = open_session(&mut ops, &tokens, &mut geometry, draw_cursor) => result,
-                                        () = worker_cancellation.cancelled() => Err(STARTUP_CANCELLED.to_owned()),
-                                    }
-                                })?;
+                                let session = runtime.block_on(open_session(&mut ops, &tokens, &mut geometry, draw_cursor, &worker_cancellation))?;
                                 portal_session = Some(session);
                             }
                             let session = portal_session.as_ref().ok_or_else(|| "portal session was not established".to_owned())?;
@@ -783,6 +807,61 @@ mod tests {
             })
         }
     }
+    /// Start that a shutdown interrupts: it cancels startup, then answers shortly after,
+    /// or never.
+    struct ShutdownDuringStartOps {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        cancellation: CancellationToken,
+        answers: bool,
+    }
+
+    impl PortalOps for ShutdownDuringStartOps {
+        fn create_session(&mut self) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("create");
+                Ok(())
+            })
+        }
+
+        fn select_sources(&mut self, _: Option<String>, _: u32) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("select");
+                Ok(())
+            })
+        }
+
+        fn start(&mut self) -> PortalFuture<'_, PortalStartResult> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("start");
+                self.cancellation.cancel();
+                if !self.answers {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(PortalStartResult {
+                    streams: vec![PortalStream {
+                        index: 0,
+                        node_id: 10,
+                        position: Some((0, 0)),
+                        size: Some((1920, 1080)),
+                    }],
+                    restore_token: Some("granted".into()),
+                })
+            })
+        }
+
+        fn open_pipe_wire_remote(&mut self) -> PortalFuture<'_, OwnedFd> {
+            Box::pin(async { Err("open must not follow a shutdown".into()) })
+        }
+
+        fn close(&mut self) -> PortalFuture<'_, ()> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("close");
+                Ok(())
+            })
+        }
+    }
+
     #[derive(Default)]
     struct PipelineState {
         healthy: bool,
@@ -996,6 +1075,76 @@ mod tests {
             &["create", "select", "start", "open", "close", "close"]
         );
     }
+
+    #[test]
+    fn a_shutdown_during_a_remembered_start_lets_the_portal_keep_the_grant() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let cancellation = CancellationToken::new();
+        let store = Store::default();
+        *store.0.lock().unwrap() = Some("remembered".into());
+        let saved = store.0.clone();
+        let mut capture = PortalVideoCapture::spawn_with_cancellation(
+            ShutdownDuringStartOps {
+                calls: calls.clone(),
+                cancellation: cancellation.clone(),
+                answers: true,
+            },
+            store,
+            Geometry(vec![monitor()]),
+            FakeFactory::default(),
+            cancellation,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+
+        let start = capture.start(directory.path(), 1, true);
+        let shutdown = capture.stop_for_shutdown();
+
+        assert_eq!(start.unwrap_err(), STARTUP_CANCELLED);
+        assert!(shutdown.unwrap().is_empty());
+        assert_eq!(saved.lock().unwrap().as_deref(), Some("granted"));
+        assert_eq!(
+            &*calls.lock().unwrap(),
+            &["create", "select", "start", "close", "close"]
+        );
+    }
+
+    #[test]
+    fn a_shutdown_waits_only_the_grace_for_a_start_that_never_answers() {
+        let calls = Arc::new(Mutex::new(vec![]));
+        let cancellation = CancellationToken::new();
+        let mut ops = ShutdownDuringStartOps {
+            calls: calls.clone(),
+            cancellation: cancellation.clone(),
+            answers: false,
+        };
+        let store = Store::default();
+        *store.0.lock().unwrap() = Some("remembered".into());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+
+        let (error, waited) = runtime.block_on(async {
+            let began = tokio::time::Instant::now();
+            let error = open_session(
+                &mut ops,
+                &store,
+                &mut Geometry(vec![monitor()]),
+                true,
+                &cancellation,
+            )
+            .await
+            .unwrap_err();
+            (error, began.elapsed())
+        });
+
+        assert_eq!(error, STARTUP_CANCELLED);
+        assert_eq!(waited, SHUTDOWN_START_GRACE);
+        assert_eq!(store.load().as_deref(), Some("remembered"));
+        assert_eq!(&*calls.lock().unwrap(), &["create", "select", "start"]);
+    }
     #[test]
     fn failures_after_create_always_close() {
         for fail in ["select", "start"] {
@@ -1013,7 +1162,13 @@ mod tests {
             let mut geometry = Geometry(vec![monitor()]);
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let error = runtime
-                .block_on(open_session(&mut ops, &store, &mut geometry, true))
+                .block_on(open_session(
+                    &mut ops,
+                    &store,
+                    &mut geometry,
+                    true,
+                    &CancellationToken::new(),
+                ))
                 .unwrap_err();
             assert!(error.contains("failed"));
             assert_eq!(calls.lock().unwrap().last(), Some(&"close"));
@@ -1039,6 +1194,7 @@ mod tests {
                 &Store::default(),
                 &mut Geometry(vec![monitor()]),
                 true,
+                &CancellationToken::new(),
             ))
             .unwrap_err();
         assert!(error.starts_with("select failed"));
@@ -1067,7 +1223,13 @@ mod tests {
             let mut geometry = Geometry(vec![monitor()]);
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime
-                .block_on(open_session(&mut ops, &store, &mut geometry, true))
+                .block_on(open_session(
+                    &mut ops,
+                    &store,
+                    &mut geometry,
+                    true,
+                    &CancellationToken::new(),
+                ))
                 .unwrap();
             assert_eq!(store.load().as_deref(), Some(expected));
         }

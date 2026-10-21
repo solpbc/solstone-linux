@@ -38,7 +38,7 @@ use crate::{
     video::{
         BackendKind,
         gstreamer::GstreamerPipelineFactory,
-        portal::{AshpdPortalOps, FileTokenStore, PortalVideoCapture},
+        portal::{AshpdPortalOps, FileTokenStore, PortalVideoCapture, STARTUP_CANCELLED},
         select_backend,
         wayland_geometry::NativeWaylandGeometry,
         x11::X11VideoCapture,
@@ -575,10 +575,24 @@ fn run_capture(
         }),
         &mut |stage| tracing::info!(stage, "shutdown progress"),
     ));
-    run_result
+    stop_during_startup_is_clean(run_result, stopped.load(Ordering::Acquire))
         .and(shutdown)
         .and(sync_shutdown)
         .and(linked_shutdown)
+}
+
+/// A stop that lands while screen sharing is still starting is an ordinary stop.
+fn stop_during_startup_is_clean(
+    run_result: Result<(), ObserverError>,
+    stopped: bool,
+) -> Result<(), ObserverError> {
+    match run_result {
+        Err(ObserverError::VideoStart(error)) if stopped && error == STARTUP_CANCELLED => {
+            tracing::info!("stopped while screen sharing was still starting");
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 /// Write the browser registrations and open the browser endpoint. Pending pages stay
@@ -1180,6 +1194,20 @@ mod tests {
         assert!(opened.is_none());
         assert_eq!(video_calls.get(), 0);
         assert_eq!(audio_calls.get(), 0);
+    }
+
+    #[test]
+    fn a_stop_while_screen_sharing_starts_exits_cleanly() {
+        let cancelled = || Err(ObserverError::VideoStart(STARTUP_CANCELLED.into()));
+        assert!(stop_during_startup_is_clean(cancelled(), true).is_ok());
+        assert!(stop_during_startup_is_clean(cancelled(), false).is_err());
+        assert!(
+            stop_during_startup_is_clean(
+                Err(ObserverError::VideoStart("Start timed out".into())),
+                true
+            )
+            .is_err()
+        );
     }
 
     #[test]
