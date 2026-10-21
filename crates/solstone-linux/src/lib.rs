@@ -67,6 +67,8 @@ mod observer_contract_tests;
 mod policy_test_support;
 #[cfg(test)]
 mod private_link_test_peer;
+#[cfg(all(test, target_arch = "x86_64"))]
+mod release_installer_tests;
 #[cfg(test)]
 mod release_rail_tests;
 #[cfg(test)]
