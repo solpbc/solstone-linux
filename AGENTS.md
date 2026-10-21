@@ -13,7 +13,7 @@ This is **not** part of the solstone monorepo. It is a standalone Rust package w
 ```
 crates/solstone-linux/src/  Shipping Rust observer, CLI, service, sync, and capture code
 crates/solstone-linux-window/src/ Separate GTK4 desktop window
-crates/rust-release-manifest/src/transparency.rs  Release-transparency publisher (not active)
+crates/rust-release-manifest/src/transparency.rs  Retired v1 release-transparency publisher
 transparency-head-log.jsonl Tracked transparency head witness
 packaging/                  Native package Containerfile and install notes
 scripts/build-release.sh    Non-candidate native package drift helper
@@ -41,8 +41,8 @@ make install        # Establish pinned Rust/tools and install the observer
 make format         # Format Rust source
 make test           # Run locked Rust tests
 make check-rust-release-manifest  # Validate release-manifest fixtures offline
-make publish-transparency RELEASE_DIR=<candidate>  # Not active for this product: exits 2
-make resign-transparency-pointer  # Not active for this product: exits 2
+make publish-transparency RELEASE_DIR=<candidate>  # Dormant v1 publisher: exits 2
+make resign-transparency-pointer  # Dormant v1 publisher: exits 2
 make release-candidate  # Create and locally prove one atomic candidate
 make release-images  # Build the local Ubuntu and Fedora release build/proof images
 make release-candidate-prove  # Resume only missing package proofs

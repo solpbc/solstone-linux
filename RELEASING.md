@@ -378,12 +378,18 @@ unchanged.
 
 ## Release transparency
 
-Transparency publication is not active for this product, and a release has no
-transparency step. The v2 release record (see `solpbc/solstone-transparency`)
-covers the journal only, and this product has no transparency adapter yet.
+Each changed release gets a v2 transparency record after origin publication,
+followed by an independent audit. Records are published at
+[trust.solstone.app](https://trust.solstone.app/). The v2 record is produced
+outside this repository; a late or failed record never holds app delivery.
+
+### Dormant v1 publisher
+
+The in-repo v1 publisher is retired.
 `make publish-transparency` and `make resign-transparency-pointer` exit 2 unless
 `TRANSPARENCY_ACTIVATED=1`, and that flag does not by itself authorize a
-publish. The rest of this section describes the dormant publisher.
+publish. Do not override that guard during a release. The rest of this section
+describes the dormant v1 publisher.
 
 When active, publication runs after delivery with `make publish-transparency
 RELEASE_DIR=<retained-candidate>`. This env-driven, retryable step never gates

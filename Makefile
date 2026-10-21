@@ -19,10 +19,10 @@ UPDATE_DEPS_ARGS ?=
 CARGO_DENY_VERSION := 0.20.2
 CARGO_DEB_VERSION := 3.7.0
 CARGO_GENERATE_RPM_VERSION := 0.21.0
-# Transparency publication is not active for this product. The v2 trust and
-# transparency rail (see solpbc/solstone-transparency) is live, but its release
-# record covers the journal only; this product has no transparency adapter yet.
-# Turning it on needs that adapter, not just flipping this checked-in flag.
+# The in-repo v1 publisher is retired. Each changed app release gets a v2 record
+# produced outside this repository, followed by an independent audit. Records are
+# published at trust.solstone.app. Keep the v1 targets dormant.
+# This flag alone does not authorize a v1 publish.
 TRANSPARENCY_ACTIVATED ?= 0
 # The release rail builds and proves natively for the host architecture only.
 RELEASE_ARCH ?= $(shell uname -m)
@@ -197,7 +197,7 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 
 check-transparency-minisign:
-	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency publication is not active for this product: the v2 release record covers the journal only and this product has no transparency adapter yet (see solpbc/solstone-transparency); this flag does not by itself authorize a real publish" >&2; exit 2; }
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "the in-repo v1 transparency publisher is retired; v2 app records are produced outside this repository (see trust.solstone.app); TRANSPARENCY_ACTIVATED=1 does not by itself authorize a publish" >&2; exit 2; }
 	@$(MAKE) rust-preflight
 	@command -v minisign >/dev/null 2>&1 || { echo "error: minisign prerequisite mismatch: expected minisign on PATH, actual missing" >&2; echo "repair: sudo zypper install minisign" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest transparency_tests::real_minisign_sign_verify_and_reject_tamper -- --exact --ignored
@@ -207,7 +207,7 @@ check-audit-signed-packet: rust-preflight check-cargo-deny
 	CARGO_NET_OFFLINE=true $(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest audit_tests::real_signed_packet_local_audit -- --exact --ignored
 
 publish-transparency:
-	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency publication is not active for this product: the v2 release record covers the journal only and this product has no transparency adapter yet (see solpbc/solstone-transparency); this flag does not by itself authorize a real publish" >&2; exit 2; }
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "the in-repo v1 transparency publisher is retired; v2 app records are produced outside this repository (see trust.solstone.app); TRANSPARENCY_ACTIVATED=1 does not by itself authorize a publish" >&2; exit 2; }
 	@$(MAKE) rust-preflight
 	@test -n "$(strip $(RELEASE_DIR))" || { echo "error: transparency release directory mismatch: expected RELEASE_DIR, actual missing" >&2; echo "repair: make publish-transparency RELEASE_DIR=<retained-candidate>" >&2; exit 1; }
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency publish --release-dir "$(RELEASE_DIR)"
@@ -228,7 +228,7 @@ publish-release: rust-preflight
 	bash scripts/publish-release.sh "$(RELEASE_DIR)"
 
 resign-transparency-pointer:
-	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "transparency publication is not active for this product: the v2 release record covers the journal only and this product has no transparency adapter yet (see solpbc/solstone-transparency); this flag does not by itself authorize a real publish" >&2; exit 2; }
+	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "the in-repo v1 transparency publisher is retired; v2 app records are produced outside this repository (see trust.solstone.app); TRANSPARENCY_ACTIVATED=1 does not by itself authorize a publish" >&2; exit 2; }
 	@$(MAKE) rust-preflight
 	CARGO_NET_OFFLINE=true $(CARGO) run $(CARGO_LOCKED) -p rust-release-manifest -- transparency resign-pointer
 
