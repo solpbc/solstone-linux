@@ -2,7 +2,14 @@
 
 The native candidate rail creates local release-candidate evidence. It does not
 tag, upload, publish, or approve publication. Delivery is a separate operator
-step that accepts only the exact retained candidate. Only x86_64 is supported.
+step that accepts only the exact retained candidate.
+
+Two architectures ship, x86_64 and aarch64, each built and proven natively on a
+host of that architecture. The rail takes its architecture from the build host
+(`uname -m`); `RELEASE_ARCH` may name it explicitly and must equal the host.
+Nothing is cross-built, and candidate creation and proof resume refuse any other
+architecture. Each architecture's candidate is a separate run with its own
+payload, checksum file, manifest, and proofs.
 
 Four evidence activities remain deliberately separate:
 
@@ -20,8 +27,11 @@ Four evidence activities remain deliberately separate:
 Use a clean checkout at the exact release commit. The compiler authority is
 `rust-toolchain.toml`; Cargo operations use `Cargo.lock`.
 
-Regenerate all four Ubuntu and Fedora release images from the locally pinned stock
-bases, without pulling, then inspect their bare local image IDs:
+The stock bases are pinned per architecture in the `Makefile`
+(`UBUNTU_STOCK_BASE_<arch>`, `FEDORA_STOCK_BASE_<arch>`), with the manifest lists
+they were pulled from. Regenerate all four Ubuntu and Fedora release images from
+the locally pinned stock bases of the host's architecture, without pulling, then
+inspect their bare local image IDs:
 
 ```bash
 make release-images
@@ -32,7 +42,10 @@ podman image inspect --format '{{.Id}}' localhost/solstone-linux-proof-fedora
 ```
 
 Commit those IDs as `sha256:<bare-id>` in the matching build and proof roles of
-`packaging/release-policy.toml`. Rebuild the build-tool images when
+the host architecture's table (`[x86_64]` or `[aarch64]`) in
+`packaging/release-policy.toml`, and its proof observations in that table's proof
+tables. A value of `unpinned` marks an architecture not yet observed on a native
+host; the rail refuses it by name. Rebuild the build-tool images when
 `Cargo.lock`; dependency-affecting workspace or member manifests;
 `rust-toolchain.toml`; the Rust, cargo-deb, or cargo-generate-rpm pins; the stock
 base references; or `packaging/Containerfile.tools` changes. The Ubuntu image
@@ -115,7 +128,7 @@ directory as lock recovery.
 
 ## Outputs and meanings
 
-The unsigned promoted payload is exactly:
+The unsigned promoted payload is exactly, for x86_64:
 
 - `dist/rust/solstone-linux-<VERSION>-linux-x86_64.tar.gz`
 - `dist/rust/solstone-linux_<VERSION>-1_amd64.deb`
@@ -123,8 +136,19 @@ The unsigned promoted payload is exactly:
 - `dist/rust/SHA256SUMS`
 - `dist/rust/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json`
 
+and for aarch64:
+
+- `dist/rust/solstone-linux-<VERSION>-linux-aarch64.tar.gz`
+- `dist/rust/solstone-linux_<VERSION>-1_arm64.deb`
+- `dist/rust/solstone-linux-<VERSION>-1.aarch64.rpm`
+- `dist/rust/SHA256SUMS-aarch64`
+- `dist/rust/solstone-linux-<VERSION>-linux-aarch64.rust-release-manifest.json`
+
+Both sets publish into one version directory, so no filename is shared; only the
+x86_64 checksum file keeps the bare `SHA256SUMS` name.
+
 Before delivery, sign that manifest with the dedicated Linux identity. This writes
-`dist/rust/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json.minisig`;
+`dist/rust/solstone-linux-<VERSION>-linux-<arch>.rust-release-manifest.json.minisig`;
 the signed candidate therefore has six files. Verification checks the pinned public
 key, manifest, checksums, and all three artifacts together:
 
@@ -146,6 +170,10 @@ Retained evidence is versioned and disjoint from the payload:
 - `dist/rust-evidence/<VERSION>/proofs/debian-amd64.json`
 - `dist/rust-evidence/<VERSION>/proofs/rpm-x86_64.json`
 - `dist/rust-evidence/<VERSION>/proofs/tar-x86_64.json`
+
+On aarch64 the proofs are `debian-arm64.json`, `rpm-aarch64.json`, and
+`tar-aarch64.json`. The ledger records the target triple, and every later check
+reads the architecture from it.
 
 `candidate-proven` means all local payload, ledger, policy, image, source, and three
 package-install/version proofs validated together. `retained-candidate-valid` means
@@ -174,13 +202,15 @@ make check-rust-release-manifest
 Validate a named manifest or classify an exact payload:
 
 ```bash
-make check-rust-release-manifest MANIFEST=dist/rust/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json
+make check-rust-release-manifest MANIFEST=dist/rust/solstone-linux-<VERSION>-linux-<arch>.rust-release-manifest.json
 make check-rust-release-manifest RELEASE_DIR=dist/rust
 ```
 
 Named-manifest validation does not imply candidate readiness. Directory
-classification requires exactly five regular files and rejects stale or extra
-entries.
+classification requires exactly five regular files of one architecture and
+rejects stale or extra entries. The manifest's target triple, its rustc host,
+its filename, and every artifact name must name the same architecture, and the
+package audit requires that architecture's ELF machine and dynamic loader.
 
 Release roots must be real confined directories. The portable, Debian, and RPM
 packages must contain the same executable bytes.
@@ -193,6 +223,8 @@ The individual lane helper is deliberately outside candidate state:
 bash scripts/build-release.sh deb
 bash scripts/build-release.sh rpm
 ```
+
+It builds for the host architecture and refuses any other.
 
 It writes only `dist/rust-drift/`, labels its output as drift evidence, and cannot
 create or replace the candidate payload or readiness evidence. Drift output is not
@@ -254,6 +286,11 @@ Objects land at
 `https://updates.solstone.app/solstone-linux/<lane>/<version>/<filename>`, and
 `<lane>/latest` (one line, `version=<version>`, the pointer the documentation
 tells people to read) is written only after every file in the set is published.
+Each architecture publishes its own six files into the same version directory.
+`latest` is shared by both, so it moves to a newer version only once every
+architecture published under the current version also has a complete set,
+verified by the publisher, under the new one. Publishing one architecture first
+holds `latest` until the other lands.
 The published key is at `https://updates.solstone.app/solstone-linux/minisign.pub`
 and is the same key this repository pins at
 `packaging/keys/solstone-linux-release.pub`. Nothing else places that object, so
@@ -295,7 +332,8 @@ missing files, downloads every existing file to compare its SHA-256 with the
 retained candidate, and publishes only a complete exact set. An exact published
 release is an idempotent success. Any differing tag, metadata, or file is a hard
 stop. Never move, replace, delete, or retarget release state; byte changes
-require a new version.
+require a new version. The second architecture's run attaches its own six files
+to the release the first published, adding only names it owns.
 
 GitHub does not build, validate, approve, or define the release. There is no
 GitHub workflow or repository-setting gate. Skipping the mirror leaves a
@@ -386,7 +424,8 @@ The retained evidence directory is derived from the validated release manifest,
 not supplied separately. For release directory `<release_dir>` and manifest
 version `<version>`, publication reads
 `<release_dir>/../rust-evidence/<version>/ledger.json` and
-`<release_dir>/../rust-evidence/<version>/proofs/{debian-amd64,rpm-x86_64,tar-x86_64}.json`.
+`<release_dir>/../rust-evidence/<version>/proofs/{debian-amd64,rpm-x86_64,tar-x86_64}.json`
+(on aarch64, `{debian-arm64,rpm-aarch64,tar-aarch64}.json`).
 It rejects evidence whose version or source commit does not bind to the release
 manifest.
 
