@@ -10,6 +10,7 @@ and this project adheres to Semantic Versioning.
 
 - desktop activity can now include the app in front and its window title on KDE Plasma and Sway, and web addresses in Firefox, for your journal. Firefox addresses are unavailable while multiple browser windows are open. web addresses have their own switch in settings; turning it on also turns on desktop accessibility. if you turned on web addresses before this update, turn them on again in settings.
 - in settings, the lists of apps and window titles to leave out now say they apply to desktop activity.
+- if you build from source on a computer set to UTC, `make ci` no longer fails four time zone checks. thanks @dvanduzer.
 
 ## [2.0.25] - 2026-10-20
 
