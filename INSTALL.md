@@ -54,7 +54,7 @@ curl -fsS https://updates.solstone.app/solstone-linux/release/latest
 ```
 
 It prints one line, `version=<VERSION>`. There is no directory listing, so fetch
-each file by name. For that version the files are:
+each file by name. For that version the files are, on x86_64:
 
 - `solstone-linux_<VERSION>-1_amd64.deb`
 - `solstone-linux-<VERSION>-1.x86_64.rpm`
@@ -62,6 +62,18 @@ each file by name. For that version the files are:
 - `solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json`
 - `solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json.minisig`
 - `SHA256SUMS`
+
+and on aarch64 (64-bit ARM), from 2.0.26:
+
+- `solstone-linux_<VERSION>-1_arm64.deb`
+- `solstone-linux-<VERSION>-1.aarch64.rpm`
+- `solstone-linux-<VERSION>-linux-aarch64.tar.gz`
+- `solstone-linux-<VERSION>-linux-aarch64.rust-release-manifest.json`
+- `solstone-linux-<VERSION>-linux-aarch64.rust-release-manifest.json.minisig`
+- `SHA256SUMS-aarch64`
+
+`uname -m` prints which one your computer is. The commands below use the x86_64
+names; on aarch64, use the aarch64 names above in their place.
 
 **Verify first.** Download the package you will install, the release manifest,
 and its adjacent `.minisig` file:
