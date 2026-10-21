@@ -27,6 +27,17 @@ fn local_datetime(timestamp: f64) -> DateTime<Local> {
     }
 }
 
+/// The reading used when no zone can be resolved: the host's local time, no zone name.
+fn host_local_reading(wall_seconds: f64) -> ZoneReading {
+    let local = local_datetime(wall_seconds);
+    ZoneReading {
+        day: local.format("%Y%m%d").to_string(),
+        hms: local.format("%H%M%S").to_string(),
+        utc_offset_seconds: local.offset().fix().local_minus_utc(),
+        tz: None,
+    }
+}
+
 pub fn timestamp_parts(timestamp: f64) -> (String, String) {
     let datetime = local_datetime(timestamp);
     (
@@ -162,6 +173,7 @@ pub(crate) struct DeviceZoneReader {
     roots: Vec<PathBuf>,
     resolved_name: bool,
     warned: bool,
+    fallback: fn(f64) -> ZoneReading,
 }
 
 impl DeviceZoneReader {
@@ -172,6 +184,22 @@ impl DeviceZoneReader {
             roots,
             resolved_name: false,
             warned: false,
+            fallback: host_local_reading,
+        }
+    }
+
+    /// Tests supply a fixed non-UTC fallback so the fallback rows give the same
+    /// answer on every host, including UTC ones.
+    #[cfg(test)]
+    pub(crate) fn with_fallback(
+        fallback: fn(f64) -> ZoneReading,
+        tz_env: Option<OsString>,
+        localtime: PathBuf,
+        roots: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            fallback,
+            ..Self::new(tz_env, localtime, roots)
         }
     }
 
@@ -206,26 +234,14 @@ impl ZoneSource for DeviceZoneReader {
                 if self.resolved_name {
                     self.warn_fallback();
                 }
-                let dt = local_datetime(wall_seconds);
-                return ZoneReading {
-                    day: dt.format("%Y%m%d").to_string(),
-                    hms: dt.format("%H%M%S").to_string(),
-                    utc_offset_seconds: dt.offset().fix().local_minus_utc(),
-                    tz: None,
-                };
+                return (self.fallback)(wall_seconds);
             };
 
             if raw_str.is_empty() {
                 if self.resolved_name {
                     self.warn_fallback();
                 }
-                let dt = local_datetime(wall_seconds);
-                return ZoneReading {
-                    day: dt.format("%Y%m%d").to_string(),
-                    hms: dt.format("%H%M%S").to_string(),
-                    utc_offset_seconds: dt.offset().fix().local_minus_utc(),
-                    tz: None,
-                };
+                return (self.fallback)(wall_seconds);
             }
 
             if let Some(shape_name) = is_valid_iana_shape(raw_str) {
@@ -242,26 +258,14 @@ impl ZoneSource for DeviceZoneReader {
                         // File exists but tzif failed
                         self.resolved_name = true;
                         self.warn_fallback();
-                        let dt = local_datetime(wall_seconds);
-                        return ZoneReading {
-                            day: dt.format("%Y%m%d").to_string(),
-                            hms: dt.format("%H%M%S").to_string(),
-                            utc_offset_seconds: dt.offset().fix().local_minus_utc(),
-                            tz: None,
-                        };
+                        return (self.fallback)(wall_seconds);
                     }
                 }
                 // Shape-valid but file does not exist
                 if self.resolved_name {
                     self.warn_fallback();
                 }
-                let dt = local_datetime(wall_seconds);
-                return ZoneReading {
-                    day: dt.format("%Y%m%d").to_string(),
-                    hms: dt.format("%H%M%S").to_string(),
-                    utc_offset_seconds: dt.offset().fix().local_minus_utc(),
-                    tz: None,
-                };
+                return (self.fallback)(wall_seconds);
             }
 
             // Not a shape-valid IANA name. Try POSIX
@@ -275,13 +279,7 @@ impl ZoneSource for DeviceZoneReader {
             if self.resolved_name {
                 self.warn_fallback();
             }
-            let dt = local_datetime(wall_seconds);
-            return ZoneReading {
-                day: dt.format("%Y%m%d").to_string(),
-                hms: dt.format("%H%M%S").to_string(),
-                utc_offset_seconds: dt.offset().fix().local_minus_utc(),
-                tz: None,
-            };
+            return (self.fallback)(wall_seconds);
         }
 
         // TZ unset: Rows 4-6
@@ -332,13 +330,7 @@ impl ZoneSource for DeviceZoneReader {
 
         // Row 6
         self.warn_fallback();
-        let dt = local_datetime(wall_seconds);
-        ZoneReading {
-            day: dt.format("%Y%m%d").to_string(),
-            hms: dt.format("%H%M%S").to_string(),
-            utc_offset_seconds: dt.offset().fix().local_minus_utc(),
-            tz: None,
-        }
+        (self.fallback)(wall_seconds)
     }
 }
 
@@ -643,9 +635,17 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/zoneinfo")
     }
 
-    fn check_utc_host() {
-        if local_offset_seconds(1790706000.0) == 0 {
-            panic!("host is UTC; can't tell the fallback from Etc/Unknown");
+    /// A fixed UTC-07:00 fallback: distinct from UTC/Etc/Unknown and from the
+    /// Auckland and Kolkata zones the fallback rows use as decoys.
+    fn fixed_fallback(wall_seconds: f64) -> ZoneReading {
+        let tz = jiff::tz::TimeZone::fixed(jiff::tz::offset(-7));
+        let ts = jiff::Timestamp::from_second(wall_seconds.floor() as i64).unwrap();
+        let dt = tz.to_datetime(ts);
+        ZoneReading {
+            day: format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day()),
+            hms: format!("{:02}{:02}{:02}", dt.hour(), dt.minute(), dt.second()),
+            utc_offset_seconds: tz.to_offset(ts).seconds(),
+            tz: None,
         }
     }
 
@@ -742,22 +742,22 @@ mod tests {
 
     #[test]
     fn zone_table_row_3_unparseable_tz() {
-        check_utc_host();
         let temp = tempfile::tempdir().unwrap();
         let root = testdata_root();
         let link = temp.path().join("localtime");
         std::os::unix::fs::symlink(root.join("Pacific/Auckland"), &link).unwrap();
 
-        let mut reader =
-            DeviceZoneReader::new(Some(OsString::from("not a zone")), link, vec![root]);
-        let (reading, lines) = capture_logs(|| reader.read_zone(1790706000.0));
-        let dt = local_datetime(1790706000.0);
-        assert_eq!(reading.day, dt.format("%Y%m%d").to_string());
-        assert_eq!(reading.hms, dt.format("%H%M%S").to_string());
-        assert_eq!(
-            reading.utc_offset_seconds,
-            dt.offset().fix().local_minus_utc()
+        let mut reader = DeviceZoneReader::with_fallback(
+            fixed_fallback,
+            Some(OsString::from("not a zone")),
+            link,
+            vec![root],
         );
+        let (reading, lines) = capture_logs(|| reader.read_zone(1790706000.0));
+        let expected = fixed_fallback(1790706000.0);
+        assert_eq!(reading.day, expected.day);
+        assert_eq!(reading.hms, expected.hms);
+        assert_eq!(reading.utc_offset_seconds, expected.utc_offset_seconds);
         assert_ne!(reading.utc_offset_seconds, 46800);
         assert_eq!(reading.tz, None);
         assert!(
@@ -768,7 +768,6 @@ mod tests {
 
     #[test]
     fn zone_table_row_3_file_corrupt() {
-        check_utc_host();
         let temp = tempfile::tempdir().unwrap();
         let temp_root = temp.path().join("zoneinfo");
         fs::create_dir_all(temp_root.join("Asia")).unwrap();
@@ -778,16 +777,17 @@ mod tests {
         let link = temp.path().join("localtime");
         std::os::unix::fs::symlink(root.join("Pacific/Auckland"), &link).unwrap();
 
-        let mut reader =
-            DeviceZoneReader::new(Some(OsString::from("Asia/Kolkata")), link, vec![temp_root]);
-        let (reading1, lines1) = capture_logs(|| reader.read_zone(1790706000.0));
-        let dt = local_datetime(1790706000.0);
-        assert_eq!(reading1.day, dt.format("%Y%m%d").to_string());
-        assert_eq!(reading1.hms, dt.format("%H%M%S").to_string());
-        assert_eq!(
-            reading1.utc_offset_seconds,
-            dt.offset().fix().local_minus_utc()
+        let mut reader = DeviceZoneReader::with_fallback(
+            fixed_fallback,
+            Some(OsString::from("Asia/Kolkata")),
+            link,
+            vec![temp_root],
         );
+        let (reading1, lines1) = capture_logs(|| reader.read_zone(1790706000.0));
+        let expected = fixed_fallback(1790706000.0);
+        assert_eq!(reading1.day, expected.day);
+        assert_eq!(reading1.hms, expected.hms);
+        assert_eq!(reading1.utc_offset_seconds, expected.utc_offset_seconds);
         assert_ne!(reading1.utc_offset_seconds, 46800);
         assert_eq!(reading1.tz, None);
         assert_eq!(
@@ -873,7 +873,6 @@ mod tests {
 
     #[test]
     fn zone_table_row_5_corrupt_resolved_link() {
-        check_utc_host();
         let temp = tempfile::tempdir().unwrap();
         let temp_root = temp.path().join("zoneinfo");
         fs::create_dir_all(temp_root.join("Asia")).unwrap();
@@ -883,15 +882,13 @@ mod tests {
         let link = temp.path().join("localtime");
         std::os::unix::fs::symlink(&corrupt_target, &link).unwrap();
 
-        let mut reader = DeviceZoneReader::new(None, link, vec![temp_root]);
+        let mut reader =
+            DeviceZoneReader::with_fallback(fixed_fallback, None, link, vec![temp_root]);
         let (reading, lines) = capture_logs(|| reader.read_zone(1790706000.0));
-        let dt = local_datetime(1790706000.0);
-        assert_eq!(reading.day, dt.format("%Y%m%d").to_string());
-        assert_eq!(reading.hms, dt.format("%H%M%S").to_string());
-        assert_eq!(
-            reading.utc_offset_seconds,
-            dt.offset().fix().local_minus_utc()
-        );
+        let expected = fixed_fallback(1790706000.0);
+        assert_eq!(reading.day, expected.day);
+        assert_eq!(reading.hms, expected.hms);
+        assert_eq!(reading.utc_offset_seconds, expected.utc_offset_seconds);
         assert_eq!(reading.tz, None);
         assert_eq!(
             lines
@@ -904,20 +901,16 @@ mod tests {
 
     #[test]
     fn zone_table_row_6_missing_localtime() {
-        check_utc_host();
         let temp = tempfile::tempdir().unwrap();
         let root = testdata_root();
         let link = temp.path().join("nonexistent_localtime");
 
-        let mut reader = DeviceZoneReader::new(None, link, vec![root]);
+        let mut reader = DeviceZoneReader::with_fallback(fixed_fallback, None, link, vec![root]);
         let (reading1, lines1) = capture_logs(|| reader.read_zone(1790706000.0));
-        let dt = local_datetime(1790706000.0);
-        assert_eq!(reading1.day, dt.format("%Y%m%d").to_string());
-        assert_eq!(reading1.hms, dt.format("%H%M%S").to_string());
-        assert_eq!(
-            reading1.utc_offset_seconds,
-            dt.offset().fix().local_minus_utc()
-        );
+        let expected = fixed_fallback(1790706000.0);
+        assert_eq!(reading1.day, expected.day);
+        assert_eq!(reading1.hms, expected.hms);
+        assert_eq!(reading1.utc_offset_seconds, expected.utc_offset_seconds);
         assert_eq!(reading1.tz, None);
         assert_eq!(
             lines1
