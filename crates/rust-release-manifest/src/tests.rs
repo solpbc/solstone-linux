@@ -35,16 +35,232 @@ fn classify_release_dir(path: &Path) -> Result<()> {
 pub(super) fn write_rendered(evidence: Evidence, release_dir: &Path) -> Result<()> {
     let text = render_manifest(evidence, release_dir)?;
     let manifest = validate_manifest_bytes(text.as_bytes())?;
+    let arch = manifest.arch()?;
     fs::write(
-        release_dir.join(ReleaseArch::X86_64.manifest_name(&manifest.version)),
+        release_dir.join(arch.manifest_name(&manifest.version)),
         text,
     )
     .map_err(display_error)?;
     fs::write(
-        release_dir.join(CHECKSUM_NAME),
+        release_dir.join(arch.checksum_name()),
         render_sha256sums(&manifest.artifacts)?,
     )
     .map_err(display_error)
+}
+
+fn evidence_for(arch: ReleaseArch) -> Evidence {
+    let mut evidence = evidence();
+    evidence.rust.rustc_verbose = evidence
+        .rust
+        .rustc_verbose
+        .replace(ReleaseArch::X86_64.triple(), arch.triple());
+    evidence.target = TargetEvidence::Compiled {
+        triple: arch.triple().into(),
+        profile: "release".into(),
+        features: vec![],
+    };
+    evidence
+}
+
+#[test]
+fn release_architectures_carry_their_exact_contract() {
+    let x86 = ReleaseArch::X86_64;
+    assert_eq!(
+        (
+            x86.name(),
+            x86.triple(),
+            x86.deb_arch(),
+            x86.rpm_arch(),
+            x86.image_arch(),
+            x86.elf_machine(),
+            x86.interpreter(),
+            x86.checksum_name(),
+        ),
+        (
+            "x86_64",
+            "x86_64-unknown-linux-gnu",
+            "amd64",
+            "x86_64",
+            "amd64",
+            62,
+            "/lib64/ld-linux-x86-64.so.2",
+            "SHA256SUMS",
+        )
+    );
+    assert_eq!(
+        x86.proof_ids(),
+        ["debian-amd64", "rpm-x86_64", "tar-x86_64"]
+    );
+    assert_eq!(
+        x86.manifest_name("2.0.25"),
+        "solstone-linux-2.0.25-linux-x86_64.rust-release-manifest.json"
+    );
+    assert_eq!(
+        ["tar", "deb", "rpm"].map(|kind| artifact_name(kind, "2.0.25", x86).unwrap()),
+        [
+            "solstone-linux-2.0.25-linux-x86_64.tar.gz",
+            "solstone-linux_2.0.25-1_amd64.deb",
+            "solstone-linux-2.0.25-1.x86_64.rpm",
+        ]
+    );
+
+    let arm = ReleaseArch::Aarch64;
+    assert_eq!(
+        (
+            arm.name(),
+            arm.triple(),
+            arm.deb_arch(),
+            arm.rpm_arch(),
+            arm.image_arch(),
+            arm.elf_machine(),
+            arm.interpreter(),
+            arm.checksum_name(),
+        ),
+        (
+            "aarch64",
+            "aarch64-unknown-linux-gnu",
+            "arm64",
+            "aarch64",
+            "arm64",
+            183,
+            "/lib/ld-linux-aarch64.so.1",
+            "SHA256SUMS-aarch64",
+        )
+    );
+    assert_eq!(
+        arm.proof_ids(),
+        ["debian-arm64", "rpm-aarch64", "tar-aarch64"]
+    );
+    assert_eq!(
+        arm.manifest_signature_name("2.0.25"),
+        "solstone-linux-2.0.25-linux-aarch64.rust-release-manifest.json.minisig"
+    );
+    assert_eq!(
+        ["tar", "deb", "rpm"].map(|kind| artifact_name(kind, "2.0.25", arm).unwrap()),
+        [
+            "solstone-linux-2.0.25-linux-aarch64.tar.gz",
+            "solstone-linux_2.0.25-1_arm64.deb",
+            "solstone-linux-2.0.25-1.aarch64.rpm",
+        ]
+    );
+    for spec in arm.proof_specs() {
+        assert_eq!(proof_spec(spec.id).unwrap().arch, arm);
+        assert_eq!(
+            spec.architecture,
+            if spec.artifact_kind == "deb" {
+                "arm64"
+            } else {
+                "aarch64"
+            }
+        );
+    }
+
+    // The two published sets share no filename.
+    let names = |arch: ReleaseArch| {
+        let mut names = ["tar", "deb", "rpm"]
+            .map(|kind| artifact_name(kind, "2.0.25", arch).unwrap())
+            .to_vec();
+        names.extend([
+            arch.manifest_name("2.0.25"),
+            arch.manifest_signature_name("2.0.25"),
+            arch.checksum_name().to_owned(),
+        ]);
+        names.into_iter().collect::<BTreeSet<_>>()
+    };
+    assert!(names(x86).is_disjoint(&names(arm)));
+
+    assert_eq!(ReleaseArch::from_triple(arm.triple()).unwrap(), arm);
+    assert!(ReleaseArch::from_triple("aarch64-unknown-linux-musl").is_err());
+    assert!(ReleaseArch::from_name("arm64").is_err());
+    // The aarch64 triple is not mistaken for an opaque token in evidence text.
+    validate_evidence_text("rust.rustc_verbose", &evidence_for(arm).rust.rustc_verbose).unwrap();
+}
+
+#[test]
+fn release_architecture_selection_refuses_cross_builds() {
+    assert_eq!(
+        select_release_arch(None, "x86_64").unwrap(),
+        ReleaseArch::X86_64
+    );
+    assert_eq!(
+        select_release_arch(None, "aarch64").unwrap(),
+        ReleaseArch::Aarch64
+    );
+    assert_eq!(
+        select_release_arch(Some("aarch64"), "aarch64").unwrap(),
+        ReleaseArch::Aarch64
+    );
+    assert_eq!(
+        select_release_arch(Some("aarch64"), "x86_64")
+            .unwrap_err()
+            .to_string(),
+        "release architecture mismatch: expected native host architecture x86_64, actual requested aarch64\nrepair: run the aarch64 release rail on a native aarch64 host; cross-built candidates are not release evidence"
+    );
+    assert!(select_release_arch(Some("x86_64"), "aarch64").is_err());
+    assert!(select_release_arch(None, "riscv64").is_err());
+    assert!(select_release_arch(Some("arm64"), "aarch64").is_err());
+    let host = ReleaseArch::host().unwrap();
+    assert_eq!(host.name(), std::env::consts::ARCH);
+    host.require_native().unwrap();
+}
+
+#[test]
+fn aarch64_candidate_payload_validates_with_its_own_names_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let arm = crate::elf64::pinned_elf64_for_arch_test(ReleaseArch::Aarch64);
+    audit_set_for(temp.path(), &arm, ReleaseArch::Aarch64);
+    write_rendered(evidence_for(ReleaseArch::Aarch64), temp.path()).unwrap();
+    let names = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        names,
+        BTreeSet::from([
+            "SHA256SUMS-aarch64".to_owned(),
+            "solstone-linux-1.0.0-1.aarch64.rpm".to_owned(),
+            "solstone-linux-1.0.0-linux-aarch64.rust-release-manifest.json".to_owned(),
+            "solstone-linux-1.0.0-linux-aarch64.tar.gz".to_owned(),
+            "solstone-linux_1.0.0-1_arm64.deb".to_owned(),
+        ])
+    );
+    classify_release(temp.path(), false).unwrap();
+    let manifest_path = temp
+        .path()
+        .join(ReleaseArch::Aarch64.manifest_name("1.0.0"));
+    verify_manifest(&manifest_path, false).unwrap();
+    let manifest: Manifest = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest.arch().unwrap(), ReleaseArch::Aarch64);
+
+    // The manifest's triple, rustc host, artifact names, and filename agree.
+    let mut wrong_host = evidence_for(ReleaseArch::Aarch64);
+    wrong_host.rust.rustc_verbose = evidence().rust.rustc_verbose;
+    assert!(render_manifest(wrong_host, temp.path()).is_err());
+    let mut x86_target = evidence();
+    x86_target.rust.rustc_verbose = evidence_for(ReleaseArch::Aarch64).rust.rustc_verbose;
+    assert!(render_manifest(x86_target, temp.path()).is_err());
+    let renamed = temp.path().join(ReleaseArch::X86_64.manifest_name("1.0.0"));
+    fs::rename(&manifest_path, &renamed).unwrap();
+    assert!(verify_manifest(&renamed, false).is_err());
+    fs::rename(&renamed, &manifest_path).unwrap();
+    fs::rename(
+        temp.path().join("SHA256SUMS-aarch64"),
+        temp.path().join(CHECKSUM_NAME),
+    )
+    .unwrap();
+    assert!(classify_release(temp.path(), false).is_err());
+    fs::rename(
+        temp.path().join(CHECKSUM_NAME),
+        temp.path().join("SHA256SUMS-aarch64"),
+    )
+    .unwrap();
+
+    // An x86_64 artifact never joins an aarch64 set.
+    let mut mixed = manifest.artifacts.clone();
+    mixed[0].path = "solstone-linux-1.0.0-1.x86_64.rpm".into();
+    mixed.sort_by(|left, right| left.path.cmp(&right.path));
+    assert!(validate_artifact_set(&mixed, ReleaseArch::Aarch64).is_err());
+    assert!(render_sha256sums(&mixed).is_err());
 }
 
 pub(super) fn tools() -> BTreeMap<String, String> {
@@ -406,11 +622,12 @@ fn package_payload_authority_matches_both_manifest_dialects() {
 fn audit_fixture_bytes(
     authority: crate::package_audit::PayloadAuthority,
     executable: &[u8],
+    arch: ReleaseArch,
 ) -> Vec<u8> {
     match authority.role {
         crate::package_audit::PayloadRole::Executable => executable.to_vec(),
         crate::package_audit::PayloadRole::WindowExecutable => {
-            crate::elf64::window_elf64_for_test()
+            crate::elf64::window_elf64_for_arch_test(arch)
         }
         crate::package_audit::PayloadRole::DesktopEntry => {
             include_bytes!("../../../packaging/org.solpbc.solstone.Window.desktop").to_vec()
@@ -439,6 +656,14 @@ struct AuditPayloadOptions {
     omit: Option<crate::package_audit::PayloadRole>,
     replacement: Option<(crate::package_audit::PayloadRole, Vec<u8>, u32)>,
     extras: Vec<(String, Vec<u8>, u32)>,
+    // Package names, metadata, and window ELF architecture; x86_64 when unset.
+    arch: Option<ReleaseArch>,
+}
+
+impl AuditPayloadOptions {
+    fn arch(&self) -> ReleaseArch {
+        self.arch.unwrap_or(ReleaseArch::X86_64)
+    }
 }
 
 fn audit_tar_with_payload(
@@ -446,7 +671,8 @@ fn audit_tar_with_payload(
     executable: &[u8],
     options: &AuditPayloadOptions,
 ) -> PathBuf {
-    let path = root.join("solstone-linux-1.0.0-linux-x86_64.tar.gz");
+    let arch = options.arch();
+    let path = root.join(artifact_name("tar", "1.0.0", arch).unwrap());
     let mut tar = tar::Builder::new(Vec::new());
     for authority in crate::package_audit::PAYLOAD_AUTHORITY {
         if options.omit == Some(authority.role) {
@@ -474,13 +700,18 @@ fn audit_tar_with_payload(
                 crate::package_audit::activity_helper_archive_path(authority.source)
             }
         };
-        let member = format!("solstone-linux-1.0.0-linux-x86_64/{relative}");
+        let member = format!("solstone-linux-1.0.0-linux-{}/{relative}", arch.name());
         let (bytes, mode) = options
             .replacement
             .as_ref()
             .filter(|(role, _, _)| *role == authority.role)
             .map(|(_, bytes, mode)| (bytes.clone(), *mode))
-            .unwrap_or_else(|| (audit_fixture_bytes(authority, executable), authority.mode));
+            .unwrap_or_else(|| {
+                (
+                    audit_fixture_bytes(authority, executable, arch),
+                    authority.mode,
+                )
+            });
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
         header.set_mode(mode);
@@ -489,7 +720,7 @@ fn audit_tar_with_payload(
             .unwrap();
     }
     for (relative, bytes, mode) in &options.extras {
-        let member = format!("solstone-linux-1.0.0-linux-x86_64/{relative}");
+        let member = format!("solstone-linux-1.0.0-linux-{}/{relative}", arch.name());
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
         header.set_mode(*mode);
@@ -541,7 +772,12 @@ fn audit_deb_with(
             .as_ref()
             .filter(|(role, _, _)| *role == authority.role)
             .map(|(_, bytes, mode)| (bytes.clone(), *mode))
-            .unwrap_or_else(|| (audit_fixture_bytes(authority, executable), authority.mode));
+            .unwrap_or_else(|| {
+                (
+                    audit_fixture_bytes(authority, executable, payload.arch()),
+                    authority.mode,
+                )
+            });
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
         header.set_mode(mode);
@@ -571,7 +807,7 @@ fn audit_deb_with(
             installed.trim_start_matches('/')
         ));
     }
-    let path = root.join("solstone-linux_1.0.0-1_amd64.deb");
+    let path = root.join(artifact_name("deb", "1.0.0", payload.arch()).unwrap());
     let marker = b"2.0\n";
     let mut control = tar::Builder::new(Vec::new());
     let mut control_members = vec![
@@ -615,9 +851,15 @@ fn audit_rpm_with(
     payload: &AuditPayloadOptions,
     configure: impl FnOnce(&mut rpm::PackageBuilder),
 ) -> PathBuf {
-    let path = root.join("solstone-linux-1.0.0-1.x86_64.rpm");
-    let mut builder =
-        rpm::PackageBuilder::new(PRODUCT, "1.0.0", "AGPL-3.0-only", "x86_64", "fixture");
+    let arch = payload.arch();
+    let path = root.join(artifact_name("rpm", "1.0.0", arch).unwrap());
+    let mut builder = rpm::PackageBuilder::new(
+        PRODUCT,
+        "1.0.0",
+        "AGPL-3.0-only",
+        arch.rpm_arch(),
+        "fixture",
+    );
     for authority in crate::package_audit::PAYLOAD_AUTHORITY {
         if payload.omit == Some(authority.role) {
             continue;
@@ -627,7 +869,12 @@ fn audit_rpm_with(
             .as_ref()
             .filter(|(role, _, _)| *role == authority.role)
             .map(|(_, bytes, mode)| (bytes.clone(), *mode))
-            .unwrap_or_else(|| (audit_fixture_bytes(authority, executable), authority.mode));
+            .unwrap_or_else(|| {
+                (
+                    audit_fixture_bytes(authority, executable, arch),
+                    authority.mode,
+                )
+            });
         builder
             .with_file_contents(
                 bytes,
@@ -681,6 +928,110 @@ fn package_audit_accepts_real_clean_containers_and_rejects_divergence() {
     }
     let error = audit_packages(&tar, &deb, &rpm, &"0".repeat(64)).unwrap_err();
     assert!(error.to_string().contains("class=DivergentExecutable"));
+}
+
+fn audit_set_for(root: &Path, executable: &[u8], arch: ReleaseArch) -> [PathBuf; 3] {
+    let options = AuditPayloadOptions {
+        arch: Some(arch),
+        ..AuditPayloadOptions::default()
+    };
+    [
+        audit_tar_with_payload(root, executable, &options),
+        audit_deb_with(
+            root,
+            executable,
+            format!(
+                "Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: {}\nDepends: libc6\n",
+                arch.deb_arch()
+            )
+            .as_bytes(),
+            &[],
+            &options,
+        ),
+        audit_rpm_with(root, executable, &options, |_| {}),
+    ]
+}
+
+#[test]
+fn package_audit_binds_every_package_and_elf_to_the_candidate_architecture() {
+    let root = tempfile::tempdir().unwrap();
+    let arm = crate::elf64::pinned_elf64_for_arch_test(ReleaseArch::Aarch64);
+    let [tar, deb, rpm] = audit_set_for(root.path(), &arm, ReleaseArch::Aarch64);
+    assert_eq!(
+        tar.file_name().unwrap(),
+        "solstone-linux-1.0.0-linux-aarch64.tar.gz"
+    );
+    assert_eq!(deb.file_name().unwrap(), "solstone-linux_1.0.0-1_arm64.deb");
+    assert_eq!(
+        rpm.file_name().unwrap(),
+        "solstone-linux-1.0.0-1.aarch64.rpm"
+    );
+    audit_packages(&tar, &deb, &rpm, &digest(&arm)).unwrap();
+    audit_packages_for_arch(ReleaseArch::Aarch64, &tar, &deb, &rpm, &digest(&arm)).unwrap();
+    for (path, version) in [(&tar, "1.0.0"), (&deb, "1.0.0"), (&rpm, "1.0.0")] {
+        package_member_evidence(path, version).unwrap();
+    }
+
+    // An aarch64 set is never accepted as the x86_64 candidate's packages.
+    let error =
+        audit_packages_for_arch(ReleaseArch::X86_64, &tar, &deb, &rpm, &digest(&arm)).unwrap_err();
+    assert!(
+        error.to_string().contains("class=PackageIdentity"),
+        "{error}"
+    );
+
+    // An x86_64 executable inside aarch64 packages is a hard failure.
+    let root = tempfile::tempdir().unwrap();
+    let x86 = crate::elf64::pinned_elf64_for_test();
+    let [tar, deb, rpm] = audit_set_for(root.path(), &x86, ReleaseArch::Aarch64);
+    let error = audit_packages(&tar, &deb, &rpm, &digest(&x86)).unwrap_err();
+    assert!(
+        error.to_string().contains("class=UnexpectedImport"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("machine: 62"), "{error}");
+
+    // The aarch64 machine with the x86_64 loader is refused too.
+    let root = tempfile::tempdir().unwrap();
+    let mixed = crate::elf64::machine_linkage_elf64_for_test(
+        ReleaseArch::Aarch64.elf_machine(),
+        ReleaseArch::X86_64.interpreter(),
+        &[
+            "libgstreamer-1.0.so.0",
+            "libgobject-2.0.so.0",
+            "libglib-2.0.so.0",
+            "libgio-2.0.so.0",
+            "libpulse.so.0",
+            "libgcc_s.so.1",
+            "libm.so.6",
+            "libc.so.6",
+        ],
+        None,
+        None,
+        None,
+    );
+    let [tar, deb, rpm] = audit_set_for(root.path(), &mixed, ReleaseArch::Aarch64);
+    let error = audit_packages(&tar, &deb, &rpm, &digest(&mixed)).unwrap_err();
+    assert!(
+        error.to_string().contains("class=UnexpectedImport"),
+        "{error}"
+    );
+
+    // Debian metadata that disagrees with the package name is refused.
+    let root = tempfile::tempdir().unwrap();
+    let [tar, _, rpm] = audit_set_for(root.path(), &arm, ReleaseArch::Aarch64);
+    let deb = audit_deb_with(
+        root.path(),
+        &arm,
+        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6\n",
+        &[],
+        &AuditPayloadOptions {
+            arch: Some(ReleaseArch::Aarch64),
+            ..AuditPayloadOptions::default()
+        },
+    );
+    assert!(audit_packages(&tar, &deb, &rpm, &digest(&arm)).is_err());
+    assert!(package_member_evidence(&deb, "1.0.0").is_err());
 }
 
 #[test]

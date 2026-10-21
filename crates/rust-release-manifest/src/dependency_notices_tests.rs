@@ -5,7 +5,8 @@ use crate::{
     RepoRoot,
     dependency_notices::{
         DependencyNoticesIndex, DependencyNoticesPaths, NOTICES_HEADER, PrebuiltScanTarget,
-        check_dependency_notices, scan_non_test_prebuilts, verify_prebuilts_allowlist,
+        check_dependency_notices, scan_non_test_prebuilts, verify_covered_population,
+        verify_prebuilts_allowlist,
     },
 };
 use std::{collections::BTreeSet, fs};
@@ -257,5 +258,30 @@ suffixes = [".so"]
     assert!(
         err.to_string()
             .contains("vendored prebuilt scan found no prebuilts")
+    );
+}
+
+#[test]
+fn covered_platform_crates_must_all_be_in_the_notices_population() {
+    let package = |name: &str| {
+        (
+            name.to_owned(),
+            "1.0.0".to_owned(),
+            "registry+https://github.com/rust-lang/crates.io-index".to_owned(),
+        )
+    };
+    let primary = BTreeSet::from([package("shared"), package("x86-only")]);
+    verify_covered_population("aarch64-unknown-linux-gnu", &primary, [package("shared")]).unwrap();
+    let error = verify_covered_population(
+        "aarch64-unknown-linux-gnu",
+        &primary,
+        [package("shared"), package("arm-only")],
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().starts_with(
+            "dependency notices coverage mismatch: package arm-only 1.0.0 is in the aarch64-unknown-linux-gnu closure"
+        ),
+        "{error}"
     );
 }

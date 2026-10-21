@@ -954,6 +954,83 @@ fn candidate_status_requires_three_fully_valid_proofs() {
 }
 
 #[test]
+fn bundle_digest_accepts_exactly_one_architectures_proof_ids() {
+    let candidate = "1".repeat(64);
+    let ledger = b"{}\n";
+    for arch in ReleaseArch::ALL {
+        let proofs = arch
+            .proof_ids()
+            .map(|id| (id.to_owned(), id.as_bytes().to_vec()))
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        bundle_digest(&candidate, ledger, &proofs).unwrap();
+    }
+    let mixed = ["debian-amd64", "rpm-aarch64", "tar-aarch64"]
+        .map(|id| (id.to_owned(), id.as_bytes().to_vec()))
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    assert!(bundle_digest(&candidate, ledger, &mixed).is_err());
+}
+
+#[test]
+fn candidate_creation_refuses_a_non_host_architecture_before_any_mutation() {
+    let repo = crate::candidate_tests::fixture();
+    let host = ReleaseArch::host().unwrap();
+    let other = ReleaseArch::ALL
+        .into_iter()
+        .find(|arch| *arch != host)
+        .unwrap();
+    let error = create_candidate_for_arch(
+        &repo.root,
+        other,
+        &repo.commit,
+        Path::new("/nonexistent/descriptor.json"),
+        &ProcessEnvironment::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().starts_with(&format!(
+            "release architecture mismatch: expected native host architecture {}, actual requested {}",
+            host.name(),
+            other.name()
+        )),
+        "{error}"
+    );
+    assert!(!repo.root.path().join("dist").exists());
+}
+
+#[test]
+fn proofs_of_another_architecture_never_bind_a_ledger() {
+    let fixture = retained_fixture();
+    assert_eq!(fixture.ledger.arch().unwrap(), ReleaseArch::X86_64);
+    let image = proof_image_identity(&format!("sha256:{}", "a".repeat(64)));
+    let proof = fixture
+        .repo
+        .root
+        .path()
+        .join("dist/rust-evidence/1.0.0/proofs/debian-amd64.json");
+    for platform in ReleaseArch::Aarch64.proof_ids() {
+        let error = validate_proof_file(
+            &ProofRequest {
+                root: &fixture.repo.root,
+                ledger: &fixture.ledger,
+                ledger_bytes: &fixture.ledger_bytes,
+                platform,
+                image: &image,
+                engine: ContainerEngine::Podman,
+                processes: &ProcessEnvironment::default(),
+            },
+            &proof,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().starts_with("proof platform mismatch"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn bundle_digest_callsite_invariant_requires_validated_exact_inventory() {
     let fixture = retained_fixture();
     let status =
