@@ -126,6 +126,26 @@ is included. Copy the bundled license notices and `INSTALL-NOTES` to
 The archive includes `INSTALL-NOTES`, which is the canonical cross-distribution
 runtime dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-party crate license texts. Native packages install the app under the system prefix.
 
+### Update a release
+
+If you installed the quick way, update with the same command and `--upgrade`.
+It restarts the app on the new version:
+
+```bash
+curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --upgrade
+```
+
+To update by hand, verify and install the newer package as above, then run:
+
+```bash
+solstone-linux install-service
+```
+
+Installing a package replaces the app on disk but doesn't restart it, so the
+solstone app keeps running the old version until this step. It rewrites the
+service files for the new version and restarts the app. If the window is open,
+close it and open it again.
+
 ### Open the window
 
 The window comes with version 2.0.24 and later. On an earlier version, use
@@ -216,7 +236,9 @@ solstone-linux window
 needs because it runs offline. A new version can also need a new development
 package; if the build stops on a missing system library, install the headers
 listed under Build from source. `make install` builds both binaries before it
-installs either, so a failed build leaves the installed app unchanged.
+installs either, so a failed build leaves the installed app unchanged. If the
+solstone app is running, `make install` restarts it on the new version. If the
+window is open, close it and open it again.
 
 Setup and runtime deliberately share one private-state lock. Confirm changes pairing state while the solstone app is running, and setup still needs the app stopped because it takes the lock. If the solstone app is running, setup exits before consuming any input and leaves intake state, configuration, and private state unchanged.
 

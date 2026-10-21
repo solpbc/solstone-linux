@@ -75,6 +75,9 @@ install: agent-setup
 	@$(CARGO) build --release $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window || { echo "error: build failed; nothing was installed and the installed app is unchanged" >&2; exit 1; }
 	@$(CARGO) install --path crates/solstone-linux $(CARGO_LOCKED) || { echo "error: observer installation mismatch: expected $(CARGO_BIN_DIR)/$(APP), actual installation failed" >&2; echo "repair: cargo install --path crates/solstone-linux --locked" >&2; exit 1; }
 	@$(CARGO) install --path crates/solstone-linux-window $(CARGO_LOCKED)
+	@if systemctl --user is-active --quiet $(UNIT) 2>/dev/null; then \
+		systemctl --user restart $(UNIT) && echo "restarted the running solstone app on the new version"; \
+	fi
 
 bootstrap:
 	@if ! command -v rustup >/dev/null 2>&1; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path; fi
