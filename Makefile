@@ -27,9 +27,11 @@ TRANSPARENCY_ACTIVATED ?= 0
 # The release rail builds and proves natively for the host architecture only.
 RELEASE_ARCH ?= $(shell uname -m)
 # Proof roles are provisioned images now, so keep their immutable stock bases explicit.
-# Each architecture's pin is its platform image ID from the same multi-arch
-# tags: docker.io/library/ubuntu:jammy-20260901.2 and
-# registry.fedoraproject.org/fedora:42.
+# Each architecture's pin is the image ID of `podman pull --platform
+# linux/<amd64|arm64>` from one manifest list: docker.io/library/ubuntu:jammy-20260901.2
+# (index sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02)
+# and registry.fedoraproject.org/fedora:42
+# (index sha256:e78cd1a688cd079c23864f289a89a49a3f4ad66d817864e325e1d058310ee95c).
 UBUNTU_STOCK_BASE_x86_64 := sha256:bf7f4568d95723d2148bb19c688526d1404ef3302ef024bc1513ad8f533d46c8
 FEDORA_STOCK_BASE_x86_64 := sha256:1eea7f82474ec19ef359ee5a5896014df434cd44c0d6ba2b937ffbe0697dec56
 UBUNTU_STOCK_BASE_aarch64 := sha256:80d8dd83c66bb85511514da010a61b49af58a6cd9ce4541f5e964acdcd7aea5b

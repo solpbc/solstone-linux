@@ -81,7 +81,7 @@ release_directory="$(realpath "$release_directory")" ||
 
 mapfile -d '' -t manifests < <(
     find "$release_directory" -mindepth 1 -maxdepth 1 -type f \
-        -name "$PRODUCT-*-linux-x86_64.rust-release-manifest.json" \
+        -name "$PRODUCT-*-linux-*.rust-release-manifest.json" \
         -print0
 )
 ((${#manifests[@]} == 1)) ||
@@ -93,20 +93,51 @@ version="$(jq -er '.version' "$manifest")" ||
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     die "candidate-set-invalid: release version must be strict SemVer"
 
-manifest_name="$PRODUCT-$version-linux-x86_64.rust-release-manifest.json"
-[[ "${manifest##*/}" == "$manifest_name" ]] ||
-    die "candidate-set-invalid: release manifest basename does not agree with its version"
+# The architecture is the manifest's own: its basename and target triple agree.
+arch=""
+for candidate_arch in x86_64 aarch64; do
+    if [[ "${manifest##*/}" == "$PRODUCT-$version-linux-$candidate_arch.rust-release-manifest.json" ]]; then
+        arch="$candidate_arch"
+    fi
+done
+[[ -n "$arch" ]] ||
+    die "candidate-set-invalid: release manifest basename does not agree with its version and a shipped architecture"
+jq -e --arg triple "$arch-unknown-linux-gnu" '.target.triple == $triple' "$manifest" >/dev/null ||
+    die "candidate-set-invalid: release manifest target does not agree with its $arch basename"
 
-# Exactly the names the producer emits today. No renames, ever.
-expected_names=(
-    "SHA256SUMS"
-    "$PRODUCT-$version-1.x86_64.rpm"
-    "$manifest_name"
-    "$manifest_name.minisig"
-    "$PRODUCT-$version-linux-x86_64.tar.gz"
-    "${PRODUCT}_$version-1_amd64.deb"
-)
-mapfile -t expected_names < <(printf '%s\n' "${expected_names[@]}" | sort)
+# Exactly the names the producer emits for one architecture. Both
+# architectures' sets share a version directory and no filename. No renames,
+# ever.
+set_names() {
+    local set_arch="$1" set_version="$2" set_manifest
+    set_manifest="$PRODUCT-$set_version-linux-$set_arch.rust-release-manifest.json"
+    case "$set_arch" in
+        x86_64)
+            printf '%s\n' \
+                "SHA256SUMS" \
+                "$PRODUCT-$set_version-1.x86_64.rpm" \
+                "${PRODUCT}_$set_version-1_amd64.deb"
+            ;;
+        aarch64)
+            printf '%s\n' \
+                "SHA256SUMS-aarch64" \
+                "$PRODUCT-$set_version-1.aarch64.rpm" \
+                "${PRODUCT}_$set_version-1_arm64.deb"
+            ;;
+    esac
+    printf '%s\n' \
+        "$set_manifest" \
+        "$set_manifest.minisig" \
+        "$PRODUCT-$set_version-linux-$set_arch.tar.gz"
+}
+checksum_name_for() {
+    case "$1" in
+        x86_64) echo "SHA256SUMS" ;;
+        aarch64) echo "SHA256SUMS-aarch64" ;;
+    esac
+}
+checksum_name="$(checksum_name_for "$arch")"
+mapfile -t expected_names < <(set_names "$arch" "$version" | sort)
 
 actual_names=()
 while IFS= read -r -d '' path; do
@@ -125,7 +156,7 @@ done
 # signature under the key this repository pins, and every declared digest.
 (
     cd "$release_directory"
-    sha256sum -c SHA256SUMS
+    sha256sum -c "$checksum_name"
 ) >/dev/null || die "digest-mismatch: release checksums do not validate"
 
 minisign -V -q -p "$public_key" -m "$manifest" -x "$manifest.minisig" ||
@@ -198,7 +229,7 @@ content_type_for() {
         *.deb) echo "application/vnd.debian.binary-package" ;;
         *.rpm) echo "application/x-rpm" ;;
         *.json) echo "application/json" ;;
-        *.minisig | SHA256SUMS) echo "text/plain; charset=utf-8" ;;
+        *.minisig | SHA256SUMS | SHA256SUMS-aarch64) echo "text/plain; charset=utf-8" ;;
         *) echo "application/octet-stream" ;;
     esac
 }
@@ -331,8 +362,32 @@ if $dry_run; then
     exit 0
 fi
 
+# Returns 0 when the origin holds the complete set for one architecture and
+# version and it verifies the same way this candidate did, 1 when any object
+# of the set is absent, and fails closed when present objects do not verify.
+remote_set_verified() {
+    local set_arch="$1" set_version="$2" set_dir set_manifest name
+    set_dir="$stage_root/remote-set-$set_arch-$set_version"
+    mkdir "$set_dir"
+    while IFS= read -r name; do
+        remote_get "$PRODUCT/$lane/$set_version/$name" "$set_dir/$name" || return 1
+    done < <(set_names "$set_arch" "$set_version")
+    set_manifest="$set_dir/$PRODUCT-$set_version-linux-$set_arch.rust-release-manifest.json"
+    (
+        cd "$set_dir"
+        sha256sum -c "$(checksum_name_for "$set_arch")" >/dev/null &&
+            jq -r '.artifacts[] | "\(.sha256)  \(.path)"' "$set_manifest" | sha256sum -c - >/dev/null
+    ) || die "digest-mismatch: the published $set_arch set for $set_version does not verify"
+    minisign -V -q -p "$public_key" -m "$set_manifest" -x "$set_manifest.minisig" ||
+        die "signature-invalid: the published $set_arch manifest for $set_version did not verify"
+    jq -e --arg version "$set_version" --arg triple "$set_arch-unknown-linux-gnu" \
+        '.version == $version and .target.triple == $triple' "$set_manifest" >/dev/null ||
+        die "candidate-set-invalid: the published $set_arch manifest does not describe $set_version"
+}
+
 latest_file="$stage_root/remote-latest"
 advance=true
+held_reason=""
 if remote_get "$latest_key" "$latest_file"; then
     existing_body="$(cat "$latest_file")"
     [[ "$existing_body" =~ ^version=[^[:space:]/]+$ ]] ||
@@ -340,6 +395,23 @@ if remote_get "$latest_key" "$latest_file"; then
     existing_version="${existing_body#version=}"
     if ! version_is_not_older "$version" "$existing_version"; then
         advance=false
+        held_reason="already at version=$existing_version"
+    elif [[ "$version" != "$existing_version" ]]; then
+        # latest is one pointer for every architecture. It moves to a newer
+        # version only once each architecture published under the current one
+        # is complete and verified there too, so no owner is pointed at a
+        # version without their packages. Releasing one architecture alone
+        # holds latest until the other's set lands.
+        for other_arch in x86_64 aarch64; do
+            [[ "$other_arch" != "$arch" ]] || continue
+            other_manifest="$PRODUCT-$existing_version-linux-$other_arch.rust-release-manifest.json"
+            remote_get "$PRODUCT/$lane/$existing_version/$other_manifest" \
+                "$stage_root/remote-existing-manifest" || continue
+            if ! remote_set_verified "$other_arch" "$version"; then
+                advance=false
+                held_reason="at version=$existing_version until the $other_arch set for $version is published"
+            fi
+        done
     fi
 fi
 
@@ -348,7 +420,7 @@ if $advance; then
     remote_put "$latest_key" "$stage_root/latest" "text/plain; charset=utf-8" "no-cache"
     printf '  put      %s (version=%s)\n' "$latest_key" "$version"
 else
-    printf '  held     %s (already at version=%s)\n' "$latest_key" "$existing_version"
+    printf '  held     %s (%s)\n' "$latest_key" "$held_reason"
 fi
 
 printf 'published %s %s to %s/%s/%s/%s/ (%d new objects)\n' \

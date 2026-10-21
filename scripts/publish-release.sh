@@ -43,7 +43,7 @@ release_directory="$(realpath "$release_directory")" ||
 
 mapfile -d '' -t manifests < <(
     find "$release_directory" -mindepth 1 -maxdepth 1 -type f \
-        -name 'solstone-linux-*-linux-x86_64.rust-release-manifest.json' \
+        -name 'solstone-linux-*-linux-*.rust-release-manifest.json' \
         -print0
 )
 ((${#manifests[@]} == 1)) ||
@@ -69,9 +69,16 @@ jq -e \
 [[ "$manifest_commit" == "$source_commit" ]] ||
     die "release manifest source commit must equal HEAD"
 
-manifest_name="solstone-linux-$version-linux-x86_64.rust-release-manifest.json"
-[[ "${manifest##*/}" == "$manifest_name" ]] ||
-    die "release manifest basename does not agree with its version"
+arch=""
+for candidate_arch in x86_64 aarch64; do
+    if [[ "${manifest##*/}" == "solstone-linux-$version-linux-$candidate_arch.rust-release-manifest.json" ]]; then
+        arch="$candidate_arch"
+    fi
+done
+[[ -n "$arch" ]] ||
+    die "release manifest basename does not agree with its version and a shipped architecture"
+jq -e --arg triple "$arch-unknown-linux-gnu" '.target.triple == $triple' "$manifest" >/dev/null ||
+    die "release manifest target does not agree with its $arch basename"
 
 metadata="$(
     CARGO_NET_OFFLINE=true cargo metadata --locked --offline --no-deps --format-version 1
@@ -92,15 +99,36 @@ notes="$(bash "$repo_root/scripts/extract_changelog.sh" "$version" "$repo_root/C
 [[ "$notes" == "## [$version] - "* ]] ||
     die "release notes do not start with the expected version heading"
 
-expected_names=(
-    "SHA256SUMS"
-    "solstone-linux-$version-1.x86_64.rpm"
-    "$manifest_name"
-    "$manifest_name.minisig"
-    "solstone-linux-$version-linux-x86_64.tar.gz"
-    "solstone-linux_$version-1_amd64.deb"
-)
-mapfile -t expected_names < <(printf '%s\n' "${expected_names[@]}" | sort)
+# One architecture's exact names. Both architectures' sets attach to the one
+# release for this version and share no filename.
+set_names() {
+    local set_arch="$1" set_manifest
+    set_manifest="solstone-linux-$version-linux-$set_arch.rust-release-manifest.json"
+    case "$set_arch" in
+        x86_64)
+            printf '%s\n' \
+                "SHA256SUMS" \
+                "solstone-linux-$version-1.x86_64.rpm" \
+                "solstone-linux_$version-1_amd64.deb"
+            ;;
+        aarch64)
+            printf '%s\n' \
+                "SHA256SUMS-aarch64" \
+                "solstone-linux-$version-1.aarch64.rpm" \
+                "solstone-linux_$version-1_arm64.deb"
+            ;;
+    esac
+    printf '%s\n' \
+        "$set_manifest" \
+        "$set_manifest.minisig" \
+        "solstone-linux-$version-linux-$set_arch.tar.gz"
+}
+case "$arch" in
+    x86_64) checksum_name="SHA256SUMS" other_arch="aarch64" ;;
+    aarch64) checksum_name="SHA256SUMS-aarch64" other_arch="x86_64" ;;
+esac
+mapfile -t expected_names < <(set_names "$arch" | sort)
+mapfile -t other_names < <(set_names "$other_arch" | sort)
 
 assert_exact_files() {
     local root="$1"
@@ -123,7 +151,7 @@ assert_exact_files() {
 assert_exact_files "$release_directory"
 (
     cd "$release_directory"
-    sha256sum -c SHA256SUMS
+    sha256sum -c "$checksum_name"
 ) || die "release checksums do not validate"
 (
     cd "$repo_root"
@@ -147,7 +175,7 @@ done
 assert_exact_files "$publishable"
 (
     cd "$publishable"
-    sha256sum -c SHA256SUMS
+    sha256sum -c "$checksum_name"
 ) || die "staged release checksums do not validate"
 (
     cd "$repo_root"
@@ -243,17 +271,28 @@ verify_remote_assets() {
     # exit on its first match while printf was still writing, and under
     # pipefail that SIGPIPE read as a listed asset being unlisted.
     local -A listed_names=()
+    local -A other_listed_names=()
+    local -a own_names=()
     local name asset_count asset_id download local_digest remote_digest
     for name in "${expected_names[@]}"; do
         listed_names["$name"]=1
+    done
+    # The other architecture's exact names may already be attached; their
+    # bytes belong to that architecture's own candidate and its own run.
+    for name in "${other_names[@]}"; do
+        other_listed_names["$name"]=1
     done
     mapfile -t remote_names < <(jq -r '.[0].assets[].name' <<<"$release_json" | sort)
     for name in "${remote_names[@]}"; do
         [[ -z "${seen_names[$name]:-}" ]] ||
             die "release contains duplicate asset names"
         seen_names["$name"]=1
+        if [[ -n "${other_listed_names[$name]:-}" ]]; then
+            continue
+        fi
         [[ -n "${listed_names[$name]:-}" ]] ||
             die "release contains an unlisted asset"
+        own_names+=("$name")
         asset_count="$(
             jq --arg name "$name" '[.[0].assets[] | select(.name == $name)] | length' \
                 <<<"$release_json"
@@ -276,14 +315,41 @@ verify_remote_assets() {
             die "release asset bytes differ from the exact candidate"
     done
     if [[ "$require_complete" == "true" ]]; then
-        ((${#remote_names[@]} == ${#expected_names[@]})) ||
+        ((${#own_names[@]} == ${#expected_names[@]})) ||
             die "published release asset set is incomplete"
         local index
         for index in "${!expected_names[@]}"; do
-            [[ "${remote_names[$index]}" == "${expected_names[$index]}" ]] ||
+            [[ "${own_names[$index]}" == "${expected_names[$index]}" ]] ||
                 die "published release asset set is incomplete"
         done
     fi
+}
+
+own_set_complete() {
+    local release_json="$1" name count
+    for name in "${expected_names[@]}"; do
+        count="$(
+            jq --arg name "$name" '[.[0].assets[] | select(.name == $name)] | length' \
+                <<<"$release_json"
+        )"
+        [[ "$count" == "1" ]] || return 1
+    done
+}
+
+upload_missing_assets() {
+    local release_json="$1" name existing_count
+    for name in "${expected_names[@]}"; do
+        existing_count="$(
+            jq --arg name "$name" '[.[0].assets[] | select(.name == $name)] | length' \
+                <<<"$release_json"
+        )"
+        if [[ "$existing_count" == "0" ]]; then
+            gh release upload "$tag" "$publishable/$name" --repo "$repo" ||
+                die "could not upload release asset"
+        elif [[ "$existing_count" != "1" ]]; then
+            die "release asset state is ambiguous"
+        fi
+    done
 }
 
 inspect_remote_tag false
@@ -304,15 +370,30 @@ if [[ "$release_count" == "1" ]]; then
     release_draft="$(jq -r '.[0].draft' <<<"$release_json")"
     [[ "$release_draft" == "true" || "$release_draft" == "false" ]] ||
         die "release draft state is invalid"
-    verify_remote_assets \
-        "$release_json" \
-        "$([[ "$release_draft" == "false" ]] && echo true || echo false)"
+    # Present assets must be exact; completeness is decided below.
+    verify_remote_assets "$release_json" false
 fi
 if $release_present && ! $remote_tag_present; then
     die "release exists without the exact annotated remote tag"
 fi
 if $release_present && [[ "$release_draft" == "false" ]]; then
-    printf 'release %s is already published and exact\n' "$tag"
+    if own_set_complete "$release_json"; then
+        printf 'release %s is already published and exact for %s\n' "$tag" "$arch"
+        exit 0
+    fi
+    # The other architecture published this version first. Attach this
+    # architecture's exact set to the same release; nothing already present
+    # is replaced.
+    upload_missing_assets "$release_json"
+    published="$(gh api "repos/$repo/releases/$release_id")" ||
+        die "could not verify the published release"
+    published_json="$(jq -n --argjson release "$published" '[$release]')"
+    verify_release_metadata "$published_json"
+    [[ "$(jq -r '.[0].draft' <<<"$published_json")" == "false" ]] ||
+        die "published release changed state"
+    verify_remote_assets "$published_json" true
+    printf 'attached exact %s assets to published native release %s: %s\n' \
+        "$arch" "$tag" "$(jq -r '.[0].html_url' <<<"$published_json")"
     exit 0
 fi
 
@@ -342,18 +423,7 @@ if ! $release_present; then
     release_json="$(jq -n --argjson release "$created_release" '[$release]')"
 fi
 
-for name in "${expected_names[@]}"; do
-    existing_count="$(
-        jq --arg name "$name" '[.[0].assets[] | select(.name == $name)] | length' \
-            <<<"$release_json"
-    )"
-    if [[ "$existing_count" == "0" ]]; then
-        gh release upload "$tag" "$publishable/$name" --repo "$repo" ||
-            die "could not upload release asset"
-    elif [[ "$existing_count" != "1" ]]; then
-        die "draft release asset state is ambiguous"
-    fi
-done
+upload_missing_assets "$release_json"
 
 release_json="$(read_release)"
 verify_release_metadata "$release_json"

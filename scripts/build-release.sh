@@ -7,7 +7,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-release.sh <deb|rpm> [x86_64]
+Usage: scripts/build-release.sh <deb|rpm> [x86_64|aarch64]
 
 Build one package lane into the fixed dist/rust-drift/ directory. This helper
 produces drift evidence only; it cannot create or promote a release candidate.
@@ -25,13 +25,14 @@ case "$FORMAT" in
   deb|rpm) ;;
   *)
     echo "error: package format mismatch: expected deb or rpm, actual '$FORMAT'" >&2
-    echo "repair: scripts/build-release.sh <deb|rpm> [x86_64]" >&2
+    echo "repair: scripts/build-release.sh <deb|rpm> [x86_64|aarch64]" >&2
     exit 2
     ;;
 esac
-if [[ "$ARCH" != "x86_64" ]]; then
-  echo "error: package architecture mismatch: expected x86_64, actual '$ARCH'" >&2
-  echo "repair: run this drift helper on x86_64" >&2
+HOST_ARCH=$(uname -m)
+if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]] || [[ "$ARCH" != "$HOST_ARCH" ]]; then
+  echo "error: package architecture mismatch: expected native host architecture $HOST_ARCH (x86_64 or aarch64), actual '$ARCH'" >&2
+  echo "repair: run this drift helper on a native $ARCH host" >&2
   exit 2
 fi
 
@@ -63,12 +64,19 @@ else
 fi
 
 policy_value() {
-  sed -n "s/^$1 = \"\([^\"]*\)\"/\1/p" packaging/release-policy.toml
+  awk -v table="[$ARCH]" -v key="$1" '
+    /^\[/ { section = $0; next }
+    section == table && index($0, key " = \"") == 1 {
+      value = substr($0, length(key) + 5)
+      sub(/"$/, "", value)
+      print value
+    }
+  ' packaging/release-policy.toml
 }
 UBUNTU_TOOL_BASE=$(policy_value build_ubuntu)
 FEDORA_TOOL_BASE=$(policy_value build_fedora)
-if [[ -z "$UBUNTU_TOOL_BASE" || -z "$FEDORA_TOOL_BASE" ]]; then
-  echo "error: release image policy mismatch: expected committed build digests, actual missing" >&2
+if [[ -z "$UBUNTU_TOOL_BASE" || -z "$FEDORA_TOOL_BASE" || "$UBUNTU_TOOL_BASE" == unpinned || "$FEDORA_TOOL_BASE" == unpinned ]]; then
+  echo "error: release image policy mismatch: expected committed $ARCH build digests, actual missing or unpinned" >&2
   echo "repair: restore packaging/release-policy.toml from the release commit" >&2
   exit 1
 fi
@@ -92,6 +100,7 @@ trap 'rm -rf "$OUTPUT_TMP"' EXIT
   --build-arg "SOURCE_ARCHIVE_SHA256=$SOURCE_ARCHIVE_SHA256" \
   --build-arg "CARGO_LOCK_SHA256=$CARGO_LOCK_SHA256" \
   --build-arg "RELEASE_VERSION=$RELEASE_VERSION" \
+  --build-arg "RELEASE_TARGET=$ARCH-unknown-linux-gnu" \
   "$REPO_ROOT"
 
 OUTPUT_DIR=dist/rust-drift
