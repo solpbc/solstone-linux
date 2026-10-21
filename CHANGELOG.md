@@ -6,14 +6,19 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.26] - 2026-10-21
+
+### Added
+
+- desktop activity can now include the app in front and its window title on KDE Plasma and Sway, and web addresses in Firefox, for your journal. Firefox addresses are unavailable while more than one Firefox window is open. web addresses have their own switch in settings; turning it on also turns on desktop accessibility. if you turned on web addresses before this update, turn them on again in settings.
+- the solstone app now comes for 64-bit ARM (aarch64) computers too: a deb, an rpm and a portable archive, beside the x86_64 ones. `scripts/install.sh` installs the aarch64 archive on an aarch64 computer.
+
 ### Fixed
 
 - security fix: if you use the relay, the solstone app no longer accepts relay certificates issued through emSign certificate authorities whose private keys are now public. before, someone between your computer and the relay could have posed as the relay and seen your computer's relay token. what goes to your journal travels inside a second encrypted connection that ends at your journal, so they could not read it.
-- desktop activity can now include the app in front and its window title on KDE Plasma and Sway, and web addresses in Firefox, for your journal. Firefox addresses are unavailable while multiple browser windows are open. web addresses have their own switch in settings; turning it on also turns on desktop accessibility. if you turned on web addresses before this update, turn them on again in settings.
 - in settings, the lists of apps and window titles to leave out now say they apply to desktop activity.
-- if you build from source on a computer set to UTC, `make ci` no longer fails four time zone checks. thanks @dvanduzer.
-- if you build from source, `make install` now restarts the solstone app when it's running, so an update takes effect right away. before, the app kept running the old version until you restarted it or signed in again. INSTALL.md now has update steps for packages too. thanks @dvanduzer.
-- if you build from source, `make ci` no longer fails now and then on a browser check when your computer is busy. thanks @dvanduzer.
+- if you build from source, `make ci` no longer fails on a computer set to UTC, or now and then when your computer is busy. thanks @dvanduzer.
+- if you build from source, `make install` now restarts the solstone app when it's running, so an update takes effect right away. before, the app kept running the old version until you restarted it or signed in again. thanks @dvanduzer.
 
 ## [2.0.25] - 2026-10-20
 
