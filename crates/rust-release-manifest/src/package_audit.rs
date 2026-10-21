@@ -72,6 +72,17 @@ const WINDOW_ALLOWED_NEEDED: [&str; 8] = [
     "libc.so.6",
 ];
 
+// glibc's aarch64 toolchain also records the dynamic loader as the daemon's
+// last DT_NEEDED entry (measured on the native aarch64 candidate of 6a6f615,
+// 2026-10-21); the x86_64 daemon carries no such entry.
+fn expected_daemon_needed(arch: ReleaseArch) -> Vec<String> {
+    let mut needed = EXPECTED_NEEDED.map(str::to_owned).to_vec();
+    if arch == ReleaseArch::Aarch64 {
+        needed.push(arch.interpreter_soname().to_owned());
+    }
+    needed
+}
+
 fn window_needed_allowed(arch: ReleaseArch, library: &str) -> bool {
     WINDOW_ALLOWED_NEEDED.contains(&library) || library == arch.interpreter_soname()
 }
@@ -1049,7 +1060,7 @@ fn inspect_elf(arch: ReleaseArch, path: &Path, bytes: &[u8]) -> Result<Elf64Link
             "/usr/bin/solstone-linux",
         )
     })?;
-    let expected_needed = EXPECTED_NEEDED.map(str::to_owned).to_vec();
+    let expected_needed = expected_daemon_needed(arch);
     if parsed.elf_type != EXPECTED_ELF_TYPE
         || parsed.machine != arch.elf_machine()
         || parsed.interpreter != arch.interpreter()
@@ -1824,5 +1835,44 @@ mod tests {
             "deb",
             compressed_tar(artifact, "control.tar.bz2", Vec::new()).unwrap_err(),
         );
+    }
+
+    // The daemon's imports are an exact list per architecture: the aarch64
+    // daemon must carry its loader entry and the x86_64 daemon must not.
+    #[test]
+    fn daemon_imports_are_exact_per_architecture() {
+        let path = Path::new("/usr/bin/solstone-linux");
+        for arch in ReleaseArch::ALL {
+            let elf = crate::elf64::pinned_elf64_for_arch_test(arch);
+            assert!(inspect_elf(arch, path, &elf).is_ok(), "{arch:?}");
+        }
+        let arm_without_loader = crate::elf64::machine_linkage_elf64_for_test(
+            ReleaseArch::Aarch64.elf_machine(),
+            ReleaseArch::Aarch64.interpreter(),
+            &EXPECTED_NEEDED,
+            None,
+            None,
+            None,
+        );
+        let mut x86_needed = EXPECTED_NEEDED.to_vec();
+        x86_needed.push(ReleaseArch::X86_64.interpreter_soname());
+        let x86_with_loader = crate::elf64::machine_linkage_elf64_for_test(
+            ReleaseArch::X86_64.elf_machine(),
+            ReleaseArch::X86_64.interpreter(),
+            &x86_needed,
+            None,
+            None,
+            None,
+        );
+        for (arch, elf) in [
+            (ReleaseArch::Aarch64, arm_without_loader),
+            (ReleaseArch::X86_64, x86_with_loader),
+        ] {
+            let error = inspect_elf(arch, path, &elf).unwrap_err();
+            assert!(
+                error.to_string().contains("class=UnexpectedImport"),
+                "{arch:?}"
+            );
+        }
     }
 }

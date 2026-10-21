@@ -723,6 +723,34 @@ pub(super) fn pin_aarch64_policy(text: &str) -> String {
     text
 }
 
+fn unpin_aarch64_policy(text: &str) -> String {
+    let mut text = text.to_owned();
+    for key in [
+        "build_ubuntu",
+        "build_fedora",
+        "proof_debian",
+        "proof_rpm",
+        "proof_tar",
+    ] {
+        text = edit_policy_line(
+            &text,
+            "aarch64",
+            key,
+            Some(&format!("{key} = \"unpinned\"")),
+        );
+    }
+    for table in [
+        "aarch64.debian-arm64",
+        "aarch64.rpm-aarch64",
+        "aarch64.tar-aarch64",
+    ] {
+        for key in ["image_digest", "os_release"] {
+            text = edit_policy_line(&text, table, key, Some(&format!("{key} = \"unpinned\"")));
+        }
+    }
+    text
+}
+
 fn policy_line(text: &str, table: &str, key: &str) -> String {
     let mut section = "";
     text.lines()
@@ -810,7 +838,8 @@ fn unpinned_architecture_policy_is_refused_by_name() {
     let policy = context.path.join("packaging/release-policy.toml");
     let text = fs::read_to_string(&policy).unwrap();
 
-    // The committed aarch64 tables are placeholders until observed natively.
+    // aarch64 tables left as placeholders, as they are until observed natively.
+    fs::write(&policy, unpin_aarch64_policy(&text)).unwrap();
     let error = ReleaseImages::from_context(&context, ReleaseArch::Aarch64).unwrap_err();
     assert!(
         error

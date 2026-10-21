@@ -512,19 +512,23 @@ pub(crate) fn pinned_elf64_for_test() -> Vec<u8> {
 
 #[cfg(test)]
 pub(crate) fn pinned_elf64_for_arch_test(arch: crate::ReleaseArch) -> Vec<u8> {
+    let mut needed = vec![
+        "libgstreamer-1.0.so.0",
+        "libgobject-2.0.so.0",
+        "libglib-2.0.so.0",
+        "libgio-2.0.so.0",
+        "libpulse.so.0",
+        "libgcc_s.so.1",
+        "libm.so.6",
+        "libc.so.6",
+    ];
+    if arch == crate::ReleaseArch::Aarch64 {
+        needed.push(arch.interpreter_soname());
+    }
     machine_linkage_elf64_for_test(
         arch.elf_machine(),
         arch.interpreter(),
-        &[
-            "libgstreamer-1.0.so.0",
-            "libgobject-2.0.so.0",
-            "libglib-2.0.so.0",
-            "libgio-2.0.so.0",
-            "libpulse.so.0",
-            "libgcc_s.so.1",
-            "libm.so.6",
-            "libc.so.6",
-        ],
+        &needed,
         None,
         None,
         None,
