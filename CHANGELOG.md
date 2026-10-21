@@ -12,6 +12,7 @@ and this project adheres to Semantic Versioning.
 - in settings, the lists of apps and window titles to leave out now say they apply to desktop activity.
 - if you build from source on a computer set to UTC, `make ci` no longer fails four time zone checks. thanks @dvanduzer.
 - if you build from source, `make install` now restarts the solstone app when it's running, so an update takes effect right away. before, the app kept running the old version until you restarted it or signed in again. INSTALL.md now has update steps for packages too. thanks @dvanduzer.
+- if you build from source, `make ci` no longer fails now and then on a browser check when your computer is busy. thanks @dvanduzer.
 
 ## [2.0.25] - 2026-10-20
 
