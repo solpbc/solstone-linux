@@ -9,8 +9,8 @@ https://solstone.app/install. Create a pairing link for this device in your jour
 
 ## The quick way
 
-On x86_64, the solstone installer downloads the app, checks its signature, starts it
-and adds solstone to your app menu:
+On x86_64 and aarch64 (64-bit ARM), the solstone installer downloads the app,
+checks its signature, starts it and adds solstone to your app menu:
 
 ```bash
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop
