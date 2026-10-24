@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- security fix: updated a cryptography dependency used by private connections.
+
 ## [2.0.27] - 2026-10-22
 
 ### Fixed
