@@ -684,10 +684,16 @@ where
     /// audio as it arrives, and stay idle until a session is live again.
     fn wait_for_session(&mut self) -> Result<(), ObserverError> {
         // The segment open when the session left closes here, with desktop activity
-        // up to that instant. Once it is closed, the only rows left would repeat
-        // that no session is in front, and writing them opened a segment of their
-        // own every few seconds, so nothing is taken in until a session is back.
-        if self.state.segment_dir.is_some() {
+        // up to that instant; so do intervals a pause carried past its segment.
+        // Once nothing is open, the only rows left would repeat that no session is
+        // in front, and writing them opened a segment of their own every few
+        // seconds, so nothing is taken in until a session is back.
+        if self.state.segment_dir.is_some()
+            || self
+                .activity
+                .as_ref()
+                .is_some_and(|activity| activity.sampler.has_open())
+        {
             self.finish_paused_segment()?;
         }
         let _ = self.backends.audio.drain();
@@ -3395,6 +3401,41 @@ pub(crate) mod tests {
             f.starts.get(),
             2,
             "intake starts again when a session is back"
+        );
+    }
+
+    // No Python ancestor: a session that leaves while desktop activity runs through
+    // a pause closes activity at that instant; no row spans the time away.
+    #[test]
+    fn leaving_during_a_kept_on_pause_closes_activity_at_that_instant() {
+        let mut f = fixture(false);
+        let (_prefs, _reads) = install_screen_activity(&mut f, true, true);
+        at(&mut f, 1.0);
+        initialize(&mut f);
+        at(&mut f, 2.0);
+        f.observer.tick().unwrap();
+        f.observer.pause(0);
+        for _ in 0..64 {
+            f.observer.backends.activity.0.push_back(Ok(away()));
+        }
+        at(&mut f, 3.0);
+        f.observer.tick().unwrap();
+        for second in [8.0, 13.0, 18.0, 23.0, 28.0] {
+            at(&mut f, second);
+            f.observer.tick().unwrap();
+        }
+        f.observer.backends.activity.0.clear();
+        at(&mut f, 33.0);
+        f.observer.tick().unwrap();
+        at(&mut f, 40.0);
+        f.observer.tick().unwrap();
+        f.observer.shutdown().unwrap();
+        let rows = activity_rows(&activity_jsonl_paths(f.observer.config.base_dir.as_path()));
+        assert!(rows.iter().any(|row| row.ts >= 33_000), "activity resumes");
+        assert!(
+            rows.iter()
+                .all(|row| row.end_ts <= 3_000 || row.ts >= 33_000),
+            "no row spans the time no session was in front: {rows:?}"
         );
     }
 
