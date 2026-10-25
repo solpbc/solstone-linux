@@ -5,7 +5,10 @@ use crate::{
     capture_stats::{
         compute_quarantine_stats, compute_status_capture_stats, format_quarantine_line,
     },
-    config::{Config, ConfigPaths, load_config, sanitize_link_authority, save_config},
+    config::{
+        Config, ConfigPaths, SettingsExplicit, load_config, sanitize_link_authority,
+        save_settings_explicit,
+    },
     private_link::{
         PrivateIoOperation, PrivateStateError, PrivateStateLock, PrivateStateLockLiveness,
         load_credential, setup_with_stream,
@@ -969,38 +972,42 @@ impl PromptIo for ConsolePrompt {
     }
 }
 
-fn prompt_bool(io: &mut dyn PromptIo, label: &str, current: bool) -> io::Result<bool> {
+fn prompt_bool(io: &mut dyn PromptIo, label: &str, current: bool) -> io::Result<Option<bool>> {
     loop {
         let value = io.read_line(&format!("{label} [{}]: ", if current { "y" } else { "n" }))?;
         match value.trim().to_lowercase().as_str() {
-            "" => return Ok(current),
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
+            "" => return Ok(None),
+            "y" | "yes" => return Ok(Some(true)),
+            "n" | "no" => return Ok(Some(false)),
             _ => io.write_line("Enter y or n.")?,
         }
     }
 }
 
-fn prompt_positive_int(io: &mut dyn PromptIo, label: &str, current: i64) -> io::Result<i64> {
+fn prompt_positive_int(
+    io: &mut dyn PromptIo,
+    label: &str,
+    current: i64,
+) -> io::Result<Option<i64>> {
     loop {
         let value = io.read_line(&format!("{label} [{current}]: "))?;
         if value.trim().is_empty() {
-            return Ok(current);
+            return Ok(None);
         }
         if let Ok(value) = value.trim().parse::<i64>()
             && value > 0
         {
-            return Ok(value);
+            return Ok(Some(value));
         }
         io.write_line("Enter a positive integer.")?;
     }
 }
 
-fn prompt_framerate(io: &mut dyn PromptIo, current: i64) -> io::Result<i64> {
+fn prompt_framerate(io: &mut dyn PromptIo, current: i64) -> io::Result<Option<i64>> {
     loop {
         let value = io.read_line(&format!("Framerate [{current}]: "))?;
         if value.trim().is_empty() {
-            return Ok(current);
+            return Ok(None);
         }
         let Ok(value) = value.trim().parse::<i64>() else {
             io.write_line("Enter an integer.")?;
@@ -1010,20 +1017,34 @@ fn prompt_framerate(io: &mut dyn PromptIo, current: i64) -> io::Result<i64> {
         if clamped != value {
             io.write_line(&format!("(clamped to {clamped})"))?;
         }
-        return Ok(clamped);
+        return Ok(Some(clamped));
     }
 }
 
 fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
     let loaded = load_config(paths);
     let mut config = loaded.config;
+    let mut explicit = SettingsExplicit::NONE;
     let result = (|| -> io::Result<()> {
-        config.capture_framerate = prompt_framerate(prompt, config.capture_framerate)?;
-        config.draw_cursor = prompt_bool(prompt, "Draw cursor", config.draw_cursor)?;
-        config.start_paused = prompt_bool(prompt, "Start paused", config.start_paused)?;
-        config.segment_interval =
-            prompt_positive_int(prompt, "Segment interval seconds", config.segment_interval)?;
-        save_config(&config)?;
+        if let Some(framerate) = prompt_framerate(prompt, config.capture_framerate)? {
+            config.capture_framerate = framerate;
+            explicit.capture_framerate = true;
+        }
+        if let Some(cursor) = prompt_bool(prompt, "Draw cursor", config.draw_cursor)? {
+            config.draw_cursor = cursor;
+            explicit.draw_cursor = true;
+        }
+        if let Some(paused) = prompt_bool(prompt, "Start paused", config.start_paused)? {
+            config.start_paused = paused;
+            explicit.start_paused = true;
+        }
+        if let Some(interval) =
+            prompt_positive_int(prompt, "Segment interval seconds", config.segment_interval)?
+        {
+            config.segment_interval = interval;
+            explicit.segment_interval = true;
+        }
+        save_settings_explicit(&config, explicit)?;
         prompt.write_line(&format!(
             "\nSettings saved to {}",
             config.config_path().display()
@@ -1402,6 +1423,7 @@ pub(crate) fn prepare_run_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::save_config;
     use crate::journal_mark::sample_credential;
     use clap::CommandFactory;
     use std::{
@@ -2015,6 +2037,105 @@ mod tests {
             (2, true, false, 300)
         );
         assert_eq!(config.stream, "strm");
+    }
+
+    #[test]
+    fn settings_enter_on_a_sparse_current_file_writes_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let config_dir = t.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.json"),
+            "{\n  \"config_version\": 2\n}\n",
+        )
+        .unwrap();
+        let mut prompt = ScriptedPrompt::new(&["", "", "", ""]);
+        assert_eq!(cmd_settings(paths(&t), &mut prompt), 0);
+        let text = fs::read_to_string(config_dir.join("config.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let map = val.as_object().unwrap();
+        assert_eq!(map.get("config_version"), Some(&serde_json::Value::from(2)));
+        for key in [
+            "stream",
+            "segment_interval",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "capture_framerate",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(map.get(key).is_none(), "key {key} was written");
+        }
+        let reloaded = load_config(paths(&t)).config;
+        assert_eq!(reloaded.capture_framerate, 1);
+        assert!(reloaded.draw_cursor);
+        assert!(!reloaded.start_paused);
+        assert_eq!(reloaded.segment_interval, 300);
+    }
+
+    #[test]
+    fn settings_typed_default_saves_that_field() {
+        for (inputs, expected_key, expected_val) in [
+            (
+                &["1", "", "", ""][..],
+                "capture_framerate",
+                serde_json::json!(1),
+            ),
+            (
+                &["", "y", "", ""][..],
+                "draw_cursor",
+                serde_json::json!(true),
+            ),
+            (
+                &["", "", "n", ""][..],
+                "start_paused",
+                serde_json::json!(false),
+            ),
+            (
+                &["", "", "", "300"][..],
+                "segment_interval",
+                serde_json::json!(300),
+            ),
+        ] {
+            let t = tempfile::tempdir().unwrap();
+            let config_dir = t.path().join("config");
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(
+                config_dir.join("config.json"),
+                "{\n  \"config_version\": 2\n}\n",
+            )
+            .unwrap();
+            let mut prompt = ScriptedPrompt::new(inputs);
+            assert_eq!(cmd_settings(paths(&t), &mut prompt), 0);
+            let text = fs::read_to_string(config_dir.join("config.json")).unwrap();
+            let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let map = val.as_object().unwrap();
+            assert_eq!(map.get(expected_key), Some(&expected_val));
+            for other in [
+                "capture_framerate",
+                "draw_cursor",
+                "start_paused",
+                "segment_interval",
+            ] {
+                if other != expected_key {
+                    assert!(
+                        map.get(other).is_none(),
+                        "unprompted key {other} was written"
+                    );
+                }
+            }
+            let reloaded = load_config(paths(&t)).config;
+            match expected_key {
+                "capture_framerate" => assert_eq!(reloaded.capture_framerate, 1),
+                "draw_cursor" => assert!(reloaded.draw_cursor),
+                "start_paused" => assert!(!reloaded.start_paused),
+                "segment_interval" => assert_eq!(reloaded.segment_interval, 300),
+                _ => unreachable!(),
+            }
+        }
     }
 
     // tests/test_cli.py::test_cmd_settings_changes_framerate

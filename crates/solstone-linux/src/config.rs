@@ -30,11 +30,16 @@ pub const DEFAULT_ACTIVITY_TITLES: bool = true;
 /// also given the address consent, which turns on desktop accessibility.
 pub const DEFAULT_ACTIVITY_URLS: bool = true;
 pub const DEFAULT_ACTIVITY_THROUGH_PAUSE: bool = false;
-/// Files at this version hold only desktop activity choices the owner made.
-/// Earlier releases wrote their defaults for these keys on first run, so a saved
-/// value there cannot be told apart from a choice. The first write at this version
-/// drops those keys once and records the version.
-pub(crate) const CONFIG_VERSION: u64 = 1;
+const ACTIVITY_OWNER_VERSION: u64 = 1;
+const SETTINGS_OWNER_VERSION: u64 = 2;
+/// Saved files at this version keep a settings key when the owner set it.
+///
+/// Version 1 dropped desktop activity defaults that earlier releases wrote on
+/// first run. Those choices, and the address consent, stay as stored once the
+/// file is version 1 or later. Version 2 drops saved defaults of the other
+/// settings keys. Each drop is pinned to its own version, so a later version
+/// does not run either one again.
+pub(crate) const CONFIG_VERSION: u64 = SETTINGS_OWNER_VERSION;
 const CONFIG_VERSION_KEY: &str = "config_version";
 const PRE_VERSION_ACTIVITY_KEYS: [&str; 3] =
     ["activity_source", "activity_titles", "activity_urls"];
@@ -277,7 +282,108 @@ fn activity_choices_are_owner_set(values: &Map<String, Value>) -> bool {
     values
         .get(CONFIG_VERSION_KEY)
         .and_then(Value::as_u64)
-        .is_some_and(|version| version >= CONFIG_VERSION)
+        .is_some_and(|version| version >= ACTIVITY_OWNER_VERSION)
+}
+
+fn saved_config_version(values: &Map<String, Value>) -> u64 {
+    values
+        .get(CONFIG_VERSION_KEY)
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+const FROZEN_STREAM: &str = "";
+const FROZEN_SEGMENT_INTERVAL: i64 = 300;
+const FROZEN_SYNC_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
+const FROZEN_SYNC_MAX_RETRIES: i64 = 10;
+const FROZEN_SYNC_STALE_THRESHOLD: i64 = 600;
+const FROZEN_CAPTURE_FRAMERATE: i64 = 1;
+const FROZEN_DRAW_CURSOR: bool = true;
+const FROZEN_START_PAUSED: bool = false;
+const FROZEN_PANEL_ICON_OFFER: bool = true;
+const FROZEN_ACTIVITY_ONLY: bool = false;
+
+fn is_matching_integer(value: &Value, expected: i64) -> bool {
+    match value {
+        Value::Number(n) if n.is_i64() || n.is_u64() => n.as_i64() == Some(expected),
+        _ => false,
+    }
+}
+
+fn is_matching_bool(value: &Value, expected: bool) -> bool {
+    matches!(value, Value::Bool(b) if *b == expected)
+}
+
+fn is_matching_sync_retry_delays(value: &Value) -> bool {
+    let Some(arr) = value.as_array() else {
+        return false;
+    };
+    if arr.len() != FROZEN_SYNC_RETRY_DELAYS.len() {
+        return false;
+    }
+    arr.iter()
+        .zip(FROZEN_SYNC_RETRY_DELAYS.iter())
+        .all(|(item, expected)| is_matching_integer(item, *expected))
+}
+
+fn strip_saved_setting_defaults(map: &mut Map<String, Value>) {
+    if map.get("stream").and_then(Value::as_str) == Some(FROZEN_STREAM) {
+        map.remove("stream");
+    }
+    if map
+        .get("segment_interval")
+        .is_some_and(|v| is_matching_integer(v, FROZEN_SEGMENT_INTERVAL))
+    {
+        map.remove("segment_interval");
+    }
+    if map
+        .get("sync_retry_delays")
+        .is_some_and(is_matching_sync_retry_delays)
+    {
+        map.remove("sync_retry_delays");
+    }
+    if map
+        .get("sync_max_retries")
+        .is_some_and(|v| is_matching_integer(v, FROZEN_SYNC_MAX_RETRIES))
+    {
+        map.remove("sync_max_retries");
+    }
+    if map
+        .get("sync_stale_threshold")
+        .is_some_and(|v| is_matching_integer(v, FROZEN_SYNC_STALE_THRESHOLD))
+    {
+        map.remove("sync_stale_threshold");
+    }
+    if map
+        .get("capture_framerate")
+        .is_some_and(|v| is_matching_integer(v, FROZEN_CAPTURE_FRAMERATE))
+    {
+        map.remove("capture_framerate");
+    }
+    if map
+        .get("draw_cursor")
+        .is_some_and(|v| is_matching_bool(v, FROZEN_DRAW_CURSOR))
+    {
+        map.remove("draw_cursor");
+    }
+    if map
+        .get("start_paused")
+        .is_some_and(|v| is_matching_bool(v, FROZEN_START_PAUSED))
+    {
+        map.remove("start_paused");
+    }
+    if map
+        .get("panel_icon_offer")
+        .is_some_and(|v| is_matching_bool(v, FROZEN_PANEL_ICON_OFFER))
+    {
+        map.remove("panel_icon_offer");
+    }
+    if map
+        .get("activity_only")
+        .is_some_and(|v| is_matching_bool(v, FROZEN_ACTIVITY_ONLY))
+    {
+        map.remove("activity_only");
+    }
 }
 
 /// A saved desktop activity value, or `None` when the file holds no owner choice
@@ -290,7 +396,7 @@ fn saved_activity_value<'a>(values: &'a Map<String, Value>, key: &str) -> Option
 }
 
 /// Whether the owner gave the address consent. Earlier releases recorded it on any
-/// activity save, so in a file from before this version it counts only where the
+/// activity save, so in a file from before version 1 it counts only where the
 /// owner had actually turned addresses on.
 fn address_consent_given(values: &Map<String, Value>) -> bool {
     values.get("activity_urls_consent").and_then(Value::as_u64) == Some(1)
@@ -519,8 +625,25 @@ fn acquire_config_write_lock(lock: &Mutex<()>) -> io::Result<MutexGuard<'_, ()>>
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SettingsExplicit {
+    pub capture_framerate: bool,
+    pub draw_cursor: bool,
+    pub start_paused: bool,
+    pub segment_interval: bool,
+}
+
+impl SettingsExplicit {
+    pub(crate) const NONE: Self = Self {
+        capture_framerate: false,
+        draw_cursor: false,
+        start_paused: false,
+        segment_interval: false,
+    };
+}
+
 enum ConfigOverlay<'a> {
-    Settings(&'a Config),
+    Settings(&'a Config, SettingsExplicit),
     Stream(&'a str),
     /// One key, written from the running app. Deliberately narrow: the daemon holds an
     /// in-memory config that may be older than a hand edit, so it must never write its
@@ -540,7 +663,7 @@ fn write_config_merge(
     let _guard = acquire_config_write_lock(&lock)?;
     let path = resolved.config_path();
     migrate_locked(&resolved)?;
-    if matches!(&overlay, ConfigOverlay::Settings(_)) {
+    if matches!(&overlay, ConfigOverlay::Settings(..)) {
         resolved.ensure_dirs()?;
     } else {
         ensure_private_directory(&resolved.config_dir).map_err(io::Error::other)?;
@@ -574,8 +697,7 @@ fn write_config_merge(
         map.remove(retired);
     }
     // One-time: earlier releases wrote these defaults on first run, so their saved
-    // values are not owner choices. The version written below keeps this from
-    // running again, so a choice saved from here on stays.
+    // values are not owner choices. Pinned to files from before version 1.
     if !activity_choices_are_owner_set(&map) {
         // The address consent was also written on any save, so it stays only where
         // the owner had turned addresses on. Nothing else turns on accessibility.
@@ -585,6 +707,9 @@ fn write_config_merge(
         for key in PRE_VERSION_ACTIVITY_KEYS {
             map.remove(key);
         }
+    }
+    if saved_config_version(&map) < SETTINGS_OWNER_VERSION {
+        strip_saved_setting_defaults(&mut map);
     }
 
     let mut warnings = Vec::new();
@@ -659,29 +784,99 @@ fn write_config_merge(
         false
     };
 
-    let is_guided_field = matches!(overlay, ConfigOverlay::GuidedField(..));
-
     match overlay {
-        ConfigOverlay::Settings(snapshot) => {
+        ConfigOverlay::Settings(snapshot, explicit) => {
             // Desktop activity choices are saved only through their own fields, so
             // a whole settings snapshot never writes them or the address consent.
-            capture_framerate = snapshot.capture_framerate.clamp(1, 10);
-            draw_cursor = snapshot.draw_cursor;
-            start_paused = snapshot.start_paused;
-            panel_icon_offer = snapshot.panel_icon_offer;
-            segment_interval = snapshot.segment_interval;
-            activity_only = snapshot.activity_only;
+            let normalized_framerate = snapshot.capture_framerate.clamp(1, 10);
+            if explicit.capture_framerate || normalized_framerate != capture_framerate {
+                map.insert(
+                    "capture_framerate".into(),
+                    Value::Number(normalized_framerate.into()),
+                );
+            }
+            capture_framerate = normalized_framerate;
+
+            let normalized_draw_cursor = snapshot.draw_cursor;
+            if explicit.draw_cursor || normalized_draw_cursor != draw_cursor {
+                map.insert("draw_cursor".into(), Value::Bool(normalized_draw_cursor));
+            }
+            draw_cursor = normalized_draw_cursor;
+
+            let normalized_start_paused = snapshot.start_paused;
+            if explicit.start_paused || normalized_start_paused != start_paused {
+                map.insert("start_paused".into(), Value::Bool(normalized_start_paused));
+            }
+            start_paused = normalized_start_paused;
+
+            let normalized_segment_interval = snapshot.segment_interval;
+            if explicit.segment_interval || normalized_segment_interval != segment_interval {
+                map.insert(
+                    "segment_interval".into(),
+                    Value::Number(normalized_segment_interval.into()),
+                );
+            }
+            segment_interval = normalized_segment_interval;
+
+            let normalized_panel_icon_offer = snapshot.panel_icon_offer;
+            if normalized_panel_icon_offer != panel_icon_offer {
+                map.insert(
+                    "panel_icon_offer".into(),
+                    Value::Bool(normalized_panel_icon_offer),
+                );
+            }
+            panel_icon_offer = normalized_panel_icon_offer;
+
+            let normalized_activity_only = snapshot.activity_only;
+            if normalized_activity_only != activity_only {
+                map.insert(
+                    "activity_only".into(),
+                    Value::Bool(normalized_activity_only),
+                );
+            }
+            activity_only = normalized_activity_only;
+
             if merge_basis.is_none() {
-                stream = snapshot.stream.clone();
-                sync_max_retries = snapshot.sync_max_retries;
-                sync_retry_delays = snapshot.sync_retry_delays.clone();
-                sync_stale_threshold = snapshot.sync_stale_threshold;
+                if snapshot.stream != stream {
+                    map.insert("stream".into(), Value::String(snapshot.stream.clone()));
+                    stream = snapshot.stream.clone();
+                }
+                if snapshot.sync_retry_delays != sync_retry_delays {
+                    map.insert(
+                        "sync_retry_delays".into(),
+                        Value::Array(
+                            snapshot
+                                .sync_retry_delays
+                                .iter()
+                                .copied()
+                                .map(Value::from)
+                                .collect(),
+                        ),
+                    );
+                    sync_retry_delays = snapshot.sync_retry_delays.clone();
+                }
+                if snapshot.sync_max_retries != sync_max_retries {
+                    map.insert(
+                        "sync_max_retries".into(),
+                        Value::Number(snapshot.sync_max_retries.into()),
+                    );
+                    sync_max_retries = snapshot.sync_max_retries;
+                }
+                if snapshot.sync_stale_threshold != sync_stale_threshold {
+                    map.insert(
+                        "sync_stale_threshold".into(),
+                        Value::Number(snapshot.sync_stale_threshold.into()),
+                    );
+                    sync_stale_threshold = snapshot.sync_stale_threshold;
+                }
             }
         }
         ConfigOverlay::Stream(new_stream) => {
+            map.insert("stream".into(), Value::String(new_stream.to_owned()));
             stream = new_stream.to_owned();
         }
         ConfigOverlay::PanelIconOffer(value) => {
+            map.insert("panel_icon_offer".into(), Value::Bool(value));
             panel_icon_offer = value;
         }
         ConfigOverlay::GuidedField(key, value) => {
@@ -897,50 +1092,8 @@ fn write_config_merge(
         config_dir: resolved.config_dir.clone(),
     };
 
-    let mut bytes = if is_guided_field {
-        map.insert(CONFIG_VERSION_KEY.into(), Value::from(CONFIG_VERSION));
-        serde_json::to_vec_pretty(&map).map_err(io::Error::other)?
-    } else if merge_basis.is_none() {
-        #[derive(Serialize)]
-        struct Fresh<'a> {
-            #[serde(flatten)]
-            config: &'a Config,
-            config_version: u64,
-        }
-        serde_json::to_vec_pretty(&Fresh {
-            config: &returned_config,
-            config_version: CONFIG_VERSION,
-        })
-        .map_err(io::Error::other)?
-    } else {
-        map.insert("stream".into(), Value::String(stream));
-        map.insert(
-            "segment_interval".into(),
-            Value::Number(segment_interval.into()),
-        );
-        map.insert(
-            "sync_retry_delays".into(),
-            Value::Array(sync_retry_delays.into_iter().map(Value::from).collect()),
-        );
-        map.insert(
-            "sync_max_retries".into(),
-            Value::Number(sync_max_retries.into()),
-        );
-        map.insert(
-            "sync_stale_threshold".into(),
-            Value::Number(sync_stale_threshold.into()),
-        );
-        map.insert(
-            "capture_framerate".into(),
-            Value::Number(capture_framerate.into()),
-        );
-        map.insert("draw_cursor".into(), Value::Bool(draw_cursor));
-        map.insert("start_paused".into(), Value::Bool(start_paused));
-        map.insert("panel_icon_offer".into(), Value::Bool(panel_icon_offer));
-        map.insert("activity_only".into(), Value::Bool(activity_only));
-        map.insert(CONFIG_VERSION_KEY.into(), Value::from(CONFIG_VERSION));
-        serde_json::to_vec_pretty(&map).map_err(io::Error::other)?
-    };
+    map.insert(CONFIG_VERSION_KEY.into(), Value::from(CONFIG_VERSION));
+    let mut bytes = serde_json::to_vec_pretty(&map).map_err(io::Error::other)?;
     bytes.push(b'\n');
 
     let is_current = || match &merge_basis {
@@ -993,19 +1146,34 @@ pub(crate) fn save_config_with_fault(
     config: &Config,
     fault: &dyn DurableWriteFault,
 ) -> io::Result<()> {
+    save_settings_explicit_with_fault(config, SettingsExplicit::NONE, fault)
+}
+
+pub fn save_config(config: &Config) -> io::Result<()> {
+    save_config_with_fault(config, &NoWriteFault)
+}
+
+pub(crate) fn save_settings_explicit(
+    config: &Config,
+    explicit: SettingsExplicit,
+) -> io::Result<()> {
+    save_settings_explicit_with_fault(config, explicit, &NoWriteFault)
+}
+
+pub(crate) fn save_settings_explicit_with_fault(
+    config: &Config,
+    explicit: SettingsExplicit,
+    fault: &dyn DurableWriteFault,
+) -> io::Result<()> {
     write_config_merge(
         &ConfigPaths {
             base_dir: Some(config.base_dir.clone()),
             config_dir: Some(config.config_dir.clone()),
         },
-        ConfigOverlay::Settings(config),
+        ConfigOverlay::Settings(config, explicit),
         fault,
     )
     .map(|_| ())
-}
-
-pub fn save_config(config: &Config) -> io::Result<()> {
-    save_config_with_fault(config, &NoWriteFault)
 }
 
 /// Read the panel-icon offer preference and nothing else.
@@ -2592,6 +2760,448 @@ mod tests {
     }
 
     #[test]
+    fn fresh_sanitation_leaves_owner_defaults_absent() {
+        let t = tempfile::tempdir().unwrap();
+        let saved = sanitize_link_authority(&paths(t.path())).unwrap();
+        let text = fs::read_to_string(saved.config_path()).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let map = value.as_object().unwrap();
+        assert_eq!(
+            map.get(CONFIG_VERSION_KEY),
+            Some(&Value::from(CONFIG_VERSION))
+        );
+        for key in [
+            "stream",
+            "segment_interval",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "capture_framerate",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(
+                map.get(key).is_none(),
+                "expected key {key} to be absent from fresh config, found: {:?}",
+                map.get(key)
+            );
+        }
+        let reloaded = load_config(paths(t.path())).config;
+        assert_eq!(reloaded.stream, "");
+        assert_eq!(reloaded.segment_interval, 300);
+        assert_eq!(reloaded.sync_retry_delays, vec![5, 30, 120, 300]);
+        assert_eq!(reloaded.sync_max_retries, 10);
+        assert_eq!(reloaded.sync_stale_threshold, 600);
+        assert_eq!(reloaded.capture_framerate, 1);
+        assert!(reloaded.draw_cursor);
+        assert!(!reloaded.start_paused);
+        assert!(reloaded.panel_icon_offer);
+        assert!(!reloaded.activity_only);
+    }
+
+    #[test]
+    fn sparse_current_save_leaves_owner_defaults_absent() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), json!({"config_version": SETTINGS_OWNER_VERSION}));
+        let loaded = load(t.path());
+        save_config(&loaded.config).unwrap();
+        let map = saved_map(t.path());
+        assert_eq!(
+            map.get(CONFIG_VERSION_KEY),
+            Some(&json!(SETTINGS_OWNER_VERSION))
+        );
+        for key in [
+            "stream",
+            "segment_interval",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "capture_framerate",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(
+                map.get(key).is_none(),
+                "key {key} was unexpectedly written: {:?}",
+                map.get(key)
+            );
+        }
+        let reloaded = load(t.path()).config;
+        assert_eq!(reloaded.stream, "");
+        assert_eq!(reloaded.segment_interval, 300);
+        assert_eq!(reloaded.sync_retry_delays, vec![5, 30, 120, 300]);
+        assert_eq!(reloaded.sync_max_retries, 10);
+        assert_eq!(reloaded.sync_stale_threshold, 600);
+        assert_eq!(reloaded.capture_framerate, 1);
+        assert!(reloaded.draw_cursor);
+        assert!(!reloaded.start_paused);
+        assert!(reloaded.panel_icon_offer);
+        assert!(!reloaded.activity_only);
+    }
+
+    #[test]
+    fn snapshot_change_persists_and_unrelated_writers_leave_other_keys() {
+        let t = tempfile::tempdir().unwrap();
+        write(
+            t.path(),
+            json!({
+                "config_version": SETTINGS_OWNER_VERSION,
+                "capture_framerate": 5,
+                "segment_interval": 300,
+                "stream": "desk",
+                "custom_key": "custom_val"
+            }),
+        );
+        let mut config = load(t.path()).config;
+        config.capture_framerate = 1;
+        save_config(&config).unwrap();
+        let map = saved_map(t.path());
+        assert_eq!(map["capture_framerate"], json!(1));
+        assert_eq!(map["segment_interval"], json!(300));
+        assert_eq!(map["stream"], json!("desk"));
+        assert_eq!(map["custom_key"], json!("custom_val"));
+        for absent in [
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(
+                map.get(absent).is_none(),
+                "absent key {absent} was added: {:?}",
+                map.get(absent)
+            );
+        }
+
+        let base_map = json!({
+            "config_version": SETTINGS_OWNER_VERSION,
+            "segment_interval": 300,
+            "stream": "desk",
+            "custom_key": "custom_val"
+        });
+
+        // Subcase 1: sanitize_link_authority
+        let t1 = tempfile::tempdir().unwrap();
+        write(t1.path(), base_map.clone());
+        sanitize_link_authority(&paths(t1.path())).unwrap();
+        let m1 = saved_map(t1.path());
+        assert_eq!(m1["segment_interval"], json!(300));
+        assert_eq!(m1["stream"], json!("desk"));
+        assert_eq!(m1["custom_key"], json!("custom_val"));
+        for absent in [
+            "capture_framerate",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(m1.get(absent).is_none(), "sanitize added {absent}");
+        }
+
+        // Subcase 2: save_linked_stream of a new nonempty name
+        let t2 = tempfile::tempdir().unwrap();
+        write(t2.path(), base_map.clone());
+        save_linked_stream(&paths(t2.path()), "new-stream").unwrap();
+        let m2 = saved_map(t2.path());
+        assert_eq!(m2["stream"], json!("new-stream"));
+        assert_eq!(m2["segment_interval"], json!(300));
+        assert_eq!(m2["custom_key"], json!("custom_val"));
+        for absent in [
+            "capture_framerate",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(
+                m2.get(absent).is_none(),
+                "save_linked_stream added {absent}"
+            );
+        }
+
+        // Subcase 3: set_panel_icon_offer(true)
+        let t3 = tempfile::tempdir().unwrap();
+        write(t3.path(), base_map.clone());
+        set_panel_icon_offer(&paths(t3.path()), true).unwrap();
+        let m3 = saved_map(t3.path());
+        assert_eq!(m3["panel_icon_offer"], json!(true));
+        assert_eq!(m3["stream"], json!("desk"));
+        assert_eq!(m3["segment_interval"], json!(300));
+        assert_eq!(m3["custom_key"], json!("custom_val"));
+        for absent in [
+            "capture_framerate",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "draw_cursor",
+            "start_paused",
+            "activity_only",
+        ] {
+            assert!(
+                m3.get(absent).is_none(),
+                "set_panel_icon_offer added {absent}"
+            );
+        }
+
+        // Subcase 4: set_guided_field of activity_only: true
+        let t4 = tempfile::tempdir().unwrap();
+        write(t4.path(), base_map.clone());
+        set_guided_field(&paths(t4.path()), "activity_only", json!(true)).unwrap();
+        let m4 = saved_map(t4.path());
+        assert_eq!(m4["activity_only"], json!(true));
+        assert_eq!(m4["stream"], json!("desk"));
+        assert_eq!(m4["segment_interval"], json!(300));
+        assert_eq!(m4["custom_key"], json!("custom_val"));
+        for absent in [
+            "capture_framerate",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+        ] {
+            assert!(m4.get(absent).is_none(), "set_guided_field added {absent}");
+        }
+    }
+
+    #[test]
+    fn unversioned_and_version_one_migrate_once() {
+        for max_retries in [3, 0] {
+            let t = tempfile::tempdir().unwrap();
+            write(
+                t.path(),
+                json!({
+                    "segment_interval": 17,
+                    "sync_retry_delays": [2, 4],
+                    "sync_max_retries": max_retries,
+                    "sync_stale_threshold": 91,
+                    "capture_framerate": 4,
+                    "draw_cursor": false,
+                    "start_paused": true,
+                    "panel_icon_offer": false,
+                    "activity_only": true,
+                    "stream": "my-stream",
+                    "custom_key": 123
+                }),
+            );
+            sanitize_link_authority(&paths(t.path())).unwrap();
+            let m = saved_map(t.path());
+            assert_eq!(m[CONFIG_VERSION_KEY], json!(SETTINGS_OWNER_VERSION));
+            assert_eq!(m["segment_interval"], json!(17));
+            assert_eq!(m["sync_retry_delays"], json!([2, 4]));
+            assert_eq!(m["sync_max_retries"], json!(max_retries));
+            assert_eq!(m["sync_stale_threshold"], json!(91));
+            assert_eq!(m["capture_framerate"], json!(4));
+            assert_eq!(m["draw_cursor"], json!(false));
+            assert_eq!(m["start_paused"], json!(true));
+            assert_eq!(m["panel_icon_offer"], json!(false));
+            assert_eq!(m["activity_only"], json!(true));
+            assert_eq!(m["stream"], json!("my-stream"));
+            assert_eq!(m["custom_key"], json!(123));
+
+            set_guided_field(&paths(t.path()), "capture_framerate", json!(1)).unwrap();
+            sanitize_link_authority(&paths(t.path())).unwrap();
+            let m_after = saved_map(t.path());
+            assert_eq!(m_after["capture_framerate"], json!(1));
+        }
+
+        let t_def = tempfile::tempdir().unwrap();
+        write(
+            t_def.path(),
+            json!({
+                "stream": "",
+                "segment_interval": 300,
+                "sync_retry_delays": [5, 30, 120, 300],
+                "sync_max_retries": 10,
+                "sync_stale_threshold": 600,
+                "capture_framerate": 1,
+                "draw_cursor": true,
+                "start_paused": false,
+                "panel_icon_offer": true,
+                "activity_only": false,
+                "custom_key": "kept"
+            }),
+        );
+        sanitize_link_authority(&paths(t_def.path())).unwrap();
+        let m_def = saved_map(t_def.path());
+        assert_eq!(m_def[CONFIG_VERSION_KEY], json!(SETTINGS_OWNER_VERSION));
+        assert_eq!(m_def["custom_key"], json!("kept"));
+        for key in [
+            "stream",
+            "segment_interval",
+            "sync_retry_delays",
+            "sync_max_retries",
+            "sync_stale_threshold",
+            "capture_framerate",
+            "draw_cursor",
+            "start_paused",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(m_def.get(key).is_none(), "key {key} was not removed");
+        }
+
+        for (source_val, stream_in, stream_expected_kept) in
+            [(true, "nonempty-stream", true), (false, "", false)]
+        {
+            let t = tempfile::tempdir().unwrap();
+            write(
+                t.path(),
+                json!({
+                    "config_version": ACTIVITY_OWNER_VERSION,
+                    "activity_source": source_val,
+                    "activity_urls_consent": 1,
+                    "stream": stream_in,
+                    "segment_interval": 300
+                }),
+            );
+            sanitize_link_authority(&paths(t.path())).unwrap();
+            let m = saved_map(t.path());
+            assert_eq!(m[CONFIG_VERSION_KEY], json!(SETTINGS_OWNER_VERSION));
+            assert_eq!(m["activity_source"], json!(source_val));
+            assert_eq!(m["activity_urls_consent"], json!(1));
+            assert!(
+                m.get("segment_interval").is_none(),
+                "segment_interval: 300 should be removed"
+            );
+            if stream_expected_kept {
+                assert_eq!(m["stream"], json!(stream_in));
+            } else {
+                assert!(m.get("stream").is_none(), "empty stream should be removed");
+            }
+
+            set_guided_field(&paths(t.path()), "segment_interval", json!(300)).unwrap();
+            sanitize_link_authority(&paths(t.path())).unwrap();
+            let m_post = saved_map(t.path());
+            assert_eq!(m_post["segment_interval"], json!(300));
+        }
+    }
+
+    #[test]
+    fn truthy_standins_are_not_historical_defaults() {
+        for (field, val) in [
+            ("draw_cursor", json!(1)),
+            ("draw_cursor", json!("false")),
+            ("activity_only", json!(0)),
+            ("sync_retry_delays", json!([5, 30, 120, 300, 1])),
+            ("sync_retry_delays", json!([5.0, 30, 120, 300])),
+            ("capture_framerate", json!(1.0)),
+        ] {
+            let t = tempfile::tempdir().unwrap();
+            let mut obj = serde_json::Map::new();
+            obj.insert(field.into(), val.clone());
+            write(t.path(), Value::Object(obj));
+            sanitize_link_authority(&paths(t.path())).unwrap();
+            let m = saved_map(t.path());
+            assert_eq!(
+                m.get(field),
+                Some(&val),
+                "field {field} with value {val} was unexpectedly stripped"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_fault_keeps_one_complete_object() {
+        for stage in [
+            DurableWriteStage::Create,
+            DurableWriteStage::Write,
+            DurableWriteStage::Fsync,
+            DurableWriteStage::Rename,
+        ] {
+            let t_unver = tempfile::tempdir().unwrap();
+            let unver_json = json!({"segment_interval": 300, "stream": "desk"});
+            write(t_unver.path(), unver_json);
+            let before_bytes = fs::read(t_unver.path().join("cfg/config.json")).unwrap();
+            assert!(
+                sanitize_link_authority_with_fault(&paths(t_unver.path()), &FailStage(stage))
+                    .is_err()
+            );
+            let after_bytes = fs::read(t_unver.path().join("cfg/config.json")).unwrap();
+            assert_eq!(
+                after_bytes, before_bytes,
+                "unversioned bytes changed on stage {stage:?}"
+            );
+
+            let t_v1 = tempfile::tempdir().unwrap();
+            let v1_json = json!({
+                "config_version": ACTIVITY_OWNER_VERSION,
+                "segment_interval": 300,
+                "stream": "desk"
+            });
+            write(t_v1.path(), v1_json);
+            let before_v1_bytes = fs::read(t_v1.path().join("cfg/config.json")).unwrap();
+            assert!(
+                sanitize_link_authority_with_fault(&paths(t_v1.path()), &FailStage(stage)).is_err()
+            );
+            let after_v1_bytes = fs::read(t_v1.path().join("cfg/config.json")).unwrap();
+            assert_eq!(
+                after_v1_bytes, before_v1_bytes,
+                "v1 bytes changed on stage {stage:?}"
+            );
+        }
+
+        let t_sync = tempfile::tempdir().unwrap();
+        write(
+            t_sync.path(),
+            json!({"segment_interval": 300, "stream": "desk"}),
+        );
+        assert!(
+            sanitize_link_authority_with_fault(
+                &paths(t_sync.path()),
+                &FailStage(DurableWriteStage::DirSync)
+            )
+            .is_err()
+        );
+        let m_sync = saved_map(t_sync.path());
+        assert_eq!(m_sync[CONFIG_VERSION_KEY], json!(SETTINGS_OWNER_VERSION));
+        assert!(m_sync.get("segment_interval").is_none());
+        assert_eq!(m_sync["stream"], json!("desk"));
+
+        set_guided_field(&paths(t_sync.path()), "capture_framerate", json!(1)).unwrap();
+        sanitize_link_authority(&paths(t_sync.path())).unwrap();
+        let m_sync_after = saved_map(t_sync.path());
+        assert_eq!(m_sync_after["capture_framerate"], json!(1));
+
+        let t_explicit_fault = tempfile::tempdir().unwrap();
+        write(
+            t_explicit_fault.path(),
+            json!({"stream": "desk", "segment_interval": 300}),
+        );
+        let orig_bytes = fs::read(t_explicit_fault.path().join("cfg/config.json")).unwrap();
+        let mut cfg = load(t_explicit_fault.path()).config;
+        cfg.capture_framerate = 1;
+        let explicit = SettingsExplicit {
+            capture_framerate: true,
+            ..SettingsExplicit::NONE
+        };
+        assert!(
+            save_settings_explicit_with_fault(
+                &cfg,
+                explicit,
+                &FailStage(DurableWriteStage::Rename)
+            )
+            .is_err()
+        );
+        let final_bytes = fs::read(t_explicit_fault.path().join("cfg/config.json")).unwrap();
+        assert_eq!(final_bytes, orig_bytes);
+    }
+
+    #[test]
     fn fresh_config_serializes_authority_free_schema() {
         let t = tempfile::tempdir().unwrap();
         let saved = sanitize_link_authority(&paths(t.path())).unwrap();
@@ -2602,27 +3212,7 @@ mod tests {
         assert!(value.get("key").is_none());
         assert!(value.get("chat_bridge_enabled").is_none());
         assert!(value.get("cache_retention_days").is_none());
-        assert_eq!(value["stream"], "");
-        assert_eq!(
-            text,
-            concat!(
-                "{\n",
-                "  \"stream\": \"\",\n",
-                "  \"segment_interval\": 300,\n",
-                "  \"sync_retry_delays\": [\n",
-                "    5,\n    30,\n    120,\n    300\n",
-                "  ],\n",
-                "  \"sync_max_retries\": 10,\n",
-                "  \"sync_stale_threshold\": 600,\n",
-                "  \"capture_framerate\": 1,\n",
-                "  \"draw_cursor\": true,\n",
-                "  \"start_paused\": false,\n",
-                "  \"panel_icon_offer\": true,\n",
-                "  \"activity_only\": false,\n",
-                "  \"config_version\": 1\n",
-                "}\n"
-            )
-        );
+        assert_eq!(text, concat!("{\n", "  \"config_version\": 2\n", "}\n"));
     }
 
     #[test]
