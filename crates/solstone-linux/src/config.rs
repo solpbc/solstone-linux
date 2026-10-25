@@ -289,6 +289,15 @@ fn saved_activity_value<'a>(values: &'a Map<String, Value>, key: &str) -> Option
     values.get(key)
 }
 
+/// Whether the owner gave the address consent. Earlier releases recorded it on any
+/// activity save, so in a file from before this version it counts only where the
+/// owner had actually turned addresses on.
+fn address_consent_given(values: &Map<String, Value>) -> bool {
+    values.get("activity_urls_consent").and_then(Value::as_u64) == Some(1)
+        && (activity_choices_are_owner_set(values)
+            || values.get("activity_urls") == Some(&Value::Bool(true)))
+}
+
 /// Desktop activity choices as a file holds them, defaults filled in from code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SavedActivity {
@@ -325,7 +334,7 @@ pub(crate) fn read_saved_activity(values: &Map<String, Value>) -> Result<SavedAc
         titles,
         // Addresses need desktop accessibility, which only the owner's own address
         // choice may turn on. A preference alone never does.
-        urls: urls && values.get("activity_urls_consent").and_then(Value::as_u64) == Some(1),
+        urls: urls && address_consent_given(values),
         exclude_apps,
         exclude_titles,
         through_pause,
@@ -568,6 +577,11 @@ fn write_config_merge(
     // values are not owner choices. The version written below keeps this from
     // running again, so a choice saved from here on stays.
     if !activity_choices_are_owner_set(&map) {
+        // The address consent was also written on any save, so it stays only where
+        // the owner had turned addresses on. Nothing else turns on accessibility.
+        if !address_consent_given(&map) {
+            map.remove("activity_urls_consent");
+        }
         for key in PRE_VERSION_ACTIVITY_KEYS {
             map.remove(key);
         }
@@ -1185,9 +1199,10 @@ mod tests {
                 "capture_framerate": 4
             }),
         );
-        // Before any write, the old values already read as unset.
+        // Before any write, the old values already read as unset, and a consent
+        // written beside a saved `false` grants nothing.
         let before = load(t.path()).config;
-        assert!(before.activity_source && before.activity_titles && before.activity_urls);
+        assert!(before.activity_source && before.activity_titles && !before.activity_urls);
 
         // The app's first write at this version migrates the file.
         sanitize_link_authority(&paths(t.path())).unwrap();
@@ -1196,13 +1211,17 @@ mod tests {
             assert!(migrated.get(key).is_none(), "{key} kept: {migrated:?}");
         }
         assert_eq!(migrated[CONFIG_VERSION_KEY], json!(CONFIG_VERSION));
-        assert_eq!(migrated["activity_urls_consent"], json!(1));
+        assert!(migrated.get("activity_urls_consent").is_none());
         assert_eq!(migrated["activity_exclude_apps"], json!(["Excluded"]));
         assert_eq!(migrated["activity_exclude_titles"], json!(["Secret"]));
         assert_eq!(migrated["stream"], json!("desk"));
         assert_eq!(migrated["capture_framerate"], json!(4));
         let loaded = load(t.path()).config;
-        assert!(loaded.activity_source && loaded.activity_titles && loaded.activity_urls);
+        assert!(loaded.activity_source && loaded.activity_titles);
+        assert!(
+            !loaded.activity_urls,
+            "accessibility is not turned on at first start"
+        );
         assert_eq!(loaded.activity_exclude_apps, ["Excluded"]);
 
         // An owner's off choice after the migration stays off through later writes.
@@ -1219,6 +1238,31 @@ mod tests {
         let saved = saved_map(t.path());
         assert_eq!(saved["activity_source"], json!(false));
         assert_eq!(saved["activity_titles"], json!(false));
+    }
+
+    #[test]
+    fn migration_keeps_the_address_consent_only_where_addresses_were_on() {
+        for (saved_urls, kept) in [(true, true), (false, false)] {
+            let t = tempfile::tempdir().unwrap();
+            write(
+                t.path(),
+                json!({
+                    "activity_source": true,
+                    "activity_titles": true,
+                    "activity_urls": saved_urls,
+                    "activity_urls_consent": 1
+                }),
+            );
+            assert_eq!(load(t.path()).config.activity_urls, kept);
+            sanitize_link_authority(&paths(t.path())).unwrap();
+            let migrated = saved_map(t.path());
+            assert!(migrated.get("activity_urls").is_none());
+            assert_eq!(migrated.contains_key("activity_urls_consent"), kept);
+            assert_eq!(load(t.path()).config.activity_urls, kept);
+            // A later write leaves the outcome as it is.
+            sanitize_link_authority(&paths(t.path())).unwrap();
+            assert_eq!(load(t.path()).config.activity_urls, kept);
+        }
     }
 
     #[test]
