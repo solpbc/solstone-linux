@@ -186,6 +186,9 @@ pub struct StateSnapshot {
     pub segment_start_mono: Option<f64>,
     pub process_start_mono: f64,
     pub session: SessionPresence,
+    /// Paused, while desktop activity keeps going because the owner kept it on
+    /// through the pause.
+    pub activity_through_pause: bool,
 }
 pub trait StateSink {
     fn publish(&mut self, snapshot: StateSnapshot);
@@ -1212,6 +1215,7 @@ where
                 .map(|_| self.state.segment_start_mono),
             process_start_mono: self.state.process_start_mono,
             session: self.state.cached_activity.session,
+            activity_through_pause: self.state.paused && !self.state.activity_held,
         })
     }
 }
@@ -3314,6 +3318,8 @@ pub(crate) mod tests {
             before_pause,
             "pause stops desktop activity too"
         );
+        let published = f.states.0.borrow().last().cloned().unwrap();
+        assert!(published.paused && !published.activity_through_pause);
 
         at(&mut f, 6.0);
         f.observer.resume();
@@ -3379,6 +3385,8 @@ pub(crate) mod tests {
         at(&mut f, 4.0);
         f.observer.tick().unwrap();
         assert_eq!(f.stops.get(), 1, "pause still stops the screen");
+        let published = f.states.0.borrow().last().cloned().unwrap();
+        assert!(published.paused && published.activity_through_pause);
         let in_pause = reads.get();
         assert!(in_pause > before_pause, "desktop activity keeps going");
         at(&mut f, 5.0);
@@ -3391,6 +3399,7 @@ pub(crate) mod tests {
         at(&mut f, 7.0);
         f.observer.tick().unwrap();
         assert_eq!(f.starts.get(), 2);
+        assert!(!f.states.0.borrow().last().unwrap().activity_through_pause);
         at(&mut f, 8.0);
         f.observer.shutdown().unwrap();
 

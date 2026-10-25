@@ -58,7 +58,12 @@ pub fn map_intake(model: &ControlModel) -> IntakeKeys {
         return IntakeKeys {
             headline: Some(CopyKey::StatusPaused),
             detail: if model.pause_bounded == Some(false) {
-                Some(CopyKey::StatusPausedDetail)
+                // Desktop activity can keep going through the pause, by the owner's choice.
+                Some(if model.activity_through_pause {
+                    CopyKey::StatusPausedActivityOnDetail
+                } else {
+                    CopyKey::StatusPausedDetail
+                })
             } else {
                 None
             },
@@ -716,6 +721,13 @@ mod tests {
         assert_eq!(k.headline, Some(CopyKey::StatusPaused));
         assert_eq!(k.detail, Some(CopyKey::StatusPausedDetail));
         assert_eq!(k.action, Some(CopyKey::ActionResume));
+
+        pau.activity_through_pause = true;
+        let k = map_intake(&pau);
+        assert_eq!(k.headline, Some(CopyKey::StatusPaused));
+        assert_eq!(k.detail, Some(CopyKey::StatusPausedActivityOnDetail));
+        assert_eq!(k.action, Some(CopyKey::ActionResume));
+        pau.activity_through_pause = false;
 
         pau.pause_bounded = Some(true);
         let k = map_intake(&pau);

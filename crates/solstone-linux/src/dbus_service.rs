@@ -255,6 +255,7 @@ mod tests {
             segment_start_mono: None,
             process_start_mono: 0.0,
             session: Default::default(),
+            activity_through_pause: false,
         }
     }
     fn not_reported_health() -> SyncHealth {
@@ -357,6 +358,7 @@ mod tests {
             segment_start_mono: None,
             process_start_mono: 0.0,
             session: Default::default(),
+            activity_through_pause: false,
         };
         let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
         let service = Observer1 {
@@ -388,6 +390,7 @@ mod tests {
             segment_start_mono: Some(100.0),
             process_start_mono: 50.0,
             session: Default::default(),
+            activity_through_pause: false,
         };
         let service = Observer1 {
             snapshot: Arc::new(Mutex::new(snapshot)),

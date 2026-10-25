@@ -13,6 +13,8 @@ pub const STATUS_SCREEN_WAITING: &str = "screen intake is waiting";
 pub const STATUS_SCREEN_WAITING_DETAIL: &str = "audio intake can continue.";
 pub const STATUS_PAUSED: &str = "paused";
 pub const STATUS_PAUSED_DETAIL: &str = "intake is paused until you resume.";
+pub const STATUS_PAUSED_ACTIVITY_ON_DETAIL: &str =
+    "screen and audio are paused until you resume. desktop activity keeps going.";
 pub const STATUS_STARTING: &str = "starting…";
 pub const STATUS_OFF: &str = "off";
 pub const STATUS_OFF_DETAIL: &str = "intake isn't running.";
@@ -142,7 +144,7 @@ pub const SETTINGS_ACTIVITY_PRIVATE_WINDOWS_NOTE: &str = "linux does not classif
 pub const SETTINGS_ACTIVITY_EXCLUDE_APPS: &str = "apps left out of desktop activity";
 pub const SETTINGS_ACTIVITY_EXCLUDE_TITLES: &str = "window titles left out of desktop activity";
 pub const SETTINGS_ACTIVITY_ROUTE: &str = "activity route";
-pub const SETTINGS_ACTIVITY_EXPLAIN: &str = "desktop activity is on whenever the solstone app takes in your screen, and pausing pauses both. it takes in the app, window title, web addresses, and active or idle time you share with it, and all of it goes into your journal.";
+pub const SETTINGS_ACTIVITY_EXPLAIN: &str = "desktop activity is on whenever the solstone app takes in your screen, and pausing pauses both. the solstone app takes in the app, window title, web addresses, and active or idle time you share with it, and all of it goes into your journal.";
 pub const HELP_HEADING: &str = "get help";
 pub const HELP_INTRO: &str = "need a hand? reach a human. we're happy to help.";
 pub const HELP_OPEN: &str = "get help";
@@ -247,6 +249,7 @@ pub enum CopyKey {
     StatusScreenWaitingDetail,
     StatusPaused,
     StatusPausedDetail,
+    StatusPausedActivityOnDetail,
     StatusStarting,
     StatusOff,
     StatusOffDetail,
@@ -411,6 +414,7 @@ impl CopyKey {
             Self::StatusScreenWaitingDetail => STATUS_SCREEN_WAITING_DETAIL,
             Self::StatusPaused => STATUS_PAUSED,
             Self::StatusPausedDetail => STATUS_PAUSED_DETAIL,
+            Self::StatusPausedActivityOnDetail => STATUS_PAUSED_ACTIVITY_ON_DETAIL,
             Self::StatusStarting => STATUS_STARTING,
             Self::StatusOff => STATUS_OFF,
             Self::StatusOffDetail => STATUS_OFF_DETAIL,

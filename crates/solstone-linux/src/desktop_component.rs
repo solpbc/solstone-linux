@@ -196,6 +196,7 @@ mod tests {
             segment_start_mono: None,
             process_start_mono: 0.0,
             session: Default::default(),
+            activity_through_pause: false,
         }
     }
     #[test]

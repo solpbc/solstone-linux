@@ -240,6 +240,7 @@ mod tests {
             segment_start_mono: Some(100.0),
             process_start_mono: 50.0,
             session: Default::default(),
+            activity_through_pause: false,
         }
     }
     fn connected_health() -> SyncHealth {

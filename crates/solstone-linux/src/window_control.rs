@@ -147,6 +147,9 @@ pub struct ControlDocument {
     pub confirmed_mark: Option<MarkRenderDocument>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_bounded: Option<bool>,
+    /// Paused, while desktop activity keeps going.
+    #[serde(default)]
+    pub activity_through_pause: bool,
     #[serde(default)]
     pub capture_attention: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,6 +264,7 @@ pub struct ControlModel {
     pub pending_mark: Option<MarkRenderDocument>,
     pub confirmed_mark: Option<MarkRenderDocument>,
     pub pause_bounded: Option<bool>,
+    pub activity_through_pause: bool,
     pub capture_attention: bool,
     pub queue_count: Option<i64>,
     pub quarantine_count: Option<u64>,
@@ -341,6 +345,7 @@ impl ControlModel {
             pending_mark: None,
             confirmed_mark: None,
             pause_bounded: None,
+            activity_through_pause: false,
             capture_attention: false,
             queue_count: None,
             quarantine_count: None,
@@ -423,6 +428,7 @@ pub fn decode_control<E: std::fmt::Display>(
         pending_mark: doc.pending_mark,
         confirmed_mark: doc.confirmed_mark,
         pause_bounded: doc.pause_bounded,
+        activity_through_pause: doc.activity_through_pause,
         capture_attention: doc.capture_attention,
         queue_count: doc.queue_count,
         quarantine_count: doc.quarantine_count,
@@ -867,6 +873,7 @@ pub(crate) fn assemble_document(
         pending_mark,
         confirmed_mark,
         pause_bounded,
+        activity_through_pause: snapshot.paused && snapshot.activity_through_pause,
         capture_attention,
         queue_count,
         quarantine_count,
@@ -2003,6 +2010,7 @@ impl Default for WindowControlHandler {
                     segment_start_mono: None,
                     process_start_mono: 0.0,
                     session: Default::default(),
+                    activity_through_pause: false,
                 })),
                 effective_settings: Arc::new(Mutex::new(None)),
                 route_status: Arc::new(Mutex::new(None)),
@@ -2506,6 +2514,7 @@ mod tests {
             segment_start_mono: None,
             process_start_mono: 0.0,
             session: Default::default(),
+            activity_through_pause: false,
         }
     }
 
@@ -4295,6 +4304,25 @@ mod tests {
             self.url_reads.set(self.url_reads.get() + 1);
             Some("https://user:secret@sentinel.example/path?q=1#frag".into())
         }
+    }
+
+    #[tokio::test]
+    async fn paused_status_says_when_desktop_activity_keeps_going() {
+        let cred = sample_valid_credential("cert-pem-bytes");
+        let pairer = Arc::new(FakePairer::new(cred));
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(None, false, pairer, starter, Arc::new(NoWriteFault)).await;
+        for through_pause in [false, true] {
+            {
+                let mut snapshot = harness.snapshot.lock().unwrap();
+                *snapshot = test_snapshot(Mode::Screencast, true);
+                snapshot.activity_through_pause = through_pause;
+            }
+            let model = decode_control_str(&harness.handler.get_control_state()).unwrap();
+            assert_eq!(model.capture, "paused");
+            assert_eq!(model.activity_through_pause, through_pause);
+        }
+        harness.shutdown().await;
     }
 
     #[tokio::test]

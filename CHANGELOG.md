@@ -8,7 +8,8 @@ and this project adheres to Semantic Versioning.
 
 ### Changed
 
-- desktop activity now comes on with your screen: starting the solstone app starts both, pausing pauses both, and all of it goes into your journal. window titles come on too. web addresses come on when you turn on their switch in settings, which also turns on desktop accessibility. you can still turn desktop activity, window titles or web addresses off in settings, and a new setting keeps desktop activity on while you pause. if you set up before this version, desktop activity and window titles are now on whenever your screen is, even if you'd turned them off. web addresses stay off unless you'd turned them on.
+- if you set up before this version, desktop activity and window titles are now on whenever the solstone app takes in your screen, even if you'd turned them off. web addresses stay off unless you'd turned them on. if you want any of them off, turn them off again in settings and they stay off.
+- desktop activity now comes on with your screen: starting the solstone app starts both, pausing pauses both, and all of it goes into your journal. window titles come on too. web addresses come on when you turn on their switch in settings, which also turns on desktop accessibility. you can still turn desktop activity, window titles or web addresses off in settings, and you can choose to keep desktop activity on while you pause.
 
 ### Fixed
 
