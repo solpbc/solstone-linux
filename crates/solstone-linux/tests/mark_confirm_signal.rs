@@ -476,8 +476,13 @@ impl MarkTerminal {
         rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &settings)
             .unwrap();
         rustix::fs::fcntl_setfl(&master, rustix::fs::OFlags::NONBLOCK).unwrap();
+        // The harness owns this pty master for the AsyncFd's whole life, so the
+        // descriptor is never closed or replaced underneath it: the safe
+        // constructor tokio deprecated for RUSTSEC-2026-0386 is sound here.
+        #[allow(deprecated)]
+        let master = AsyncFd::new(fs::File::from(master)).unwrap();
         Self {
-            master: AsyncFd::new(fs::File::from(master)).unwrap(),
+            master,
             _slave: slave,
             path,
             pending: Vec::new(),
