@@ -385,10 +385,14 @@ where
         self.state.cached_is_active = target == Mode::Screencast;
         self.state.mode = target;
         if self.config.activity_only {
-            self.note_activity();
-            self.ensure_activity_segment()?;
-            let _ = self.persist_activity();
-            if !self.session_live() {
+            // As for screen and sound: with no session in front at startup, there
+            // is nothing to close and nothing to take in, so no segment opens
+            // until a session is in front.
+            if self.session_live() {
+                self.note_activity();
+                self.ensure_activity_segment()?;
+                let _ = self.persist_activity();
+            } else {
                 self.state.mode = Mode::Idle;
             }
             self.publish();
@@ -3401,6 +3405,52 @@ pub(crate) mod tests {
             f.starts.get(),
             2,
             "intake starts again when a session is back"
+        );
+    }
+
+    // No Python ancestor: desktop activity alone, started with no session in front,
+    // writes nothing and opens no segment until a session is in front.
+    #[test]
+    fn activity_only_start_with_no_session_in_front_opens_no_segment() {
+        let mut f = fixture(false);
+        let (_fault, _reads) = install_notes(&mut f, true);
+        for _ in 0..64 {
+            f.observer.backends.activity.0.push_back(Ok(away()));
+        }
+        at(&mut f, 1.0);
+        initialize(&mut f);
+        for second in [6.0, 11.0, 16.0] {
+            at(&mut f, second);
+            f.observer.tick().unwrap();
+        }
+        assert!(f.observer.state.segment_dir.is_none());
+        assert_eq!(
+            segment_dirs(&f),
+            0,
+            "no segment opens while no session is in front"
+        );
+        assert!(
+            activity_jsonl_paths(f.observer.config.base_dir.as_path()).is_empty(),
+            "nothing is written while no session is in front"
+        );
+        f.observer.backends.activity.0.clear();
+        at(&mut f, 21.0);
+        f.observer.tick().unwrap();
+        assert!(
+            f.observer.state.segment_dir.is_some(),
+            "a segment opens when a session is back"
+        );
+        at(&mut f, 26.0);
+        f.observer.tick().unwrap();
+        f.observer.shutdown().unwrap();
+        let rows = activity_rows(&activity_jsonl_paths(f.observer.config.base_dir.as_path()));
+        assert!(
+            !rows.is_empty(),
+            "activity is written once a session is back"
+        );
+        assert!(
+            rows.iter().all(|row| row.ts >= 21_000),
+            "no row covers the time before a session was in front: {rows:?}"
         );
     }
 
