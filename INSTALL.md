@@ -53,8 +53,20 @@ version:
 curl -fsS https://updates.solstone.app/solstone-linux/release/latest
 ```
 
-It prints one line, `version=<VERSION>`. There is no directory listing, so fetch
-each file by name. For that version the files are, on x86_64:
+It prints one line, `version=<VERSION>`. Read it into a variable that the
+commands below use, so you don't type the version by hand:
+
+```bash
+SOLSTONE_VERSION=$(curl -fsS https://updates.solstone.app/solstone-linux/release/latest | sed -n 's/^version=//p')
+echo "installing solstone-linux $SOLSTONE_VERSION"
+```
+
+Run the rest of these steps in the same shell. In a new one, set
+`SOLSTONE_VERSION` again first.
+
+Download paths use the bare version, `release/<VERSION>/` with no `v`, even
+though the GitHub tag is `v<VERSION>`. There is no directory listing, so fetch
+each file by name. For any version the files are, on x86_64:
 
 - `solstone-linux_<VERSION>-1_amd64.deb`
 - `solstone-linux-<VERSION>-1.x86_64.rpm`
@@ -79,10 +91,10 @@ names; on aarch64, use the aarch64 names above in their place.
 and its adjacent `.minisig` file:
 
 ```bash
-base="https://updates.solstone.app/solstone-linux/release/<VERSION>"
+base="https://updates.solstone.app/solstone-linux/release/$SOLSTONE_VERSION"
 curl -fLO "$base/<the-package-you-will-install>"
-curl -fLO "$base/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json"
-curl -fLO "$base/solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json.minisig"
+curl -fLO "$base/solstone-linux-$SOLSTONE_VERSION-linux-x86_64.rust-release-manifest.json"
+curl -fLO "$base/solstone-linux-$SOLSTONE_VERSION-linux-x86_64.rust-release-manifest.json.minisig"
 ```
 
 Then fetch the published key, authenticate the manifest, and check the package
@@ -90,16 +102,17 @@ against the digest in that manifest:
 
 ```bash
 curl -fLo solstone-linux-release.pub https://updates.solstone.app/solstone-linux/minisign.pub
-minisign -Vm solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json -p solstone-linux-release.pub
-jq -r --arg package '<downloaded-package>' \
+minisign -Vm "solstone-linux-$SOLSTONE_VERSION-linux-x86_64.rust-release-manifest.json" -p solstone-linux-release.pub
+jq -r --arg package "<downloaded-package>" \
   '.artifacts[] | select(.path == $package) | "\(.sha256)  \(.path)"' \
-  solstone-linux-<VERSION>-linux-x86_64.rust-release-manifest.json \
+  "solstone-linux-$SOLSTONE_VERSION-linux-x86_64.rust-release-manifest.json" \
   | sha256sum -c -
 ```
 
 Minisign authenticates the release manifest. The next command checks the
 downloaded package against the authenticated SHA-256 digest. Replace
-`<downloaded-package>` with its exact filename. You run these checks; `apt`,
+`<downloaded-package>` with its exact filename, such as
+`solstone-linux_${SOLSTONE_VERSION}-1_amd64.deb`. You run these checks; `apt`,
 `dnf`, and `scripts/install.sh` do not. If either command refuses the files,
 stop.
 
@@ -110,14 +123,14 @@ published for your distribution when available.
 the verify-first step above before running:
 
 ```bash
-sudo apt install ./solstone-linux_<VERSION>-1_amd64.deb
+sudo apt install "./solstone-linux_${SOLSTONE_VERSION}-1_amd64.deb"
 ```
 
 **Fedora / RHEL:** `dnf` does not check our minisign signature, so complete the
 verify-first step above before running:
 
 ```bash
-sudo dnf install ./solstone-linux-<VERSION>-1.x86_64.rpm
+sudo dnf install "./solstone-linux-$SOLSTONE_VERSION-1.x86_64.rpm"
 ```
 
 For the portable archive, `scripts/install.sh` does not check our minisign
@@ -125,7 +138,7 @@ signature either. Complete the verify-first step above before running it. The
 installer is in the matching release source checkout, not inside the archive:
 
 ```bash
-scripts/install.sh solstone-linux-<VERSION>-linux-x86_64.tar.gz
+scripts/install.sh "solstone-linux-$SOLSTONE_VERSION-linux-x86_64.tar.gz"
 ```
 
 If you downloaded only the tarball, obtain `scripts/install.sh` from the
