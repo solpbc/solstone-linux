@@ -3271,7 +3271,7 @@ dependencies = [
 
 [[package]]
 name = "rust-release-manifest"
-version = "2.0.27"
+version = "2.0.28"
 dependencies = [
  "ar",
  "base64 0.22.1",
@@ -3650,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "solstone-linux"
-version = "2.0.27"
+version = "2.0.28"
 dependencies = [
  "ashpd",
  "chrono",
@@ -3699,7 +3699,7 @@ dependencies = [
 
 [[package]]
 name = "solstone-linux-window"
-version = "2.0.27"
+version = "2.0.28"
 dependencies = [
  "gtk4",
  "num-format",
