@@ -643,7 +643,15 @@ impl SettingsExplicit {
 }
 
 enum ConfigOverlay<'a> {
+    /// CLI settings. The snapshot was taken before the prompts, so a field is
+    /// written only when that prompt was answered. Every other disk value stays,
+    /// including one saved while the prompts were open.
     Settings(&'a Config, SettingsExplicit),
+    /// Test and setup writer. No production caller. An existing file takes a
+    /// modelled setting only when this snapshot differs from the post-migration
+    /// value, and it does not take stream or the sync fields. A new file writes
+    /// those four only when they differ from the code default.
+    Setup(&'a Config),
     Stream(&'a str),
     /// One key, written from the running app. Deliberately narrow: the daemon holds an
     /// in-memory config that may be older than a hand edit, so it must never write its
@@ -663,7 +671,10 @@ fn write_config_merge(
     let _guard = acquire_config_write_lock(&lock)?;
     let path = resolved.config_path();
     migrate_locked(&resolved)?;
-    if matches!(&overlay, ConfigOverlay::Settings(..)) {
+    if matches!(
+        &overlay,
+        ConfigOverlay::Settings(..) | ConfigOverlay::Setup(..)
+    ) {
         resolved.ensure_dirs()?;
     } else {
         ensure_private_directory(&resolved.config_dir).map_err(io::Error::other)?;
@@ -787,9 +798,36 @@ fn write_config_merge(
     match overlay {
         ConfigOverlay::Settings(snapshot, explicit) => {
             // Desktop activity choices are saved only through their own fields, so
+            // a settings save never writes them or the address consent.
+            if explicit.capture_framerate {
+                let normalized_framerate = snapshot.capture_framerate.clamp(1, 10);
+                map.insert(
+                    "capture_framerate".into(),
+                    Value::Number(normalized_framerate.into()),
+                );
+                capture_framerate = normalized_framerate;
+            }
+            if explicit.draw_cursor {
+                draw_cursor = snapshot.draw_cursor;
+                map.insert("draw_cursor".into(), Value::Bool(draw_cursor));
+            }
+            if explicit.start_paused {
+                start_paused = snapshot.start_paused;
+                map.insert("start_paused".into(), Value::Bool(start_paused));
+            }
+            if explicit.segment_interval {
+                segment_interval = snapshot.segment_interval;
+                map.insert(
+                    "segment_interval".into(),
+                    Value::Number(segment_interval.into()),
+                );
+            }
+        }
+        ConfigOverlay::Setup(snapshot) => {
+            // Desktop activity choices are saved only through their own fields, so
             // a whole settings snapshot never writes them or the address consent.
             let normalized_framerate = snapshot.capture_framerate.clamp(1, 10);
-            if explicit.capture_framerate || normalized_framerate != capture_framerate {
+            if normalized_framerate != capture_framerate {
                 map.insert(
                     "capture_framerate".into(),
                     Value::Number(normalized_framerate.into()),
@@ -798,19 +836,19 @@ fn write_config_merge(
             capture_framerate = normalized_framerate;
 
             let normalized_draw_cursor = snapshot.draw_cursor;
-            if explicit.draw_cursor || normalized_draw_cursor != draw_cursor {
+            if normalized_draw_cursor != draw_cursor {
                 map.insert("draw_cursor".into(), Value::Bool(normalized_draw_cursor));
             }
             draw_cursor = normalized_draw_cursor;
 
             let normalized_start_paused = snapshot.start_paused;
-            if explicit.start_paused || normalized_start_paused != start_paused {
+            if normalized_start_paused != start_paused {
                 map.insert("start_paused".into(), Value::Bool(normalized_start_paused));
             }
             start_paused = normalized_start_paused;
 
             let normalized_segment_interval = snapshot.segment_interval;
-            if explicit.segment_interval || normalized_segment_interval != segment_interval {
+            if normalized_segment_interval != segment_interval {
                 map.insert(
                     "segment_interval".into(),
                     Value::Number(normalized_segment_interval.into()),
@@ -1146,7 +1184,15 @@ pub(crate) fn save_config_with_fault(
     config: &Config,
     fault: &dyn DurableWriteFault,
 ) -> io::Result<()> {
-    save_settings_explicit_with_fault(config, SettingsExplicit::NONE, fault)
+    write_config_merge(
+        &ConfigPaths {
+            base_dir: Some(config.base_dir.clone()),
+            config_dir: Some(config.config_dir.clone()),
+        },
+        ConfigOverlay::Setup(config),
+        fault,
+    )
+    .map(|_| ())
 }
 
 pub fn save_config(config: &Config) -> io::Result<()> {

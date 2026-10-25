@@ -1423,7 +1423,7 @@ pub(crate) fn prepare_run_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::save_config;
+    use crate::config::{save_config, set_guided_field, set_panel_icon_offer};
     use crate::journal_mark::sample_credential;
     use clap::CommandFactory;
     use std::{
@@ -2020,6 +2020,137 @@ mod tests {
         let mut prompt = ScriptedPrompt::new(inputs);
         assert_eq!(cmd_settings(paths(t), &mut prompt), 0);
         (load_config(paths(t)).config, prompt.output)
+    }
+
+    // An independent writer can save while the prompts are open. Enter leaves
+    // that key alone, and the final save keeps the independent value.
+    #[test]
+    fn settings_enter_preserves_an_independent_save_during_the_prompt() {
+        fn sparse(t: &tempfile::TempDir) {
+            let config_dir = t.path().join("config");
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(
+                config_dir.join("config.json"),
+                "{\n  \"config_version\": 2\n}\n",
+            )
+            .unwrap();
+        }
+        enum IndependentSave {
+            DrawCursor,
+            PanelIconOffer,
+            ActivityOnly,
+        }
+        struct InterleavingPrompt {
+            paths: ConfigPaths,
+            trigger: &'static str,
+            action: Option<IndependentSave>,
+            output: String,
+        }
+        impl InterleavingPrompt {
+            fn save_independent(kind: IndependentSave, paths: &ConfigPaths) {
+                match kind {
+                    IndependentSave::DrawCursor => {
+                        set_guided_field(paths, "draw_cursor", serde_json::json!(false)).unwrap();
+                    }
+                    IndependentSave::PanelIconOffer => {
+                        set_panel_icon_offer(paths, false).unwrap();
+                    }
+                    IndependentSave::ActivityOnly => {
+                        set_guided_field(paths, "activity_only", serde_json::json!(true)).unwrap();
+                    }
+                }
+            }
+        }
+        impl PromptIo for InterleavingPrompt {
+            fn read_line(&mut self, prompt: &str) -> io::Result<String> {
+                self.output.push_str(prompt);
+                if prompt.contains(self.trigger)
+                    && let Some(action) = self.action.take()
+                {
+                    Self::save_independent(action, &self.paths);
+                }
+                Ok(String::new())
+            }
+            fn write_line(&mut self, line: &str) -> io::Result<()> {
+                self.output.push_str(line);
+                self.output.push('\n');
+                Ok(())
+            }
+        }
+        fn saved(t: &tempfile::TempDir) -> serde_json::Map<String, serde_json::Value> {
+            let text = fs::read_to_string(t.path().join("config/config.json")).unwrap();
+            serde_json::from_str::<serde_json::Value>(&text)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone()
+        }
+
+        let t = tempfile::tempdir().unwrap();
+        sparse(&t);
+        let config_paths = paths(&t);
+        let mut prompt = InterleavingPrompt {
+            paths: config_paths.clone(),
+            trigger: "Draw cursor",
+            action: Some(IndependentSave::DrawCursor),
+            output: String::new(),
+        };
+        assert_eq!(cmd_settings(config_paths, &mut prompt), 0);
+        let map = saved(&t);
+        assert_eq!(map.get("draw_cursor"), Some(&serde_json::json!(false)));
+        for key in [
+            "capture_framerate",
+            "start_paused",
+            "segment_interval",
+            "panel_icon_offer",
+            "activity_only",
+        ] {
+            assert!(map.get(key).is_none(), "enter wrote {key}");
+        }
+
+        let t = tempfile::tempdir().unwrap();
+        sparse(&t);
+        let config_paths = paths(&t);
+        let mut prompt = InterleavingPrompt {
+            paths: config_paths.clone(),
+            trigger: "Framerate",
+            action: Some(IndependentSave::PanelIconOffer),
+            output: String::new(),
+        };
+        assert_eq!(cmd_settings(config_paths, &mut prompt), 0);
+        let map = saved(&t);
+        assert_eq!(map.get("panel_icon_offer"), Some(&serde_json::json!(false)));
+        for key in [
+            "capture_framerate",
+            "draw_cursor",
+            "start_paused",
+            "segment_interval",
+            "activity_only",
+        ] {
+            assert!(map.get(key).is_none(), "enter wrote {key}");
+        }
+
+        let t = tempfile::tempdir().unwrap();
+        sparse(&t);
+        let config_paths = paths(&t);
+        let mut prompt = InterleavingPrompt {
+            paths: config_paths.clone(),
+            trigger: "Framerate",
+            action: Some(IndependentSave::ActivityOnly),
+            output: String::new(),
+        };
+        assert_eq!(cmd_settings(config_paths, &mut prompt), 0);
+        let map = saved(&t);
+        assert_eq!(map.get("activity_only"), Some(&serde_json::json!(true)));
+        for key in [
+            "capture_framerate",
+            "draw_cursor",
+            "start_paused",
+            "segment_interval",
+            "panel_icon_offer",
+        ] {
+            assert!(map.get(key).is_none(), "enter wrote {key}");
+        }
     }
 
     // tests/test_cli.py::test_cmd_settings_enter_keeps_all
