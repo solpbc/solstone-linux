@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "1265cbef7574dec100757c4638964b7aab16d035977d947d735835631387ef21",
+  "cargo_lock_sha256": "7e18bc68403fffde043794cb809136871bfefe2d2d35d03dd885e0af75284eed",
   "notices_sha256": "63cd007157084f39f30dcd1ee9279ebb4216151b2c3e06e1d4932c4574ba848b",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux-window",
@@ -7153,7 +7153,7 @@
     },
     {
       "name": "tokio",
-      "version": "1.52.4",
+      "version": "1.53.3",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "MIT",
       "members": [
