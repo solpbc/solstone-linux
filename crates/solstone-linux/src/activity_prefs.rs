@@ -15,6 +15,21 @@ pub struct ActivityPolicy {
     pub activity_urls: bool,
     pub activity_exclude_apps: Vec<String>,
     pub activity_exclude_titles: Vec<String>,
+    #[serde(default)]
+    pub activity_through_pause: bool,
+}
+
+impl ActivityPolicy {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            activity_source: config.activity_source,
+            activity_titles: config.activity_titles,
+            activity_urls: config.activity_urls,
+            activity_exclude_apps: config.activity_exclude_apps.clone(),
+            activity_exclude_titles: config.activity_exclude_titles.clone(),
+            activity_through_pause: config.activity_through_pause,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +39,8 @@ pub struct ActivityPrefsSnapshot {
     pub urls: bool,
     pub exclude_apps: Vec<String>,
     pub exclude_titles: Vec<String>,
+    /// Desktop activity keeps going through the owner's pause.
+    pub through_pause: bool,
     pub generation: u64,
     pub policy_boundary_ms: Option<u64>,
 }
@@ -42,6 +59,7 @@ impl ActivityPrefs {
             urls: config.activity_urls,
             exclude_apps: config.activity_exclude_apps.clone(),
             exclude_titles: config.activity_exclude_titles.clone(),
+            through_pause: config.activity_through_pause,
             generation: initial_gen,
             policy_boundary_ms: None,
         };
@@ -58,6 +76,13 @@ impl ActivityPrefs {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// The owner chose to keep desktop activity running through the main pause.
+    /// It does nothing while the source itself is off.
+    pub fn runs_through_pause(&self) -> bool {
+        let lock = self.state.read().unwrap_or_else(|p| p.into_inner());
+        lock.source && lock.through_pause
     }
 
     pub fn apply_policy(&self, policy: ActivityPolicy) -> u64 {
@@ -77,6 +102,7 @@ impl ActivityPrefs {
         lock.urls = policy.activity_urls;
         lock.exclude_apps = policy.activity_exclude_apps;
         lock.exclude_titles = policy.activity_exclude_titles;
+        lock.through_pause = policy.activity_through_pause;
         lock.generation = next;
         lock.policy_boundary_ms = Some(
             lock.policy_boundary_ms

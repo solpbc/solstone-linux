@@ -23,6 +23,29 @@ const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const CONFIG_WRITE_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const CONFIG_WRITE_LOCK_POLL: Duration = Duration::from_micros(100);
 static CONFIG_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+/// Desktop activity runs whenever screen intake runs, unless the owner turns it off.
+pub const DEFAULT_ACTIVITY_SOURCE: bool = true;
+pub const DEFAULT_ACTIVITY_TITLES: bool = true;
+/// The address preference starts on. Addresses are read only once the owner has
+/// also given the address consent, which turns on desktop accessibility.
+pub const DEFAULT_ACTIVITY_URLS: bool = true;
+pub const DEFAULT_ACTIVITY_THROUGH_PAUSE: bool = false;
+/// Files at this version hold only desktop activity choices the owner made.
+/// Earlier releases wrote their defaults for these keys on first run, so a saved
+/// value there cannot be told apart from a choice. The first write at this version
+/// drops those keys once and records the version.
+pub(crate) const CONFIG_VERSION: u64 = 1;
+const CONFIG_VERSION_KEY: &str = "config_version";
+const PRE_VERSION_ACTIVITY_KEYS: [&str; 3] =
+    ["activity_source", "activity_titles", "activity_urls"];
+pub(crate) const ACTIVITY_POLICY_KEYS: [&str; 6] = [
+    "activity_source",
+    "activity_titles",
+    "activity_urls",
+    "activity_exclude_apps",
+    "activity_exclude_titles",
+    "activity_through_pause",
+];
 pub(crate) const RETIRED_CONFIG_KEYS: [&str; 4] = [
     "server_url",
     "key",
@@ -43,16 +66,23 @@ pub struct Config {
     /// Whether the running app may offer to set up the GNOME panel icon. The owner
     /// turns this off from the offer itself, or by hand like every other key.
     pub panel_icon_offer: bool,
-    #[serde(default)]
+    /// Desktop activity choices are saved only when the owner makes them, so these
+    /// fields are never serialized from a whole settings snapshot.
+    #[serde(default, skip_serializing)]
     pub activity_source: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub activity_titles: bool,
-    #[serde(default)]
+    /// The effective address choice: the saved preference and the owner's address
+    /// consent together.
+    #[serde(default, skip_serializing)]
     pub activity_urls: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub activity_exclude_apps: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub activity_exclude_titles: Vec<String>,
+    /// Desktop activity keeps going through the owner's pause.
+    #[serde(default, skip_serializing)]
+    pub activity_through_pause: bool,
     #[serde(default)]
     pub activity_only: bool,
     #[serde(skip)]
@@ -84,11 +114,13 @@ impl Default for Config {
             draw_cursor: true,
             start_paused: false,
             panel_icon_offer: true,
-            activity_source: false,
-            activity_titles: false,
+            activity_source: DEFAULT_ACTIVITY_SOURCE,
+            activity_titles: DEFAULT_ACTIVITY_TITLES,
+            // No address consent exists before the owner gives it.
             activity_urls: false,
             activity_exclude_apps: Vec::new(),
             activity_exclude_titles: Vec::new(),
+            activity_through_pause: DEFAULT_ACTIVITY_THROUGH_PAUSE,
             activity_only: false,
             base_dir: home.join(".local/share/solstone-linux"),
             config_dir: config_dir_for(home, env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)),
@@ -209,9 +241,9 @@ fn load_string(
     }
 }
 
-fn load_activity_bool(value: Option<&Value>) -> Result<bool, ()> {
+fn load_activity_bool(value: Option<&Value>, default: bool) -> Result<bool, ()> {
     match value {
-        None => Ok(false),
+        None => Ok(default),
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(_) => Err(()),
     }
@@ -240,6 +272,66 @@ fn load_activity_exclusions(value: Option<&Value>) -> Result<Vec<String>, ()> {
     Ok(out)
 }
 
+/// Whether this file's source, title and address values are the owner's own.
+fn activity_choices_are_owner_set(values: &Map<String, Value>) -> bool {
+    values
+        .get(CONFIG_VERSION_KEY)
+        .and_then(Value::as_u64)
+        .is_some_and(|version| version >= CONFIG_VERSION)
+}
+
+/// A saved desktop activity value, or `None` when the file holds no owner choice
+/// for it. A missing key means the current default in code.
+fn saved_activity_value<'a>(values: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    if PRE_VERSION_ACTIVITY_KEYS.contains(&key) && !activity_choices_are_owner_set(values) {
+        return None;
+    }
+    values.get(key)
+}
+
+/// Desktop activity choices as a file holds them, defaults filled in from code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SavedActivity {
+    pub source: bool,
+    pub titles: bool,
+    /// The effective address choice: preference and the owner's address consent.
+    pub urls: bool,
+    pub exclude_apps: Vec<String>,
+    pub exclude_titles: Vec<String>,
+    pub through_pause: bool,
+}
+
+pub(crate) fn read_saved_activity(values: &Map<String, Value>) -> Result<SavedActivity, ()> {
+    let source = load_activity_bool(
+        saved_activity_value(values, "activity_source"),
+        DEFAULT_ACTIVITY_SOURCE,
+    )?;
+    let titles = load_activity_bool(
+        saved_activity_value(values, "activity_titles"),
+        DEFAULT_ACTIVITY_TITLES,
+    )?;
+    let urls = load_activity_bool(
+        saved_activity_value(values, "activity_urls"),
+        DEFAULT_ACTIVITY_URLS,
+    )?;
+    let through_pause = load_activity_bool(
+        values.get("activity_through_pause"),
+        DEFAULT_ACTIVITY_THROUGH_PAUSE,
+    )?;
+    let exclude_apps = load_activity_exclusions(values.get("activity_exclude_apps"))?;
+    let exclude_titles = load_activity_exclusions(values.get("activity_exclude_titles"))?;
+    Ok(SavedActivity {
+        source,
+        titles,
+        // Addresses need desktop accessibility, which only the owner's own address
+        // choice may turn on. A preference alone never does.
+        urls: urls && values.get("activity_urls_consent").and_then(Value::as_u64) == Some(1),
+        exclude_apps,
+        exclude_titles,
+        through_pause,
+    })
+}
+
 /// A malformed activity boolean or exclusion list disables the source in memory.
 /// The file is left as it was. The warning carries no exclusion text.
 fn apply_loaded_activity_policy(
@@ -247,27 +339,19 @@ fn apply_loaded_activity_policy(
     config: &mut Config,
     warnings: &mut Vec<ConfigWarning>,
 ) {
-    let source = load_activity_bool(values.get("activity_source"));
-    let titles = load_activity_bool(values.get("activity_titles"));
-    let urls = load_activity_bool(values.get("activity_urls"));
-    let apps = load_activity_exclusions(values.get("activity_exclude_apps"));
-    let title_list = load_activity_exclusions(values.get("activity_exclude_titles"));
-    if let (Ok(source), Ok(titles), Ok(urls), Ok(apps), Ok(title_list)) =
-        (source, titles, urls, apps, title_list)
-    {
-        config.activity_source = source;
-        config.activity_titles = titles;
-        // Older releases saved this preference but could not read addresses.
-        // That unused choice did not authorize enabling OS accessibility.
-        config.activity_urls =
-            urls && values.get("activity_urls_consent").and_then(Value::as_u64) == Some(1);
-        config.activity_exclude_apps = apps;
-        config.activity_exclude_titles = title_list;
+    if let Ok(saved) = read_saved_activity(values) {
+        config.activity_source = saved.source;
+        config.activity_titles = saved.titles;
+        config.activity_urls = saved.urls;
+        config.activity_exclude_apps = saved.exclude_apps;
+        config.activity_exclude_titles = saved.exclude_titles;
+        config.activity_through_pause = saved.through_pause;
         return;
     }
     config.activity_source = false;
     config.activity_titles = false;
     config.activity_urls = false;
+    config.activity_through_pause = false;
     config.activity_exclude_apps.clear();
     config.activity_exclude_titles.clear();
     warnings.push(ConfigWarning {
@@ -480,6 +564,14 @@ fn write_config_merge(
     for retired in RETIRED_CONFIG_KEYS {
         map.remove(retired);
     }
+    // One-time: earlier releases wrote these defaults on first run, so their saved
+    // values are not owner choices. The version written below keeps this from
+    // running again, so a choice saved from here on stays.
+    if !activity_choices_are_owner_set(&map) {
+        for key in PRE_VERSION_ACTIVITY_KEYS {
+            map.remove(key);
+        }
+    }
 
     let mut warnings = Vec::new();
     let mut stream = if merge_basis.is_some() {
@@ -546,6 +638,7 @@ fn write_config_merge(
     let mut activity_urls = activity_basis.activity_urls;
     let mut activity_exclude_apps = activity_basis.activity_exclude_apps;
     let mut activity_exclude_titles = activity_basis.activity_exclude_titles;
+    let mut activity_through_pause = activity_basis.activity_through_pause;
     let mut activity_only = if merge_basis.is_some() {
         json_truthy(map.get("activity_only"), false)
     } else {
@@ -556,17 +649,13 @@ fn write_config_merge(
 
     match overlay {
         ConfigOverlay::Settings(snapshot) => {
-            map.insert("activity_urls_consent".into(), Value::from(1));
+            // Desktop activity choices are saved only through their own fields, so
+            // a whole settings snapshot never writes them or the address consent.
             capture_framerate = snapshot.capture_framerate.clamp(1, 10);
             draw_cursor = snapshot.draw_cursor;
             start_paused = snapshot.start_paused;
             panel_icon_offer = snapshot.panel_icon_offer;
             segment_interval = snapshot.segment_interval;
-            activity_source = snapshot.activity_source;
-            activity_titles = snapshot.activity_titles;
-            activity_urls = snapshot.activity_urls;
-            activity_exclude_apps = snapshot.activity_exclude_apps.clone();
-            activity_exclude_titles = snapshot.activity_exclude_titles.clone();
             activity_only = snapshot.activity_only;
             if merge_basis.is_none() {
                 stream = snapshot.stream.clone();
@@ -685,93 +774,78 @@ fn write_config_merge(
                     Value::Array(arr.clone())
                 }
                 "activity_policy" => {
+                    // Only the choices the owner changed arrive here, and only those
+                    // are written. A missing key keeps the current default.
                     let obj = value.as_object().ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid activity_policy")
                     })?;
-                    let src = obj
-                        .get("activity_source")
-                        .and_then(Value::as_bool)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "missing activity_source in policy",
-                            )
-                        })?;
-                    let tit = obj
-                        .get("activity_titles")
-                        .and_then(Value::as_bool)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "missing activity_titles in policy",
-                            )
-                        })?;
-                    let url = obj
-                        .get("activity_urls")
-                        .and_then(Value::as_bool)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "missing activity_urls in policy",
-                            )
-                        })?;
-                    let apps_arr = obj
-                        .get("activity_exclude_apps")
-                        .and_then(Value::as_array)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "missing activity_exclude_apps in policy",
-                            )
-                        })?;
-                    let mut apps = Vec::new();
-                    for item in apps_arr {
-                        let s = item.as_str().ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "invalid activity_exclude_apps entry",
-                            )
-                        })?;
-                        apps.push(s.to_string());
+                    if obj.is_empty()
+                        || obj
+                            .keys()
+                            .any(|key| !ACTIVITY_POLICY_KEYS.contains(&key.as_str()))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "invalid activity_policy",
+                        ));
                     }
-                    let titles_arr = obj
-                        .get("activity_exclude_titles")
-                        .and_then(Value::as_array)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "missing activity_exclude_titles in policy",
-                            )
-                        })?;
-                    let mut titles = Vec::new();
-                    for item in titles_arr {
-                        let s = item.as_str().ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "invalid activity_exclude_titles entry",
-                            )
-                        })?;
-                        titles.push(s.to_string());
+                    let flag = |key: &str| -> io::Result<Option<bool>> {
+                        obj.get(key)
+                            .map(|value| {
+                                value.as_bool().ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidInput,
+                                        "invalid activity_policy",
+                                    )
+                                })
+                            })
+                            .transpose()
+                    };
+                    let list = |key: &str| -> io::Result<Option<Vec<String>>> {
+                        let Some(value) = obj.get(key) else {
+                            return Ok(None);
+                        };
+                        let invalid = || {
+                            io::Error::new(io::ErrorKind::InvalidInput, "invalid activity_policy")
+                        };
+                        let items = value.as_array().ok_or_else(invalid)?;
+                        items
+                            .iter()
+                            .map(|item| item.as_str().map(str::to_string).ok_or_else(invalid))
+                            .collect::<io::Result<Vec<_>>>()
+                            .map(Some)
+                    };
+                    let src = flag("activity_source")?;
+                    let tit = flag("activity_titles")?;
+                    let url = flag("activity_urls")?;
+                    let through = flag("activity_through_pause")?;
+                    let apps = list("activity_exclude_apps")?;
+                    let titles = list("activity_exclude_titles")?;
+
+                    if let Some(src) = src {
+                        activity_source = src;
                     }
-
-                    activity_source = src;
-                    activity_titles = tit;
-                    activity_urls = url;
-                    map.insert("activity_urls_consent".into(), Value::from(1));
-                    activity_exclude_apps = apps;
-                    activity_exclude_titles = titles;
-
-                    map.insert("activity_source".to_owned(), Value::Bool(src));
-                    map.insert("activity_titles".to_owned(), Value::Bool(tit));
-                    map.insert("activity_urls".to_owned(), Value::Bool(url));
-                    map.insert(
-                        "activity_exclude_apps".to_owned(),
-                        Value::Array(apps_arr.clone()),
-                    );
-                    map.insert(
-                        "activity_exclude_titles".to_owned(),
-                        Value::Array(titles_arr.clone()),
-                    );
+                    if let Some(tit) = tit {
+                        activity_titles = tit;
+                    }
+                    if let Some(url) = url {
+                        activity_urls = url;
+                        // The owner made the address choice itself, with the switch
+                        // that says it turns on desktop accessibility.
+                        map.insert("activity_urls_consent".into(), Value::from(1));
+                    }
+                    if let Some(through) = through {
+                        activity_through_pause = through;
+                    }
+                    if let Some(apps) = apps {
+                        activity_exclude_apps = apps;
+                    }
+                    if let Some(titles) = titles {
+                        activity_exclude_titles = titles;
+                    }
+                    for (key, value) in obj {
+                        map.insert(key.clone(), value.clone());
+                    }
                     Value::Null
                 }
                 _ => {
@@ -803,29 +877,27 @@ fn write_config_merge(
         activity_urls,
         activity_exclude_apps: activity_exclude_apps.clone(),
         activity_exclude_titles: activity_exclude_titles.clone(),
+        activity_through_pause,
         activity_only,
         base_dir: resolved.base_dir.clone(),
         config_dir: resolved.config_dir.clone(),
     };
 
     let mut bytes = if is_guided_field {
+        map.insert(CONFIG_VERSION_KEY.into(), Value::from(CONFIG_VERSION));
         serde_json::to_vec_pretty(&map).map_err(io::Error::other)?
     } else if merge_basis.is_none() {
-        if let Some(consent) = map.get("activity_urls_consent") {
-            #[derive(Serialize)]
-            struct Consented<'a> {
-                #[serde(flatten)]
-                config: &'a Config,
-                activity_urls_consent: &'a Value,
-            }
-            serde_json::to_vec_pretty(&Consented {
-                config: &returned_config,
-                activity_urls_consent: consent,
-            })
-            .map_err(io::Error::other)?
-        } else {
-            serde_json::to_vec_pretty(&returned_config).map_err(io::Error::other)?
+        #[derive(Serialize)]
+        struct Fresh<'a> {
+            #[serde(flatten)]
+            config: &'a Config,
+            config_version: u64,
         }
+        serde_json::to_vec_pretty(&Fresh {
+            config: &returned_config,
+            config_version: CONFIG_VERSION,
+        })
+        .map_err(io::Error::other)?
     } else {
         map.insert("stream".into(), Value::String(stream));
         map.insert(
@@ -851,28 +923,8 @@ fn write_config_merge(
         map.insert("draw_cursor".into(), Value::Bool(draw_cursor));
         map.insert("start_paused".into(), Value::Bool(start_paused));
         map.insert("panel_icon_offer".into(), Value::Bool(panel_icon_offer));
-        map.insert("activity_source".into(), Value::Bool(activity_source));
-        map.insert("activity_titles".into(), Value::Bool(activity_titles));
-        map.insert("activity_urls".into(), Value::Bool(activity_urls));
-        map.insert(
-            "activity_exclude_apps".into(),
-            Value::Array(
-                activity_exclude_apps
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        map.insert(
-            "activity_exclude_titles".into(),
-            Value::Array(
-                activity_exclude_titles
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
         map.insert("activity_only".into(), Value::Bool(activity_only));
+        map.insert(CONFIG_VERSION_KEY.into(), Value::from(CONFIG_VERSION));
         serde_json::to_vec_pretty(&map).map_err(io::Error::other)?
     };
     bytes.push(b'\n');
@@ -1036,25 +1088,183 @@ mod tests {
     };
 
     #[test]
-    fn first_settings_save_preserves_explicit_address_consent() {
+    fn a_whole_settings_save_writes_no_activity_choice_or_address_consent() {
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             config_dir: root.path().join("config"),
             base_dir: root.path().join("data"),
-            activity_source: true,
-            activity_titles: true,
+            activity_source: false,
+            activity_titles: false,
             activity_urls: true,
+            activity_through_pause: true,
             activity_exclude_apps: vec!["Excluded".into()],
             ..Config::default()
         };
-        save_config(&config).unwrap();
-        let loaded = load_config(ConfigPaths {
-            base_dir: Some(config.base_dir),
-            config_dir: Some(config.config_dir),
-        })
-        .config;
-        assert!(loaded.activity_urls && loaded.activity_source && loaded.activity_titles);
+        let paths = ConfigPaths {
+            base_dir: Some(config.base_dir.clone()),
+            config_dir: Some(config.config_dir.clone()),
+        };
+        for _ in 0..2 {
+            save_config(&config).unwrap();
+            let saved: Value =
+                serde_json::from_slice(&fs::read(config.config_path()).unwrap()).unwrap();
+            for key in ACTIVITY_POLICY_KEYS
+                .iter()
+                .copied()
+                .chain(["activity_urls_consent"])
+            {
+                assert!(saved.get(key).is_none(), "{key} written: {saved}");
+            }
+            let loaded = load_config(paths.clone()).config;
+            assert!(loaded.activity_source && loaded.activity_titles);
+            assert!(!loaded.activity_urls && !loaded.activity_through_pause);
+            assert!(loaded.activity_exclude_apps.is_empty());
+        }
+    }
+
+    fn saved_map(root: &std::path::Path) -> Map<String, Value> {
+        let text = fs::read_to_string(root.join("cfg").join("config.json")).unwrap();
+        serde_json::from_str::<Value>(&text)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn missing_activity_keys_read_as_the_defaults_in_code() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), json!({"config_version": CONFIG_VERSION}));
+        let loaded = load(t.path()).config;
+        assert!(loaded.activity_source, "on with screen intake");
+        assert!(loaded.activity_titles);
+        assert!(!loaded.activity_through_pause);
+        assert!(
+            !loaded.activity_urls,
+            "addresses wait for their own consent"
+        );
+        // With the address consent given, the address preference starts on.
+        write(
+            t.path(),
+            json!({"config_version": CONFIG_VERSION, "activity_urls_consent": 1}),
+        );
+        assert!(load(t.path()).config.activity_urls);
+        // No file at all: the same defaults.
+        let empty = tempfile::tempdir().unwrap();
+        let fresh = load(empty.path()).config;
+        assert!(fresh.activity_source && fresh.activity_titles && !fresh.activity_urls);
+    }
+
+    #[test]
+    fn fresh_start_writes_no_activity_default() {
+        let t = tempfile::tempdir().unwrap();
+        sanitize_link_authority(&paths(t.path())).unwrap();
+        sanitize_link_authority(&paths(t.path())).unwrap();
+        let saved = saved_map(t.path());
+        for key in ACTIVITY_POLICY_KEYS {
+            assert!(saved.get(key).is_none(), "{key} written: {saved:?}");
+        }
+        assert_eq!(saved[CONFIG_VERSION_KEY], json!(CONFIG_VERSION));
+    }
+
+    #[test]
+    fn earlier_saved_activity_defaults_migrate_once() {
+        let t = tempfile::tempdir().unwrap();
+        // What an earlier release wrote on first run, plus owner choices that stay.
+        write(
+            t.path(),
+            json!({
+                "stream": "desk",
+                "activity_source": false,
+                "activity_titles": false,
+                "activity_urls": false,
+                "activity_urls_consent": 1,
+                "activity_exclude_apps": ["Excluded"],
+                "activity_exclude_titles": ["Secret"],
+                "activity_only": false,
+                "capture_framerate": 4
+            }),
+        );
+        // Before any write, the old values already read as unset.
+        let before = load(t.path()).config;
+        assert!(before.activity_source && before.activity_titles && before.activity_urls);
+
+        // The app's first write at this version migrates the file.
+        sanitize_link_authority(&paths(t.path())).unwrap();
+        let migrated = saved_map(t.path());
+        for key in PRE_VERSION_ACTIVITY_KEYS {
+            assert!(migrated.get(key).is_none(), "{key} kept: {migrated:?}");
+        }
+        assert_eq!(migrated[CONFIG_VERSION_KEY], json!(CONFIG_VERSION));
+        assert_eq!(migrated["activity_urls_consent"], json!(1));
+        assert_eq!(migrated["activity_exclude_apps"], json!(["Excluded"]));
+        assert_eq!(migrated["activity_exclude_titles"], json!(["Secret"]));
+        assert_eq!(migrated["stream"], json!("desk"));
+        assert_eq!(migrated["capture_framerate"], json!(4));
+        let loaded = load(t.path()).config;
+        assert!(loaded.activity_source && loaded.activity_titles && loaded.activity_urls);
         assert_eq!(loaded.activity_exclude_apps, ["Excluded"]);
+
+        // An owner's off choice after the migration stays off through later writes.
+        set_guided_field(
+            &paths(t.path()),
+            "activity_policy",
+            json!({"activity_source": false, "activity_titles": false}),
+        )
+        .unwrap();
+        sanitize_link_authority(&paths(t.path())).unwrap();
+        save_linked_stream(&paths(t.path()), "desk-2").unwrap();
+        let kept = load(t.path()).config;
+        assert!(!kept.activity_source && !kept.activity_titles);
+        let saved = saved_map(t.path());
+        assert_eq!(saved["activity_source"], json!(false));
+        assert_eq!(saved["activity_titles"], json!(false));
+    }
+
+    #[test]
+    fn an_activity_policy_write_saves_only_the_choices_it_carries() {
+        let t = tempfile::tempdir().unwrap();
+        sanitize_link_authority(&paths(t.path())).unwrap();
+        let saved = set_guided_field(
+            &paths(t.path()),
+            "activity_policy",
+            json!({"activity_titles": false}),
+        )
+        .unwrap();
+        assert!(saved.activity_source && !saved.activity_titles);
+        let map = saved_map(t.path());
+        assert_eq!(map["activity_titles"], json!(false));
+        for key in [
+            "activity_source",
+            "activity_urls",
+            "activity_urls_consent",
+            "activity_through_pause",
+            "activity_exclude_apps",
+            "activity_exclude_titles",
+        ] {
+            assert!(map.get(key).is_none(), "{key} written: {map:?}");
+        }
+        // Only the owner's own address choice records the address consent.
+        let saved = set_guided_field(
+            &paths(t.path()),
+            "activity_policy",
+            json!({"activity_urls": true, "activity_through_pause": true}),
+        )
+        .unwrap();
+        assert!(saved.activity_urls && saved.activity_through_pause);
+        let map = saved_map(t.path());
+        assert_eq!(map["activity_urls_consent"], json!(1));
+        assert_eq!(map["activity_through_pause"], json!(true));
+        assert!(map.get("activity_source").is_none());
+        // Unknown or empty policies change nothing.
+        for bad in [
+            json!({}),
+            json!({"activity_source": "yes"}),
+            json!({"other": true}),
+        ] {
+            assert!(set_guided_field(&paths(t.path()), "activity_policy", bad).is_err());
+        }
+        assert_eq!(saved_map(t.path()), map);
     }
 
     struct FailStage(DurableWriteStage);
@@ -1656,11 +1866,6 @@ mod tests {
                 "draw_cursor": true,
                 "start_paused": false,
                 "panel_icon_offer": true,
-                "activity_source": false,
-                "activity_titles": false,
-                "activity_urls": false,
-                "activity_exclude_apps": [],
-                "activity_exclude_titles": [],
                 "activity_only": false
             })
         );
@@ -2369,12 +2574,8 @@ mod tests {
                 "  \"draw_cursor\": true,\n",
                 "  \"start_paused\": false,\n",
                 "  \"panel_icon_offer\": true,\n",
-                "  \"activity_source\": false,\n",
-                "  \"activity_titles\": false,\n",
-                "  \"activity_urls\": false,\n",
-                "  \"activity_exclude_apps\": [],\n",
-                "  \"activity_exclude_titles\": [],\n",
-                "  \"activity_only\": false\n",
+                "  \"activity_only\": false,\n",
+                "  \"config_version\": 1\n",
                 "}\n"
             )
         );

@@ -628,6 +628,7 @@ mod tests {
             activity_urls: false,
             activity_exclude_apps: Vec::new(),
             activity_exclude_titles: Vec::new(),
+            activity_through_pause: false,
             activity_only: false,
         };
         assert_eq!(
@@ -782,6 +783,7 @@ mod tests {
             activity_urls: false,
             activity_exclude_apps: Vec::new(),
             activity_exclude_titles: Vec::new(),
+            activity_through_pause: false,
             activity_only: false,
         };
         let keys_unavailable = map_settings_state(false, &saved, None, false, true, false, false);

@@ -225,6 +225,8 @@ pub struct SettingsDocument {
     #[serde(default)]
     pub activity_exclude_titles: Vec<String>,
     #[serde(default)]
+    pub activity_through_pause: bool,
+    #[serde(default)]
     pub activity_only: bool,
 }
 
@@ -286,6 +288,7 @@ pub struct SettingsModel {
     pub activity_urls: bool,
     pub activity_exclude_apps: Vec<String>,
     pub activity_exclude_titles: Vec<String>,
+    pub activity_through_pause: bool,
     pub activity_only: bool,
 }
 
@@ -321,11 +324,12 @@ impl ControlModel {
                 draw_cursor: DEFAULT_DRAW_CURSOR,
                 start_paused: DEFAULT_START_PAUSED,
                 segment_interval: DEFAULT_SEGMENT_INTERVAL,
-                activity_source: false,
-                activity_titles: false,
+                activity_source: crate::config::DEFAULT_ACTIVITY_SOURCE,
+                activity_titles: crate::config::DEFAULT_ACTIVITY_TITLES,
                 activity_urls: false,
                 activity_exclude_apps: Vec::new(),
                 activity_exclude_titles: Vec::new(),
+                activity_through_pause: crate::config::DEFAULT_ACTIVITY_THROUGH_PAUSE,
                 activity_only: false,
             },
             restart_required: None,
@@ -389,6 +393,7 @@ pub fn decode_control<E: std::fmt::Display>(
             activity_urls: doc.settings.activity_urls,
             activity_exclude_apps: doc.settings.activity_exclude_apps,
             activity_exclude_titles: doc.settings.activity_exclude_titles,
+            activity_through_pause: doc.settings.activity_through_pause,
             activity_only: doc.settings.activity_only,
         },
         restart_required: doc.restart_required,
@@ -405,6 +410,7 @@ pub fn decode_control<E: std::fmt::Display>(
             activity_urls: s.activity_urls,
             activity_exclude_apps: s.activity_exclude_apps,
             activity_exclude_titles: s.activity_exclude_titles,
+            activity_through_pause: s.activity_through_pause,
             activity_only: s.activity_only,
         }),
         route_status: doc.route_status.map(|r| RouteStatusModel {
@@ -665,11 +671,13 @@ pub fn default_settings_doc() -> SettingsDocument {
         draw_cursor: DEFAULT_DRAW_CURSOR,
         start_paused: DEFAULT_START_PAUSED,
         segment_interval: DEFAULT_SEGMENT_INTERVAL,
-        activity_source: false,
-        activity_titles: false,
+        activity_source: crate::config::DEFAULT_ACTIVITY_SOURCE,
+        activity_titles: crate::config::DEFAULT_ACTIVITY_TITLES,
+        // Addresses wait for the owner's own address choice.
         activity_urls: false,
         activity_exclude_apps: Vec::new(),
         activity_exclude_titles: Vec::new(),
+        activity_through_pause: crate::config::DEFAULT_ACTIVITY_THROUGH_PAUSE,
         activity_only: false,
     }
 }
@@ -714,95 +722,35 @@ pub fn read_saved_settings(config_paths: &ConfigPaths) -> (SettingsDocument, boo
         Some(Value::Number(n)) => n.as_i64().ok_or(()),
         Some(_) => Err(()),
     };
-    let activity_source = match obj.get("activity_source") {
-        None => Ok(false),
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(_) => Err(()),
-    };
-    let activity_titles = match obj.get("activity_titles") {
-        None => Ok(false),
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(_) => Err(()),
-    };
-    let activity_urls = match obj.get("activity_urls") {
-        None => Ok(false),
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(_) => Err(()),
-    };
     let activity_only = match obj.get("activity_only") {
         None => Ok(false),
         Some(Value::Bool(b)) => Ok(*b),
         Some(_) => Err(()),
     };
-    let activity_exclude_apps = match obj.get("activity_exclude_apps") {
-        None => Ok(Vec::new()),
-        Some(Value::Array(arr)) => {
-            let mut items = Vec::new();
-            let mut ok = true;
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    items.push(s.to_string());
-                } else {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok { Ok(items) } else { Err(()) }
-        }
-        Some(_) => Err(()),
-    };
-    let activity_exclude_titles = match obj.get("activity_exclude_titles") {
-        None => Ok(Vec::new()),
-        Some(Value::Array(arr)) => {
-            let mut items = Vec::new();
-            let mut ok = true;
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    items.push(s.to_string());
-                } else {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok { Ok(items) } else { Err(()) }
-        }
-        Some(_) => Err(()),
-    };
+    // The same reading the app itself uses: defaults from code for missing keys,
+    // and addresses only with the owner's address consent.
+    let activity = crate::config::read_saved_activity(obj);
 
     match (
         framerate,
         draw_cursor,
         start_paused,
         segment_interval,
-        activity_source,
-        activity_titles,
-        activity_urls,
-        activity_exclude_apps,
-        activity_exclude_titles,
+        activity,
         activity_only,
     ) {
-        (
-            Ok(f),
-            Ok(d),
-            Ok(p),
-            Ok(s),
-            Ok(asrc),
-            Ok(atit),
-            Ok(aurl),
-            Ok(aapps),
-            Ok(atits),
-            Ok(aonly),
-        ) => (
+        (Ok(f), Ok(d), Ok(p), Ok(s), Ok(activity), Ok(aonly)) => (
             SettingsDocument {
                 capture_framerate: f,
                 draw_cursor: d,
                 start_paused: p,
                 segment_interval: s,
-                activity_source: asrc,
-                activity_titles: atit,
-                activity_urls: aurl,
-                activity_exclude_apps: aapps,
-                activity_exclude_titles: atits,
+                activity_source: activity.source,
+                activity_titles: activity.titles,
+                activity_urls: activity.urls,
+                activity_exclude_apps: activity.exclude_apps,
+                activity_exclude_titles: activity.exclude_titles,
+                activity_through_pause: activity.through_pause,
                 activity_only: aonly,
             },
             true,
@@ -1007,7 +955,8 @@ fn apply_live_activity_policy(supervisor: &WindowControlSupervisor, policy: Acti
             && current.titles == policy.activity_titles
             && current.urls == policy.activity_urls
             && current.exclude_apps == policy.activity_exclude_apps
-            && current.exclude_titles == policy.activity_exclude_titles;
+            && current.exclude_titles == policy.activity_exclude_titles
+            && current.through_pause == policy.activity_through_pause;
         if !unchanged {
             prefs.apply_policy(policy.clone());
         }
@@ -1020,6 +969,7 @@ fn apply_live_activity_policy(supervisor: &WindowControlSupervisor, policy: Acti
         eff.activity_urls = policy.activity_urls;
         eff.activity_exclude_apps = policy.activity_exclude_apps.clone();
         eff.activity_exclude_titles = policy.activity_exclude_titles;
+        eff.activity_through_pause = policy.activity_through_pause;
     }
 }
 
@@ -1058,20 +1008,26 @@ fn validate_setting(field: &str, value: &str) -> Result<Value, &'static str> {
             let Some(obj) = val.as_object() else {
                 return Err("invalid-setting");
             };
-            if !obj.get("activity_source").is_some_and(Value::is_boolean)
-                || !obj.get("activity_titles").is_some_and(Value::is_boolean)
-                || !obj.get("activity_urls").is_some_and(Value::is_boolean)
-            {
+            // Only the choices the owner changed. Each one present must be valid.
+            if obj.is_empty() {
                 return Err("invalid-setting");
             }
-            let Some(apps) = obj.get("activity_exclude_apps") else {
-                return Err("invalid-setting");
-            };
-            validate_exclusion_list(apps)?;
-            let Some(titles) = obj.get("activity_exclude_titles") else {
-                return Err("invalid-setting");
-            };
-            validate_exclusion_list(titles)?;
+            for (key, item) in obj {
+                match key.as_str() {
+                    "activity_source"
+                    | "activity_titles"
+                    | "activity_urls"
+                    | "activity_through_pause" => {
+                        if !item.is_boolean() {
+                            return Err("invalid-setting");
+                        }
+                    }
+                    "activity_exclude_apps" | "activity_exclude_titles" => {
+                        validate_exclusion_list(item)?;
+                    }
+                    _ => return Err("invalid-setting"),
+                }
+            }
             Ok(val)
         }
         _ => Err("invalid-setting"),
@@ -1928,27 +1884,9 @@ impl WindowControlSupervisor {
         let result = set_guided_field(&self.config_paths, &field, normalized.clone());
         match result {
             Ok(saved) => {
-                if field == "activity_policy" {
-                    if let Ok(policy) = serde_json::from_value::<ActivityPolicy>(normalized.clone())
-                    {
-                        apply_live_activity_policy(self, policy);
-                    }
-                    {
-                        let mut phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
-                        phase.fault = None;
-                    }
-                    self.assemble_current(None)
-                } else if is_lone_activity_field(&field) {
-                    apply_live_activity_policy(
-                        self,
-                        ActivityPolicy {
-                            activity_source: saved.activity_source,
-                            activity_titles: saved.activity_titles,
-                            activity_urls: saved.activity_urls,
-                            activity_exclude_apps: saved.activity_exclude_apps,
-                            activity_exclude_titles: saved.activity_exclude_titles,
-                        },
-                    );
+                if field == "activity_policy" || is_lone_activity_field(&field) {
+                    // The saved file, read back with its defaults, is the policy.
+                    apply_live_activity_policy(self, ActivityPolicy::from_config(&saved));
                     {
                         let mut phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
                         phase.fault = None;
@@ -4366,6 +4304,14 @@ mod tests {
         let starter = Arc::new(FakeOwnerStarter::default());
         let harness = TestHarness::new(None, false, pairer, starter, Arc::new(NoWriteFault)).await;
 
+        // Desktop activity starts on. A lone write may turn it off.
+        assert!(harness.activity_prefs.snapshot().source);
+        for field in ["activity_source", "activity_titles"] {
+            let _ = harness
+                .handler
+                .write_setting(field.into(), "false".into())
+                .await;
+        }
         let initial_gen = harness.activity_prefs.generation();
         assert!(!harness.activity_prefs.snapshot().source);
 
@@ -4500,6 +4446,21 @@ mod tests {
         let model2 = decode_control_str(&doc2).unwrap();
         assert_eq!(model2.restart_required, Some(true));
         assert_eq!(model2.effective.as_ref().unwrap().capture_framerate, 4);
+
+        // Keeping activity on through the pause is one more choice in the policy,
+        // and it takes effect without a restart.
+        assert!(!harness.activity_prefs.runs_through_pause());
+        let doc3 = harness
+            .handler
+            .write_setting(
+                "activity_policy".into(),
+                serde_json::json!({"activity_through_pause": true}).to_string(),
+            )
+            .await;
+        assert!(harness.activity_prefs.runs_through_pause());
+        let model3 = decode_control_str(&doc3).unwrap();
+        assert!(model3.settings.activity_through_pause);
+        assert!(model3.effective.as_ref().unwrap().activity_through_pause);
 
         harness.shutdown().await;
     }

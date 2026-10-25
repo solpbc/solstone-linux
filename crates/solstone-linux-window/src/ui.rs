@@ -1120,6 +1120,16 @@ fn create_settings_page(
     let activity_source_label = gtk::Label::new(Some(CopyKey::SettingsActivitySource.as_str()));
     activity_source_label.set_halign(gtk::Align::Start);
     activity_source_label.set_mnemonic_widget(Some(&activity_source_switch));
+    let activity_through_pause_switch = gtk::Switch::new();
+    activity_through_pause_switch.set_halign(gtk::Align::Start);
+    let activity_through_pause_label =
+        gtk::Label::new(Some(CopyKey::SettingsActivityThroughPause.as_str()));
+    activity_through_pause_label.set_halign(gtk::Align::Start);
+    activity_through_pause_label.set_mnemonic_widget(Some(&activity_through_pause_switch));
+    let activity_through_pause_help =
+        gtk::Label::new(Some(CopyKey::SettingsActivityThroughPauseHelp.as_str()));
+    activity_through_pause_help.set_halign(gtk::Align::Start);
+    activity_through_pause_help.set_wrap(true);
     let activity_titles_switch = gtk::Switch::new();
     activity_titles_switch.set_halign(gtk::Align::Start);
     let activity_titles_label = gtk::Label::new(Some(CopyKey::SettingsActivityTitles.as_str()));
@@ -1207,6 +1217,9 @@ fn create_settings_page(
     form_box.append(&activity_explain);
     form_box.append(&activity_source_label);
     form_box.append(&activity_source_switch);
+    form_box.append(&activity_through_pause_label);
+    form_box.append(&activity_through_pause_switch);
+    form_box.append(&activity_through_pause_help);
     form_box.append(&activity_titles_label);
     form_box.append(&activity_titles_switch);
     form_box.append(&activity_urls_label);
@@ -1305,6 +1318,20 @@ fn create_settings_page(
     {
         let ctrl = Rc::clone(&controller);
         let rendering = Rc::clone(&rendering);
+        activity_through_pause_switch.connect_state_set(move |_, state| {
+            if !rendering.get() {
+                let mut c = ctrl.borrow_mut();
+                c.settings_draft.activity_through_pause = Some(state);
+                c.settings_draft.activity_through_pause_dirty = !c.document.saved_available
+                    || state != c.document.settings.activity_through_pause;
+            }
+            glib::Propagation::Proceed
+        });
+    }
+
+    {
+        let ctrl = Rc::clone(&controller);
+        let rendering = Rc::clone(&rendering);
         activity_titles_switch.connect_state_set(move |_, state| {
             if !rendering.get() {
                 let mut c = ctrl.borrow_mut();
@@ -1386,6 +1413,7 @@ fn create_settings_page(
         let start_paused_switch = start_paused_switch.clone();
         let segment_entry = segment_entry.clone();
         let activity_source_switch = activity_source_switch.clone();
+        let activity_through_pause_switch = activity_through_pause_switch.clone();
         let activity_titles_switch = activity_titles_switch.clone();
         let activity_urls_switch = activity_urls_switch.clone();
         let activity_exclude_apps_entry = activity_exclude_apps_entry.clone();
@@ -1412,6 +1440,7 @@ fn create_settings_page(
                 activity_urls_dirty,
                 activity_exclude_apps_dirty,
                 activity_exclude_titles_dirty,
+                activity_through_pause_dirty,
                 activity_only_dirty,
                 saved_framerate,
                 saved_cursor,
@@ -1422,6 +1451,7 @@ fn create_settings_page(
                 saved_activity_urls,
                 saved_exclude_apps,
                 saved_exclude_titles,
+                saved_activity_through_pause,
                 saved_activity_only,
                 route_line,
                 write_failed,
@@ -1451,6 +1481,7 @@ fn create_settings_page(
                     c.settings_draft.activity_urls_dirty,
                     c.settings_draft.activity_exclude_apps_dirty,
                     c.settings_draft.activity_exclude_titles_dirty,
+                    c.settings_draft.activity_through_pause_dirty,
                     c.settings_draft.activity_only_dirty,
                     c.document.settings.capture_framerate,
                     c.document.settings.draw_cursor,
@@ -1461,6 +1492,7 @@ fn create_settings_page(
                     c.document.settings.activity_urls,
                     c.document.settings.activity_exclude_apps.clone(),
                     c.document.settings.activity_exclude_titles.clone(),
+                    c.document.settings.activity_through_pause,
                     c.document.settings.activity_only,
                     activity_route_line(c.document.route_status.as_ref()),
                     c.settings_draft.write_failed,
@@ -1514,6 +1546,12 @@ fn create_settings_page(
                     && activity_source_switch.is_active() != saved_activity_source
                 {
                     activity_source_switch.set_active(saved_activity_source);
+                }
+                if !activity_through_pause_dirty
+                    && !activity_through_pause_switch.has_focus()
+                    && activity_through_pause_switch.is_active() != saved_activity_through_pause
+                {
+                    activity_through_pause_switch.set_active(saved_activity_through_pause);
                 }
                 if !activity_titles_dirty
                     && !activity_titles_switch.has_focus()
@@ -1669,7 +1707,7 @@ fn create_settings_page(
             match res {
                 Ok(mut settings) => {
                     error_label.set_visible(false);
-                    let writes = ctrl.borrow().settings_draft.changed_writes(&ctrl.borrow().document.settings);
+                    let writes = ctrl.borrow().settings_draft.changed_writes();
                     if writes.is_empty() {
                         return;
                     }

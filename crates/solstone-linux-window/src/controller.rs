@@ -58,6 +58,8 @@ pub struct SettingsDraft {
     pub activity_exclude_apps_dirty: bool,
     pub activity_exclude_titles: Option<Vec<String>>,
     pub activity_exclude_titles_dirty: bool,
+    pub activity_through_pause: Option<bool>,
+    pub activity_through_pause_dirty: bool,
     pub activity_only: Option<bool>,
     pub activity_only_dirty: bool,
     pub in_flight: Option<InFlight<SettingsModel>>,
@@ -87,10 +89,11 @@ impl SettingsDraft {
             || self.activity_urls_dirty
             || self.activity_exclude_apps_dirty
             || self.activity_exclude_titles_dirty
+            || self.activity_through_pause_dirty
             || self.activity_only_dirty
     }
 
-    pub fn changed_writes(&self, baseline: &SettingsModel) -> Vec<(&'static str, String)> {
+    pub fn changed_writes(&self) -> Vec<(&'static str, String)> {
         let mut writes = Vec::new();
         if self.framerate_dirty
             && let Some(val) = self.framerate
@@ -112,49 +115,44 @@ impl SettingsDraft {
         {
             writes.push(("segment_interval", val.to_string()));
         }
-        let activity_dirty = self.activity_source_dirty
-            || self.activity_titles_dirty
-            || self.activity_urls_dirty
-            || self.activity_exclude_apps_dirty
-            || self.activity_exclude_titles_dirty;
-        if activity_dirty {
-            let source = if self.activity_source_dirty {
-                self.activity_source.unwrap_or(baseline.activity_source)
-            } else {
-                baseline.activity_source
-            };
-            let titles = if self.activity_titles_dirty {
-                self.activity_titles.unwrap_or(baseline.activity_titles)
-            } else {
-                baseline.activity_titles
-            };
-            let urls = if self.activity_urls_dirty {
-                self.activity_urls.unwrap_or(baseline.activity_urls)
-            } else {
-                baseline.activity_urls
-            };
-            let exclude_apps = if self.activity_exclude_apps_dirty {
-                self.activity_exclude_apps
-                    .clone()
-                    .unwrap_or_else(|| baseline.activity_exclude_apps.clone())
-            } else {
-                baseline.activity_exclude_apps.clone()
-            };
-            let exclude_titles = if self.activity_exclude_titles_dirty {
-                self.activity_exclude_titles
-                    .clone()
-                    .unwrap_or_else(|| baseline.activity_exclude_titles.clone())
-            } else {
-                baseline.activity_exclude_titles.clone()
-            };
-            let policy = serde_json::json!({
-                "activity_source": source,
-                "activity_titles": titles,
-                "activity_urls": urls,
-                "activity_exclude_apps": exclude_apps,
-                "activity_exclude_titles": exclude_titles,
-            });
-            writes.push(("activity_policy", policy.to_string()));
+        // One atomic policy write carrying only the activity choices the owner
+        // changed. Untouched choices stay unsaved, so they keep the app's defaults.
+        let mut policy = serde_json::Map::new();
+        if self.activity_source_dirty
+            && let Some(val) = self.activity_source
+        {
+            policy.insert("activity_source".into(), val.into());
+        }
+        if self.activity_titles_dirty
+            && let Some(val) = self.activity_titles
+        {
+            policy.insert("activity_titles".into(), val.into());
+        }
+        if self.activity_urls_dirty
+            && let Some(val) = self.activity_urls
+        {
+            policy.insert("activity_urls".into(), val.into());
+        }
+        if self.activity_exclude_apps_dirty
+            && let Some(ref val) = self.activity_exclude_apps
+        {
+            policy.insert("activity_exclude_apps".into(), val.clone().into());
+        }
+        if self.activity_exclude_titles_dirty
+            && let Some(ref val) = self.activity_exclude_titles
+        {
+            policy.insert("activity_exclude_titles".into(), val.clone().into());
+        }
+        if self.activity_through_pause_dirty
+            && let Some(val) = self.activity_through_pause
+        {
+            policy.insert("activity_through_pause".into(), val.into());
+        }
+        if !policy.is_empty() {
+            writes.push((
+                "activity_policy",
+                serde_json::Value::Object(policy).to_string(),
+            ));
         }
         if self.activity_only_dirty
             && let Some(val) = self.activity_only
@@ -172,29 +170,28 @@ impl SettingsDraft {
             "segment_interval" => settings.segment_interval.to_string() == *expected,
             "activity_only" => settings.activity_only.to_string() == *expected,
             "activity_policy" => {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(expected) {
-                    val.get("activity_source")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(settings.activity_source)
-                        && val
-                            .get("activity_titles")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(settings.activity_titles)
-                        && val
-                            .get("activity_urls")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(settings.activity_urls)
-                        && val
-                            .get("activity_exclude_apps")
-                            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+                let Ok(serde_json::Value::Object(val)) =
+                    serde_json::from_str::<serde_json::Value>(expected)
+                else {
+                    return false;
+                };
+                val.iter().all(|(key, item)| match key.as_str() {
+                    "activity_source" => item.as_bool() == Some(settings.activity_source),
+                    "activity_titles" => item.as_bool() == Some(settings.activity_titles),
+                    "activity_urls" => item.as_bool() == Some(settings.activity_urls),
+                    "activity_through_pause" => {
+                        item.as_bool() == Some(settings.activity_through_pause)
+                    }
+                    "activity_exclude_apps" => {
+                        serde_json::from_value::<Vec<String>>(item.clone()).ok()
                             == Some(settings.activity_exclude_apps.clone())
-                        && val
-                            .get("activity_exclude_titles")
-                            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+                    }
+                    "activity_exclude_titles" => {
+                        serde_json::from_value::<Vec<String>>(item.clone()).ok()
                             == Some(settings.activity_exclude_titles.clone())
-                } else {
-                    false
-                }
+                    }
+                    _ => false,
+                })
             }
             _ => false,
         })
@@ -427,7 +424,7 @@ impl Controller {
     pub fn start_settings_save(&mut self, bus_owner: &str, settings: SettingsModel) -> u64 {
         self.restart_verified = false;
         let id = self.alloc_id();
-        self.settings_draft.requested_writes = self.settings_draft.changed_writes(&settings);
+        self.settings_draft.requested_writes = self.settings_draft.changed_writes();
         self.settings_draft.in_flight = Some(InFlight {
             id,
             bus_owner: bus_owner.to_string(),
@@ -618,6 +615,12 @@ impl Controller {
                 && val == &self.document.settings.activity_exclude_titles
             {
                 self.settings_draft.activity_exclude_titles_dirty = false;
+            }
+            if self.settings_draft.activity_through_pause_dirty
+                && let Some(val) = self.settings_draft.activity_through_pause
+                && val == self.document.settings.activity_through_pause
+            {
+                self.settings_draft.activity_through_pause_dirty = false;
             }
             if self.settings_draft.activity_only_dirty
                 && let Some(val) = self.settings_draft.activity_only
@@ -926,6 +929,7 @@ mod tests {
                 activity_urls: false,
                 activity_exclude_apps: Vec::new(),
                 activity_exclude_titles: Vec::new(),
+                activity_through_pause: false,
                 activity_only: false,
             },
         )
@@ -1036,22 +1040,22 @@ mod tests {
             activity_urls: false,
             activity_exclude_apps: Vec::new(),
             activity_exclude_titles: Vec::new(),
+            activity_through_pause: false,
             activity_only: false,
         }
     }
 
     #[test]
     fn test_changed_writes_contains_only_dirty_fields() {
-        let baseline = sample_baseline();
         let mut draft = SettingsDraft::default();
-        assert!(draft.changed_writes(&baseline).is_empty());
+        assert!(draft.changed_writes().is_empty());
 
         draft.framerate = Some(8);
-        assert!(draft.changed_writes(&baseline).is_empty()); // not dirty yet
+        assert!(draft.changed_writes().is_empty()); // not dirty yet
 
         draft.framerate_dirty = true;
         assert_eq!(
-            draft.changed_writes(&baseline),
+            draft.changed_writes(),
             vec![("capture_framerate", "8".to_string())]
         );
 
@@ -1063,7 +1067,7 @@ mod tests {
         draft.segment_dirty = true;
 
         assert_eq!(
-            draft.changed_writes(&baseline),
+            draft.changed_writes(),
             vec![
                 ("capture_framerate", "8".to_string()),
                 ("draw_cursor", "false".to_string()),
@@ -1074,52 +1078,30 @@ mod tests {
     }
 
     #[test]
-    fn test_changed_writes_activity_policy_merges_with_baseline() {
-        let baseline = SettingsModel {
-            capture_framerate: 1,
-            draw_cursor: true,
-            start_paused: false,
-            segment_interval: 300,
-            activity_source: false,
-            activity_titles: true,
-            activity_urls: false,
-            activity_exclude_apps: vec!["KeepMe".to_string()],
-            activity_exclude_titles: vec![],
-            activity_only: false,
-        };
+    fn test_changed_writes_activity_policy_carries_only_changed_choices() {
         let draft = SettingsDraft {
+            activity_titles: Some(false),
+            activity_titles_dirty: true,
+            activity_through_pause: Some(true),
+            activity_through_pause_dirty: true,
+            // Shown but untouched: not sent, so it keeps the app's default.
             activity_source: Some(true),
-            activity_source_dirty: true,
             ..SettingsDraft::default()
         };
 
-        let writes = draft.changed_writes(&baseline);
+        let writes = draft.changed_writes();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, "activity_policy");
-
         let val: serde_json::Value = serde_json::from_str(&writes[0].1).unwrap();
         assert_eq!(
-            val.get("activity_source").and_then(|v| v.as_bool()),
-            Some(true)
+            val,
+            serde_json::json!({"activity_titles": false, "activity_through_pause": true})
         );
-        assert_eq!(
-            val.get("activity_titles").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            val.get("activity_urls").and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        assert_eq!(
-            val.get("activity_exclude_apps")
-                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok()),
-            Some(vec!["KeepMe".to_string()])
-        );
-        assert_eq!(
-            val.get("activity_exclude_titles")
-                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok()),
-            Some(vec![])
-        );
+
+        let mut saved = sample_baseline();
+        assert!(!SettingsDraft::matches_writes(&saved, &writes));
+        saved.activity_through_pause = true;
+        assert!(SettingsDraft::matches_writes(&saved, &writes));
     }
 
     #[test]
@@ -1195,7 +1177,20 @@ mod tests {
             assert!(!blob.contains("Notes"));
         }
 
-        let baseline = sample_baseline();
+        // What the app applies: its current choices with the sent ones on top.
+        fn applied(base: &Config, sent: &str) -> ActivityPolicy {
+            let mut policy = serde_json::to_value(ActivityPolicy::from_config(base)).unwrap();
+            let sent: serde_json::Value = serde_json::from_str(sent).unwrap();
+            for (key, value) in sent.as_object().unwrap() {
+                policy[key] = value.clone();
+            }
+            serde_json::from_value(policy).unwrap()
+        }
+
+        let off = Config {
+            activity_source: false,
+            ..Config::default()
+        };
         let draft = SettingsDraft {
             activity_source: Some(true),
             activity_source_dirty: true,
@@ -1209,11 +1204,11 @@ mod tests {
             activity_exclude_titles_dirty: true,
             ..SettingsDraft::default()
         };
-        let writes = draft.changed_writes(&baseline);
+        let writes = draft.changed_writes();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, "activity_policy");
 
-        let policy: ActivityPolicy = serde_json::from_str(&writes[0].1).unwrap();
+        let policy = applied(&off, &writes[0].1);
         assert!(policy.activity_source);
         assert!(policy.activity_titles);
         assert!(policy.activity_urls);
@@ -1226,7 +1221,7 @@ mod tests {
             vec!["SENTINEL_TITLE".to_string()]
         );
 
-        let prefs = ActivityPrefs::new(&Config::default());
+        let prefs = ActivityPrefs::new(&off);
         let mut sampler = ActivitySampler::new();
         let mut provider = Sentinel {
             app: "SENTINEL_APP",
@@ -1261,10 +1256,10 @@ mod tests {
             activity_exclude_titles_dirty: true,
             ..SettingsDraft::default()
         };
-        let title_writes = title_draft.changed_writes(&baseline);
+        let title_writes = title_draft.changed_writes();
         assert_eq!(title_writes.len(), 1);
         assert_eq!(title_writes[0].0, "activity_policy");
-        let title_policy: ActivityPolicy = serde_json::from_str(&title_writes[0].1).unwrap();
+        let title_policy = applied(&Config::default(), &title_writes[0].1);
         assert!(title_policy.activity_exclude_apps.is_empty());
         let title_prefs = ActivityPrefs::new(&Config::default());
         title_prefs.apply_policy(title_policy);

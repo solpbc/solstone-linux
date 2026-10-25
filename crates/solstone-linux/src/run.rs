@@ -376,6 +376,7 @@ fn run_capture(
                 activity_urls: config.activity_urls,
                 activity_exclude_apps: config.activity_exclude_apps.clone(),
                 activity_exclude_titles: config.activity_exclude_titles.clone(),
+                activity_through_pause: config.activity_through_pause,
                 activity_only: config.activity_only,
             })));
         let captures_dir = Some(config.captures_dir());

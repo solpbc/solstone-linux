@@ -1192,6 +1192,7 @@ mod tests {
             urls,
             exclude_apps: apps.iter().map(|s| (*s).to_string()).collect(),
             exclude_titles: title_exclusions.iter().map(|s| (*s).to_string()).collect(),
+            through_pause: false,
             generation: 1,
             policy_boundary_ms: None,
         }

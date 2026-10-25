@@ -628,6 +628,7 @@ mod tests {
             activity_urls: false,
             activity_exclude_apps: Vec::new(),
             activity_exclude_titles: Vec::new(),
+            activity_through_pause: false,
         });
         let (want, _, _, _, _, _) = gate.authorize();
         assert!(!want);

@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- desktop activity now comes on with your screen: starting the solstone app starts both, and pausing pauses both. window titles come on too. web addresses come on once you've turned on desktop accessibility from their switch in settings. you can still turn desktop activity, window titles or web addresses off in settings, and a new setting keeps desktop activity on while you pause. this update turns these on for everyone, so if you had turned any of them off, turn them off again in settings.
+
 ### Fixed
 
 - security fix: updated a cryptography dependency used by private connections.

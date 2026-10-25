@@ -264,6 +264,11 @@ pub struct ObserverState {
     /// Until this monotonic time, video that died on its own is not restarted, so
     /// the restart waits for a fresh reading of the lock.
     pub video_retry_after: f64,
+    /// The main pause is holding desktop activity, and the desktop readers know it.
+    pub activity_held: bool,
+    /// Screen and audio are paused while desktop activity keeps going on its own,
+    /// because the owner chose to keep activity on through the pause.
+    pub activity_alone: bool,
 }
 
 pub struct Observer<V, A, P, M, W, E, C, Q, N> {
@@ -345,6 +350,8 @@ where
                 waited_for_session: false,
                 session_settle_until: f64::NEG_INFINITY,
                 video_retry_after: f64::NEG_INFINITY,
+                activity_held: starting.paused,
+                activity_alone: false,
             },
         }
     }
@@ -368,6 +375,8 @@ where
     }
 
     pub fn initialize(&mut self) -> Result<(), ObserverError> {
+        let now_ms = wall_millis(self.backends.clock.wall_seconds());
+        self.set_activity_hold(self.activity_paused(), now_ms);
         let target = self.probe_status().unwrap_or(Mode::Screencast);
         self.state.segment_is_muted = self.state.cached_is_muted;
         self.state.cached_is_active = target == Mode::Screencast;
@@ -404,20 +413,9 @@ where
             Some(deadline) => HeldPause::Until(deadline),
             None => HeldPause::UntilResumed,
         };
-        if let Some(activity) = self.activity.as_ref() {
-            activity.prefs.bump_generation();
-        }
-        // Seal at this instant. The next tick must not extend the interval, and it
-        // must not ask the desktop what is in front.
-        self.foreground.set_reading(false);
-        self.foreground.set_paused(true);
-        if let Some(activity) = self.activity.as_mut() {
-            let cutoff = activity
-                .prefs
-                .take_policy_boundary_before(now_ms)
-                .unwrap_or(now_ms);
-            activity.sampler.seal(cutoff);
-        }
+        // Desktop activity pauses with screen and audio, at this instant, unless the
+        // owner chose to keep it on through the pause.
+        self.sync_activity_hold(now_ms);
         if let Err(error) = pause_hold::save(&self.config.state_dir(), held) {
             tracing::warn!(%error, "Could not record the pause; it holds until this app stops");
         }
@@ -433,8 +431,48 @@ where
         if let Err(error) = pause_hold::clear(&self.config.state_dir()) {
             tracing::warn!(%error, "Could not remove the recorded pause");
         }
-        self.foreground.set_paused(false);
+        let now_ms = wall_millis(self.backends.clock.wall_seconds());
+        self.sync_activity_hold(now_ms);
         self.publish();
+    }
+
+    /// The main pause holds desktop activity, unless the owner chose to keep
+    /// activity on through it.
+    fn activity_paused(&self) -> bool {
+        self.state.paused
+            && !self
+                .activity
+                .as_ref()
+                .is_some_and(|activity| activity.prefs.runs_through_pause())
+    }
+
+    fn sync_activity_hold(&mut self, at_ms: u64) {
+        let held = self.activity_paused();
+        if held != self.state.activity_held {
+            self.set_activity_hold(held, at_ms);
+        }
+    }
+
+    fn set_activity_hold(&mut self, held: bool, at_ms: u64) {
+        self.state.activity_held = held;
+        if !held {
+            self.foreground.set_paused(false);
+            return;
+        }
+        if let Some(activity) = self.activity.as_ref() {
+            activity.prefs.bump_generation();
+        }
+        // Seal at this instant. The next tick must not extend the interval, and it
+        // must not ask the desktop what is in front.
+        self.foreground.set_reading(false);
+        self.foreground.set_paused(true);
+        if let Some(activity) = self.activity.as_mut() {
+            let cutoff = activity
+                .prefs
+                .take_policy_boundary_before(at_ms)
+                .unwrap_or(at_ms);
+            activity.sampler.seal(cutoff);
+        }
     }
 
     pub fn tick(&mut self) -> Result<(), ObserverError> {
@@ -456,14 +494,22 @@ where
         {
             self.resume();
         }
+        self.sync_activity_hold(wall_millis(self.backends.clock.wall_seconds()));
         if self.config.activity_only {
             return self.tick_activity_only();
         }
         if self.state.paused {
+            if !self.state.activity_held {
+                return self.tick_activity_through_pause();
+            }
             self.finish_paused_segment()?;
+            self.state.activity_alone = false;
             let _ = self.backends.audio.drain();
             self.publish();
             return Ok(());
+        }
+        if self.state.activity_alone {
+            self.end_activity_alone()?;
         }
         if self.state.segment_dir.is_none() {
             // Deliberate reference parity: resume-reopen ticks do not drain audio.
@@ -852,8 +898,88 @@ where
             .stats
             .snapshot(&self.config.captures_dir(), &today);
     }
+    /// Paused, with desktop activity kept on: screen and audio stop as for any
+    /// pause, and desktop activity carries on by itself, the way activity-only
+    /// intake does.
+    fn tick_activity_through_pause(&mut self) -> Result<(), ObserverError> {
+        if !self.state.activity_alone {
+            self.end_media_for_pause()?;
+            self.state.activity_alone = true;
+        }
+        let _ = self.backends.audio.drain();
+        let _ = self.probe_status();
+        if !self.session_live() {
+            self.wait_for_session()?;
+            return Ok(());
+        }
+        self.split_activity_interval()?;
+        self.note_activity();
+        self.ensure_activity_segment()?;
+        let _ = self.persist_activity();
+        self.publish();
+        Ok(())
+    }
+
+    /// Close the screen and audio segment at the pause. Open desktop activity
+    /// intervals continue in the next segment from the same instant.
+    fn end_media_for_pause(&mut self) -> Result<(), ObserverError> {
+        let end_ms = wall_millis(self.backends.clock.wall_seconds());
+        let continued = self.activity_continuation();
+        if self.state.mode == Mode::Screencast {
+            self.stop_video()?;
+        }
+        self.state.mode = Mode::Idle;
+        if self.state.segment_dir.is_some() {
+            self.write_gated_audio()?;
+        }
+        self.state.frames.clear();
+        self.state.hit_gate = HitGate::default();
+        self.finalize_segment_at(end_ms)?;
+        self.resume_activity_continuation(continued, end_ms);
+        Ok(())
+    }
+
+    /// The pause that kept desktop activity on has ended. Its activity segment
+    /// closes here, and open intervals continue as screen and audio start again.
+    fn end_activity_alone(&mut self) -> Result<(), ObserverError> {
+        self.state.activity_alone = false;
+        if self.state.segment_dir.is_none() {
+            return Ok(());
+        }
+        let end_ms = wall_millis(self.backends.clock.wall_seconds());
+        let continued = self.activity_continuation();
+        self.finalize_segment_at(end_ms)?;
+        self.resume_activity_continuation(continued, end_ms);
+        Ok(())
+    }
+
+    fn activity_continuation(&self) -> (Option<u64>, ActivityContinuation) {
+        self.activity
+            .as_ref()
+            .map(|activity| {
+                let generation = activity.prefs.generation();
+                (
+                    Some(generation),
+                    activity.sampler.continuation_for_generation(generation),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn resume_activity_continuation(
+        &mut self,
+        (generation, continued): (Option<u64>, ActivityContinuation),
+        at_ms: u64,
+    ) {
+        if let Some(activity) = self.activity.as_mut()
+            && generation == Some(activity.prefs.generation())
+        {
+            activity.sampler.resume_continuation(continued, at_ms);
+        }
+    }
+
     fn tick_activity_only(&mut self) -> Result<(), ObserverError> {
-        if self.state.paused {
+        if self.state.activity_held {
             self.finish_paused_segment()?;
             let _ = self.backends.audio.drain();
             self.publish();
@@ -889,12 +1015,13 @@ where
         }
         let facts = self.backends.activity.activity_facts();
         let route = route_name(facts.kind, &facts.desktop_token);
+        let held = self.state.activity_held;
         let input = PollInput {
             now_ms,
             prefs: snap.clone(),
             activity: self.state.cached_activity,
             bound: facts.bound,
-            paused: self.state.paused,
+            paused: held,
             route,
         };
         let start_generation = snap.generation;
@@ -902,7 +1029,6 @@ where
         let Observer {
             foreground,
             backends,
-            state,
             activity,
             ..
         } = self;
@@ -912,7 +1038,7 @@ where
         };
         let mut still_ok = || {
             if prefs.generation() != start_generation
-                || state.paused
+                || held
                 || backends.activity.current_session_epoch() != start_epoch
             {
                 return false;
@@ -1037,7 +1163,9 @@ where
     }
 
     fn ensure_activity_segment(&mut self) -> Result<(), ObserverError> {
-        if !self.config.activity_only || self.state.segment_dir.is_some() {
+        if !(self.config.activity_only || self.state.activity_alone)
+            || self.state.segment_dir.is_some()
+        {
             return Ok(());
         }
         let open = self
@@ -3067,6 +3195,7 @@ pub(crate) mod tests {
             activity_urls: false,
             activity_exclude_apps: Vec::new(),
             activity_exclude_titles: Vec::new(),
+            activity_through_pause: false,
         };
         prefs.apply_policy_at(policy(false), 1_000);
         prefs.apply_policy_at(policy(true), 2_000);
@@ -3098,6 +3227,7 @@ pub(crate) mod tests {
                 activity_urls: false,
                 activity_exclude_apps: Vec::new(),
                 activity_exclude_titles: Vec::new(),
+                activity_through_pause: false,
             },
             1_000,
         );
@@ -3106,6 +3236,223 @@ pub(crate) mod tests {
         let rows = activity_rows(&activity_jsonl_paths(f.observer.config.base_dir.as_path()));
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|row| row.end_ts <= 1_000));
+    }
+
+    /// Desktop activity beside screen and audio intake, from a settings file the
+    /// owner has never touched except for `through_pause`.
+    fn install_screen_activity(
+        f: &mut Fixture,
+        source: bool,
+        through_pause: bool,
+    ) -> (
+        std::sync::Arc<crate::activity_prefs::ActivityPrefs>,
+        Rc<Cell<usize>>,
+    ) {
+        let pref_config = Config {
+            activity_source: source,
+            activity_through_pause: through_pause,
+            ..Config::default()
+        };
+        let prefs = std::sync::Arc::new(crate::activity_prefs::ActivityPrefs::new(&pref_config));
+        let reads = Rc::new(Cell::new(0));
+        f.observer.install_activity(
+            std::sync::Arc::clone(&prefs),
+            std::sync::Arc::new(crate::activity_source::ActivityFault::new()),
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::activity_source::CapabilityStatus::default(),
+            )),
+            Box::new(CountingForeground {
+                reads: reads.clone(),
+                title_reads: Rc::new(Cell::new(0)),
+                app: "Notes".into(),
+            }),
+        );
+        (prefs, reads)
+    }
+
+    fn foreground_rows(f: &Fixture) -> Vec<crate::activity_writer::DesktopActivityRow> {
+        activity_rows(&activity_jsonl_paths(f.observer.config.base_dir.as_path()))
+            .into_iter()
+            .filter(|row| {
+                matches!(
+                    row.payload,
+                    crate::activity_writer::DesktopActivityPayload::Foreground { .. }
+                )
+            })
+            .collect()
+    }
+
+    fn at(f: &mut Fixture, seconds: f64) {
+        f.wall.set(seconds);
+        f.mono.set(seconds);
+    }
+
+    #[test]
+    fn default_activity_starts_with_screen_and_pauses_with_it() {
+        let defaults = Config::default();
+        assert!(defaults.activity_source && defaults.activity_titles);
+        assert!(!defaults.activity_through_pause);
+        let mut f = fixture(false);
+        let (_prefs, reads) = install_screen_activity(&mut f, true, false);
+        at(&mut f, 1.0);
+        initialize(&mut f);
+        assert_eq!(f.starts.get(), 1);
+        at(&mut f, 2.0);
+        f.observer.tick().unwrap();
+        let before_pause = reads.get();
+        assert!(before_pause >= 1, "activity runs once screen intake starts");
+
+        at(&mut f, 3.0);
+        f.observer.pause(0);
+        for second in [4.0, 5.0] {
+            at(&mut f, second);
+            f.observer.tick().unwrap();
+        }
+        assert_eq!(f.stops.get(), 1, "pause stops the screen");
+        assert_eq!(
+            reads.get(),
+            before_pause,
+            "pause stops desktop activity too"
+        );
+
+        at(&mut f, 6.0);
+        f.observer.resume();
+        at(&mut f, 7.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 2, "resume starts the screen again");
+        at(&mut f, 8.0);
+        f.observer.tick().unwrap();
+        assert!(
+            reads.get() > before_pause,
+            "resume starts desktop activity again"
+        );
+        f.observer.shutdown().unwrap();
+
+        let rows = foreground_rows(&f);
+        assert!(rows.iter().any(|row| row.ts >= 7_000));
+        assert!(
+            rows.iter()
+                .all(|row| row.end_ts <= 3_000 || row.ts >= 6_000),
+            "nothing is taken in while paused"
+        );
+    }
+
+    #[test]
+    fn activity_turned_off_never_runs() {
+        for through_pause in [false, true] {
+            let mut f = fixture(false);
+            let (_prefs, reads) = install_screen_activity(&mut f, false, through_pause);
+            at(&mut f, 1.0);
+            initialize(&mut f);
+            for second in [2.0, 3.0] {
+                at(&mut f, second);
+                f.observer.tick().unwrap();
+            }
+            f.observer.pause(0);
+            for second in [4.0, 5.0] {
+                at(&mut f, second);
+                f.observer.tick().unwrap();
+            }
+            f.observer.resume();
+            at(&mut f, 6.0);
+            f.observer.tick().unwrap();
+            f.observer.shutdown().unwrap();
+            assert_eq!(f.starts.get(), 2, "screen intake is unaffected");
+            assert_eq!(reads.get(), 0);
+            assert!(activity_jsonl_paths(f.observer.config.base_dir.as_path()).is_empty());
+        }
+    }
+
+    #[test]
+    fn activity_kept_on_through_pause_runs_while_screen_and_audio_pause() {
+        let mut f = fixture(false);
+        let (_prefs, reads) = install_screen_activity(&mut f, true, true);
+        at(&mut f, 1.0);
+        initialize(&mut f);
+        at(&mut f, 2.0);
+        f.observer.tick().unwrap();
+        let before_pause = reads.get();
+        assert!(before_pause >= 1);
+
+        at(&mut f, 3.0);
+        f.observer.pause(0);
+        at(&mut f, 4.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.stops.get(), 1, "pause still stops the screen");
+        let in_pause = reads.get();
+        assert!(in_pause > before_pause, "desktop activity keeps going");
+        at(&mut f, 5.0);
+        f.observer.tick().unwrap();
+        assert!(reads.get() > in_pause);
+        assert_eq!(f.starts.get(), 1, "the screen stays off while paused");
+
+        at(&mut f, 6.0);
+        f.observer.resume();
+        at(&mut f, 7.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 2);
+        at(&mut f, 8.0);
+        f.observer.shutdown().unwrap();
+
+        // Three segments: screen and audio, activity alone through the pause, then
+        // screen and audio again. The paused one carries no screen.
+        let root = f.observer.config.base_dir.clone();
+        let names = segment_names(&root);
+        assert_eq!(names.len(), 3, "{names:?}");
+        let paused_segment = &names[1];
+        let paused_dir = fs::read_dir(root.join("captures"))
+            .unwrap()
+            .flatten()
+            .flat_map(|day| fs::read_dir(day.path().join("desk")).unwrap().flatten())
+            .map(|entry| entry.path())
+            .find(|path| path.file_name().unwrap().to_string_lossy() == paused_segment.as_str())
+            .unwrap();
+        assert!(!paused_dir.join("screen.webm").exists());
+        assert!(!rows_in_segment(&root, paused_segment).is_empty());
+
+        // The interval carries across both boundaries without a gap.
+        let mut rows = foreground_rows(&f);
+        rows.sort_by_key(|row| row.ts);
+        assert_eq!(rows.first().unwrap().ts, 2_000);
+        assert_eq!(rows.last().unwrap().end_ts, 8_000);
+        for pair in rows.windows(2) {
+            assert_eq!(pair[0].end_ts, pair[1].ts, "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn activity_kept_on_through_pause_runs_without_the_screen() {
+        // Starting paused, the screen never starts; desktop activity still runs.
+        let mut f = fixture(true);
+        let (prefs, reads) = install_screen_activity(&mut f, true, true);
+        at(&mut f, 1.0);
+        initialize(&mut f);
+        for second in [2.0, 3.0] {
+            at(&mut f, second);
+            f.observer.tick().unwrap();
+        }
+        assert_eq!(f.starts.get(), 0);
+        let running = reads.get();
+        assert!(running >= 1);
+
+        // The owner turns the choice back off while paused: activity stops then.
+        prefs.apply_policy_at(
+            crate::activity_prefs::ActivityPolicy {
+                activity_through_pause: false,
+                ..crate::activity_prefs::ActivityPolicy::from_config(&Config::default())
+            },
+            3_500,
+        );
+        for second in [4.0, 5.0] {
+            at(&mut f, second);
+            f.observer.tick().unwrap();
+        }
+        assert_eq!(reads.get(), running);
+        assert_eq!(f.starts.get(), 0);
+        f.observer.shutdown().unwrap();
+        let rows = foreground_rows(&f);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.end_ts <= 4_000), "{rows:?}");
     }
 
     #[test]
