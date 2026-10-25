@@ -683,7 +683,13 @@ where
     /// No live session: close any open segment with what it already holds, discard
     /// audio as it arrives, and stay idle until a session is live again.
     fn wait_for_session(&mut self) -> Result<(), ObserverError> {
-        self.finish_paused_segment()?;
+        // The segment open when the session left closes here, with desktop activity
+        // up to that instant. Once it is closed, the only rows left would repeat
+        // that no session is in front, and writing them opened a segment of their
+        // own every few seconds, so nothing is taken in until a session is back.
+        if self.state.segment_dir.is_some() {
+            self.finish_paused_segment()?;
+        }
         let _ = self.backends.audio.drain();
         self.state.mode = Mode::Idle;
         self.state.cached_is_active = false;
@@ -3340,6 +3346,55 @@ pub(crate) mod tests {
             rows.iter()
                 .all(|row| row.end_ts <= 3_000 || row.ts >= 6_000),
             "nothing is taken in while paused"
+        );
+    }
+
+    // No Python ancestor: with desktop activity on, the segment that closes as the
+    // session leaves records activity up to that instant, and nothing more is
+    // written and no segment opens until a session is in front again.
+    #[test]
+    fn desktop_activity_opens_no_segment_while_no_session_is_in_front() {
+        let mut f = fixture(false);
+        let (_prefs, _reads) = install_screen_activity(&mut f, true, false);
+        at(&mut f, 1.0);
+        initialize(&mut f);
+        assert_eq!(f.starts.get(), 1);
+        at(&mut f, 2.0);
+        f.observer.tick().unwrap();
+        for _ in 0..64 {
+            f.observer.backends.activity.0.push_back(Ok(away()));
+        }
+        at(&mut f, 3.0);
+        f.observer.tick().unwrap();
+        assert!(f.observer.state.segment_dir.is_none());
+        assert_eq!(f.events.completed.borrow().len(), 1);
+        let closed = activity_rows(&activity_jsonl_paths(f.observer.config.base_dir.as_path()));
+        assert!(
+            closed.iter().any(|row| row.end_ts == 3_000),
+            "the closing segment records activity up to the instant the session left"
+        );
+        for second in [8.0, 13.0, 18.0, 23.0, 28.0] {
+            at(&mut f, second);
+            f.observer.tick().unwrap();
+        }
+        assert_eq!(
+            segment_dirs(&f),
+            1,
+            "no segment opens while no session is in front"
+        );
+        assert_eq!(f.events.completed.borrow().len(), 1);
+        assert_eq!(
+            activity_rows(&activity_jsonl_paths(f.observer.config.base_dir.as_path())),
+            closed,
+            "nothing more is written while no session is in front"
+        );
+        f.observer.backends.activity.0.clear();
+        at(&mut f, 33.0);
+        f.observer.tick().unwrap();
+        assert_eq!(
+            f.starts.get(),
+            2,
+            "intake starts again when a session is back"
         );
     }
 
