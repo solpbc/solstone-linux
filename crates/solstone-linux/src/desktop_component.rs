@@ -147,10 +147,15 @@ impl DesktopComponent {
                 let session = std::env::var_os("XDG_SESSION_TYPE");
                 let display = std::env::var_os("WAYLAND_DISPLAY");
                 let wayland = crate::clipboard::is_wayland(session.as_deref(), display.as_deref());
-                if crate::clipboard::copy(&about.text, wayland).unwrap_or(false) {
-                    Ok(())
-                } else {
-                    Err("couldn't copy. run `solstone-linux about` to select and copy your versions.".into())
+                match crate::clipboard::copy(&about.text, wayland) {
+                    Ok(true) => Ok(()),
+                    // Name the one tool this session needs; the notification is the only
+                    // place an owner on the portable archive learns it.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
+                        "couldn't copy without {}. install it, or run `solstone-linux about` to select and copy your versions.",
+                        if wayland { "wl-clipboard" } else { "xclip" }
+                    )),
+                    _ => Err("couldn't copy. run `solstone-linux about` to select and copy your versions.".into()),
                 }
             }
             crate::tray::TrayCommand::CopyInstructions => {

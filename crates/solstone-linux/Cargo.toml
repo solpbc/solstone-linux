@@ -90,6 +90,10 @@ depends = "$auto, libgtk-4-1 (>= 4.6), libglib2.0-bin"
 # headless installs. `suggests` is ignored by default (`Install-Suggests "0"`), which
 # records the relationship without imposing it.
 suggests = "gnome-shell-extension-appindicator"
+# The panel icon's "copy" hands its text to wl-copy on Wayland and xclip on X11: a
+# background app can't set a Wayland clipboard by itself. Recommended, so a missing
+# tool costs only the copy, never the install.
+recommends = "wl-clipboard, xclip"
 section = "utils"
 priority = "optional"
 assets = [
@@ -165,6 +169,8 @@ assets = [
 # the bits present, not the icon visible.
 [package.metadata.generate-rpm.recommends]
 "(gnome-shell-extension-appindicator if gnome-shell)" = ""
+wl-clipboard = "*"
+xclip = "*"
 
 [package.metadata.generate-rpm.requires]
 gtk4 = ">= 4.6"
