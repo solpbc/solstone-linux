@@ -6,6 +6,12 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.29] - 2026-10-26
+
+### Fixed
+
+- with "activity only" turned on in settings, starting the solstone app while you're not signed in at your desktop, for example while the login screen shows or someone else is signed in, no longer leaves a short segment in your journal that holds only a note that you were away.
+
 ## [2.0.28] - 2026-10-25
 
 ### Changed
