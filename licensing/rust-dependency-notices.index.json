@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "63ed83cbf9dd1355d0492b907fe14503e5f5e72878aab98ba74c11a66b41f223",
+  "cargo_lock_sha256": "8e82f149e1f6d754975cce985dbee5503f4e1d08feaf5ebf8da8874e48bb179c",
   "notices_sha256": "63cd007157084f39f30dcd1ee9279ebb4216151b2c3e06e1d4932c4574ba848b",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux-window",
@@ -1462,7 +1462,7 @@
     },
     {
       "name": "crypto-bigint",
-      "version": "0.7.6",
+      "version": "0.7.10",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "Apache-2.0 OR MIT",
       "members": [
@@ -1528,7 +1528,7 @@
     },
     {
       "name": "ctutils",
-      "version": "0.4.5",
+      "version": "0.4.6",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "Apache-2.0 OR MIT",
       "members": [

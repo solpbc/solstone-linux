@@ -386,10 +386,25 @@ fn process_output(
         )
     })?;
     if !output.status.success() {
+        let detail = if gate == "audit cargo-deny gate" {
+            sensitive
+                .redact(&String::from_utf8_lossy(&output.stderr))
+                .split_whitespace()
+                .take(40)
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            String::new()
+        };
+        let actual = if detail.is_empty() {
+            "command failure".to_owned()
+        } else {
+            format!("command failure: {detail}")
+        };
         return Err(sensitive.error(
             gate,
             "local command success",
-            "command failure",
+            &actual,
             "repair the local signed audit inputs and retry",
         ));
     }

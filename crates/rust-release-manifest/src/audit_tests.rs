@@ -481,6 +481,9 @@ fn real_signed_packet_local_audit() {
     };
     let error = audit_error(&vulnerable_request, &public_bytes, &key_id, &fixture);
     assert!(error.contains("audit cargo-deny gate mismatch"), "{error}");
+    assert!(error.contains("RUSTSEC-2099-0003"), "{error}");
+    assert!(error.contains("serde_json"), "{error}");
+    assert!(!error.contains(vulnerable_request.locator), "{error}");
     assert!(!error.contains("\"verdict\":\"pass\""), "{error}");
 
     let extra_repo = temp.path().join("extra-head-db");
