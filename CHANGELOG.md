@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.30] - 2026-10-27
+
 ### Fixed
 
 - when "copy" in the panel icon's "about" menu couldn't copy your versions because wl-clipboard, or xclip on X11, wasn't installed, its message now names the one to install. the deb and rpm now recommend both, so installing the deb with apt, or the rpm with dnf, brings them along.
