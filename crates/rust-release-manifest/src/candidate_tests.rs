@@ -2890,10 +2890,14 @@ fn manifest_tool_map_is_derived_from_two_lanes_and_host_identity() {
     assert_eq!(tools["ubuntu_image_digest"], "a".repeat(64));
     assert_eq!(tools["fedora_image_digest"], "b".repeat(64));
 }
-pub const TEST_EXCEPTIONS: [&str; 5] = [
+pub const TEST_EXCEPTIONS: [&str; 9] = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0372",
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+    "RUSTSEC-2026-0410",
 ];

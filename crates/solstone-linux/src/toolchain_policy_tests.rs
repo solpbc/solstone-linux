@@ -734,6 +734,10 @@ fn dependency_policy_denies_wildcards_and_unknown_sources() {
             "RUSTSEC-2026-0370",
             "RUSTSEC-2026-0371",
             "RUSTSEC-2026-0372",
+            "RUSTSEC-2026-0391",
+            "RUSTSEC-2026-0398",
+            "RUSTSEC-2026-0403",
+            "RUSTSEC-2026-0410",
         ])
     );
     for ignored in ignores {
@@ -757,6 +761,15 @@ fn dependency_policy_denies_wildcards_and_unknown_sources() {
                 assert!(reason.contains("consumer releases that eliminate zbus 5"));
                 assert!(reason.contains("remove with this package"));
                 assert!(reason.contains("https://github.com/z-galaxy/zbus/issues/2043"));
+            }
+            "RUSTSEC-2026-0391" | "RUSTSEC-2026-0398" | "RUSTSEC-2026-0403"
+            | "RUSTSEC-2026-0410" => {
+                assert!(reason.contains("Temporary exception."));
+                assert!(reason.contains("Release tooling only"));
+                assert!(reason.contains(
+                    "never the shipped solstone-linux or solstone-linux-window binaries"
+                ));
+                assert!(reason.contains("rpm >= 0.29 and zstd >= 0.14.3"));
             }
             _ => unreachable!("unreviewed advisory exception"),
         }
