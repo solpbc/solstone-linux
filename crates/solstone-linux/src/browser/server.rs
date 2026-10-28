@@ -402,6 +402,10 @@ pub fn state_message(kind: &str, facts: &Facts) -> Value {
         "destination_generation": facts.generation,
         "period_id": facts.period_id,
         "custody": {"full": facts.full, "stale": false},
+        // This app pauses only when the owner pauses it, so its pause never means
+        // nobody is here. An extension set to read through the owner's pause
+        // reads through it only when `away` is false.
+        "away": false,
     });
     if let Some(failure) = facts.failure {
         message["failure"] = json!(failure);
@@ -791,6 +795,7 @@ mod tests {
             read_type(&mut stream, "state").await
         };
         assert_eq!(paused["capture"], "paused");
+        assert_eq!(paused["away"], false);
         rig.pause.send_replace(snapshot(false));
 
         rig.handle.shutdown().await;
