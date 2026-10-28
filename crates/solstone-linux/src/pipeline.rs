@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use crate::positions::BoxGeometry;
+use crate::video::SCREEN_FRAMERATE;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PropertyValue {
@@ -42,12 +43,7 @@ pub struct PipelineDescription {
     pub elements: Vec<ElementSpec>,
 }
 
-pub fn pipeline_description(
-    pipewire_fd: i32,
-    node_id: u32,
-    framerate: u8,
-    output: &Path,
-) -> PipelineDescription {
+pub fn pipeline_description(pipewire_fd: i32, node_id: u32, output: &Path) -> PipelineDescription {
     let mut elements = vec![element(
         "pipewiresrc",
         vec![
@@ -68,14 +64,13 @@ pub fn pipeline_description(
     // video/x-raw(memory:DMABuf) branch and its EGL/GL dependency for 1fps
     // multi-monitor Wayland capture.
     elements.push(element("capsfilter", vec![], Some("video/x-raw".into())));
-    elements.extend(encoder_tail(framerate, output));
+    elements.extend(encoder_tail(output));
     PipelineDescription { elements }
 }
 
 pub fn ximagesrc_pipeline_description(
     display: &str,
     bounds: &BoxGeometry,
-    framerate: u8,
     draw_cursor: bool,
     output: &Path,
 ) -> PipelineDescription {
@@ -94,7 +89,7 @@ pub fn ximagesrc_pipeline_description(
         ],
         None,
     )];
-    elements.extend(encoder_tail(framerate, output));
+    elements.extend(encoder_tail(output));
     PipelineDescription { elements }
 }
 
@@ -113,13 +108,13 @@ fn element(factory: &str, properties: Vec<PropertySpec>, caps: Option<String>) -
     }
 }
 
-fn encoder_tail(framerate: u8, output: &Path) -> Vec<ElementSpec> {
+fn encoder_tail(output: &Path) -> Vec<ElementSpec> {
     vec![
         element("videorate", vec![], None),
         element(
             "capsfilter",
             vec![],
-            Some(format!("video/x-raw,framerate={framerate}/1")),
+            Some(format!("video/x-raw,framerate={SCREEN_FRAMERATE}/1")),
         ),
         element("videoconvert", vec![], None),
         element(
@@ -173,7 +168,7 @@ mod tests {
     #[test]
     fn canonical_portal_pipeline_forces_shm_and_matches_encoder_tail() {
         let description =
-            pipeline_description(7, 42, 1, Path::new("/tmp/unknown_monitor-0_screen.webm"));
+            pipeline_description(7, 42, Path::new("/tmp/unknown_monitor-0_screen.webm"));
         assert_eq!(
             render_gst_launch(&description),
             "pipewiresrc fd=7 path=42 ! video/x-raw ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 keyframe-max-dist=30 static-threshold=100 ! webmmux ! filesink location=/tmp/unknown_monitor-0_screen.webm"
@@ -185,7 +180,7 @@ mod tests {
         // Empirical contract from a live KDE Plasma portal run: the portal hands
         // out node ids; pipewiresrc `target-object` matches object serials and
         // fails to reach Playing, while the deprecated `path` matches node ids.
-        let description = pipeline_description(7, 42, 10, Path::new("out.webm"));
+        let description = pipeline_description(7, 42, Path::new("out.webm"));
         let source = &description.elements[0];
         assert_eq!(source.properties[1].name, "path");
         assert_eq!(
@@ -204,8 +199,27 @@ mod tests {
         assert!(!source_caps.contains("DMABuf"));
         assert_eq!(
             description.elements[3].caps.as_deref(),
-            Some("video/x-raw,framerate=10/1")
+            Some("video/x-raw,framerate=1/1")
         );
+    }
+
+    #[test]
+    fn screen_pipelines_always_record_one_frame_a_second() {
+        let bounds = BoxGeometry {
+            x1: 0,
+            y1: 0,
+            x2: 1920,
+            y2: 1080,
+        };
+        for description in [
+            pipeline_description(7, 42, Path::new("out.webm")),
+            ximagesrc_pipeline_description(":0", &bounds, true, Path::new("out.webm")),
+        ] {
+            assert!(
+                render_gst_launch(&description)
+                    .contains(" ! videorate ! video/x-raw,framerate=1/1 ! ")
+            );
+        }
     }
 
     #[test]
@@ -219,7 +233,6 @@ mod tests {
                 x2: 1920,
                 y2: 1080,
             },
-            1,
             true,
             Path::new("left.webm"),
         );
@@ -235,13 +248,12 @@ mod tests {
                 x2: 3840,
                 y2: 1080,
             },
-            10,
             false,
             Path::new("right.webm"),
         );
         assert_eq!(
             render_gst_launch(&second),
-            "ximagesrc display-name=:1 startx=1920 starty=0 endx=3839 endy=1079 use-damage=false show-pointer=false ! videorate ! video/x-raw,framerate=10/1 ! videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 keyframe-max-dist=30 static-threshold=100 ! webmmux ! filesink location=right.webm"
+            "ximagesrc display-name=:1 startx=1920 starty=0 endx=3839 endy=1079 use-damage=false show-pointer=false ! videorate ! video/x-raw,framerate=1/1 ! videoconvert ! vp8enc end-usage=cq cq-level=4 max-quantizer=15 keyframe-max-dist=30 static-threshold=100 ! webmmux ! filesink location=right.webm"
         );
     }
 }

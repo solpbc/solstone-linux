@@ -369,7 +369,6 @@ fn run_capture(
         let on_confirmed = Some(sync_trigger.clone());
         let effective_settings =
             Arc::new(Mutex::new(Some(crate::window_control::SettingsDocument {
-                capture_framerate: config.capture_framerate,
                 draw_cursor: config.draw_cursor,
                 start_paused: config.start_paused,
                 segment_interval: config.segment_interval,
@@ -927,11 +926,10 @@ impl VideoCapture for CaptureVideo {
     fn start(
         &mut self,
         directory: &std::path::Path,
-        framerate: i64,
         draw_cursor: bool,
     ) -> Result<Vec<VideoStream>, String> {
         match self {
-            Self::Live(video) => video.start(directory, framerate, draw_cursor),
+            Self::Live(video) => video.start(directory, draw_cursor),
             Self::Idle => Err("activity-only".into()),
         }
     }
@@ -1105,13 +1103,12 @@ impl VideoCapture for VideoBackend {
     fn start(
         &mut self,
         directory: &std::path::Path,
-        framerate: i64,
         draw_cursor: bool,
     ) -> Result<Vec<VideoStream>, String> {
         self.follow_target()?;
         match &mut self.active {
-            ActiveVideo::Portal(value) => value.start(directory, framerate, draw_cursor),
-            ActiveVideo::X11(value) => value.start(directory, framerate, draw_cursor),
+            ActiveVideo::Portal(value) => value.start(directory, draw_cursor),
+            ActiveVideo::X11(value) => value.start(directory, draw_cursor),
         }
     }
     fn stop(&mut self) -> Result<Vec<StoppedStream>, String> {
@@ -1466,7 +1463,6 @@ mod tests {
         fn start(
             &mut self,
             _directory: &std::path::Path,
-            _framerate: i64,
             _draw_cursor: bool,
         ) -> Result<Vec<crate::observer::VideoStream>, String> {
             Ok(vec![])
@@ -2343,7 +2339,6 @@ mod tests {
                 "segment_interval": 173,
                 "sync_max_retries": 0,
                 "cache_retention_days": 0,
-                "capture_framerate": 7,
                 "draw_cursor": false,
                 "start_paused": false
             })
@@ -2459,7 +2454,6 @@ mod tests {
                 assert!(persisted.get(legacy).is_none());
             }
             assert_eq!(config.segment_interval, 173);
-            assert_eq!(config.capture_framerate, 7);
             assert!(!config.draw_cursor);
             let day = "20260101";
             let pending = create_pending(&config, day);

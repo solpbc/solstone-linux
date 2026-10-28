@@ -40,8 +40,6 @@ pub struct PairingPresentation {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SettingsDraft {
-    pub framerate: Option<i64>,
-    pub framerate_dirty: bool,
     pub cursor: Option<bool>,
     pub cursor_dirty: bool,
     pub start_paused: Option<bool>,
@@ -80,8 +78,7 @@ pub enum SettingsWriteOutcome {
 
 impl SettingsDraft {
     pub fn is_dirty(&self) -> bool {
-        self.framerate_dirty
-            || self.cursor_dirty
+        self.cursor_dirty
             || self.start_paused_dirty
             || self.segment_dirty
             || self.activity_source_dirty
@@ -95,11 +92,6 @@ impl SettingsDraft {
 
     pub fn changed_writes(&self) -> Vec<(&'static str, String)> {
         let mut writes = Vec::new();
-        if self.framerate_dirty
-            && let Some(val) = self.framerate
-        {
-            writes.push(("capture_framerate", val.to_string()));
-        }
         if self.cursor_dirty
             && let Some(val) = self.cursor
         {
@@ -164,7 +156,6 @@ impl SettingsDraft {
 
     pub fn matches_writes(settings: &SettingsModel, writes: &[(&'static str, String)]) -> bool {
         writes.iter().all(|(field, expected)| match *field {
-            "capture_framerate" => settings.capture_framerate.to_string() == *expected,
             "draw_cursor" => settings.draw_cursor.to_string() == *expected,
             "start_paused" => settings.start_paused.to_string() == *expected,
             "segment_interval" => settings.segment_interval.to_string() == *expected,
@@ -562,12 +553,6 @@ impl Controller {
             {
                 self.settings_draft.saved_verified = false;
             }
-            if self.settings_draft.framerate_dirty
-                && let Some(val) = self.settings_draft.framerate
-                && val == self.document.settings.capture_framerate
-            {
-                self.settings_draft.framerate_dirty = false;
-            }
             if self.settings_draft.cursor_dirty
                 && let Some(val) = self.settings_draft.cursor
                 && val == self.document.settings.draw_cursor
@@ -826,8 +811,8 @@ mod tests {
         let mut controller = Controller::new();
         controller.set_bus_owner(Some(":1.100".into()));
 
-        controller.settings_draft.framerate = Some(7);
-        controller.settings_draft.framerate_dirty = true;
+        controller.settings_draft.segment = Some(7);
+        controller.settings_draft.segment_dirty = true;
         controller.logs.frozen = Some(crate::logs::FrozenLog {
             content: "pre-existing log".into(),
             outcome: crate::logs::LogOutcome::Complete,
@@ -840,7 +825,6 @@ mod tests {
             "health": "connected",
             "capture": "recording",
             "settings": {
-                "capture_framerate": 5,
                 "draw_cursor": true,
                 "start_paused": false,
                 "segment_interval": 10
@@ -850,9 +834,9 @@ mod tests {
 
         controller.apply_status_reply(1, ":1.100", Ok(doc_json.into()));
 
-        // Settings draft is preserved and still dirty because 5 != 7
-        assert_eq!(controller.settings_draft.framerate, Some(7));
-        assert!(controller.settings_draft.framerate_dirty);
+        // Settings draft is preserved and still dirty because 10 != 7
+        assert_eq!(controller.settings_draft.segment, Some(7));
+        assert!(controller.settings_draft.segment_dirty);
 
         // Logs are untouched
         assert_eq!(
@@ -873,7 +857,6 @@ mod tests {
             "health": "connected",
             "capture": "recording",
             "settings": {
-                "capture_framerate": 5,
                 "draw_cursor": true,
                 "start_paused": false,
                 "segment_interval": 10
@@ -890,8 +873,8 @@ mod tests {
         let mut controller = Controller::new();
         controller.set_bus_owner(Some(":1.100".into()));
 
-        controller.settings_draft.framerate = Some(7);
-        controller.settings_draft.framerate_dirty = true;
+        controller.settings_draft.segment = Some(7);
+        controller.settings_draft.segment_dirty = true;
 
         let doc_json = r#"{
             "v": 1,
@@ -900,30 +883,28 @@ mod tests {
             "health": "connected",
             "capture": "recording",
             "settings": {
-                "capture_framerate": 7,
                 "draw_cursor": true,
                 "start_paused": false,
-                "segment_interval": 10
+                "segment_interval": 7
             },
             "saved_available": true
         }"#;
 
         controller.apply_status_reply(1, ":1.100", Ok(doc_json.into()));
-        assert!(!controller.settings_draft.framerate_dirty);
+        assert!(!controller.settings_draft.segment_dirty);
         assert!(!controller.settings_draft.saved_verified);
     }
 
-    fn begin_frame_save(controller: &mut Controller) -> u64 {
-        controller.settings_draft.framerate = Some(7);
-        controller.settings_draft.framerate_dirty = true;
+    fn begin_segment_save(controller: &mut Controller) -> u64 {
+        controller.settings_draft.segment = Some(7);
+        controller.settings_draft.segment_dirty = true;
         let owner = controller.bus_owner.clone().unwrap();
         controller.start_settings_save(
             &owner,
             SettingsModel {
-                capture_framerate: 7,
                 draw_cursor: true,
                 start_paused: false,
-                segment_interval: 300,
+                segment_interval: 7,
                 activity_source: false,
                 activity_titles: false,
                 activity_urls: false,
@@ -935,8 +916,8 @@ mod tests {
         )
     }
 
-    fn saved_frame_reply() -> String {
-        CURRENT_RESPONSE.replace("\"capture_framerate\":1", "\"capture_framerate\":7")
+    fn saved_segment_reply() -> String {
+        CURRENT_RESPONSE.replace("\"segment_interval\":300", "\"segment_interval\":7")
     }
 
     fn fresh_reply(controller: &mut Controller, reply: Result<String, ControlClientError>) {
@@ -948,13 +929,13 @@ mod tests {
     fn saved_requires_a_read_started_after_write_completion() {
         let mut controller = Controller::new();
         controller.set_bus_owner(Some(":1.100".into()));
-        let save_id = begin_frame_save(&mut controller);
+        let save_id = begin_segment_save(&mut controller);
         let older_read_id = controller.alloc_id();
         controller.apply_settings_write_reply(save_id, ":1.100", SettingsWriteOutcome::Complete);
-        controller.apply_status_reply(older_read_id, ":1.100", Ok(saved_frame_reply()));
+        controller.apply_status_reply(older_read_id, ":1.100", Ok(saved_segment_reply()));
         assert!(!controller.settings_draft.saved_verified);
         assert!(controller.settings_draft.waiting_confirming_read);
-        fresh_reply(&mut controller, Ok(saved_frame_reply()));
+        fresh_reply(&mut controller, Ok(saved_segment_reply()));
         assert!(controller.settings_draft.saved_verified);
         assert!(!controller.settings_draft.waiting_confirming_read);
     }
@@ -963,14 +944,14 @@ mod tests {
     fn failed_followup_read_does_not_report_save_success_or_definite_failure() {
         let mut controller = Controller::new();
         controller.set_bus_owner(Some(":1.100".into()));
-        let id = begin_frame_save(&mut controller);
+        let id = begin_segment_save(&mut controller);
         controller.apply_settings_write_reply(id, ":1.100", SettingsWriteOutcome::Complete);
         fresh_reply(&mut controller, Err(ControlClientError::Timeout));
         assert!(!controller.settings_draft.saved_verified);
         assert!(!controller.settings_draft.write_failed);
         assert!(controller.settings_draft.waiting_confirming_read);
-        assert!(controller.settings_draft.framerate_dirty);
-        fresh_reply(&mut controller, Ok(saved_frame_reply()));
+        assert!(controller.settings_draft.segment_dirty);
+        fresh_reply(&mut controller, Ok(saved_segment_reply()));
         assert!(controller.settings_draft.saved_verified);
     }
 
@@ -978,11 +959,11 @@ mod tests {
     fn lost_reply_settles_when_a_fresh_read_establishes_every_requested_write() {
         let mut controller = Controller::new();
         controller.set_bus_owner(Some(":1.100".into()));
-        let id = begin_frame_save(&mut controller);
+        let id = begin_segment_save(&mut controller);
         controller.apply_settings_write_reply(id, ":1.100", SettingsWriteOutcome::Unknown);
         assert!(!controller.settings_draft.write_failed);
         assert!(controller.settings_draft.write_uncertain);
-        fresh_reply(&mut controller, Ok(saved_frame_reply()));
+        fresh_reply(&mut controller, Ok(saved_segment_reply()));
         assert!(controller.settings_draft.saved_verified);
         assert!(!controller.settings_draft.write_uncertain);
     }
@@ -997,10 +978,10 @@ mod tests {
             controller.set_bus_owner(Some(":1.100".into()));
             controller.settings_draft.cursor = Some(false);
             controller.settings_draft.cursor_dirty = true;
-            let id = begin_frame_save(&mut controller);
+            let id = begin_segment_save(&mut controller);
             controller.apply_settings_write_reply(id, ":1.100", outcome);
-            fresh_reply(&mut controller, Ok(saved_frame_reply()));
-            assert!(!controller.settings_draft.framerate_dirty);
+            fresh_reply(&mut controller, Ok(saved_segment_reply()));
+            assert!(!controller.settings_draft.segment_dirty);
             assert!(controller.settings_draft.cursor_dirty);
             assert!(!controller.settings_draft.saved_verified);
             assert_eq!(
@@ -1018,20 +999,19 @@ mod tests {
     fn edits_made_after_save_are_preserved_without_a_whole_form_saved_claim() {
         let mut controller = Controller::new();
         controller.set_bus_owner(Some(":1.100".into()));
-        let id = begin_frame_save(&mut controller);
-        controller.settings_draft.framerate = Some(8);
-        controller.settings_draft.framerate_dirty = true;
+        let id = begin_segment_save(&mut controller);
+        controller.settings_draft.segment = Some(8);
+        controller.settings_draft.segment_dirty = true;
         controller.apply_settings_write_reply(id, ":1.100", SettingsWriteOutcome::Complete);
-        fresh_reply(&mut controller, Ok(saved_frame_reply()));
-        assert_eq!(controller.settings_draft.framerate, Some(8));
-        assert!(controller.settings_draft.framerate_dirty);
+        fresh_reply(&mut controller, Ok(saved_segment_reply()));
+        assert_eq!(controller.settings_draft.segment, Some(8));
+        assert!(controller.settings_draft.segment_dirty);
         assert!(!controller.settings_draft.saved_verified);
         assert!(!controller.settings_draft.waiting_confirming_read);
     }
 
     fn sample_baseline() -> SettingsModel {
         SettingsModel {
-            capture_framerate: 1,
             draw_cursor: true,
             start_paused: false,
             segment_interval: 300,
@@ -1050,17 +1030,15 @@ mod tests {
         let mut draft = SettingsDraft::default();
         assert!(draft.changed_writes().is_empty());
 
-        draft.framerate = Some(8);
+        draft.cursor = Some(false);
         assert!(draft.changed_writes().is_empty()); // not dirty yet
 
-        draft.framerate_dirty = true;
+        draft.cursor_dirty = true;
         assert_eq!(
             draft.changed_writes(),
-            vec![("capture_framerate", "8".to_string())]
+            vec![("draw_cursor", "false".to_string())]
         );
 
-        draft.cursor = Some(false);
-        draft.cursor_dirty = true;
         draft.start_paused = Some(true);
         draft.start_paused_dirty = true;
         draft.segment = Some(15);
@@ -1069,7 +1047,6 @@ mod tests {
         assert_eq!(
             draft.changed_writes(),
             vec![
-                ("capture_framerate", "8".to_string()),
                 ("draw_cursor", "false".to_string()),
                 ("start_paused", "true".to_string()),
                 ("segment_interval", "15".to_string()),
@@ -1316,7 +1293,6 @@ mod tests {
             "health": "connected",
             "capture": "recording",
             "settings": {
-                "capture_framerate": 5,
                 "draw_cursor": true,
                 "start_paused": false,
                 "segment_interval": 10
@@ -1334,7 +1310,6 @@ mod tests {
             "capture": "paused",
             "pause_bounded": true,
             "settings": {
-                "capture_framerate": 5,
                 "draw_cursor": true,
                 "start_paused": false,
                 "segment_interval": 10
@@ -1403,12 +1378,12 @@ mod tests {
             let mut c = Controller::new();
             c.set_bus_owner(Some(":1.old".into()));
             c.document = decode_control_str(CURRENT_RESPONSE).unwrap();
-            c.settings_draft.framerate = Some(7);
-            c.settings_draft.framerate_dirty = true;
+            c.settings_draft.segment = Some(7);
+            c.settings_draft.segment_dirty = true;
             c.settings_draft.cursor = Some(false);
             c.settings_draft.cursor_dirty = true;
             let wanted = SettingsModel {
-                capture_framerate: 7,
+                segment_interval: 7,
                 draw_cursor: false,
                 ..c.document.settings.clone()
             };
@@ -1423,7 +1398,7 @@ mod tests {
             let id = c.alloc_id();
             c.apply_status_reply(id, ":1.new", Ok(reply));
             assert_eq!(c.settings_draft.saved_verified, complete);
-            assert!(!c.settings_draft.framerate_dirty);
+            assert!(!c.settings_draft.segment_dirty);
             assert_eq!(c.settings_draft.cursor_dirty, !complete);
             assert_eq!(c.settings_draft.write_uncertain, !complete);
         }
@@ -1433,14 +1408,14 @@ mod tests {
     fn new_save_and_changed_instance_facts_invalidate_previous_restart_success() {
         let mut c = Controller::new();
         c.set_bus_owner(Some(":1.old".into()));
-        c.document = decode_control_str(&response_with_effective(1)).unwrap();
+        c.document = decode_control_str(&response_with_effective(300)).unwrap();
         c.restart_verified = true;
-        begin_frame_save(&mut c);
+        begin_segment_save(&mut c);
         assert!(!c.restart_verified);
         c.restart_verified = true;
         let mismatch = response_with_effective(7).replace(
-            "\"effective\":{\"capture_framerate\":7",
-            "\"effective\":{\"capture_framerate\":1",
+            "\"effective\":{\"draw_cursor\":true",
+            "\"effective\":{\"draw_cursor\":false",
         );
         c.apply_status_reply(100, ":1.old", Ok(mismatch));
         assert!(!c.restart_verified);
@@ -1486,10 +1461,10 @@ mod tests {
         );
     }
 
-    fn response_with_effective(frame: i64) -> String {
+    fn response_with_effective(segment: i64) -> String {
         CURRENT_RESPONSE.replace("\"saved_available\":true}",
-            "\"saved_available\":true,\"effective\":{\"capture_framerate\":1,\"draw_cursor\":true,\"start_paused\":false,\"segment_interval\":300}}")
-            .replace("\"capture_framerate\":1", &format!("\"capture_framerate\":{frame}"))
+            "\"saved_available\":true,\"effective\":{\"draw_cursor\":true,\"start_paused\":false,\"segment_interval\":300}}")
+            .replace("\"segment_interval\":300", &format!("\"segment_interval\":{segment}"))
     }
 
     #[test]
@@ -1604,24 +1579,24 @@ mod tests {
         assert!(c.pairing_presentation().is_none());
     }
 
-    const CURRENT_RESPONSE: &str = r#"{"v":1,"durable":"confirmed","owner":"running","health":"connected","capture":"recording","settings":{"capture_framerate":1,"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
+    const CURRENT_RESPONSE: &str = r#"{"v":1,"durable":"confirmed","owner":"running","health":"connected","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
 
     #[test]
     fn failed_reads_do_not_consume_drafts_or_finish_resume() {
         let mut controller = Controller::new();
         controller.set_bus_owner(Some(":1.100".into()));
-        controller.settings_draft.framerate = Some(1);
-        controller.settings_draft.framerate_dirty = true;
+        controller.settings_draft.segment = Some(1);
+        controller.settings_draft.segment_dirty = true;
         controller.start_intake_command(":1.100", IntakeCommand::Resume);
         controller.apply_status_reply(2, ":1.100", Err(ControlClientError::Timeout));
-        assert!(controller.settings_draft.framerate_dirty);
+        assert!(controller.settings_draft.segment_dirty);
         assert!(controller.intake_command.is_some());
         assert!(!controller.settings_draft.saved_verified);
 
         let unreadable =
             CURRENT_RESPONSE.replace("\"saved_available\":true", "\"saved_available\":false");
         controller.apply_status_reply(3, ":1.100", Ok(unreadable));
-        assert!(controller.settings_draft.framerate_dirty);
+        assert!(controller.settings_draft.segment_dirty);
     }
 
     #[test]

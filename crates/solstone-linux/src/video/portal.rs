@@ -35,7 +35,7 @@ use crate::{
     restore_token::{load_restore_token, save_restore_token},
     streams::{SILENT_STREAM_LOG_MESSAGE, is_healthy_file_size, stream_filename},
     video::{
-        ReconnectStrategy, clamp_framerate,
+        ReconnectStrategy,
         gstreamer::{CapturePipeline, PipelineFactory, StoppingPipeline, stop_pipelines},
         reconnect_strategy,
         wayland_geometry::{NativeWaylandGeometry, WAYLAND_ENUMERATION_TIMEOUT},
@@ -367,7 +367,6 @@ struct PortalPipeline {
 enum Command {
     Start {
         directory: PathBuf,
-        framerate: i64,
         draw_cursor: bool,
         reply: mpsc::Sender<Result<Vec<VideoStream>, String>>,
     },
@@ -455,7 +454,7 @@ impl PortalVideoCapture {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 match command {
-                    Command::Start { directory, framerate, draw_cursor, reply } => {
+                    Command::Start { directory, draw_cursor, reply } => {
                         if !tracked.is_empty() {
                             let _ = reply.send(Err("portal capture is already active".into()));
                             continue;
@@ -483,7 +482,7 @@ impl PortalVideoCapture {
                                     }
                                 };
                                 let output = directory.join(stream_filename(&stream.position_label, &stream.connector));
-                                let description = pipeline_description(remote.as_raw_fd(), stream.node_id, clamp_framerate(framerate), &output);
+                                let description = pipeline_description(remote.as_raw_fd(), stream.node_id, &output);
                                 let mut pipeline = match factory.build(&description) { Ok(pipeline) => pipeline, Err(error) => { warn!(connector = %stream.connector, %error, "portal pipeline construction failed; other streams continue"); continue; } };
                                 if let Err(error) = pipeline.start() { warn!(connector = %stream.connector, %error, "portal pipeline failed to enter Playing; other streams continue"); pipeline.force_stop(); continue; }
                                 streams.push(VideoStream { connector: stream.connector.clone(), position: stream.position_label.clone(), file_path: output.to_string_lossy().into_owned() });
@@ -581,15 +580,9 @@ impl PortalVideoCapture {
 }
 
 impl VideoCapture for PortalVideoCapture {
-    fn start(
-        &mut self,
-        directory: &Path,
-        framerate: i64,
-        draw_cursor: bool,
-    ) -> Result<Vec<VideoStream>, String> {
+    fn start(&mut self, directory: &Path, draw_cursor: bool) -> Result<Vec<VideoStream>, String> {
         self.request(COMMAND_TIMEOUT, |reply| Command::Start {
             directory: directory.to_owned(),
-            framerate,
             draw_cursor,
             reply,
         })?
@@ -1018,7 +1011,7 @@ mod tests {
         let directory_path = directory.path().to_path_buf();
         let (finished, result) = mpsc::channel();
         let worker = thread::spawn(move || {
-            let start = capture.start(&directory_path, 1, true);
+            let start = capture.start(&directory_path, true);
             let shutdown = capture.stop_for_shutdown();
             let _keep_directory = directory;
             let _ = finished.send((start, shutdown));
@@ -1057,7 +1050,7 @@ mod tests {
         let directory_path = directory.path().to_path_buf();
         let (finished, result) = mpsc::channel();
         let worker = thread::spawn(move || {
-            let start = capture.start(&directory_path, 1, true);
+            let start = capture.start(&directory_path, true);
             let shutdown = capture.stop_for_shutdown();
             let _keep_directory = directory;
             let _ = finished.send((start, shutdown));
@@ -1097,7 +1090,7 @@ mod tests {
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
-        let start = capture.start(directory.path(), 1, true);
+        let start = capture.start(directory.path(), true);
         let shutdown = capture.stop_for_shutdown();
 
         assert_eq!(start.unwrap_err(), STARTUP_CANCELLED);
@@ -1266,7 +1259,7 @@ mod tests {
             PortalVideoCapture::spawn(ops, Store::default(), Geometry(vec![monitor()]), factory)
                 .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        let streams = capture.start(directory.path(), 1, true).unwrap();
+        let streams = capture.start(directory.path(), true).unwrap();
         assert_eq!(
             streams[0].file_path,
             directory
@@ -1303,7 +1296,7 @@ mod tests {
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
-        assert_eq!(capture.start(directory.path(), 1, true).unwrap().len(), 2);
+        assert_eq!(capture.start(directory.path(), true).unwrap().len(), 2);
         assert_eq!(*opens.lock().unwrap(), 2);
         capture.stop().unwrap();
     }
@@ -1321,7 +1314,7 @@ mod tests {
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
-        capture.start(directory.path(), 1, true).unwrap();
+        capture.start(directory.path(), true).unwrap();
         let descriptions = descriptions.lock().unwrap();
         let fds: Vec<i32> = descriptions
             .iter()
@@ -1373,7 +1366,7 @@ mod tests {
             .unwrap();
             let directory = tempfile::tempdir().unwrap();
 
-            let streams = capture.start(directory.path(), 1, true).unwrap();
+            let streams = capture.start(directory.path(), true).unwrap();
 
             assert_eq!(streams.len(), 1);
             assert_eq!(streams[0].connector, connector);
@@ -1400,7 +1393,7 @@ mod tests {
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
-        let error = capture.start(directory.path(), 1, true).unwrap_err();
+        let error = capture.start(directory.path(), true).unwrap_err();
 
         assert!(error.contains("No portal stream pipelines could be started"));
         assert_eq!(*opens.lock().unwrap(), 2);
@@ -1431,7 +1424,7 @@ mod tests {
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
-        let streams = capture.start(directory.path(), 1, true).unwrap();
+        let streams = capture.start(directory.path(), true).unwrap();
 
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].connector, "monitor-1");
@@ -1457,7 +1450,7 @@ mod tests {
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
-        let streams = capture.start(directory.path(), 1, true).unwrap();
+        let streams = capture.start(directory.path(), true).unwrap();
 
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].connector, "DP-1");
@@ -1483,7 +1476,7 @@ mod tests {
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
 
-        assert!(capture.start(directory.path(), 1, true).is_err());
+        assert!(capture.start(directory.path(), true).is_err());
         assert!(
             states
                 .lock()
@@ -1525,7 +1518,7 @@ mod tests {
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        assert!(capture.start(directory.path(), 1, true).is_err());
+        assert!(capture.start(directory.path(), true).is_err());
         assert_eq!(
             calls
                 .lock()
@@ -1558,7 +1551,7 @@ mod tests {
         let mut capture =
             PortalVideoCapture::spawn(ops, Store::default(), PanicGeometry, FakeFactory::default())
                 .unwrap();
-        let error = capture.start(Path::new("/tmp"), 1, true).unwrap_err();
+        let error = capture.start(Path::new("/tmp"), true).unwrap_err();
         assert!(error.contains("disconnected"));
         assert!(!capture.is_healthy());
         assert_eq!(calls.lock().unwrap().last(), Some(&"close"));
@@ -1588,10 +1581,10 @@ mod tests {
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        capture.start(directory.path(), 1, true).unwrap();
+        capture.start(directory.path(), true).unwrap();
         assert!(
             capture
-                .start(directory.path(), 1, true)
+                .start(directory.path(), true)
                 .unwrap_err()
                 .contains("already active")
         );
@@ -1610,7 +1603,7 @@ mod tests {
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        capture.start(directory.path(), 1, true).unwrap();
+        capture.start(directory.path(), true).unwrap();
 
         let stopped = capture.stop_for_shutdown().unwrap();
 
@@ -1647,9 +1640,9 @@ mod tests {
         )
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
-        capture.start(directory.path(), 1, true).unwrap();
+        capture.start(directory.path(), true).unwrap();
         capture.stop().unwrap();
-        capture.start(directory.path(), 1, true).unwrap();
+        capture.start(directory.path(), true).unwrap();
         assert_eq!(
             calls
                 .lock()

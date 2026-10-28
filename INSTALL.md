@@ -186,8 +186,8 @@ In `journal`, paste the pairing link from your journal. Compare the displayed ma
 with your journal's mark before confirming it. You can pair again while intake
 continues. `open your journal` opens it in your browser.
 
-In `settings`, change frame rate, whether to show the cursor, whether to start
-paused, or segment duration. The config file remains the source of truth:
+In `settings`, change whether to show the cursor, whether to start paused, or
+segment duration. The config file remains the source of truth:
 `$XDG_CONFIG_HOME/solstone-linux/config.json`, normally
 `~/.config/solstone-linux/config.json`. Saving keeps unknown and hand-added keys.
 The window says when a saved change needs a restart and offers to restart the

@@ -1003,33 +1003,11 @@ fn prompt_positive_int(
     }
 }
 
-fn prompt_framerate(io: &mut dyn PromptIo, current: i64) -> io::Result<Option<i64>> {
-    loop {
-        let value = io.read_line(&format!("Framerate [{current}]: "))?;
-        if value.trim().is_empty() {
-            return Ok(None);
-        }
-        let Ok(value) = value.trim().parse::<i64>() else {
-            io.write_line("Enter an integer.")?;
-            continue;
-        };
-        let clamped = value.clamp(1, 10);
-        if clamped != value {
-            io.write_line(&format!("(clamped to {clamped})"))?;
-        }
-        return Ok(Some(clamped));
-    }
-}
-
 fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
     let loaded = load_config(paths);
     let mut config = loaded.config;
     let mut explicit = SettingsExplicit::NONE;
     let result = (|| -> io::Result<()> {
-        if let Some(framerate) = prompt_framerate(prompt, config.capture_framerate)? {
-            config.capture_framerate = framerate;
-            explicit.capture_framerate = true;
-        }
         if let Some(cursor) = prompt_bool(prompt, "Draw cursor", config.draw_cursor)? {
             config.draw_cursor = cursor;
             explicit.draw_cursor = true;
@@ -2012,7 +1990,7 @@ mod tests {
     fn settings_config(t: &tempfile::TempDir) {
         let mut config = load_config(paths(t)).config;
         config.stream = "strm".into();
-        config.capture_framerate = 2;
+        config.segment_interval = 120;
         save_config(&config).unwrap();
     }
     fn run_settings(t: &tempfile::TempDir, inputs: &[&str]) -> (Config, String) {
@@ -2099,7 +2077,6 @@ mod tests {
         let map = saved(&t);
         assert_eq!(map.get("draw_cursor"), Some(&serde_json::json!(false)));
         for key in [
-            "capture_framerate",
             "start_paused",
             "segment_interval",
             "panel_icon_offer",
@@ -2113,7 +2090,7 @@ mod tests {
         let config_paths = paths(&t);
         let mut prompt = InterleavingPrompt {
             paths: config_paths.clone(),
-            trigger: "Framerate",
+            trigger: "Draw cursor",
             action: Some(IndependentSave::PanelIconOffer),
             output: String::new(),
         };
@@ -2121,7 +2098,6 @@ mod tests {
         let map = saved(&t);
         assert_eq!(map.get("panel_icon_offer"), Some(&serde_json::json!(false)));
         for key in [
-            "capture_framerate",
             "draw_cursor",
             "start_paused",
             "segment_interval",
@@ -2135,7 +2111,7 @@ mod tests {
         let config_paths = paths(&t);
         let mut prompt = InterleavingPrompt {
             paths: config_paths.clone(),
-            trigger: "Framerate",
+            trigger: "Draw cursor",
             action: Some(IndependentSave::ActivityOnly),
             output: String::new(),
         };
@@ -2143,7 +2119,6 @@ mod tests {
         let map = saved(&t);
         assert_eq!(map.get("activity_only"), Some(&serde_json::json!(true)));
         for key in [
-            "capture_framerate",
             "draw_cursor",
             "start_paused",
             "segment_interval",
@@ -2157,15 +2132,14 @@ mod tests {
     #[test]
     fn settings_enter_keeps_all() {
         let t = tempfile::tempdir().unwrap();
-        let (config, _) = run_settings(&t, &["", "", "", ""]);
+        let (config, _) = run_settings(&t, &["", "", ""]);
         assert_eq!(
             (
-                config.capture_framerate,
                 config.draw_cursor,
                 config.start_paused,
                 config.segment_interval,
             ),
-            (2, true, false, 300)
+            (true, false, 120)
         );
         assert_eq!(config.stream, "strm");
     }
@@ -2180,7 +2154,7 @@ mod tests {
             "{\n  \"config_version\": 2\n}\n",
         )
         .unwrap();
-        let mut prompt = ScriptedPrompt::new(&["", "", "", ""]);
+        let mut prompt = ScriptedPrompt::new(&["", "", ""]);
         assert_eq!(cmd_settings(paths(&t), &mut prompt), 0);
         let text = fs::read_to_string(config_dir.join("config.json")).unwrap();
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -2192,7 +2166,6 @@ mod tests {
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
-            "capture_framerate",
             "draw_cursor",
             "start_paused",
             "panel_icon_offer",
@@ -2201,7 +2174,6 @@ mod tests {
             assert!(map.get(key).is_none(), "key {key} was written");
         }
         let reloaded = load_config(paths(&t)).config;
-        assert_eq!(reloaded.capture_framerate, 1);
         assert!(reloaded.draw_cursor);
         assert!(!reloaded.start_paused);
         assert_eq!(reloaded.segment_interval, 300);
@@ -2210,23 +2182,10 @@ mod tests {
     #[test]
     fn settings_typed_default_saves_that_field() {
         for (inputs, expected_key, expected_val) in [
+            (&["y", "", ""][..], "draw_cursor", serde_json::json!(true)),
+            (&["", "n", ""][..], "start_paused", serde_json::json!(false)),
             (
-                &["1", "", "", ""][..],
-                "capture_framerate",
-                serde_json::json!(1),
-            ),
-            (
-                &["", "y", "", ""][..],
-                "draw_cursor",
-                serde_json::json!(true),
-            ),
-            (
-                &["", "", "n", ""][..],
-                "start_paused",
-                serde_json::json!(false),
-            ),
-            (
-                &["", "", "", "300"][..],
+                &["", "", "300"][..],
                 "segment_interval",
                 serde_json::json!(300),
             ),
@@ -2245,12 +2204,7 @@ mod tests {
             let val: serde_json::Value = serde_json::from_str(&text).unwrap();
             let map = val.as_object().unwrap();
             assert_eq!(map.get(expected_key), Some(&expected_val));
-            for other in [
-                "capture_framerate",
-                "draw_cursor",
-                "start_paused",
-                "segment_interval",
-            ] {
+            for other in ["draw_cursor", "start_paused", "segment_interval"] {
                 if other != expected_key {
                     assert!(
                         map.get(other).is_none(),
@@ -2260,7 +2214,6 @@ mod tests {
             }
             let reloaded = load_config(paths(&t)).config;
             match expected_key {
-                "capture_framerate" => assert_eq!(reloaded.capture_framerate, 1),
                 "draw_cursor" => assert!(reloaded.draw_cursor),
                 "start_paused" => assert!(!reloaded.start_paused),
                 "segment_interval" => assert_eq!(reloaded.segment_interval, 300),
@@ -2269,43 +2222,18 @@ mod tests {
         }
     }
 
-    // tests/test_cli.py::test_cmd_settings_changes_framerate
-    #[test]
-    fn settings_changes_framerate() {
-        let t = tempfile::tempdir().unwrap();
-        assert_eq!(run_settings(&t, &["5", "", "", ""]).0.capture_framerate, 5);
-    }
-
-    // tests/test_cli.py::test_cmd_settings_framerate_clamped
-    #[test]
-    fn settings_framerate_clamped() {
-        let t = tempfile::tempdir().unwrap();
-        let (config, output) = run_settings(&t, &["99", "", "", ""]);
-        assert_eq!(config.capture_framerate, 10);
-        assert!(output.contains("(clamped to 10)"));
-    }
-
-    // tests/test_cli.py::test_cmd_settings_framerate_reprompts_on_invalid
-    #[test]
-    fn settings_framerate_reprompts() {
-        let t = tempfile::tempdir().unwrap();
-        let (config, output) = run_settings(&t, &["abc", "3", "", "", ""]);
-        assert_eq!(config.capture_framerate, 3);
-        assert!(output.contains("Enter an integer."));
-    }
-
     // tests/test_cli.py::test_cmd_settings_toggles_bool
     #[test]
     fn settings_toggles_bool() {
         let t = tempfile::tempdir().unwrap();
-        assert!(!run_settings(&t, &["", "n", "", ""]).0.draw_cursor);
+        assert!(!run_settings(&t, &["n", "", ""]).0.draw_cursor);
     }
 
     // tests/test_cli.py::test_cmd_settings_retention_semantics
     #[test]
     fn settings_omits_retention_prompt_and_strips_key() {
         let t = tempfile::tempdir().unwrap();
-        let (config, output) = run_settings(&t, &["", "", "", ""]);
+        let (config, output) = run_settings(&t, &["", "", ""]);
         assert!(!output.contains("retention"));
         assert!(!output.contains("Retention"));
         let disk_text = fs::read_to_string(config.config_path()).unwrap();
@@ -2318,11 +2246,11 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         settings_config(&t);
         let mut prompt = ScriptedPrompt {
-            inputs: [Ok("5".into()), Err(io::Error::other("boom"))].into(),
+            inputs: [Ok("n".into()), Err(io::Error::other("boom"))].into(),
             output: String::new(),
         };
         assert_eq!(cmd_settings(paths(&t), &mut prompt), 1);
-        assert_eq!(load_config(paths(&t)).config.capture_framerate, 2);
+        assert!(load_config(paths(&t)).config.draw_cursor);
     }
 
     struct StatusRunner(Option<&'static str>);

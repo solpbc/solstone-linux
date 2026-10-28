@@ -31,9 +31,8 @@ pub fn reconnect_strategy(reuse_session: bool) -> ReconnectStrategy {
     }
 }
 
-pub fn clamp_framerate(framerate: i64) -> u8 {
-    framerate.clamp(1, 10) as u8
-}
+/// One frame a second, like every other solstone screen source.
+pub const SCREEN_FRAMERATE: u8 = 1;
 
 pub fn select_backend(
     session_type: Option<&str>,
@@ -131,15 +130,6 @@ pub fn select_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn framerate_is_clamped_to_config_range() {
-        assert_eq!(clamp_framerate(-9), 1);
-        assert_eq!(clamp_framerate(1), 1);
-        assert_eq!(clamp_framerate(10), 10);
-        assert_eq!(clamp_framerate(11), 10);
-        assert_eq!(clamp_framerate(i64::MAX), 10);
-    }
 
     #[test]
     fn backend_selection_matches_python_order() {

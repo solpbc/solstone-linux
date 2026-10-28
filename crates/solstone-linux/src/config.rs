@@ -51,11 +51,12 @@ pub(crate) const ACTIVITY_POLICY_KEYS: [&str; 6] = [
     "activity_exclude_titles",
     "activity_through_pause",
 ];
-pub(crate) const RETIRED_CONFIG_KEYS: [&str; 4] = [
+pub(crate) const RETIRED_CONFIG_KEYS: [&str; 5] = [
     "server_url",
     "key",
     "chat_bridge_enabled",
     "cache_retention_days",
+    "capture_framerate",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -65,7 +66,6 @@ pub struct Config {
     pub sync_retry_delays: Vec<i64>,
     pub sync_max_retries: i64,
     pub sync_stale_threshold: i64,
-    pub capture_framerate: i64,
     pub draw_cursor: bool,
     pub start_paused: bool,
     /// Whether the running app may offer to set up the GNOME panel icon. The owner
@@ -115,7 +115,6 @@ impl Default for Config {
             sync_retry_delays: DEFAULT_RETRY_DELAYS.to_vec(),
             sync_max_retries: 10,
             sync_stale_threshold: DEFAULT_SYNC_STALE_THRESHOLD,
-            capture_framerate: 1,
             draw_cursor: true,
             start_paused: false,
             panel_icon_offer: true,
@@ -297,7 +296,6 @@ const FROZEN_SEGMENT_INTERVAL: i64 = 300;
 const FROZEN_SYNC_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const FROZEN_SYNC_MAX_RETRIES: i64 = 10;
 const FROZEN_SYNC_STALE_THRESHOLD: i64 = 600;
-const FROZEN_CAPTURE_FRAMERATE: i64 = 1;
 const FROZEN_DRAW_CURSOR: bool = true;
 const FROZEN_START_PAUSED: bool = false;
 const FROZEN_PANEL_ICON_OFFER: bool = true;
@@ -353,12 +351,6 @@ fn strip_saved_setting_defaults(map: &mut Map<String, Value>) {
         .is_some_and(|v| is_matching_integer(v, FROZEN_SYNC_STALE_THRESHOLD))
     {
         map.remove("sync_stale_threshold");
-    }
-    if map
-        .get("capture_framerate")
-        .is_some_and(|v| is_matching_integer(v, FROZEN_CAPTURE_FRAMERATE))
-    {
-        map.remove("capture_framerate");
     }
     if map
         .get("draw_cursor")
@@ -566,7 +558,6 @@ fn load_resolved_config(mut config: Config) -> LoadedConfig {
         DEFAULT_SYNC_STALE_THRESHOLD,
         &mut warnings,
     );
-    config.capture_framerate = load_int(values, "capture_framerate", 1, &mut warnings).clamp(1, 10);
     config.draw_cursor = json_truthy(values.get("draw_cursor"), true);
     config.start_paused = json_truthy(values.get("start_paused"), false);
     config.panel_icon_offer = json_truthy(values.get("panel_icon_offer"), true);
@@ -627,7 +618,6 @@ fn acquire_config_write_lock(lock: &Mutex<()>) -> io::Result<MutexGuard<'_, ()>>
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SettingsExplicit {
-    pub capture_framerate: bool,
     pub draw_cursor: bool,
     pub start_paused: bool,
     pub segment_interval: bool,
@@ -635,7 +625,6 @@ pub(crate) struct SettingsExplicit {
 
 impl SettingsExplicit {
     pub(crate) const NONE: Self = Self {
-        capture_framerate: false,
         draw_cursor: false,
         start_paused: false,
         segment_interval: false,
@@ -759,11 +748,6 @@ fn write_config_merge(
     } else {
         DEFAULT_SYNC_STALE_THRESHOLD
     };
-    let mut capture_framerate = if merge_basis.is_some() {
-        load_int(&map, "capture_framerate", 1, &mut warnings).clamp(1, 10)
-    } else {
-        1
-    };
     let mut draw_cursor = if merge_basis.is_some() {
         json_truthy(map.get("draw_cursor"), true)
     } else {
@@ -799,14 +783,6 @@ fn write_config_merge(
         ConfigOverlay::Settings(snapshot, explicit) => {
             // Desktop activity choices are saved only through their own fields, so
             // a settings save never writes them or the address consent.
-            if explicit.capture_framerate {
-                let normalized_framerate = snapshot.capture_framerate.clamp(1, 10);
-                map.insert(
-                    "capture_framerate".into(),
-                    Value::Number(normalized_framerate.into()),
-                );
-                capture_framerate = normalized_framerate;
-            }
             if explicit.draw_cursor {
                 draw_cursor = snapshot.draw_cursor;
                 map.insert("draw_cursor".into(), Value::Bool(draw_cursor));
@@ -826,15 +802,6 @@ fn write_config_merge(
         ConfigOverlay::Setup(snapshot) => {
             // Desktop activity choices are saved only through their own fields, so
             // a whole settings snapshot never writes them or the address consent.
-            let normalized_framerate = snapshot.capture_framerate.clamp(1, 10);
-            if normalized_framerate != capture_framerate {
-                map.insert(
-                    "capture_framerate".into(),
-                    Value::Number(normalized_framerate.into()),
-                );
-            }
-            capture_framerate = normalized_framerate;
-
             let normalized_draw_cursor = snapshot.draw_cursor;
             if normalized_draw_cursor != draw_cursor {
                 map.insert("draw_cursor".into(), Value::Bool(normalized_draw_cursor));
@@ -919,14 +886,6 @@ fn write_config_merge(
         }
         ConfigOverlay::GuidedField(key, value) => {
             let normalized = match key {
-                "capture_framerate" => {
-                    let n = value.as_i64().ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "invalid capture_framerate")
-                    })?;
-                    let clamped = n.clamp(1, 10);
-                    capture_framerate = clamped;
-                    Value::Number(clamped.into())
-                }
                 "draw_cursor" => {
                     let b = value.as_bool().ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid draw_cursor")
@@ -1115,7 +1074,6 @@ fn write_config_merge(
         sync_retry_delays: sync_retry_delays.clone(),
         sync_max_retries,
         sync_stale_threshold,
-        capture_framerate,
         draw_cursor,
         start_paused,
         panel_icon_offer,
@@ -1410,7 +1368,7 @@ mod tests {
                 "activity_exclude_apps": ["Excluded"],
                 "activity_exclude_titles": ["Secret"],
                 "activity_only": false,
-                "capture_framerate": 4
+                "segment_interval": 4
             }),
         );
         // Before any write, the old values already read as unset, and a consent
@@ -1429,7 +1387,7 @@ mod tests {
         assert_eq!(migrated["activity_exclude_apps"], json!(["Excluded"]));
         assert_eq!(migrated["activity_exclude_titles"], json!(["Secret"]));
         assert_eq!(migrated["stream"], json!("desk"));
-        assert_eq!(migrated["capture_framerate"], json!(4));
+        assert_eq!(migrated["segment_interval"], json!(4));
         let loaded = load(t.path()).config;
         assert!(loaded.activity_source && loaded.activity_titles);
         assert!(
@@ -1545,26 +1503,23 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum SettingsField {
-        SegmentInterval,
-        CaptureFramerate,
+        SegmentInterval(i64),
+        DrawCursor(bool),
     }
 
     #[derive(Clone, Copy)]
     struct ConfigWriteValue {
         stream: &'static str,
         field: SettingsField,
-        setting: i64,
     }
 
     const FIRST_WRITE: ConfigWriteValue = ConfigWriteValue {
         stream: "linked-first",
-        field: SettingsField::SegmentInterval,
-        setting: 111,
+        field: SettingsField::SegmentInterval(111),
     };
     const SECOND_WRITE: ConfigWriteValue = ConfigWriteValue {
         stream: "linked-second",
-        field: SettingsField::CaptureFramerate,
-        setting: 9,
+        field: SettingsField::DrawCursor(false),
     };
 
     #[derive(Clone, Copy)]
@@ -1589,10 +1544,8 @@ mod tests {
             ConfigWriteFlow::Settings => {
                 let mut config = load_config(paths.clone()).config;
                 match value.field {
-                    SettingsField::SegmentInterval => config.segment_interval = value.setting,
-                    SettingsField::CaptureFramerate => {
-                        config.capture_framerate = value.setting;
-                    }
+                    SettingsField::SegmentInterval(setting) => config.segment_interval = setting,
+                    SettingsField::DrawCursor(setting) => config.draw_cursor = setting,
                 }
                 save_config(&config)
             }
@@ -1603,11 +1556,11 @@ mod tests {
     fn assert_config_write_value(flow: ConfigWriteFlow, value: ConfigWriteValue, config: &Config) {
         match flow {
             ConfigWriteFlow::Settings => match value.field {
-                SettingsField::SegmentInterval => {
-                    assert_eq!(config.segment_interval, value.setting);
+                SettingsField::SegmentInterval(setting) => {
+                    assert_eq!(config.segment_interval, setting);
                 }
-                SettingsField::CaptureFramerate => {
-                    assert_eq!(config.capture_framerate, value.setting);
+                SettingsField::DrawCursor(setting) => {
+                    assert_eq!(config.draw_cursor, setting);
                 }
             },
             ConfigWriteFlow::Linked => assert_eq!(config.stream, value.stream),
@@ -1807,7 +1760,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let d = t.path().join("cfg");
         fs::create_dir_all(&d).unwrap();
-        let raw = br#"{"activity_source":"yes","activity_exclude_apps":"SECRET_TITLE_SENTINEL","capture_framerate":4}"#;
+        let raw = br#"{"activity_source":"yes","activity_exclude_apps":"SECRET_TITLE_SENTINEL","segment_interval":4}"#;
         let path = d.join("config.json");
         fs::write(&path, raw).unwrap();
         let loaded = load(t.path());
@@ -1815,7 +1768,7 @@ mod tests {
         assert!(!loaded.config.activity_titles);
         assert!(!loaded.config.activity_urls);
         assert!(loaded.config.activity_exclude_apps.is_empty());
-        assert_eq!(loaded.config.capture_framerate, 4);
+        assert_eq!(loaded.config.segment_interval, 4);
         assert_eq!(fs::read(&path).unwrap(), raw);
         let messages: Vec<&str> = loaded.warnings.iter().map(|w| w.message.as_str()).collect();
         assert!(
@@ -1848,8 +1801,6 @@ mod tests {
     }
     macro_rules! invalid {($name:ident,$field:literal,$value:expr,$expected:expr)=>{
         #[test]fn $name(){let t=tempfile::tempdir().unwrap();write(t.path(),json!({$field:$value}));let x=load(t.path());assert_eq!(warning_fields(&x),vec![Some($field)]);assert_eq!(serde_json::to_value(&x.config).unwrap()[$field],json!($expected));}}}
-    // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[capture_framerate]
-    invalid!(invalid_framerate, "capture_framerate", "abc", 1);
     // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[segment_interval]
     invalid!(invalid_interval, "segment_interval", "300", 300);
     // tests/test_config.py::test_load_invalid_typed_fields_warn_and_default[sync_retry_delays]
@@ -1902,24 +1853,10 @@ mod tests {
         assert_eq!(c.sync_retry_delays, vec![10, 60, 300]);
         assert_eq!(c.sync_max_retries, 5);
     }
-    // tests/test_config.py::test_capture_framerate_default
-    #[test]
-    fn framerate_default() {
-        assert_eq!(Config::default().capture_framerate, 1);
-    }
     // tests/test_config.py::test_draw_cursor_default
     #[test]
     fn cursor_default() {
         assert!(Config::default().draw_cursor);
-    }
-    // tests/test_config.py::test_capture_framerate_roundtrip
-    #[test]
-    fn framerate_roundtrip() {
-        let t = tempfile::tempdir().unwrap();
-        assert_eq!(
-            round_trip(t.path(), |c| c.capture_framerate = 2).capture_framerate,
-            2
-        );
     }
     // tests/test_config.py::test_draw_cursor_roundtrip
     #[test]
@@ -1927,28 +1864,28 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         assert!(!round_trip(t.path(), |c| c.draw_cursor = false).draw_cursor);
     }
-    // tests/test_config.py::test_capture_framerate_defaults_on_old_config
     #[test]
-    fn old_framerate_defaults() {
+    fn old_cursor_default() {
         let t = tempfile::tempdir().unwrap();
         write(t.path(), json!({"stream":"old"}));
-        let c = load(t.path()).config;
-        assert_eq!(c.capture_framerate, 1);
-        assert!(c.draw_cursor);
+        assert!(load(t.path()).config.draw_cursor);
     }
-    // tests/test_config.py::test_capture_framerate_clamped_to_max
+    // The screen is always recorded at one frame a second, so a saved frame rate
+    // from an earlier release is read past and dropped on the next save.
     #[test]
-    fn framerate_max() {
+    fn retired_framerate_loads_and_is_dropped_on_save() {
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"capture_framerate":999}));
-        assert_eq!(load(t.path()).config.capture_framerate, 10);
-    }
-    // tests/test_config.py::test_capture_framerate_clamped_to_min
-    #[test]
-    fn framerate_min() {
-        let t = tempfile::tempdir().unwrap();
-        write(t.path(), json!({"capture_framerate":0}));
-        assert_eq!(load(t.path()).config.capture_framerate, 1);
+        write(t.path(), json!({"stream":"desk","capture_framerate":5}));
+        let path = t.path().join("cfg/config.json");
+        let before = fs::read(&path).unwrap();
+        let loaded = load(t.path());
+        assert!(loaded.warnings.is_empty());
+        assert_eq!(loaded.config.stream, "desk");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        save_config(&loaded.config).unwrap();
+        let map = saved_map(t.path());
+        assert!(map.get("capture_framerate").is_none());
+        assert_eq!(map["stream"], json!("desk"));
     }
     // tests/test_config.py::test_start_paused_default
     #[test]
@@ -2100,12 +2037,12 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let old = t.path().join("config");
         fs::create_dir(&old).unwrap();
-        fs::write(old.join("config.json"), r#"{"capture_framerate":4}"#).unwrap();
+        fs::write(old.join("config.json"), r#"{"segment_interval":4}"#).unwrap();
         let x = load_config(ConfigPaths {
             base_dir: Some(t.path().into()),
             config_dir: Some(old.clone()),
         });
-        assert_eq!(x.config.capture_framerate, 4);
+        assert_eq!(x.config.segment_interval, 4);
         assert!(old.exists());
     }
     // all nine persisted defaults.
@@ -2120,7 +2057,6 @@ mod tests {
                 "sync_retry_delays": [5, 30, 120, 300],
                 "sync_max_retries": 10,
                 "sync_stale_threshold": 600,
-                "capture_framerate": 1,
                 "draw_cursor": true,
                 "start_paused": false,
                 "panel_icon_offer": true,
@@ -2292,8 +2228,7 @@ mod tests {
         disk_val["custom_plugin_field"] = json!({"active": true});
         fs::write(&disk_path, serde_json::to_string_pretty(&disk_val).unwrap()).unwrap();
 
-        // Snapshot applies 4 prompted fields:
-        snapshot.capture_framerate = 5;
+        // Snapshot applies 3 prompted fields:
         snapshot.draw_cursor = false;
         snapshot.start_paused = true;
         snapshot.segment_interval = 600;
@@ -2303,8 +2238,7 @@ mod tests {
 
         let saved_val: Value =
             serde_json::from_str(&fs::read_to_string(&disk_path).unwrap()).unwrap();
-        // 4 prompted fields win
-        assert_eq!(saved_val["capture_framerate"], 5);
+        // 3 prompted fields win
         assert_eq!(saved_val["draw_cursor"], false);
         assert_eq!(saved_val["start_paused"], true);
         assert_eq!(saved_val["segment_interval"], 600);
@@ -2738,7 +2672,6 @@ mod tests {
                 "sync_stale_threshold": 91,
                 "cache_retention_days": 12,
                 "chat_bridge_enabled": false,
-                "capture_framerate": 4,
                 "draw_cursor": false,
                 "start_paused": true
             }),
@@ -2750,7 +2683,6 @@ mod tests {
         assert_eq!(sanitized.sync_retry_delays, vec![2, 4]);
         assert_eq!(sanitized.sync_max_retries, 3);
         assert_eq!(sanitized.sync_stale_threshold, 91);
-        assert_eq!(sanitized.capture_framerate, 4);
         assert!(!sanitized.draw_cursor);
         assert!(sanitized.start_paused);
         let value: Value =
@@ -2822,7 +2754,6 @@ mod tests {
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
-            "capture_framerate",
             "draw_cursor",
             "start_paused",
             "panel_icon_offer",
@@ -2840,7 +2771,6 @@ mod tests {
         assert_eq!(reloaded.sync_retry_delays, vec![5, 30, 120, 300]);
         assert_eq!(reloaded.sync_max_retries, 10);
         assert_eq!(reloaded.sync_stale_threshold, 600);
-        assert_eq!(reloaded.capture_framerate, 1);
         assert!(reloaded.draw_cursor);
         assert!(!reloaded.start_paused);
         assert!(reloaded.panel_icon_offer);
@@ -2864,7 +2794,6 @@ mod tests {
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
-            "capture_framerate",
             "draw_cursor",
             "start_paused",
             "panel_icon_offer",
@@ -2882,7 +2811,6 @@ mod tests {
         assert_eq!(reloaded.sync_retry_delays, vec![5, 30, 120, 300]);
         assert_eq!(reloaded.sync_max_retries, 10);
         assert_eq!(reloaded.sync_stale_threshold, 600);
-        assert_eq!(reloaded.capture_framerate, 1);
         assert!(reloaded.draw_cursor);
         assert!(!reloaded.start_paused);
         assert!(reloaded.panel_icon_offer);
@@ -2896,17 +2824,17 @@ mod tests {
             t.path(),
             json!({
                 "config_version": SETTINGS_OWNER_VERSION,
-                "capture_framerate": 5,
+                "draw_cursor": false,
                 "segment_interval": 300,
                 "stream": "desk",
                 "custom_key": "custom_val"
             }),
         );
         let mut config = load(t.path()).config;
-        config.capture_framerate = 1;
+        config.draw_cursor = true;
         save_config(&config).unwrap();
         let map = saved_map(t.path());
-        assert_eq!(map["capture_framerate"], json!(1));
+        assert_eq!(map["draw_cursor"], json!(true));
         assert_eq!(map["segment_interval"], json!(300));
         assert_eq!(map["stream"], json!("desk"));
         assert_eq!(map["custom_key"], json!("custom_val"));
@@ -2914,7 +2842,6 @@ mod tests {
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
-            "draw_cursor",
             "start_paused",
             "panel_icon_offer",
             "activity_only",
@@ -2942,7 +2869,6 @@ mod tests {
         assert_eq!(m1["stream"], json!("desk"));
         assert_eq!(m1["custom_key"], json!("custom_val"));
         for absent in [
-            "capture_framerate",
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
@@ -2963,7 +2889,6 @@ mod tests {
         assert_eq!(m2["segment_interval"], json!(300));
         assert_eq!(m2["custom_key"], json!("custom_val"));
         for absent in [
-            "capture_framerate",
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
@@ -2988,7 +2913,6 @@ mod tests {
         assert_eq!(m3["segment_interval"], json!(300));
         assert_eq!(m3["custom_key"], json!("custom_val"));
         for absent in [
-            "capture_framerate",
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
@@ -3012,7 +2936,6 @@ mod tests {
         assert_eq!(m4["segment_interval"], json!(300));
         assert_eq!(m4["custom_key"], json!("custom_val"));
         for absent in [
-            "capture_framerate",
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
@@ -3035,7 +2958,6 @@ mod tests {
                     "sync_retry_delays": [2, 4],
                     "sync_max_retries": max_retries,
                     "sync_stale_threshold": 91,
-                    "capture_framerate": 4,
                     "draw_cursor": false,
                     "start_paused": true,
                     "panel_icon_offer": false,
@@ -3051,7 +2973,6 @@ mod tests {
             assert_eq!(m["sync_retry_delays"], json!([2, 4]));
             assert_eq!(m["sync_max_retries"], json!(max_retries));
             assert_eq!(m["sync_stale_threshold"], json!(91));
-            assert_eq!(m["capture_framerate"], json!(4));
             assert_eq!(m["draw_cursor"], json!(false));
             assert_eq!(m["start_paused"], json!(true));
             assert_eq!(m["panel_icon_offer"], json!(false));
@@ -3059,10 +2980,10 @@ mod tests {
             assert_eq!(m["stream"], json!("my-stream"));
             assert_eq!(m["custom_key"], json!(123));
 
-            set_guided_field(&paths(t.path()), "capture_framerate", json!(1)).unwrap();
+            set_guided_field(&paths(t.path()), "draw_cursor", json!(true)).unwrap();
             sanitize_link_authority(&paths(t.path())).unwrap();
             let m_after = saved_map(t.path());
-            assert_eq!(m_after["capture_framerate"], json!(1));
+            assert_eq!(m_after["draw_cursor"], json!(true));
         }
 
         let t_def = tempfile::tempdir().unwrap();
@@ -3074,7 +2995,6 @@ mod tests {
                 "sync_retry_delays": [5, 30, 120, 300],
                 "sync_max_retries": 10,
                 "sync_stale_threshold": 600,
-                "capture_framerate": 1,
                 "draw_cursor": true,
                 "start_paused": false,
                 "panel_icon_offer": true,
@@ -3092,7 +3012,6 @@ mod tests {
             "sync_retry_delays",
             "sync_max_retries",
             "sync_stale_threshold",
-            "capture_framerate",
             "draw_cursor",
             "start_paused",
             "panel_icon_offer",
@@ -3145,7 +3064,7 @@ mod tests {
             ("activity_only", json!(0)),
             ("sync_retry_delays", json!([5, 30, 120, 300, 1])),
             ("sync_retry_delays", json!([5.0, 30, 120, 300])),
-            ("capture_framerate", json!(1.0)),
+            ("segment_interval", json!(300.0)),
         ] {
             let t = tempfile::tempdir().unwrap();
             let mut obj = serde_json::Map::new();
@@ -3218,10 +3137,10 @@ mod tests {
         assert!(m_sync.get("segment_interval").is_none());
         assert_eq!(m_sync["stream"], json!("desk"));
 
-        set_guided_field(&paths(t_sync.path()), "capture_framerate", json!(1)).unwrap();
+        set_guided_field(&paths(t_sync.path()), "draw_cursor", json!(true)).unwrap();
         sanitize_link_authority(&paths(t_sync.path())).unwrap();
         let m_sync_after = saved_map(t_sync.path());
-        assert_eq!(m_sync_after["capture_framerate"], json!(1));
+        assert_eq!(m_sync_after["draw_cursor"], json!(true));
 
         let t_explicit_fault = tempfile::tempdir().unwrap();
         write(
@@ -3230,9 +3149,9 @@ mod tests {
         );
         let orig_bytes = fs::read(t_explicit_fault.path().join("cfg/config.json")).unwrap();
         let mut cfg = load(t_explicit_fault.path()).config;
-        cfg.capture_framerate = 1;
+        cfg.draw_cursor = true;
         let explicit = SettingsExplicit {
-            capture_framerate: true,
+            draw_cursor: true,
             ..SettingsExplicit::NONE
         };
         assert!(

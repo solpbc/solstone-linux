@@ -15,12 +15,9 @@ use crate::{
     pipeline::ximagesrc_pipeline_description,
     positions::{BoxGeometry, Monitor, assign_monitor_positions},
     streams::{SILENT_STREAM_LOG_MESSAGE, is_healthy_file_size, stream_filename},
-    video::{
-        clamp_framerate,
-        gstreamer::{
-            CapturePipeline, GstreamerPipelineFactory, PipelineFactory, StoppingPipeline,
-            stop_pipelines,
-        },
+    video::gstreamer::{
+        CapturePipeline, GstreamerPipelineFactory, PipelineFactory, StoppingPipeline,
+        stop_pipelines,
     },
 };
 
@@ -135,12 +132,7 @@ impl<P, F> X11VideoCapture<P, F> {
 }
 
 impl<P: X11OutputProvider, F: PipelineFactory> VideoCapture for X11VideoCapture<P, F> {
-    fn start(
-        &mut self,
-        directory: &Path,
-        framerate: i64,
-        draw_cursor: bool,
-    ) -> Result<Vec<VideoStream>, String> {
+    fn start(&mut self, directory: &Path, draw_cursor: bool) -> Result<Vec<VideoStream>, String> {
         if self.started || !self.tracked.is_empty() {
             return Err(
                 "X11 video capture is already active; stop it before starting again".into(),
@@ -157,7 +149,6 @@ impl<P: X11OutputProvider, F: PipelineFactory> VideoCapture for X11VideoCapture<
         if monitors.is_empty() {
             return Err("No usable monitors found for X11 capture".into());
         }
-        let framerate = clamp_framerate(framerate);
         let mut streams = Vec::new();
         for (index, monitor) in monitors.into_iter().enumerate() {
             let position = monitor.position.unwrap_or_else(|| "center".into());
@@ -165,7 +156,6 @@ impl<P: X11OutputProvider, F: PipelineFactory> VideoCapture for X11VideoCapture<
             let description = ximagesrc_pipeline_description(
                 &self.display,
                 &monitor.bounds,
-                framerate,
                 draw_cursor,
                 &output,
             );
@@ -341,7 +331,7 @@ mod tests {
         );
         assert!(
             capture
-                .start(Path::new("/tmp"), 1, true)
+                .start(Path::new("/tmp"), true)
                 .unwrap_err()
                 .contains("No usable")
         );
@@ -366,7 +356,7 @@ mod tests {
             FakeOutputs(Ok(monitors)),
             FakeFactory::default(),
         );
-        let streams = capture.start(Path::new("/tmp"), 1, false).unwrap();
+        let streams = capture.start(Path::new("/tmp"), false).unwrap();
         assert_eq!(streams.len(), 2);
         assert_eq!(capture.pipelines.descriptions.len(), 2);
         assert_eq!(
@@ -391,7 +381,7 @@ mod tests {
             FakeOutputs(Ok(monitors)),
             FakeFactory::default(),
         );
-        assert!(capture.start(Path::new("/tmp"), 1, true).is_err());
+        assert!(capture.start(Path::new("/tmp"), true).is_err());
     }
 
     #[test]
@@ -407,7 +397,7 @@ mod tests {
         let mut capture =
             X11VideoCapture::with_dependencies(":0", FakeOutputs(Ok(monitors)), factory);
         assert!(!capture.is_healthy());
-        assert_eq!(capture.start(Path::new("/tmp"), -3, true).unwrap().len(), 1);
+        assert_eq!(capture.start(Path::new("/tmp"), true).unwrap().len(), 1);
         assert!(capture.is_healthy());
         capture.pipelines.states[0].lock().unwrap().healthy = false;
         assert!(!capture.is_healthy());
@@ -421,10 +411,10 @@ mod tests {
             FakeOutputs(Ok(vec![monitor("DP-1", [0, 0, 1920, 1080])])),
             FakeFactory::default(),
         );
-        capture.start(Path::new("/tmp"), 1, true).unwrap();
+        capture.start(Path::new("/tmp"), true).unwrap();
         assert!(
             capture
-                .start(Path::new("/tmp"), 1, true)
+                .start(Path::new("/tmp"), true)
                 .unwrap_err()
                 .contains("already active")
         );
@@ -445,7 +435,7 @@ mod tests {
             FakeOutputs(Ok(monitors)),
             FakeFactory::default(),
         );
-        let streams = capture.start(directory.path(), 1, true).unwrap();
+        let streams = capture.start(directory.path(), true).unwrap();
         let healthy_size = (0_u64..)
             .find(|size| is_healthy_file_size(Some(*size)))
             .unwrap();
@@ -469,14 +459,14 @@ mod tests {
             FakeOutputs(Ok(vec![monitor("DP-1", [0, 0, 1920, 1080])])),
             FakeFactory::default(),
         );
-        missing.start(directory.path(), 1, true).unwrap();
+        missing.start(directory.path(), true).unwrap();
         assert_eq!(missing.stop().unwrap()[0].file_bytes, 0);
         let mut capture = X11VideoCapture::with_dependencies(
             ":0",
             FakeOutputs(Ok(vec![monitor("DP-1", [0, 0, 1920, 1080])])),
             FakeFactory::default(),
         );
-        let streams = capture.start(directory.path(), 1, true).unwrap();
+        let streams = capture.start(directory.path(), true).unwrap();
         fs::create_dir(&streams[0].file_path).unwrap();
         let stopped = capture.stop().unwrap();
         assert_eq!(stopped.len(), 1);

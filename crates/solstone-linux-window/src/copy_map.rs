@@ -411,18 +411,7 @@ pub fn map_service_start(
 }
 
 #[cfg(test)]
-pub fn validate_settings_inputs(
-    framerate_str: &str,
-    segment_str: &str,
-) -> Result<(i64, i64), CopyKey> {
-    let framerate: i64 = framerate_str
-        .trim()
-        .parse()
-        .map_err(|_| CopyKey::SettingsFrameInvalid)?;
-    if !(1..=10).contains(&framerate) {
-        return Err(CopyKey::SettingsFrameInvalid);
-    }
-
+pub fn validate_settings_inputs(segment_str: &str) -> Result<i64, CopyKey> {
     let segment: i64 = segment_str
         .trim()
         .parse()
@@ -431,22 +420,14 @@ pub fn validate_settings_inputs(
         return Err(CopyKey::SettingsSegmentInvalid);
     }
 
-    Ok((framerate, segment))
+    Ok(segment)
 }
 
 pub fn validate_settings_changes(
     saved: &SettingsModel,
-    framerate: Option<&str>,
     segment: Option<&str>,
 ) -> Result<SettingsModel, CopyKey> {
     let mut requested = saved.clone();
-    if let Some(text) = framerate {
-        let value = crate::format::parse_integer(text).ok_or(CopyKey::SettingsFrameInvalid)?;
-        if !(1..=10).contains(&value) {
-            return Err(CopyKey::SettingsFrameInvalid);
-        }
-        requested.capture_framerate = value;
-    }
     if let Some(text) = segment {
         let value = crate::format::parse_integer(text).ok_or(CopyKey::SettingsSegmentInvalid)?;
         if value <= 0 {
@@ -540,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_journal_connected_and_offline() {
-        let response = r#"{"v":1,"durable":"confirmed","owner":"running","health":"connected","capture":"recording","settings":{"capture_framerate":1,"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
+        let response = r#"{"v":1,"durable":"confirmed","owner":"running","health":"connected","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
         for health in [
             "connected",
             "offline",
@@ -584,7 +565,7 @@ mod tests {
 
     #[test]
     fn failed_local_activation_is_not_a_claim_that_the_journal_is_offline() {
-        let response = r#"{"v":1,"durable":"confirmed","owner":"failed","health":"transport-unavailable","capture":"recording","settings":{"capture_framerate":1,"draw_cursor":true,"start_paused":false,"segment_interval":300},"fault":"owner-start-failed"}"#;
+        let response = r#"{"v":1,"durable":"confirmed","owner":"failed","health":"transport-unavailable","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"fault":"owner-start-failed"}"#;
         let model = solstone_linux::window_control::decode_control_str(response).unwrap();
         let keys = map_journal_health(&model);
         assert_eq!(keys.status, Some(CopyKey::StatusAttention));
@@ -594,7 +575,7 @@ mod tests {
 
     #[test]
     fn held_commit_and_unverifiable_attempts_keep_their_distinct_recovery() {
-        let response = r#"{"v":1,"durable":"held","owner":"absent","health":"not-reported","capture":"recording","settings":{"capture_framerate":1,"draw_cursor":true,"start_paused":false,"segment_interval":300},"fault":"commit-failed"}"#;
+        let response = r#"{"v":1,"durable":"held","owner":"absent","health":"not-reported","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"fault":"commit-failed"}"#;
         let held = solstone_linux::window_control::decode_control_str(response).unwrap();
         assert_eq!(map_fault(&held), Some(CopyKey::PairingOutcomeUnavailable));
         assert_ne!(
@@ -624,7 +605,6 @@ mod tests {
     #[test]
     fn validation_does_not_rewrite_untouched_hand_edited_settings() {
         let saved = SettingsModel {
-            capture_framerate: 99,
             draw_cursor: false,
             start_paused: true,
             segment_interval: 1500,
@@ -636,16 +616,9 @@ mod tests {
             activity_through_pause: false,
             activity_only: false,
         };
+        assert_eq!(validate_settings_changes(&saved, None), Ok(saved.clone()));
         assert_eq!(
-            validate_settings_changes(&saved, None, None),
-            Ok(saved.clone())
-        );
-        assert_eq!(
-            validate_settings_changes(&saved, Some("99"), None),
-            Err(CopyKey::SettingsFrameInvalid)
-        );
-        assert_eq!(
-            validate_settings_changes(&saved, None, Some("0")),
+            validate_settings_changes(&saved, Some("0")),
             Err(CopyKey::SettingsSegmentInvalid)
         );
     }
@@ -679,7 +652,7 @@ mod tests {
 
     #[test]
     fn pending_response_exposes_explicit_mark_confirmation() {
-        let payload = r##"{"v":1,"durable":"unpaired","owner":"absent","health":"not-reported","capture":"recording","settings":{"capture_framerate":1,"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true,"attempt":{"id":"candidate-a","pairing_id":"ceremony-a","state":"pending","mark":"afoot·unfixed"},"pending_mark":{"icon1":{"name":"line","svg":"<path d='M2 2h20'/>","color":{"name":"amber","hex":"#f59e0b"},"rot":0},"icon2":{"name":"circle","svg":"<circle cx='12' cy='12' r='8'/>","color":{"name":"blue","hex":"#3b82f6"},"rot":45},"words":["afoot","unfixed"]}}"##;
+        let payload = r##"{"v":1,"durable":"unpaired","owner":"absent","health":"not-reported","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true,"attempt":{"id":"candidate-a","pairing_id":"ceremony-a","state":"pending","mark":"afoot·unfixed"},"pending_mark":{"icon1":{"name":"line","svg":"<path d='M2 2h20'/>","color":{"name":"amber","hex":"#f59e0b"},"rot":0},"icon2":{"name":"circle","svg":"<circle cx='12' cy='12' r='8'/>","color":{"name":"blue","hex":"#3b82f6"},"rot":45},"words":["afoot","unfixed"]}}"##;
         let model = solstone_linux::window_control::decode_control_str(payload).unwrap();
         assert_eq!(
             model.view,
@@ -738,7 +711,7 @@ mod tests {
 
     #[test]
     fn idle_screen_never_claims_audio_intake_is_off() {
-        let payload = r#"{"v":1,"durable":"unpaired","owner":"absent","health":"pairing-required","capture":"idle","settings":{"capture_framerate":1,"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
+        let payload = r#"{"v":1,"durable":"unpaired","owner":"absent","health":"pairing-required","capture":"idle","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
         let model = solstone_linux::window_control::decode_control_str(payload).unwrap();
         let keys = map_intake(&model);
         assert_eq!(keys.headline, Some(CopyKey::StatusScreenWaiting));
@@ -786,7 +759,6 @@ mod tests {
     #[test]
     fn test_settings_mapping() {
         let saved = SettingsModel {
-            capture_framerate: 5,
             draw_cursor: true,
             start_paused: false,
             segment_interval: 10,
@@ -812,7 +784,7 @@ mod tests {
         assert_eq!(keys_same.restart_needed, None);
 
         let eff_diff = SettingsModel {
-            capture_framerate: 6,
+            segment_interval: 20,
             ..saved.clone()
         };
         let keys_diff =
@@ -824,21 +796,13 @@ mod tests {
         assert_eq!(keys_diff.restart_action, Some(CopyKey::SettingsRestart));
 
         assert_eq!(
-            validate_settings_inputs("0", "10"),
-            Err(CopyKey::SettingsFrameInvalid)
-        );
-        assert_eq!(
-            validate_settings_inputs("11", "10"),
-            Err(CopyKey::SettingsFrameInvalid)
-        );
-        assert_eq!(
-            validate_settings_inputs("5", "0"),
+            validate_settings_inputs("0"),
             Err(CopyKey::SettingsSegmentInvalid)
         );
         assert_eq!(
-            validate_settings_inputs("5", "-1"),
+            validate_settings_inputs("-1"),
             Err(CopyKey::SettingsSegmentInvalid)
         );
-        assert!(validate_settings_inputs("5", "10").is_ok());
+        assert!(validate_settings_inputs("10").is_ok());
     }
 }

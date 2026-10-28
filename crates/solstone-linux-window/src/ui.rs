@@ -1094,10 +1094,6 @@ fn create_settings_page(
 
     let form_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
 
-    let framerate_entry = gtk::Entry::new();
-    let framerate_help = gtk::Label::new(Some(CopyKey::SettingsFrameRateHelp.as_str()));
-    framerate_help.set_halign(gtk::Align::Start);
-
     let cursor_switch = gtk::Switch::new();
     cursor_switch.set_halign(gtk::Align::Start);
     let cursor_label = gtk::Label::new(Some(CopyKey::SettingsCursor.as_str()));
@@ -1196,12 +1192,6 @@ fn create_settings_page(
     save_error_label.set_wrap(true);
     save_error_label.set_visible(false);
 
-    let framerate_label = gtk::Label::new(Some(CopyKey::SettingsFrameRate.as_str()));
-    framerate_label.set_halign(gtk::Align::Start);
-    framerate_label.set_mnemonic_widget(Some(&framerate_entry));
-    form_box.append(&framerate_label);
-    form_box.append(&framerate_entry);
-    form_box.append(&framerate_help);
     form_box.append(&cursor_label);
     form_box.append(&cursor_switch);
     form_box.append(&start_paused_label);
@@ -1245,20 +1235,6 @@ fn create_settings_page(
     container.append(&restart_button);
     container.append(&save_error_label);
     scrolled.set_child(Some(&container));
-
-    {
-        let ctrl = Rc::clone(&controller);
-        let rendering = Rc::clone(&rendering);
-        framerate_entry.connect_changed(move |e| {
-            if !rendering.get() {
-                let mut state = ctrl.borrow_mut();
-                state.settings_draft.framerate = parse_integer(&e.text());
-                state.settings_draft.framerate_dirty = !state.document.saved_available
-                    || state.settings_draft.framerate
-                        != Some(state.document.settings.capture_framerate);
-            }
-        });
-    }
 
     {
         let ctrl = Rc::clone(&controller);
@@ -1408,7 +1384,6 @@ fn create_settings_page(
         let load_failed_label = load_failed_label.clone();
         let reload_button = reload_button.clone();
         let form_box = form_box.clone();
-        let framerate_entry = framerate_entry.clone();
         let cursor_switch = cursor_switch.clone();
         let start_paused_switch = start_paused_switch.clone();
         let segment_entry = segment_entry.clone();
@@ -1420,7 +1395,6 @@ fn create_settings_page(
         let activity_exclude_titles_entry = activity_exclude_titles_entry.clone();
         let activity_only_switch = activity_only_switch.clone();
         let activity_route_label = activity_route_label.clone();
-        let framerate_entry_for_mode = framerate_entry.clone();
         let cursor_switch_for_mode = cursor_switch.clone();
         let segment_entry_for_mode = segment_entry.clone();
         let saved_banner = saved_banner.clone();
@@ -1431,7 +1405,6 @@ fn create_settings_page(
         Rc::new(move || {
             let (
                 keys,
-                framerate_dirty,
                 cursor_dirty,
                 start_paused_dirty,
                 segment_dirty,
@@ -1442,7 +1415,6 @@ fn create_settings_page(
                 activity_exclude_titles_dirty,
                 activity_through_pause_dirty,
                 activity_only_dirty,
-                saved_framerate,
                 saved_cursor,
                 saved_start_paused,
                 saved_segment,
@@ -1472,7 +1444,6 @@ fn create_settings_page(
                 );
                 (
                     keys,
-                    c.settings_draft.framerate_dirty,
                     c.settings_draft.cursor_dirty,
                     c.settings_draft.start_paused_dirty,
                     c.settings_draft.segment_dirty,
@@ -1483,7 +1454,6 @@ fn create_settings_page(
                     c.settings_draft.activity_exclude_titles_dirty,
                     c.settings_draft.activity_through_pause_dirty,
                     c.settings_draft.activity_only_dirty,
-                    c.document.settings.capture_framerate,
                     c.document.settings.draw_cursor,
                     c.document.settings.start_paused,
                     c.document.settings.segment_interval,
@@ -1513,14 +1483,6 @@ fn create_settings_page(
                 form_box.set_visible(true);
 
                 // GTK must not replace a dirty or focused settings buffer
-                if !framerate_dirty
-                    && !framerate_entry
-                        .state_flags()
-                        .contains(gtk::StateFlags::FOCUS_WITHIN)
-                    && framerate_entry.text().as_str() != format_integer(saved_framerate)
-                {
-                    framerate_entry.set_text(&format_integer(saved_framerate));
-                }
                 if !cursor_dirty
                     && !cursor_switch.has_focus()
                     && cursor_switch.is_active() != saved_cursor
@@ -1596,7 +1558,6 @@ fn create_settings_page(
                 } else {
                     saved_activity_only
                 };
-                framerate_entry_for_mode.set_sensitive(!activity_only_selected);
                 cursor_switch_for_mode.set_sensitive(!activity_only_selected);
                 segment_entry_for_mode.set_sensitive(!activity_only_selected);
                 activity_route_label.set_text(&route_line);
@@ -1686,7 +1647,6 @@ fn create_settings_page(
 
     {
         let ctrl = Rc::clone(&controller);
-        let framerate_entry = framerate_entry.clone();
         let segment_entry = segment_entry.clone();
         let cursor_switch = cursor_switch.clone();
         let start_paused_switch = start_paused_switch.clone();
@@ -1696,12 +1656,10 @@ fn create_settings_page(
             if ctrl.borrow().settings_draft.in_flight.is_some() {
                 return;
             }
-            let framerate_text = framerate_entry.text();
             let segment_text = segment_entry.text();
             let res = {
                 let c = ctrl.borrow();
                 validate_settings_changes(&c.document.settings,
-                    c.settings_draft.framerate_dirty.then_some(framerate_text.as_str()),
                     c.settings_draft.segment_dirty.then_some(segment_text.as_str()))
             };
             match res {

@@ -96,8 +96,6 @@ pub const PAIRING_CONFIRM_ACTION: &str = "confirm your journal's mark";
 pub const JOURNAL_MARK_LABEL: &str = "mark";
 pub const JOURNAL_MARK_SPEECH_TEMPLATE: &str = "{tint1}, {tint2} · {word1}·{word2}";
 pub const SETTINGS_HEADING: &str = "settings";
-pub const SETTINGS_FRAME_RATE: &str = "screen frame rate";
-pub const SETTINGS_FRAME_RATE_HELP: &str = "frames per second · 1–10";
 pub const SETTINGS_CURSOR: &str = "draw cursor";
 pub const SETTINGS_START_PAUSED: &str = "start paused";
 pub const SETTINGS_SEGMENT: &str = "segment interval";
@@ -124,7 +122,6 @@ pub const SETTINGS_SAVE_UNAVAILABLE: &str =
     "couldn't check whether all your settings were saved. read them again before trying again.";
 pub const SETTINGS_LOAD_FAILED: &str =
     "couldn't read your settings. try again before making changes.";
-pub const SETTINGS_FRAME_INVALID: &str = "enter a whole number from 1 to 10.";
 pub const SETTINGS_SEGMENT_INVALID: &str = "enter a whole number greater than 0.";
 pub const SETTINGS_FILE: &str = "config file";
 pub const SETTINGS_CONFLICT: &str =
@@ -322,8 +319,6 @@ pub enum CopyKey {
     PairingConfirmAction,
     JournalMarkLabel,
     SettingsHeading,
-    SettingsFrameRate,
-    SettingsFrameRateHelp,
     SettingsCursor,
     SettingsStartPaused,
     SettingsSegment,
@@ -343,7 +338,6 @@ pub enum CopyKey {
     SettingsSaveIncomplete,
     SettingsSaveUnavailable,
     SettingsLoadFailed,
-    SettingsFrameInvalid,
     SettingsSegmentInvalid,
     SettingsFile,
     SettingsConflict,
@@ -491,8 +485,6 @@ impl CopyKey {
             Self::PairingConfirmAction => PAIRING_CONFIRM_ACTION,
             Self::JournalMarkLabel => JOURNAL_MARK_LABEL,
             Self::SettingsHeading => SETTINGS_HEADING,
-            Self::SettingsFrameRate => SETTINGS_FRAME_RATE,
-            Self::SettingsFrameRateHelp => SETTINGS_FRAME_RATE_HELP,
             Self::SettingsCursor => SETTINGS_CURSOR,
             Self::SettingsStartPaused => SETTINGS_START_PAUSED,
             Self::SettingsSegment => SETTINGS_SEGMENT,
@@ -512,7 +504,6 @@ impl CopyKey {
             Self::SettingsSaveIncomplete => SETTINGS_SAVE_INCOMPLETE,
             Self::SettingsSaveUnavailable => SETTINGS_SAVE_UNAVAILABLE,
             Self::SettingsLoadFailed => SETTINGS_LOAD_FAILED,
-            Self::SettingsFrameInvalid => SETTINGS_FRAME_INVALID,
             Self::SettingsSegmentInvalid => SETTINGS_SEGMENT_INVALID,
             Self::SettingsFile => SETTINGS_FILE,
             Self::SettingsConflict => SETTINGS_CONFLICT,

@@ -35,7 +35,6 @@ use crate::upload::UploadClient;
 pub const CEREMONY_TTL: Duration = Duration::from_secs(600);
 pub const PAIR_BOUND: Duration = Duration::from_secs(30);
 
-pub const DEFAULT_CAPTURE_FRAMERATE: i64 = 1;
 pub const DEFAULT_DRAW_CURSOR: bool = true;
 pub const DEFAULT_START_PAUSED: bool = false;
 pub const DEFAULT_SEGMENT_INTERVAL: i64 = 300;
@@ -213,7 +212,6 @@ pub struct RouteStatusModel {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SettingsDocument {
-    pub capture_framerate: i64,
     pub draw_cursor: bool,
     pub start_paused: bool,
     pub segment_interval: i64,
@@ -283,7 +281,6 @@ pub struct AttemptModel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsModel {
-    pub capture_framerate: i64,
     pub draw_cursor: bool,
     pub start_paused: bool,
     pub segment_interval: i64,
@@ -324,7 +321,6 @@ impl ControlModel {
             health: "not-reported".into(),
             capture: String::new(),
             settings: SettingsModel {
-                capture_framerate: DEFAULT_CAPTURE_FRAMERATE,
                 draw_cursor: DEFAULT_DRAW_CURSOR,
                 start_paused: DEFAULT_START_PAUSED,
                 segment_interval: DEFAULT_SEGMENT_INTERVAL,
@@ -389,7 +385,6 @@ pub fn decode_control<E: std::fmt::Display>(
         health: doc.health,
         capture: doc.capture,
         settings: SettingsModel {
-            capture_framerate: doc.settings.capture_framerate,
             draw_cursor: doc.settings.draw_cursor,
             start_paused: doc.settings.start_paused,
             segment_interval: doc.settings.segment_interval,
@@ -406,7 +401,6 @@ pub fn decode_control<E: std::fmt::Display>(
         fault: doc.fault,
         saved_available: doc.saved_available,
         effective: doc.effective.map(|s| SettingsModel {
-            capture_framerate: s.capture_framerate,
             draw_cursor: s.draw_cursor,
             start_paused: s.start_paused,
             segment_interval: s.segment_interval,
@@ -673,7 +667,6 @@ pub(crate) fn resolve_config_file(paths: &ConfigPaths) -> PathBuf {
 
 pub fn default_settings_doc() -> SettingsDocument {
     SettingsDocument {
-        capture_framerate: DEFAULT_CAPTURE_FRAMERATE,
         draw_cursor: DEFAULT_DRAW_CURSOR,
         start_paused: DEFAULT_START_PAUSED,
         segment_interval: DEFAULT_SEGMENT_INTERVAL,
@@ -708,11 +701,6 @@ pub fn read_saved_settings(config_paths: &ConfigPaths) -> (SettingsDocument, boo
         return (default_settings_doc(), false);
     };
 
-    let framerate = match obj.get("capture_framerate") {
-        None => Ok(DEFAULT_CAPTURE_FRAMERATE),
-        Some(Value::Number(n)) => n.as_i64().ok_or(()),
-        Some(_) => Err(()),
-    };
     let draw_cursor = match obj.get("draw_cursor") {
         None => Ok(DEFAULT_DRAW_CURSOR),
         Some(Value::Bool(b)) => Ok(*b),
@@ -738,16 +726,14 @@ pub fn read_saved_settings(config_paths: &ConfigPaths) -> (SettingsDocument, boo
     let activity = crate::config::read_saved_activity(obj);
 
     match (
-        framerate,
         draw_cursor,
         start_paused,
         segment_interval,
         activity,
         activity_only,
     ) {
-        (Ok(f), Ok(d), Ok(p), Ok(s), Ok(activity), Ok(aonly)) => (
+        (Ok(d), Ok(p), Ok(s), Ok(activity), Ok(aonly)) => (
             SettingsDocument {
-                capture_framerate: f,
                 draw_cursor: d,
                 start_paused: p,
                 segment_interval: s,
@@ -882,7 +868,7 @@ pub(crate) fn assemble_document(
         config_path: Some(resolve_config_file(config_paths).display().to_string()),
     };
     serde_json::to_string(&doc).unwrap_or_else(|_| {
-        r#"{"v":1,"durable":"unavailable","owner":"absent","health":"not-reported","capture":"","settings":{"capture_framerate":1,"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":false}"#.into()
+        r#"{"v":1,"durable":"unavailable","owner":"absent","health":"not-reported","capture":"","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":false}"#.into()
     })
 }
 
@@ -985,10 +971,6 @@ fn validate_setting(field: &str, value: &str) -> Result<Value, &'static str> {
         return Err("invalid-setting");
     }
     match field {
-        "capture_framerate" => {
-            let n = value.trim().parse::<i64>().map_err(|_| "invalid-setting")?;
-            Ok(Value::Number(n.clamp(1, 10).into()))
-        }
         "draw_cursor" | "start_paused" | "activity_source" | "activity_titles"
         | "activity_urls" | "activity_only" => {
             let normalized = value.trim().to_lowercase();
@@ -2238,7 +2220,7 @@ impl WindowControlHandler {
     }
 
     fn fallback_unavailable(&self) -> String {
-        "{\"v\":1,\"durable\":\"unavailable\",\"owner\":\"absent\",\"attempt\":null,\"health\":\"not-reported\",\"capture\":\"\",\"settings\":{\"capture_framerate\":1,\"draw_cursor\":true,\"start_paused\":false,\"segment_interval\":300},\"restart_required\":null,\"open_journal\":null,\"fault\":null}".to_string()
+        "{\"v\":1,\"durable\":\"unavailable\",\"owner\":\"absent\",\"attempt\":null,\"health\":\"not-reported\",\"capture\":\"\",\"settings\":{\"draw_cursor\":true,\"start_paused\":false,\"segment_interval\":300},\"restart_required\":null,\"open_journal\":null,\"fault\":null}".to_string()
     }
 }
 
@@ -2662,7 +2644,7 @@ mod tests {
             let snapshot = Arc::new(Mutex::new(test_snapshot(Mode::Idle, false)));
 
             let mut initial_settings = default_settings_doc();
-            initial_settings.capture_framerate = 4;
+            initial_settings.segment_interval = 77;
             let effective_settings = Arc::new(Mutex::new(Some(initial_settings)));
             let activity_prefs = Arc::new(ActivityPrefs::new(&crate::config::Config::default()));
 
@@ -3788,7 +3770,6 @@ mod tests {
         let initial_json = serde_json::json!({
             "unknown_key": "some_value",
             "panel_icon_offer": false,
-            "capture_framerate": 2,
             "draw_cursor": false,
             "start_paused": true,
             "segment_interval": 120,
@@ -3797,7 +3778,6 @@ mod tests {
 
         let doc = harness.handler.get_control_state();
         let m = decode_control_str(&doc).unwrap();
-        assert_eq!(m.settings.capture_framerate, 2);
         assert!(!m.settings.draw_cursor);
         assert!(m.settings.start_paused);
         assert_eq!(m.settings.segment_interval, 120);
@@ -3806,13 +3786,6 @@ mod tests {
             serde_json::from_slice(&fs::read(&config_file).unwrap()).unwrap();
         current_map.insert("hand_edit".into(), Value::String("after_read".into()));
         fs::write(&config_file, serde_json::to_vec(&current_map).unwrap()).unwrap();
-
-        let inv1 = harness
-            .handler
-            .write_setting("capture_framerate".into(), "invalid".into())
-            .await;
-        let m_inv1 = decode_control_str(&inv1).unwrap();
-        assert_eq!(m_inv1.fault, Some("invalid-setting".into()));
 
         let inv2 = harness
             .handler
@@ -3830,10 +3803,10 @@ mod tests {
 
         let ok = harness
             .handler
-            .write_setting("capture_framerate".into(), "5".into())
+            .write_setting("segment_interval".into(), "600".into())
             .await;
         let m_ok = decode_control_str(&ok).unwrap();
-        assert_eq!(m_ok.settings.capture_framerate, 5);
+        assert_eq!(m_ok.settings.segment_interval, 600);
         assert_eq!(m_ok.restart_required, Some(true));
         assert!(m_ok.fault.is_none());
 
@@ -3852,14 +3825,13 @@ mod tests {
         assert!(saved.get("start_paused").unwrap().as_bool().unwrap());
         assert_eq!(
             saved.get("segment_interval").unwrap().as_i64().unwrap(),
-            120
+            600
         );
-        assert_eq!(saved.get("capture_framerate").unwrap().as_i64().unwrap(), 5);
 
         fs::write(&config_file, b"corrupted json").unwrap();
         let inv_json = harness
             .handler
-            .write_setting("capture_framerate".into(), "3".into())
+            .write_setting("segment_interval".into(), "60".into())
             .await;
         let m_inv_json = decode_control_str(&inv_json).unwrap();
         assert_eq!(m_inv_json.fault, Some("invalid-config".into()));
@@ -3867,10 +3839,32 @@ mod tests {
         fs::write(&config_file, b"{}").unwrap();
         let def_doc = harness.handler.get_control_state();
         let m_def = decode_control_str(&def_doc).unwrap();
-        assert_eq!(m_def.settings.capture_framerate, DEFAULT_CAPTURE_FRAMERATE);
         assert_eq!(m_def.settings.draw_cursor, DEFAULT_DRAW_CURSOR);
         assert_eq!(m_def.settings.start_paused, DEFAULT_START_PAUSED);
         assert_eq!(m_def.settings.segment_interval, DEFAULT_SEGMENT_INTERVAL);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn write_setting_rejects_a_frame_rate() {
+        let cred = sample_valid_credential("cert-pem-bytes");
+        let pairer = Arc::new(FakePairer::new(cred));
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(None, false, pairer, starter, Arc::new(NoWriteFault)).await;
+
+        let config_file = harness.config_root.join("config.json");
+        let initial = br#"{"segment_interval":120}"#;
+        fs::write(&config_file, initial).unwrap();
+
+        // The screen is always recorded at one frame a second; there is no rate to set.
+        let doc = harness
+            .handler
+            .write_setting("capture_framerate".into(), "5".into())
+            .await;
+        let m = decode_control_str(&doc).unwrap();
+        assert_eq!(m.fault, Some("invalid-setting".into()));
+        assert_eq!(fs::read(&config_file).unwrap(), initial);
 
         harness.shutdown().await;
     }
@@ -4073,7 +4067,6 @@ mod tests {
             "health": "connected",
             "capture": "idle",
             "settings": {
-                "capture_framerate": 5,
                 "draw_cursor": false,
                 "start_paused": true,
                 "segment_interval": 600
@@ -4096,7 +4089,6 @@ mod tests {
         assert_eq!(att.mark, Some("red, blue · word·word".into()));
         assert_eq!(model.health, "connected");
         assert_eq!(model.capture, "idle");
-        assert_eq!(model.settings.capture_framerate, 5);
         assert!(!model.settings.draw_cursor);
         assert!(model.settings.start_paused);
         assert_eq!(model.settings.segment_interval, 600);
@@ -4211,7 +4203,6 @@ mod tests {
 
         let (settings, available) = read_saved_settings(&paths);
         assert!(available);
-        assert_eq!(settings.capture_framerate, DEFAULT_CAPTURE_FRAMERATE);
         assert_eq!(settings.draw_cursor, DEFAULT_DRAW_CURSOR);
         assert_eq!(settings.start_paused, DEFAULT_START_PAUSED);
         assert_eq!(settings.segment_interval, DEFAULT_SEGMENT_INTERVAL);
@@ -4220,39 +4211,32 @@ mod tests {
         std::fs::write(&config_file, b"{}").unwrap();
         let (settings, available) = read_saved_settings(&paths);
         assert!(available);
-        assert_eq!(settings.capture_framerate, DEFAULT_CAPTURE_FRAMERATE);
         assert_eq!(settings.draw_cursor, DEFAULT_DRAW_CURSOR);
         assert_eq!(settings.start_paused, DEFAULT_START_PAUSED);
         assert_eq!(settings.segment_interval, DEFAULT_SEGMENT_INTERVAL);
 
-        std::fs::write(&config_file, br#"{"capture_framerate": 5}"#).unwrap();
+        std::fs::write(&config_file, br#"{"draw_cursor": false}"#).unwrap();
         let (settings, available) = read_saved_settings(&paths);
         assert!(available);
-        assert_eq!(settings.capture_framerate, 5);
-        assert_eq!(settings.draw_cursor, DEFAULT_DRAW_CURSOR);
+        assert!(!settings.draw_cursor);
         assert_eq!(settings.start_paused, DEFAULT_START_PAUSED);
         assert_eq!(settings.segment_interval, DEFAULT_SEGMENT_INTERVAL);
 
-        std::fs::write(
-            &config_file,
-            br#"{"capture_framerate": 99, "segment_interval": -50}"#,
-        )
-        .unwrap();
+        std::fs::write(&config_file, br#"{"segment_interval": -50}"#).unwrap();
         let (settings, available) = read_saved_settings(&paths);
         assert!(available);
-        assert_eq!(settings.capture_framerate, 99);
         assert_eq!(settings.segment_interval, -50);
 
         std::fs::write(&config_file, b"not valid json").unwrap();
         let (settings, available) = read_saved_settings(&paths);
         assert!(!available);
-        assert_eq!(settings.capture_framerate, DEFAULT_CAPTURE_FRAMERATE);
+        assert_eq!(settings.segment_interval, DEFAULT_SEGMENT_INTERVAL);
 
         std::fs::write(&config_file, b"[1, 2, 3]").unwrap();
         let (_settings, available) = read_saved_settings(&paths);
         assert!(!available);
 
-        std::fs::write(&config_file, br#"{"capture_framerate": "five"}"#).unwrap();
+        std::fs::write(&config_file, br#"{"segment_interval": "five"}"#).unwrap();
         let (_settings, available) = read_saved_settings(&paths);
         assert!(!available);
 
@@ -4463,7 +4447,7 @@ mod tests {
         assert_eq!(stopped.exclude_titles, vec!["SENTINEL_TITLE".to_string()]);
         assert_eq!(harness.activity_prefs.generation(), initial_gen + 2);
 
-        // write_setting("activity_only", "true") then a second policy write: decoded document restart_required is still true, and effective framerate is still 4.
+        // write_setting("activity_only", "true") then a second policy write: decoded document restart_required is still true, and effective segment interval is still 77.
         let _ = harness
             .handler
             .write_setting("activity_only".into(), "true".into())
@@ -4475,7 +4459,7 @@ mod tests {
             .await;
         let model2 = decode_control_str(&doc2).unwrap();
         assert_eq!(model2.restart_required, Some(true));
-        assert_eq!(model2.effective.as_ref().unwrap().capture_framerate, 4);
+        assert_eq!(model2.effective.as_ref().unwrap().segment_interval, 77);
 
         // Keeping activity on through the pause is one more choice in the policy,
         // and it takes effect without a restart.

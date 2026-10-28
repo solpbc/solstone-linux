@@ -59,12 +59,7 @@ pub struct StoppedStream {
 }
 
 pub trait VideoCapture {
-    fn start(
-        &mut self,
-        directory: &Path,
-        framerate: i64,
-        draw_cursor: bool,
-    ) -> Result<Vec<VideoStream>, String>;
+    fn start(&mut self, directory: &Path, draw_cursor: bool) -> Result<Vec<VideoStream>, String>;
     fn stop(&mut self) -> Result<Vec<StoppedStream>, String>;
     fn stop_for_shutdown(&mut self) -> Result<Vec<StoppedStream>, String> {
         self.stop()
@@ -754,7 +749,7 @@ where
             let streams = self
                 .backends
                 .video
-                .start(&dir, self.config.capture_framerate, self.config.draw_cursor)
+                .start(&dir, self.config.draw_cursor)
                 .map_err(ObserverError::VideoStart)?;
             if streams.is_empty() {
                 return Err(ObserverError::VideoStart("no streams available".into()));
@@ -1374,7 +1369,7 @@ pub(crate) mod tests {
         stopped: Vec<StoppedStream>,
     }
     impl VideoCapture for FakeVideo {
-        fn start(&mut self, d: &Path, _: i64, _: bool) -> Result<Vec<VideoStream>, String> {
+        fn start(&mut self, d: &Path, _: bool) -> Result<Vec<VideoStream>, String> {
             self.starts.set(self.starts.get() + 1);
             if self.fail_start {
                 return Err("start".into());
