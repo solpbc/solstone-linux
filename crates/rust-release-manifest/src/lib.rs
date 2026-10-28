@@ -3050,19 +3050,19 @@ fn rpm_executable_member(path: &Path, package: &str) -> Result<PackageMemberEvid
     let mut executable = None;
     for file in rpm.files().map_err(display_error)? {
         let file = file.map_err(display_error)?;
-        if file.metadata.path == Path::new("/usr/bin/solstone-linux") {
+        if file.metadata.path() == Path::new("/usr/bin/solstone-linux") {
             if executable.is_some() {
                 return Err(Error::new(
                     "rpm executable member mismatch: expected unique file",
                 ));
             }
-            let mode = u64::from(file.metadata.mode.permissions());
+            let mode = u64::from(file.metadata.permissions());
             executable = Some(member_record(
                 package,
                 "rpm",
                 "/usr/bin/solstone-linux",
                 mode,
-                file.content,
+                file.into_content().unwrap_or_default(),
             )?);
         }
     }

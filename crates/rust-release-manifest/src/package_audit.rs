@@ -844,7 +844,7 @@ fn rpm_members(path: &Path) -> Result<Vec<Member>> {
         let file = file.map_err(|error| {
             audit_error(path, "MalformedContainer", &error.to_string(), "rpm:cpio")
         })?;
-        if file.metadata.mode.file_type() != rpm::FileType::Regular {
+        if file.metadata.file_type() != rpm::FileType::Regular {
             return Err(audit_error(
                 path,
                 "UnsupportedMember",
@@ -854,7 +854,7 @@ fn rpm_members(path: &Path) -> Result<Vec<Member>> {
         }
         let member = file
             .metadata
-            .path
+            .path()
             .to_str()
             .ok_or_else(|| audit_error(path, "MalformedContainer", "non-utf8-path", "rpm"))?
             .to_owned();
@@ -863,8 +863,8 @@ fn rpm_members(path: &Path) -> Result<Vec<Member>> {
         }
         members.push(Member {
             path: member,
-            mode: u32::from(file.metadata.mode.permissions()),
-            bytes: file.content,
+            mode: u32::from(file.metadata.permissions()),
+            bytes: file.into_content().unwrap_or_default(),
         });
     }
     Ok(members)
