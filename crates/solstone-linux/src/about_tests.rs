@@ -269,6 +269,7 @@ fn native_and_report_project_only_public_fields_and_preserve_snapshot_bytes() {
         period_id: Some("fixture-period".into()),
         full: false,
         held_bytes: 0,
+        away: false,
     };
     for kind in ["hello_ack", "state"] {
         let envelope =

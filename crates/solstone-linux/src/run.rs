@@ -356,6 +356,7 @@ fn run_capture(
         process_start_mono: clock.monotonic_seconds(),
         session: first_target.presence,
         activity_through_pause: false,
+        away: false,
     };
     let snapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
     let (states, tray_receiver) = WatchStateSink::channel(initial_snapshot);
@@ -1339,6 +1340,7 @@ mod tests {
             process_start_mono: 0.0,
             session: Default::default(),
             activity_through_pause: false,
+            away: false,
         };
         let (states, receiver) = WatchStateSink::channel(snapshot.clone());
         (
@@ -1564,6 +1566,7 @@ mod tests {
             process_start_mono: 42.0,
             session: Default::default(),
             activity_through_pause: false,
+            away: false,
         };
         let health = crate::sync_health::derive_health(
             &crate::sync_health::SyncFacts::default(),

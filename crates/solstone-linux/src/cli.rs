@@ -3803,6 +3803,7 @@ mod tests {
             process_start_mono: 0.0,
             session: Default::default(),
             activity_through_pause: false,
+            away: false,
         });
         let handle = crate::browser::server::start(crate::browser::server::ServerConfig {
             base_dir: running_config.base_dir.clone(),

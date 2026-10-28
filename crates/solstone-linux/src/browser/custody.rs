@@ -140,6 +140,8 @@ pub struct Facts {
     pub period_id: Option<String>,
     pub full: bool,
     pub held_bytes: u64,
+    /// Nobody is at this desktop; reported with the pause it causes.
+    pub away: bool,
 }
 
 pub struct Custody {
@@ -223,6 +225,7 @@ impl Custody {
                 period_id: None,
                 full,
                 held_bytes: self.held_bytes,
+                away: false,
             };
         };
         Facts {
@@ -239,6 +242,7 @@ impl Custody {
             period_id: self.period_id().map(str::to_owned),
             full,
             held_bytes: self.held_bytes,
+            away: false,
         }
     }
 

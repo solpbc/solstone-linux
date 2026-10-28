@@ -74,16 +74,24 @@ impl Shared {
         state_message_with_about(kind, facts, &(self.about)(facts))
     }
 
-    fn paused(&self) -> bool {
-        self.paused.borrow().paused
+    /// The owner's pause, and whether nobody is at this desktop. Either holds
+    /// reads; `away` tells the extension which, since it can be set to keep
+    /// reading through the owner's pause.
+    fn hold(&self) -> (bool, bool) {
+        let snapshot = self.paused.borrow();
+        (snapshot.paused, snapshot.away)
     }
 
     fn facts(&self) -> Facts {
         let generation = self.current_generation();
-        self.custody
+        let (paused, away) = self.hold();
+        let mut facts = self
+            .custody
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .facts(generation.as_deref(), self.paused())
+            .facts(generation.as_deref(), paused || away);
+        facts.away = away;
+        facts
     }
 
     fn current_generation(&self) -> Option<String> {
@@ -318,9 +326,9 @@ async fn clock_loop(shared: Arc<Shared>) {
 
 async fn pause_loop(shared: Arc<Shared>) {
     let mut paused = shared.paused.clone();
-    let mut last = paused.borrow().paused;
+    let mut last = shared.hold();
     while paused.changed().await.is_ok() {
-        let now = paused.borrow().paused;
+        let now = shared.hold();
         if now != last {
             last = now;
             let _ = shared.events.send(Event::Publish);
@@ -402,10 +410,10 @@ pub fn state_message(kind: &str, facts: &Facts) -> Value {
         "destination_generation": facts.generation,
         "period_id": facts.period_id,
         "custody": {"full": facts.full, "stale": false},
-        // This app pauses only when the owner pauses it, so its pause never means
-        // nobody is here. An extension set to read through the owner's pause
-        // reads through it only when `away` is false.
-        "away": false,
+        // A locked screen or a session not in front pauses with `away: true`; the
+        // owner's pause alone is `away: false`. An extension set to read through
+        // the owner's pause reads through it only when `away` is false.
+        "away": facts.away,
     });
     if let Some(failure) = facts.failure {
         message["failure"] = json!(failure);
@@ -664,6 +672,7 @@ mod tests {
             process_start_mono: 0.0,
             session: Default::default(),
             activity_through_pause: false,
+            away: false,
         }
     }
 
@@ -739,6 +748,17 @@ mod tests {
         }
     }
 
+    /// The next `state` whose capture is `capture`, skipping a few stale ones.
+    async fn read_capture(stream: &mut UnixStream, capture: &str) -> Value {
+        for _ in 0..4 {
+            let state = read_type(stream, "state").await;
+            if state["capture"] == capture {
+                return state;
+            }
+        }
+        panic!("no state with capture {capture}");
+    }
+
     async fn connect(rig: &Rig, brand: &str, mode: &str, hello_brand: &str) -> UnixStream {
         let mut stream = UnixStream::connect(&rig.endpoint).await.unwrap();
         frame(
@@ -797,6 +817,23 @@ mod tests {
         assert_eq!(paused["capture"], "paused");
         assert_eq!(paused["away"], false);
         rig.pause.send_replace(snapshot(false));
+        read_capture(&mut stream, "permitted").await;
+
+        // Nobody here (a locked screen, another session in front): paused with
+        // `away: true`, so an extension that reads through the owner's pause stops.
+        rig.pause.send_replace(StateSnapshot {
+            away: true,
+            ..snapshot(false)
+        });
+        let locked = read_capture(&mut stream, "paused").await;
+        assert_eq!(locked["away"], true);
+        rig.pause.send_replace(StateSnapshot {
+            away: true,
+            ..snapshot(true)
+        });
+        rig.pause.send_replace(snapshot(false));
+        let back = read_capture(&mut stream, "permitted").await;
+        assert_eq!(back["away"], false);
 
         rig.handle.shutdown().await;
         assert_eq!(read_type(&mut stream, "bye").await["reason"], "shutdown");

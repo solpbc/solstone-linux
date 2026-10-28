@@ -2011,6 +2011,7 @@ impl Default for WindowControlHandler {
                     process_start_mono: 0.0,
                     session: Default::default(),
                     activity_through_pause: false,
+                    away: false,
                 })),
                 effective_settings: Arc::new(Mutex::new(None)),
                 route_status: Arc::new(Mutex::new(None)),
@@ -2515,6 +2516,7 @@ mod tests {
             process_start_mono: 0.0,
             session: Default::default(),
             activity_through_pause: false,
+            away: false,
         }
     }
 

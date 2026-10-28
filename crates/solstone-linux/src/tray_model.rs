@@ -241,6 +241,7 @@ mod tests {
             process_start_mono: 50.0,
             session: Default::default(),
             activity_through_pause: false,
+            away: false,
         }
     }
     fn connected_health() -> SyncHealth {

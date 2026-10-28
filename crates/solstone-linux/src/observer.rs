@@ -189,6 +189,9 @@ pub struct StateSnapshot {
     /// Paused, while desktop activity keeps going because the owner kept it on
     /// through the pause.
     pub activity_through_pause: bool,
+    /// Nobody is at this desktop: its screen is locked, or this owner's session
+    /// is not the live one in front of the seat. Browser reads hold here.
+    pub away: bool,
 }
 pub trait StateSink {
     fn publish(&mut self, snapshot: StateSnapshot);
@@ -512,6 +515,11 @@ where
             self.finish_paused_segment()?;
             self.state.activity_alone = false;
             let _ = self.backends.audio.drain();
+            // Nothing is taken in, but whether anyone is here still reaches the
+            // browser intake, which an owner can keep reading through a pause.
+            if let Ok(activity) = self.backends.activity.probe() {
+                self.take_activity(activity);
+            }
             self.publish();
             return Ok(());
         }
@@ -1201,6 +1209,15 @@ where
     fn probe_status(&mut self) -> Result<Mode, String> {
         let activity = self.backends.activity.probe()?;
         let muted = self.backends.mute.probe_muted()?;
+        self.take_activity(activity);
+        self.state.cached_is_muted = muted;
+        let target = mode(activity);
+        // Deliberate reference parity: activity.active observes hits from before this tick drains.
+        self.state.cached_is_active =
+            target == Mode::Screencast || self.state.hit_gate.should_save();
+        Ok(target)
+    }
+    fn take_activity(&mut self, activity: ActivityState) {
         if activity.session_epoch != self.state.cached_activity.session_epoch {
             self.state.session_settle_until =
                 self.backends.clock.monotonic_seconds() + SESSION_SETTLE_SECONDS;
@@ -1209,12 +1226,6 @@ where
             }
         }
         self.state.cached_activity = activity;
-        self.state.cached_is_muted = muted;
-        let target = mode(activity);
-        // Deliberate reference parity: activity.active observes hits from before this tick drains.
-        self.state.cached_is_active =
-            target == Mode::Screencast || self.state.hit_gate.should_save();
-        Ok(target)
     }
     fn publish(&mut self) {
         self.backends.states.publish(StateSnapshot {
@@ -1232,6 +1243,8 @@ where
             process_start_mono: self.state.process_start_mono,
             session: self.state.cached_activity.session,
             activity_through_pause: self.state.paused && !self.state.activity_held,
+            // The same test desktop activity uses for someone being here.
+            away: self.state.cached_activity.screen_locked || !self.session_live(),
         })
     }
 }
@@ -1864,6 +1877,43 @@ pub(crate) mod tests {
                     .sum()
             })
             .unwrap_or(0)
+    }
+
+    // No Python ancestor: the browser intake holds reads while nobody is here, and an
+    // extension set to read through the owner's pause needs to tell the two apart.
+    #[test]
+    fn a_locked_screen_or_a_session_not_in_front_publishes_away_even_while_paused() {
+        let mut f = fixture(false);
+        f.observer.backends.activity.0.push_back(Ok(active()));
+        initialize(&mut f);
+        let last_away = |f: &Fixture| f.states.0.borrow().last().unwrap().away;
+        assert!(!last_away(&f));
+
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
+        assert!(last_away(&f), "a locked screen is away");
+        f.observer.backends.activity.0.push_back(Ok(active()));
+        f.observer.tick().unwrap();
+        assert!(!last_away(&f));
+        f.observer.backends.activity.0.push_back(Ok(away()));
+        f.observer.tick().unwrap();
+        assert!(last_away(&f), "another session in front is away");
+        f.observer.backends.activity.0.push_back(Ok(active()));
+        f.observer.tick().unwrap();
+        assert!(!last_away(&f));
+
+        // The owner's pause holds everything else, but a lock during it still shows.
+        f.observer.pause(0);
+        let paused = f.states.0.borrow().last().cloned().unwrap();
+        assert!(paused.paused && !paused.away);
+        f.observer.backends.activity.0.push_back(Ok(idle()));
+        f.observer.tick().unwrap();
+        let locked = f.states.0.borrow().last().cloned().unwrap();
+        assert!(locked.paused && locked.away);
+        f.observer.backends.activity.0.push_back(Ok(active()));
+        f.observer.tick().unwrap();
+        let back = f.states.0.borrow().last().cloned().unwrap();
+        assert!(back.paused && !back.away);
     }
 
     // No Python ancestor: no live desktop session means nothing is taken in at all.

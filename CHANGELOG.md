@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- the solstone extension now stops taking in pages while your screen is locked, or while you're not signed in at your desktop, for example while the login screen shows or someone else is signed in. the locked-screen part needs a desktop that reports its lock screen, as GNOME and KDE do.
+
 ## [2.0.30] - 2026-10-27
 
 ### Fixed
