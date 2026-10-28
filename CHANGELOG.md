@@ -6,13 +6,15 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.31] - 2026-10-28
+
 ### Changed
 
-- your screen now goes into your journal at one picture a second, the same as on your other devices. "screen frame rate" is gone from settings, and if you'd raised it, it goes back to one a second.
+- while the solstone app takes in your screen, it goes into your journal at one picture a second. "screen frame rate" is gone from settings, and if you'd raised it, it goes back to one a second.
 
 ### Fixed
 
-- the solstone extension now stops taking in pages while your screen is locked, or while you're not signed in at your desktop, for example while the login screen shows or someone else is signed in. the locked-screen part needs a desktop that reports its lock screen, as GNOME and KDE do.
+- the solstone app now has the solstone extension stop taking in pages for your journal while your screen is locked, or while you're not signed in at your desktop, for example while the login screen shows or someone else is signed in. the locked-screen part needs a desktop that reports its lock screen, as GNOME and KDE do.
 
 ## [2.0.30] - 2026-10-27
 
