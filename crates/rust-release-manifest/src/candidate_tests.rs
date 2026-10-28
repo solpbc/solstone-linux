@@ -237,6 +237,10 @@ pub(super) fn fixture() -> TestRepo {
         fs::copy(source.join(image_policy), temp.path().join(image_policy)).unwrap();
     }
     normalize_fixture_release_policy(&temp.path().join(image_policy));
+    // The fixture publishes its first entry (seq 1, version 1.0.0) against an
+    // empty chain, so it starts from an empty head log rather than the
+    // repository's own published history.
+    fs::write(temp.path().join(TRANSPARENCY_HEAD_LOG), b"").unwrap();
     for args in [
         &["init", "-q"][..],
         &["config", "user.email", "release-fixture@invalid.example"][..],
