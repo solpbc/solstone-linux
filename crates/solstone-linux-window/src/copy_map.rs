@@ -2,7 +2,9 @@
 // Copyright (c) 2026 sol pbc
 
 use solstone_linux::copy::CopyKey;
-use solstone_linux::window_control::{ControlModel, SettingsModel, adapt_graphical_link};
+use solstone_linux::window_control::{
+    ControlModel, MarkRenderDocument, SettingsModel, adapt_graphical_link,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IntakeKeys {
@@ -99,6 +101,40 @@ pub struct JournalHealthKeys {
     pub action_open: Option<CopyKey>,
 }
 
+pub fn attempt_pending(model: &ControlModel) -> bool {
+    model
+        .attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.state == "pending")
+}
+
+/// The mark the journal tab's card draws, if it has one to draw.
+pub fn mark_to_show(model: &ControlModel) -> Option<MarkRenderDocument> {
+    let unverifiable = model.fault.as_deref() == Some("unverifiable")
+        || model
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.state == "unverifiable");
+    if unverifiable {
+        None
+    } else if attempt_pending(model) || model.durable == "held" {
+        model.pending_mark.clone()
+    } else {
+        model.confirmed_mark.clone()
+    }
+}
+
+/// With no mark to draw: true when one exists and can't be shown right now,
+/// false when there's no journal identity here yet.
+pub fn empty_mark_is_unavailable(model: &ControlModel) -> bool {
+    model.durable != "unpaired"
+        || model.view == solstone_linux::window_control::SessionView::Unknown
+        || model
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| matches!(attempt.state.as_str(), "pending" | "unverifiable"))
+}
+
 pub fn map_journal_health(model: &ControlModel) -> JournalHealthKeys {
     if model.view == solstone_linux::window_control::SessionView::Unknown {
         return JournalHealthKeys {
@@ -147,6 +183,22 @@ pub fn map_journal_health(model: &ControlModel) -> JournalHealthKeys {
             status: Some(CopyKey::JournalNotPaired),
             detail: None,
             action_open: None,
+        };
+    } else if model.durable == "held" {
+        // An attempt in the window asks its own question below the card; a pairing
+        // held on disk can only be answered at the terminal.
+        return if attempt_pending(model) {
+            JournalHealthKeys {
+                status: None,
+                detail: None,
+                action_open: None,
+            }
+        } else {
+            JournalHealthKeys {
+                status: Some(CopyKey::PairingHeld),
+                detail: Some(CopyKey::PairingHeldRun),
+                action_open: None,
+            }
         };
     }
 
@@ -228,6 +280,7 @@ pub fn map_pairing(model: &ControlModel, attempt_outcome: Option<&str>) -> Pairi
                     ..Default::default()
                 };
             }
+            "commit-failed" => return PairingKeys::default(),
             "malformed-link" => {
                 return PairingKeys {
                     title: Some(CopyKey::PairingBadLink),
@@ -261,9 +314,7 @@ pub fn map_pairing(model: &ControlModel, attempt_outcome: Option<&str>) -> Pairi
         }
     }
 
-    if model.durable == "held"
-        || model.attempt.as_ref().map(|a| a.state.as_str()) == Some("pending")
-    {
+    if attempt_pending(model) {
         let has_verifiable_mark = model.pending_mark.is_some();
         if has_verifiable_mark {
             return PairingKeys {
@@ -277,7 +328,7 @@ pub fn map_pairing(model: &ControlModel, attempt_outcome: Option<&str>) -> Pairi
                 secondary_detail: Some(CopyKey::PairingQuestionDetail),
                 confirm_action: Some(CopyKey::PairingConfirm),
                 reject_action: Some(CopyKey::PairingReject),
-                cancel_action: Some(CopyKey::PairingCancel),
+                cancel_action: None,
                 check_status: None,
             };
         } else {
@@ -661,7 +712,52 @@ mod tests {
         let keys = map_pairing(&model, None);
         assert!(keys.confirm_action.is_some());
         assert!(keys.reject_action.is_some());
-        assert!(keys.cancel_action.is_some());
+        assert!(keys.cancel_action.is_none());
+        assert!(attempt_pending(&model));
+        assert_eq!(mark_to_show(&model), model.pending_mark);
+    }
+
+    fn held_on_disk_model(with_mark: bool) -> ControlModel {
+        let mark = if with_mark {
+            r##","pending_mark":{"icon1":{"name":"line","svg":"<path d='M2 2h20'/>","color":{"name":"amber","hex":"#f59e0b"},"rot":0},"icon2":{"name":"circle","svg":"<circle cx='12' cy='12' r='8'/>","color":{"name":"blue","hex":"#3b82f6"},"rot":45},"words":["afoot","unfixed"]}"##
+        } else {
+            ""
+        };
+        let payload = format!(
+            r#"{{"v":1,"durable":"held","owner":"absent","health":"journal-mark-held","capture":"recording","settings":{{"draw_cursor":true,"start_paused":false,"segment_interval":300}},"saved_available":true{mark}}}"#
+        );
+        solstone_linux::window_control::decode_control_str(&payload).unwrap()
+    }
+
+    #[test]
+    fn pairing_held_on_disk_names_the_terminal_and_asks_nothing_here() {
+        for with_mark in [true, false] {
+            let model = held_on_disk_model(with_mark);
+            let journal = map_journal_health(&model);
+            assert_eq!(journal.status, Some(CopyKey::PairingHeld));
+            assert_eq!(journal.detail, Some(CopyKey::PairingHeldRun));
+            assert_eq!(map_pairing(&model, None), PairingKeys::default());
+            assert_eq!(mark_to_show(&model).is_some(), with_mark);
+            assert!(empty_mark_is_unavailable(&model));
+        }
+    }
+
+    #[test]
+    fn empty_card_after_a_finished_attempt_on_an_unpaired_computer_is_not_unavailable() {
+        let base = r#"{"v":1,"durable":"unpaired","owner":"absent","health":"not-reported","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true,"attempt":{"id":"a","pairing_id":"p","state":"STATE"}}"#;
+        for (state, unavailable) in [
+            ("rejected", false),
+            ("cancelled", false),
+            ("expired", false),
+            ("failed", false),
+            ("unverifiable", true),
+        ] {
+            let model =
+                solstone_linux::window_control::decode_control_str(&base.replace("STATE", state))
+                    .unwrap();
+            assert_eq!(empty_mark_is_unavailable(&model), unavailable, "{state}");
+            assert!(mark_to_show(&model).is_none());
+        }
     }
 
     #[test]

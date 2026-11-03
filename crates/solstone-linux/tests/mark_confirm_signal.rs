@@ -489,6 +489,27 @@ impl MarkTerminal {
         }
     }
 
+    fn slave_for_stdin(&self) -> Stdio {
+        Stdio::from(self._slave.try_clone().unwrap())
+    }
+
+    async fn wait_for_output(&mut self) -> io::Result<()> {
+        tokio::time::timeout(HARNESS_TIMEOUT, async {
+            loop {
+                let mut ready = self.master.readable().await?;
+                let mut bytes = [0; 4096];
+                match ready.try_io(|fd| fd.get_ref().read(&mut bytes)) {
+                    Ok(Ok(0)) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+                    Ok(Ok(_)) => return Ok(()),
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => continue,
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no terminal output"))?
+    }
+
     async fn wait_for_prompt(&mut self) -> io::Result<()> {
         tokio::time::timeout(HARNESS_TIMEOUT, async {
             let prompt = b"does this match your journal? type yes or no:";
@@ -698,6 +719,47 @@ async fn setup_ceremony_sigint_kills_process_and_saves_nothing() {
     assert!(!cred_path.exists());
     let current_config = fs::read(&config_path).unwrap();
     assert_eq!(current_config, initial_config);
+}
+
+#[tokio::test]
+async fn setup_at_a_terminal_asks_for_the_link_and_goes_on_at_enter() {
+    let bin = env!("CARGO_BIN_EXE_solstone-linux");
+    let temp = tempdir().unwrap();
+    let xdg_config = temp.path().join("config");
+    let xdg_data = temp.path().join("data");
+    let app_config = xdg_config.join("solstone-linux");
+    fs::create_dir_all(&app_config).unwrap();
+    fs::create_dir_all(xdg_data.join("solstone-linux")).unwrap();
+
+    let peer = PairListener::start().await;
+    let mut terminal = MarkTerminal::new();
+
+    // Stdin is the terminal and stays open, so nothing here ever sends end of input.
+    let mut child = Command::new(bin)
+        .arg("setup")
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
+        .stdin(terminal.slave_for_stdin())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    terminal.wait_for_output().await.unwrap();
+    terminal
+        .answer(format!("{}\n", peer.link()).as_bytes())
+        .await;
+    terminal.wait_for_prompt().await.unwrap();
+    terminal.answer(b"yes\n").await;
+
+    let status = wait_for_exit(&mut child).await;
+    assert_eq!(status.code(), Some(0));
+    assert!(app_config.join("credentials.json").exists());
+    let answer = fs::read_to_string(app_config.join("pairing-answer.json")).unwrap();
+    assert!(!answer.contains(r#""confirmed":"""#));
+    peer.shutdown().await;
 }
 
 #[tokio::test]

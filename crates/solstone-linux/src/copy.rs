@@ -61,6 +61,7 @@ pub const PAIRING_FAILED: &str =
     "pairing didn't go through. get a new pairing link from your journal and try again.";
 pub const PAIRING_HELD: &str = "waiting for you to confirm your journal's mark";
 pub const PAIRING_HELD_DETAIL: &str = "nothing waiting goes into your journal until you do.";
+pub const PAIRING_HELD_RUN: &str = "when you're ready, run: solstone-linux confirm";
 pub const PAIRING_REPLACEMENT_HELD_DETAIL: &str =
     "your current pairing stays in use until you confirm this mark.";
 pub const PAIRING_QUESTION: &str = "does this match your journal?";
@@ -71,8 +72,8 @@ pub const PAIRING_REJECT: &str = "that doesn't match";
 pub const PAIRING_CANCEL: &str = "cancel pairing";
 pub const PAIRING_CONFIRMING: &str = "confirming…";
 pub const PAIRING_SUCCESS: &str = "the solstone app can now connect to your journal.";
-pub const PAIRING_REJECTED_TITLE: &str = "not connected";
-pub const PAIRING_REJECTED_DETAIL: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired. get a fresh pairing link from your journal, or email support@solstone.app and we'll help.";
+pub const PAIRING_REJECTED_TITLE: &str = "not paired";
+pub const PAIRING_REJECTED_DETAIL: &str = "nothing this computer has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a new pairing link from your journal and try again, or email support@solstone.app and we'll help.";
 pub const PAIRING_REPLACEMENT_REJECTED_TITLE: &str = "new pairing cancelled";
 pub const PAIRING_REPLACEMENT_REJECTED_DETAIL: &str = "you said this mark doesn't match the one your journal shows. your current pairing stays in use. get a fresh pairing link from your journal, or email support@solstone.app and we'll help.";
 pub const PAIRING_CANCELLED: &str =
@@ -80,7 +81,7 @@ pub const PAIRING_CANCELLED: &str =
 pub const PAIRING_REPLACEMENT_CANCELLED: &str =
     "new pairing cancelled. your current pairing stays in use.";
 pub const PAIRING_UNAVAILABLE_TITLE: &str = "couldn't verify";
-pub const PAIRING_UNAVAILABLE_DETAIL: &str = "couldn't work out your journal's mark, so there's nothing to compare. nothing waiting goes into your journal until you confirm its mark.";
+pub const PAIRING_UNAVAILABLE_DETAIL: &str = "couldn't work out that journal's mark, so there's nothing to compare. get a new pairing link from your journal, then try again.";
 pub const PAIRING_REPLACEMENT_UNAVAILABLE_DETAIL: &str = "couldn't work out this mark, so there's nothing to compare. your current pairing stays in use.";
 pub const PAIRING_MARK_UNAVAILABLE: &str = "mark unavailable";
 pub const PAIRING_NEW_LINK: &str = "get a fresh link";
@@ -291,6 +292,7 @@ pub enum CopyKey {
     PairingFailed,
     PairingHeld,
     PairingHeldDetail,
+    PairingHeldRun,
     PairingReplacementHeldDetail,
     PairingQuestion,
     PairingQuestionDetail,
@@ -457,6 +459,7 @@ impl CopyKey {
             Self::PairingFailed => PAIRING_FAILED,
             Self::PairingHeld => PAIRING_HELD,
             Self::PairingHeldDetail => PAIRING_HELD_DETAIL,
+            Self::PairingHeldRun => PAIRING_HELD_RUN,
             Self::PairingReplacementHeldDetail => PAIRING_REPLACEMENT_HELD_DETAIL,
             Self::PairingQuestion => PAIRING_QUESTION,
             Self::PairingQuestionDetail => PAIRING_QUESTION_DETAIL,

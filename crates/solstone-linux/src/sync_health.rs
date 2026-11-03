@@ -502,6 +502,15 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
     health
 }
 
+const UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY: &str = "unknown journal seen through the relay";
+const UNKNOWN_JOURNAL_RESET_LINE: &str =
+    "if you recently reset your journal, pair this device again.";
+const UNKNOWN_JOURNAL_RELAY_LINE: &str = "this is less certain than a direct connection.";
+
+fn unknown_journal_seen_at(address: &str) -> String {
+    format!("unknown journal seen at {address}")
+}
+
 fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) {
     if link.unknown_journals.is_empty() {
         return;
@@ -524,22 +533,34 @@ fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) 
         };
 
         let your_journal = if let Some(paired) = paired_spoken {
-            paired.to_owned()
+            format!("your journal:   {paired}")
         } else {
-            "mark unavailable right now".to_owned()
+            crate::journal_mark::MARK_UNAVAILABLE_LINE.to_owned()
+        };
+        // Nothing to act on or weigh when nothing was claimed.
+        let footer = |line: &str| {
+            if sighting_spoken.is_some() {
+                format!("\n  {line}")
+            } else {
+                String::new()
+            }
         };
 
-        if let Some(address) = &sighting.address {
-            tooltip_lines.push(format!("unknown journal seen at {address}"));
-            detail_blocks.push(format!(
-                "Unknown journal seen at {address}:\n  what answered:  {what_answered}\n  your journal:   {your_journal}\n  if you recently reset your journal, pair it again."
-            ));
+        let (header, footer) = if let Some(address) = &sighting.address {
+            (
+                unknown_journal_seen_at(address),
+                footer(UNKNOWN_JOURNAL_RESET_LINE),
+            )
         } else {
-            tooltip_lines.push("unknown journal seen through the relay".to_owned());
-            detail_blocks.push(format!(
-                "Unknown journal seen through the relay:\n  what answered:  {what_answered}\n  your journal:   {your_journal}\n  this is weaker evidence than a direct connection."
-            ));
-        }
+            (
+                UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY.to_owned(),
+                footer(UNKNOWN_JOURNAL_RELAY_LINE),
+            )
+        };
+        detail_blocks.push(format!(
+            "{header}:\n  what answered:  {what_answered}\n  {your_journal}{footer}"
+        ));
+        tooltip_lines.push(header);
     }
 
     for line in tooltip_lines {
@@ -1613,16 +1634,18 @@ mod tests {
                 .contains("unknown journal seen at 192.168.1.50:5015")
         );
 
-        let expected_block = "\
-Unknown journal seen at 192.168.1.50:5015:
+        let expected_block = format!(
+            "{}:
   what answered:  blue, purple · liquefy·smock  (claimed, not verified)
   your journal:   pink, cyan · distrust·chokehold
-  if you recently reset your journal, pair it again.";
+  {UNKNOWN_JOURNAL_RESET_LINE}",
+            unknown_journal_seen_at("192.168.1.50:5015")
+        );
 
-        assert!(health.cli.ends_with(expected_block));
-        assert!(health.doctor_detail.ends_with(expected_block));
-        assert!(health.accessible_recording.ends_with(expected_block));
-        assert!(health.accessible_idle.ends_with(expected_block));
+        assert!(health.cli.ends_with(&expected_block));
+        assert!(health.doctor_detail.ends_with(&expected_block));
+        assert!(health.accessible_recording.ends_with(&expected_block));
+        assert!(health.accessible_idle.ends_with(&expected_block));
     }
 
     #[test]
@@ -1656,14 +1679,15 @@ Unknown journal seen at 192.168.1.50:5015:
                 .contains("unknown journal seen through the relay")
         );
 
-        let expected_block = "\
-Unknown journal seen through the relay:
+        let expected_block = format!(
+            "{UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY}:
   what answered:  blue, purple · liquefy·smock  (claimed, not verified)
   your journal:   pink, cyan · distrust·chokehold
-  this is weaker evidence than a direct connection.";
+  {UNKNOWN_JOURNAL_RELAY_LINE}"
+        );
 
-        assert!(health.cli.ends_with(expected_block));
-        assert!(health.doctor_detail.ends_with(expected_block));
+        assert!(health.cli.ends_with(&expected_block));
+        assert!(health.doctor_detail.ends_with(&expected_block));
     }
 
     #[test]
@@ -1695,13 +1719,15 @@ Unknown journal seen through the relay:
                 .contains("unknown journal seen at 127.0.0.1:5015")
         );
 
-        let expected_block = "\
-Unknown journal seen at 127.0.0.1:5015:
+        // Nothing was claimed, so there's no footer to act on.
+        let expected_block = format!(
+            "{}:
   what answered:  no identity presented
-  your journal:   pink, cyan · distrust·chokehold
-  if you recently reset your journal, pair it again.";
+  your journal:   pink, cyan · distrust·chokehold",
+            unknown_journal_seen_at("127.0.0.1:5015")
+        );
 
-        assert!(health.cli.ends_with(expected_block));
+        assert!(health.cli.ends_with(&expected_block));
         assert!(!health.cli.contains("claimed, not verified"));
     }
 

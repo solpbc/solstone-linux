@@ -35,8 +35,17 @@ pub(crate) const HELD_FIRST_SENTENCE: &str = "waiting for you to confirm your jo
 pub(crate) const RUN_LINE: &str = "when you're ready, run: solstone-linux confirm";
 pub(crate) const SUCCESS_LINE: &str = "the solstone app can now connect to your journal.";
 pub(crate) const NOT_PAIRED: &str = "not paired.";
-pub(crate) const MISMATCH_BODY: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired, and nothing it has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a fresh pair link from your journal and run setup again, or email support@solstone.app and we'll help.";
-pub(crate) const CANCEL_LINE: &str = "pairing cancelled. nothing this computer has kept went to that journal through this link. get a fresh pair link from your journal and run setup again when you're ready.";
+pub(crate) const MISMATCH_BODY: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired, and nothing it has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and run setup again, or email support@solstone.app and we'll help.";
+pub(crate) const CANCEL_LINE: &str = "pairing cancelled. nothing this computer has kept went to that journal through this link. get a fresh pairing link from your journal and run setup again when you're ready.";
+pub(crate) const PAIRING_KEPT_LINE: &str = "not changed. your current pairing stays in use. nothing this computer has kept went to that journal through this link.";
+pub(crate) const PAIRING_KEPT_STOPPED_LINE: &str =
+    "pairing cancelled. your current pairing stays in use.";
+pub(crate) const SETUP_BAD_LINK_LINE: &str = "Setup failed: the pairing link was not valid.";
+pub(crate) const LINK_PROMPT: &str =
+    "paste the pairing link from your journal, then press enter:\n";
+pub(crate) const JOURNAL_ROW_NOT_PAIRED: &str = "journal: not paired";
+pub(crate) const JOURNAL_ROW_WAITING: &str = "journal: your journal";
+pub(crate) const MARK_UNAVAILABLE_LINE: &str = "your journal's mark: unavailable right now";
 pub(crate) const CONFIRM_DONE: &str = "your journal's mark is already confirmed. nothing to do.";
 pub(crate) const CONFIRM_UNPAIRED: &str = "not paired. to pair, run: solstone-linux setup";
 pub(crate) const COULDNT_VERIFY: &str = "couldn't verify.";
@@ -44,8 +53,8 @@ pub(crate) const SETUP_NO_TERMINAL: &str = "setup can't ask you about your journ
 pub(crate) const CONFIRM_NO_TERMINAL: &str = "confirm can't ask you about your journal's mark here. run it in a terminal, or give the mark's two words with --mark \"word word\".";
 pub(crate) const MARK_USAGE: &str =
     "give the two words of your journal's mark, like --mark \"bramble quokka\".";
-pub(crate) const MARK_MISMATCH_LINE: &str = "the mark words you gave don't match the journal's mark, so this computer isn't paired, and nothing it has kept went to that journal through this link. check the words, get a fresh pair link from your journal and run setup again.";
-pub(crate) const SETUP_UNVERIFIABLE_LINE: &str = "this computer couldn't work out the journal's mark, so the words you gave can't be matched. this computer isn't paired, and nothing it has kept went to that journal through this link. get a fresh pair link from your journal and run setup in a terminal to decide for yourself.";
+pub(crate) const MARK_MISMATCH_LINE: &str = "the mark words you gave don't match the journal's mark, so this computer isn't paired, and nothing it has kept went to that journal through this link. check the words, get a fresh pairing link from your journal and run setup again.";
+pub(crate) const SETUP_UNVERIFIABLE_LINE: &str = "this computer couldn't work out the journal's mark, so the words you gave can't be matched. this computer isn't paired, and nothing it has kept went to that journal through this link. get a fresh pairing link from your journal and run setup in a terminal to decide for yourself.";
 pub(crate) const CONFIRM_UNVERIFIABLE_LINE: &str = "this computer couldn't work out the journal's mark, so the words you gave can't be matched. waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do. run solstone-linux confirm in a terminal to decide for yourself.";
 pub(crate) const MARK_HELP: &str = "the two words of the mark your journal's network app shows. needed when there's no terminal to ask you on.";
 
@@ -343,6 +352,58 @@ pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
     }
 }
 
+/// The `journal:` row of `status`: the mark's two words once the owner has
+/// confirmed it, never before.
+pub(crate) fn journal_status_row(config_root: &Path) -> String {
+    if journal_mark_held_on_disk(config_root) {
+        return JOURNAL_ROW_WAITING.to_owned();
+    }
+    match load_credential(config_root) {
+        Ok(None) => JOURNAL_ROW_NOT_PAIRED.to_owned(),
+        Ok(Some(credential)) => spl_core::mark::mark_from_jid(&credential.instance_id)
+            .map(|mark| {
+                let spec = mark.to_render_spec();
+                format!("journal: {}·{}", spec.words[0], spec.words[1])
+            })
+            .unwrap_or_else(|_| MARK_UNAVAILABLE_LINE.to_owned()),
+        Err(_) => MARK_UNAVAILABLE_LINE.to_owned(),
+    }
+}
+
+/// Stdin at a terminal never reaches end of input on its own, so the pairing
+/// link ends at the first newline, and the owner is asked for it just before
+/// the first read. Piped input keeps reading to end of input and skips this.
+pub(crate) struct TerminalLinkInput<R, W> {
+    input: R,
+    prompt_to: Option<W>,
+    finished: bool,
+}
+
+impl<R: Read, W: Write> TerminalLinkInput<R, W> {
+    pub(crate) fn new(input: R, prompt_to: Option<W>) -> Self {
+        Self {
+            input,
+            prompt_to,
+            finished: false,
+        }
+    }
+}
+
+impl<R: Read, W: Write> Read for TerminalLinkInput<R, W> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.finished || buffer.is_empty() {
+            return Ok(0);
+        }
+        if let Some(mut terminal) = self.prompt_to.take() {
+            let _ = terminal.write_all(LINK_PROMPT.as_bytes());
+            let _ = terminal.flush();
+        }
+        let read = self.input.read(&mut buffer[..1])?;
+        self.finished = read == 0 || buffer[0] == b'\n';
+        Ok(read)
+    }
+}
+
 pub(crate) fn grandfather_answer_file(config_root: &Path) -> Result<(), PrivateStateError> {
     grandfather_answer_file_with_fault(config_root, None, &NoWriteFault)
 }
@@ -630,6 +691,45 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn terminal_link_input_stops_at_the_first_newline_and_prompts_once() {
+        let mut typed = std::io::Cursor::new(b"link-one\nstill-typing".to_vec());
+        let mut prompted = Vec::new();
+        let mut line = Vec::new();
+        TerminalLinkInput::new(&mut typed, Some(&mut prompted))
+            .read_to_end(&mut line)
+            .unwrap();
+        assert_eq!(line, b"link-one\n");
+        assert_eq!(typed.position(), 9, "reads nothing past the newline");
+        assert_eq!(prompted, LINK_PROMPT.as_bytes());
+    }
+
+    #[test]
+    fn journal_status_row_follows_the_answer() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root).unwrap();
+        assert_eq!(journal_status_row(root), JOURNAL_ROW_NOT_PAIRED);
+
+        let jid = "01234567-89ab-cdef-0123-456789abcdef";
+        let mut cred = sample_credential(jid, "cert-pem");
+        crate::private_link::persist_credential(root, &cred).unwrap();
+        let id = compute_pairing_id(&cred.client_cert_pem);
+
+        write_pairing_answer(root, "").unwrap();
+        assert_eq!(journal_status_row(root), JOURNAL_ROW_WAITING);
+
+        write_pairing_answer(root, &id).unwrap();
+        let spec = spl_core::mark::mark_from_jid(jid).unwrap().to_render_spec();
+        let row = journal_status_row(root);
+        assert!(row.contains(&spec.words[0]) && row.contains(&spec.words[1]));
+        assert_ne!(row, JOURNAL_ROW_WAITING);
+
+        cred.instance_id = "invalid-jid".into();
+        crate::private_link::persist_credential(root, &cred).unwrap();
+        assert_eq!(journal_status_row(root), MARK_UNAVAILABLE_LINE);
+    }
 
     #[test]
     fn parse_mark_words_variations() {

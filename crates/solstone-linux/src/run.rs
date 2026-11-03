@@ -2511,7 +2511,7 @@ mod tests {
             assert_eq!(failed_calls.load(Ordering::SeqCst), 0);
             assert_eq!(
                 String::from_utf8(failure_errors.clone()).unwrap(),
-                "Setup failed: the pair link was not valid.\n"
+                format!("{}\n", crate::journal_mark::SETUP_BAD_LINK_LINE)
             );
             failure_output.clear();
             failure_errors.clear();

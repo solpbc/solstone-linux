@@ -695,6 +695,10 @@ fn create_journal_page(
     pairing_notice.set_halign(gtk::Align::Start);
     pairing_notice.set_wrap(true);
     pairing_notice.set_visible(false);
+    let pairing_detail = gtk::Label::new(None);
+    pairing_detail.set_halign(gtk::Align::Start);
+    pairing_detail.set_wrap(true);
+    pairing_detail.set_visible(false);
 
     let link_label = gtk::Label::new(Some(CopyKey::JournalLinkLabel.as_str()));
     link_label.set_halign(gtk::Align::Start);
@@ -720,6 +724,7 @@ fn create_journal_page(
     pairing_box.append(&link_entry);
     pairing_box.append(&pair_button);
     pairing_box.append(&pairing_notice);
+    pairing_box.append(&pairing_detail);
     pairing_box.append(&held_box);
 
     container.append(&status_label);
@@ -930,26 +935,8 @@ fn create_journal_page(
             open_button.set_visible(journal_keys.action_open.is_some());
 
             // Mark chip rendering
-            let unverifiable = c.document.fault.as_deref() == Some("unverifiable")
-                || c.document
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|attempt| attempt.state == "unverifiable");
-            let mark = if unverifiable {
-                None
-            } else if c
-                .document
-                .attempt
-                .as_ref()
-                .is_some_and(|attempt| attempt.state == "pending")
-            {
-                c.document.pending_mark.clone()
-            } else {
-                c.document.confirmed_mark.clone()
-            };
-            let unavailable = c.document.durable != "unpaired"
-                || c.document.attempt.is_some()
-                || c.document.view == solstone_linux::window_control::SessionView::Unknown;
+            let mark = crate::copy_map::mark_to_show(&c.document);
+            let unavailable = crate::copy_map::empty_mark_is_unavailable(&c.document);
             let mark_state = Some((mark.clone(), unavailable));
             if *rendered_mark.borrow() != mark_state {
                 while let Some(child) = mark_container.first_child() {
@@ -970,10 +957,13 @@ fn create_journal_page(
             pairing_notice.set_visible(notice.is_some());
             question.set_visible(pairing_keys.secondary_title.is_some());
             question_detail.set_visible(pairing_keys.secondary_detail.is_some());
-            if let Some(key) = pairing_keys.detail {
-                detail_label.set_text(key.as_str());
-                detail_label.set_visible(true);
-            }
+            pairing_detail.set_text(pairing_keys.detail.map_or("", |key| key.as_str()));
+            pairing_detail.set_visible(pairing_keys.detail.is_some());
+            // Nothing stands between the mark and the question it's asking about.
+            let asking = crate::copy_map::attempt_pending(&c.document);
+            link_label.set_visible(!asking);
+            link_entry.set_visible(!asking);
+            pair_button.set_visible(!asking);
 
             held_box.set_visible(
                 pairing_keys.confirm_action.is_some() || pairing_keys.reject_action.is_some(),

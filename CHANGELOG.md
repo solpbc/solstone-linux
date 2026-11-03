@@ -6,6 +6,11 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- after you stop at the mark question, the window and tray now say it's waiting for your answer, instead of asking you to pair again. answering no while you're already paired no longer says you aren't.
+- setup now asks for the pairing link at a terminal, and goes on when you press enter.
+
 ## [2.0.31] - 2026-10-28
 
 ### Changed

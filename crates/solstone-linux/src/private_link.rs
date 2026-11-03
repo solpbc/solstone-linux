@@ -701,7 +701,12 @@ pub(crate) enum SetupOutcome {
     MarkMismatch,
     SetupUnverifiable,
     WalkedAwayHeld,
-    WalkedAwayConfirmedAlready,
+    /// The new link was refused and the confirmed pairing it would have replaced stands.
+    ReplacementRefused,
+    /// As `ReplacementRefused`, when the new link's mark couldn't be worked out.
+    ReplacementUnverifiable,
+    /// The owner stopped at the question and the confirmed pairing stands.
+    ReplacementStopped,
 }
 
 #[cfg(test)]
@@ -830,6 +835,14 @@ pub(crate) async fn pair_and_admit(
     Ok(credential)
 }
 
+async fn existing_pairing_confirmed(config_root: &Path) -> Result<bool, PrivateStateError> {
+    let _answer_lock = crate::journal_mark::AnswerLock::acquire(config_root).await?;
+    Ok(load_credential(config_root)?.is_some_and(|existing| {
+        let existing_id = compute_pairing_id(&existing.client_cert_pem);
+        crate::journal_mark::is_pairing_confirmed(config_root, &existing_id)
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
     pairer: &dyn Pairer,
@@ -899,12 +912,22 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                 return Ok(SetupOutcome::Confirmed);
             }
             Ok(false) => {
+                let replacing = existing_pairing_confirmed(state_lock.root()).await?;
                 crate::journal_mark::retire_client_registration(&credential).await;
-                return Ok(SetupOutcome::MarkMismatch);
+                return Ok(if replacing {
+                    SetupOutcome::ReplacementRefused
+                } else {
+                    SetupOutcome::MarkMismatch
+                });
             }
             Err(()) => {
+                let replacing = existing_pairing_confirmed(state_lock.root()).await?;
                 crate::journal_mark::retire_client_registration(&credential).await;
-                return Ok(SetupOutcome::SetupUnverifiable);
+                return Ok(if replacing {
+                    SetupOutcome::ReplacementUnverifiable
+                } else {
+                    SetupOutcome::SetupUnverifiable
+                });
             }
         }
     }
@@ -915,12 +938,8 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
         crate::journal_mark::QuestionOutcome::WalkedAway
     };
 
+    let is_already_confirmed = existing_pairing_confirmed(state_lock.root()).await?;
     let _answer_lock = crate::journal_mark::AnswerLock::acquire(state_lock.root()).await?;
-    let existing_cred = load_credential(state_lock.root())?;
-    let is_already_confirmed = existing_cred.as_ref().is_some_and(|ex| {
-        let ex_id = compute_pairing_id(&ex.client_cert_pem);
-        crate::journal_mark::is_pairing_confirmed(state_lock.root(), &ex_id)
-    });
 
     match question_outcome {
         crate::journal_mark::QuestionOutcome::Confirmed => {
@@ -951,18 +970,26 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
         crate::journal_mark::QuestionOutcome::No => {
             drop(_answer_lock);
             crate::journal_mark::retire_client_registration(&credential).await;
-            Ok(SetupOutcome::TerminalNo)
+            Ok(if is_already_confirmed {
+                SetupOutcome::ReplacementRefused
+            } else {
+                SetupOutcome::TerminalNo
+            })
         }
         crate::journal_mark::QuestionOutcome::Cancel => {
             drop(_answer_lock);
             crate::journal_mark::retire_client_registration(&credential).await;
-            Ok(SetupOutcome::TerminalCancel)
+            Ok(if is_already_confirmed {
+                SetupOutcome::ReplacementStopped
+            } else {
+                SetupOutcome::TerminalCancel
+            })
         }
         crate::journal_mark::QuestionOutcome::WalkedAway => {
             if is_already_confirmed {
                 drop(_answer_lock);
                 crate::journal_mark::retire_client_registration(&credential).await;
-                Ok(SetupOutcome::WalkedAwayConfirmedAlready)
+                Ok(SetupOutcome::ReplacementStopped)
             } else {
                 sanitize_link_authority(&private_config_paths(state_lock.root()))
                     .map_err(config_persist_error)?;

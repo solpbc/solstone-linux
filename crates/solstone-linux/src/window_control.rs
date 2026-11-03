@@ -787,6 +787,28 @@ fn apply_activity_status(
     }
 }
 
+/// A saved credential the owner hasn't confirmed is held, whatever the answer
+/// file says, which is the reading `status` and `doctor` take too.
+fn durable_state_on_disk(config_root: &std::path::Path) -> String {
+    if pairing_commit_pending(config_root) {
+        return "held".into();
+    }
+    let answer = read_pairing_answer(config_root).ok().flatten();
+    match crate::private_link::load_credential(config_root) {
+        Ok(Some(cred)) => {
+            let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
+            if is_pairing_confirmed(config_root, &pairing_id) {
+                "confirmed".into()
+            } else {
+                "held".into()
+            }
+        }
+        Ok(None) => "unpaired".into(),
+        Err(_) if answer.is_some_and(|ans| ans.confirmed.is_empty()) => "unpaired".into(),
+        Err(_) => "held".into(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_document(
     phase: &Phase,
@@ -814,11 +836,24 @@ pub(crate) fn assemble_document(
         None
     };
 
-    let pending_mark = phase.pending_instance_id.as_deref().and_then(|jid| {
-        spl_core::mark::mark_from_jid(jid)
-            .ok()
-            .map(|m| m.to_render_spec().into())
-    });
+    // With no attempt in the window, a held pairing's mark is the saved credential's.
+    let held_instance_id = (phase.pending_instance_id.is_none() && phase.durable == "held")
+        .then(|| {
+            load_credential(&resolve_config_dir(config_paths))
+                .ok()
+                .flatten()
+        })
+        .flatten()
+        .map(|cred| cred.instance_id);
+    let pending_mark = phase
+        .pending_instance_id
+        .as_deref()
+        .or(held_instance_id.as_deref())
+        .and_then(|jid| {
+            spl_core::mark::mark_from_jid(jid)
+                .ok()
+                .map(|m| m.to_render_spec().into())
+        });
 
     let pause_bounded = if snapshot.paused {
         Some(snapshot.pause_until.is_some())
@@ -1196,34 +1231,8 @@ impl WindowControlSupervisor {
         )
     }
 
-    fn check_durable_state(&self, candidate_pairing_id: Option<&str>) -> String {
-        let config_root = resolve_config_dir(&self.config_paths);
-        if pairing_commit_pending(&config_root) {
-            return "held".into();
-        }
-        let cred_opt = crate::private_link::load_credential(&config_root)
-            .ok()
-            .flatten();
-        if let Some(ref cred) = cred_opt {
-            let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
-            if is_pairing_confirmed(&config_root, &pairing_id) {
-                return "confirmed".to_string();
-            }
-        }
-        let answer = read_pairing_answer(&config_root).ok().flatten();
-        if let Some(ref ans) = answer {
-            if !ans.confirmed.is_empty() && candidate_pairing_id != Some(ans.confirmed.as_str()) {
-                "held".to_string()
-            } else if ans.confirmed.is_empty() {
-                "unpaired".to_string()
-            } else {
-                "held".to_string()
-            }
-        } else if cred_opt.is_some() || config_root.join(CREDENTIALS_FILENAME).exists() {
-            "held".to_string()
-        } else {
-            "unpaired".to_string()
-        }
+    fn check_durable_state(&self) -> String {
+        durable_state_on_disk(&resolve_config_dir(&self.config_paths))
     }
 
     pub(crate) async fn run(mut self) -> Result<(), PrivateStateError> {
@@ -1295,7 +1304,7 @@ impl WindowControlSupervisor {
                 phase.owner_status = "failed".into();
             }
         } else {
-            let durable_state = self.check_durable_state(None);
+            let durable_state = self.check_durable_state();
             if durable_state == "held" {
                 self.upload.link_facts().set_journal_mark_held(true);
             } else {
@@ -1410,6 +1419,21 @@ impl WindowControlSupervisor {
                         phase.failed_owner_pairing_id = Some(pairing_id);
                     }
                 }
+            }
+        }
+        // `confirm` answering no drops a held pairing while the app runs.
+        if self.owner.is_none() && self.check_durable_state() == "unpaired" {
+            let was_held = {
+                let mut phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
+                let was_held = phase.durable == "held";
+                if was_held {
+                    phase.durable = "unpaired".into();
+                }
+                was_held
+            };
+            if was_held {
+                self.upload.link_facts().set_journal_mark_held(false);
+                self.upload.publish_link_fact(LinkFact::PairingRequired);
             }
         }
     }
@@ -1703,7 +1727,7 @@ impl WindowControlSupervisor {
             let durable_state = if uncertain {
                 "unavailable".into()
             } else {
-                self.check_durable_state(Some(&cand.pairing_id))
+                self.check_durable_state()
             };
             self.upload
                 .link_facts()
@@ -2712,31 +2736,8 @@ mod tests {
             }
         }
 
-        fn check_durable_state_on_root(&self, candidate_pairing_id: Option<&str>) -> String {
-            let cred_opt = crate::private_link::load_credential(&self.config_root)
-                .ok()
-                .flatten();
-            if let Some(ref cred) = cred_opt {
-                let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
-                if is_pairing_confirmed(&self.config_root, &pairing_id) {
-                    return "confirmed".to_string();
-                }
-            }
-            let answer = read_pairing_answer(&self.config_root).ok().flatten();
-            if let Some(ref ans) = answer {
-                if !ans.confirmed.is_empty() && candidate_pairing_id != Some(ans.confirmed.as_str())
-                {
-                    "held".to_string()
-                } else if ans.confirmed.is_empty() {
-                    "unpaired".to_string()
-                } else {
-                    "held".to_string()
-                }
-            } else if cred_opt.is_some() || self.config_root.join(CREDENTIALS_FILENAME).exists() {
-                "held".to_string()
-            } else {
-                "unpaired".to_string()
-            }
+        fn check_durable_state_on_root(&self) -> String {
+            durable_state_on_disk(&self.config_root)
         }
 
         async fn restart(&mut self) {
@@ -3219,9 +3220,47 @@ mod tests {
         assert_ne!(m.health, "connected");
         assert_eq!(m.durable, "unpaired");
 
-        let check_durable = harness.check_durable_state_on_root(None);
+        let check_durable = harness.check_durable_state_on_root();
         assert_eq!(check_durable, "unpaired");
 
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn first_pairing_left_at_the_terminal_reads_held_with_its_mark() {
+        let cred = sample_valid_credential("held-cert");
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(
+            Some(cred.clone()),
+            false,
+            Arc::new(FakePairer::new(sample_valid_credential("next-cert"))),
+            starter.clone(),
+            Arc::new(NoWriteFault),
+        )
+        .await;
+        harness.handler.open_journal().await;
+        let model = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert_eq!(model.durable, "held");
+        assert_eq!(model.view, SessionView::Held);
+        assert_eq!(model.attempt, None);
+        assert_eq!(
+            model.pending_mark.as_ref().map(|mark| mark.words.clone()),
+            spl_core::mark::mark_from_jid(&cred.instance_id)
+                .ok()
+                .map(|mark| mark.to_render_spec().words)
+        );
+        assert_eq!(starter.starts.load(Ordering::SeqCst), 0);
+
+        // `confirm` answering no drops the credential while the app runs.
+        fs::remove_file(harness.config_root.join(CREDENTIALS_FILENAME)).unwrap();
+        harness
+            .clock
+            .advance_and_yield(JOURNAL_MARK_RECHECK_INTERVAL)
+            .await;
+        harness.handler.open_journal().await;
+        let model = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert_eq!(model.durable, "unpaired");
+        assert_eq!(model.pending_mark, None);
         harness.shutdown().await;
     }
 

@@ -22,7 +22,7 @@ use spl_transport::credential::Credential;
 use std::{
     collections::HashMap,
     env, fs, io,
-    io::{BufRead, Read, Write},
+    io::{BufRead, IsTerminal, Read, Write},
     os::unix::fs::PermissionsExt,
     process::Command,
     thread,
@@ -404,7 +404,7 @@ pub fn run() -> i32 {
         Commands::Setup { mark, stream_name } => cmd_setup(
             SetupOptions { mark, stream_name },
             ConfigPaths::default(),
-            &mut io::stdin().lock(),
+            &mut setup_input(),
             &mut io::stdout(),
             &mut io::stderr(),
         ),
@@ -571,6 +571,18 @@ fn open_terminal() -> Option<fs::File> {
         )
         .map(fs::File::from)
         .ok()
+    }
+}
+
+fn setup_input() -> Box<dyn Read> {
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        Box::new(crate::journal_mark::TerminalLinkInput::new(
+            stdin.lock(),
+            open_terminal(),
+        ))
+    } else {
+        Box::new(stdin.lock())
     }
 }
 
@@ -881,12 +893,21 @@ pub(crate) fn render_setup_result(
             let _ = write_line(output, crate::journal_mark::RUN_LINE);
             5
         }
-        Ok(crate::private_link::SetupOutcome::WalkedAwayConfirmedAlready) => {
-            let _ = write_line(output, crate::journal_mark::CANCEL_LINE);
+        Ok(crate::private_link::SetupOutcome::ReplacementRefused) => {
+            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
+            1
+        }
+        Ok(crate::private_link::SetupOutcome::ReplacementUnverifiable) => {
+            let _ = write_line(output, crate::journal_mark::COULDNT_VERIFY);
+            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
+            1
+        }
+        Ok(crate::private_link::SetupOutcome::ReplacementStopped) => {
+            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_STOPPED_LINE);
             1
         }
         Err(PrivateStateError::PairInputInvalid) => {
-            let _ = write_line(errors, "Setup failed: the pair link was not valid.");
+            let _ = write_line(errors, crate::journal_mark::SETUP_BAD_LINK_LINE);
             1
         }
         Err(PrivateStateError::PairingFailed) => {
@@ -1187,18 +1208,18 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
             _ => "unknown".to_owned(),
         };
         (
-            "Journal link: managed privately",
+            crate::journal_mark::journal_status_row(&config.config_dir),
             Some(format!("Journal version: {version_str}")),
         )
     } else {
-        ("Journal link: not paired", None)
+        (crate::journal_mark::JOURNAL_ROW_NOT_PAIRED.to_owned(), None)
     };
     let mut render = || -> io::Result<()> {
         write_line(
             output,
             format!("Config: {}", config.config_path().display()),
         )?;
-        write_line(output, link_line)?;
+        write_line(output, &link_line)?;
         if let Some(line) = &version_line {
             write_line(output, line)?;
         }
@@ -1672,7 +1693,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "Setup failed: the pair link was not valid.\n"
+            format!("{}\n", crate::journal_mark::SETUP_BAD_LINK_LINE)
         );
         assert!(input.position() > 0);
         assert!(input.position() <= 4097);
@@ -2306,8 +2327,9 @@ mod tests {
         } else {
             ""
         };
+        let journal_row = crate::journal_mark::journal_status_row(&config.config_dir);
         let expected = format!(
-            "Config: {}\nJournal link: managed privately\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nSync: offline; held on this device; will retry\n{browser}\nService: active\n",
+            "Config: {}\n{journal_row}\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nSync: offline; held on this device; will retry\n{browser}\nService: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );
@@ -2345,7 +2367,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains("Journal link: managed privately")
+                .contains(crate::journal_mark::MARK_UNAVAILABLE_LINE)
         );
     }
 
@@ -2361,8 +2383,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("Journal link: not paired"));
-        assert!(!out.contains("managed privately"));
+        assert!(out.contains(crate::journal_mark::JOURNAL_ROW_NOT_PAIRED));
     }
 
     #[test]
@@ -2383,7 +2404,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("Journal link: managed privately"));
+        assert!(out.contains(crate::journal_mark::MARK_UNAVAILABLE_LINE));
         for sentinel in [
             "STATUS-URL-SENTINEL",
             "STATUS-KEY-SENTINEL",
@@ -2413,7 +2434,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains("Journal link: not paired"));
+        assert!(out_str.contains(crate::journal_mark::JOURNAL_ROW_NOT_PAIRED));
         assert!(!out_str.contains("Journal version:"));
 
         // Set up credential
@@ -2438,7 +2459,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains("Journal link: managed privately"));
+        assert!(out_str.contains(&crate::journal_mark::journal_status_row(&config.config_dir)));
         assert!(out_str.contains("Journal version: unknown"));
 
         // Save version in paired_journal.json
@@ -2921,6 +2942,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refusing_a_new_link_keeps_a_confirmed_pairing_and_says_so() {
+        struct DirectPairer(spl_transport::credential::Credential);
+        impl crate::private_link::Pairer for DirectPairer {
+            fn pair<'a>(
+                &'a self,
+                _link: &'a str,
+                _device_label: &'a str,
+                _additional_fields: &'a serde_json::Map<String, serde_json::Value>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                spl_transport::credential::Credential,
+                                crate::private_link::PrivateStateError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                let cred = self.0.clone();
+                Box::pin(async move { Ok(cred) })
+            }
+        }
+
+        use crate::journal_mark::{COULDNT_VERIFY, PAIRING_KEPT_LINE, PAIRING_KEPT_STOPPED_LINE};
+        // (typed answer, given mark words, new link's mark readable, expected lines)
+        type RefusalCase<'a> = (&'a [u8], Option<&'a str>, bool, &'a [&'a str]);
+        let cases: [RefusalCase; 4] = [
+            (b"no\n", None, true, &[PAIRING_KEPT_LINE]),
+            (b"cancel\n", None, false, &[PAIRING_KEPT_STOPPED_LINE]),
+            (b"", Some("wrong words"), true, &[PAIRING_KEPT_LINE]),
+            (
+                b"",
+                Some("wrong words"),
+                false,
+                &[COULDNT_VERIFY, PAIRING_KEPT_LINE],
+            ),
+        ];
+        for (answer, mark, readable, expected) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let config = status_config(&temp);
+            let cred_x = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-x-pem");
+            crate::private_link::persist_credential(&config.config_dir, &cred_x).unwrap();
+            let id_x = crate::private_link::compute_pairing_id(&cred_x.client_cert_pem);
+            crate::journal_mark::write_pairing_answer(&config.config_dir, &id_x).unwrap();
+            let cred_bytes_before = fs::read(config.config_dir.join("credentials.json")).unwrap();
+
+            let peer_y = crate::private_link_test_peer::PrivateLinkPeer::start().await;
+            let mut cred_y = peer_y.credential();
+            if !readable {
+                cred_y.instance_id = "invalid-jid".into();
+            }
+            let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
+            tty_peer.write_all(answer).unwrap();
+
+            let res = crate::private_link::setup_with_pairer_and_stream_with_fault(
+                &DirectPairer(cred_y),
+                &config.config_dir,
+                &config.state_dir(),
+                "desktop",
+                Some("desktop"),
+                mark,
+                Some(tty_child.as_fd()),
+                std::io::Cursor::new(crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.as_bytes()),
+                None,
+                None,
+            )
+            .await;
+
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            assert_eq!(render_setup_result(res, &mut out, &mut err), 1);
+            let expected = expected.join("\n") + "\n";
+            assert_eq!(String::from_utf8(out).unwrap(), expected);
+            assert_eq!(
+                fs::read(config.config_dir.join("credentials.json")).unwrap(),
+                cred_bytes_before
+            );
+            assert!(crate::journal_mark::is_pairing_confirmed(
+                &config.config_dir,
+                &id_x
+            ));
+            assert_eq!(peer_y.requests()[0].method, "DELETE");
+            peer_y.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
     async fn setup_walk_away_keeps_a_confirmed_pairing() {
         let temp = tempfile::tempdir().unwrap();
         let config = status_config(&temp);
@@ -2995,7 +3103,7 @@ mod tests {
         ));
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains(crate::journal_mark::CANCEL_LINE));
+        assert!(out_str.contains(crate::journal_mark::PAIRING_KEPT_STOPPED_LINE));
 
         let hex = spl_core::ca::sha256_hex(peer_y.client_der());
         let requests = peer_y.requests();

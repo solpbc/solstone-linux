@@ -25,9 +25,35 @@ pub fn create_font_database() -> fontdb::Database {
     db
 }
 
+const CARD_WIDTH: f32 = 240.0;
+const CARD_HEIGHT: f32 = 130.0;
+const CARD_SIDE_PADDING: f32 = 22.0;
+
+/// The width of the two words as the card draws them, in the bundled font.
+fn measured_words_width(word1: &str, word2: &str) -> Option<f32> {
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><text font-family="Comfortaa" font-weight="700" font-size="18" xml:space="preserve">{word1} · {word2}</text></svg>"##
+    );
+    let options = Options {
+        fontdb: Arc::new(create_font_database()),
+        ..Options::default()
+    };
+    let tree = Tree::from_str(&svg, &options).ok()?;
+    Some(tree.root().abs_bounding_box().width())
+}
+
+/// The card hugs its content, and never gets narrower than the chips' usual card.
+pub fn mark_card_width(mark: &MarkRenderDocument) -> f32 {
+    let word1 = gtk::glib::markup_escape_text(&mark.words[0].to_lowercase());
+    let word2 = gtk::glib::markup_escape_text(&mark.words[1].to_lowercase());
+    measured_words_width(&word1, &word2).map_or(CARD_WIDTH, |words| {
+        (words + 2.0 * CARD_SIDE_PADDING).ceil().max(CARD_WIDTH)
+    })
+}
+
 pub fn build_mark_card_svg(mark: &MarkRenderDocument) -> String {
-    let total_width = 240.0;
-    let total_height = 130.0;
+    let total_width = mark_card_width(mark);
+    let total_height = CARD_HEIGHT;
     let chip_y = 20.0;
     let chip1_cx = (total_width - (48.0 * 2.0 + 11.0)) / 2.0 + 24.0;
     let chip1_cy = chip_y + 24.0;
@@ -99,7 +125,8 @@ pub fn render_mark_card_svg(svg_str: &str, scale: f32) -> Option<resvg::tiny_ski
 
 pub fn create_mark_card_widget(mark: MarkRenderDocument) -> gtk::Widget {
     let accessible_name = mark_card_accessible_name(&mark);
-    create_card_widget(build_mark_card_svg(&mark), accessible_name)
+    let width = mark_card_width(&mark);
+    create_card_widget(build_mark_card_svg(&mark), accessible_name, width)
 }
 
 fn empty_mark_card_svg(unavailable: bool) -> (String, &'static str) {
@@ -149,20 +176,21 @@ fn empty_mark_card_svg(unavailable: bool) -> (String, &'static str) {
 
 pub fn create_empty_mark_widget(unavailable: bool) -> gtk::Widget {
     let (svg, speech) = empty_mark_card_svg(unavailable);
-    create_card_widget(svg, speech.into())
+    create_card_widget(svg, speech.into(), CARD_WIDTH)
 }
 
-fn create_card_widget(svg: String, accessible_name: String) -> gtk::Widget {
-    let area = gtk::DrawingArea::builder()
-        .accessible_role(gtk::AccessibleRole::Presentation)
-        .build();
-    area.set_content_width(240);
-    area.set_content_height(130);
-
-    let label = gtk::Label::new(Some(&accessible_name));
-    label.set_wrap(true);
-    label.set_max_width_chars(32);
-    label.set_focusable(true);
+fn create_card_widget(svg: String, accessible_name: String, width: f32) -> gtk::Widget {
+    // GtkBuilder is how a GTK 4.6 binding sets an accessible label: the direct call
+    // needs the crate's 4.10 feature, above this window's floor.
+    let name = gtk::glib::markup_escape_text(&accessible_name);
+    let ui = format!(
+        r#"<interface><object class="GtkDrawingArea" id="card"><property name="accessible-role">img</property><property name="focusable">true</property><accessibility><property name="label">{name}</property></accessibility></object></interface>"#
+    );
+    let area: gtk::DrawingArea = gtk::Builder::from_string(&ui)
+        .object("card")
+        .expect("the card's interface names its one object");
+    area.set_content_width(width as i32);
+    area.set_content_height(CARD_HEIGHT as i32);
 
     area.set_draw_func(move |widget, cr, _width, _height| {
         let scale = widget.scale_factor() as f32;
@@ -197,11 +225,8 @@ fn create_card_widget(svg: String, accessible_name: String) -> gtk::Widget {
         }
     });
 
-    let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    container.set_halign(gtk::Align::Center);
-    container.append(&area);
-    container.append(&label);
-    container.upcast()
+    area.set_halign(gtk::Align::Center);
+    area.upcast()
 }
 
 #[cfg(test)]
@@ -245,6 +270,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn mark_with_words(word1: &str, word2: &str) -> MarkRenderDocument {
+        let icon = |name: &str, rot| MarkIconDocument {
+            name: name.into(),
+            svg: "<path d=\"M0 0 L10 10\"/>".into(),
+            color: MarkColorDocument {
+                name: "gold".into(),
+                hex: "#ffd700".into(),
+            },
+            rot,
+        };
+        MarkRenderDocument {
+            icon1: icon("star", 0),
+            icon2: icon("moon", 45),
+            words: [word1.into(), word2.into()],
+        }
+    }
+
+    #[test]
+    fn the_longest_words_stay_inside_the_card() {
+        let short = mark_with_words("afoot", "unfixed");
+        assert_eq!(mark_card_width(&short), CARD_WIDTH);
+
+        let long = mark_with_words("mammogram", "womanhood");
+        let width = mark_card_width(&long);
+        assert!(width > CARD_WIDTH, "got {width}");
+        let words = measured_words_width("mammogram", "womanhood").unwrap();
+        assert!(
+            width - words >= 2.0 * CARD_SIDE_PADDING,
+            "got {width}, {words}"
+        );
+
+        // Rendered, the words leave the card's own edge columns clear.
+        let pixmap = render_mark_card_svg(&build_mark_card_svg(&long), 1.0).unwrap();
+        assert_eq!(pixmap.width(), width.ceil() as u32);
+        assert_eq!(dark_pixels(&pixmap, 2..10, 85..115), 0);
+        assert_eq!(
+            dark_pixels(&pixmap, pixmap.width() - 10..pixmap.width() - 2, 85..115),
+            0
+        );
+        assert!(dark_pixels(&pixmap, 10..pixmap.width() - 10, 85..115) > 50);
     }
 
     #[test]

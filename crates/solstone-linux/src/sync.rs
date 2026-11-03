@@ -5934,11 +5934,7 @@ mod tests {
                 .tooltip
                 .contains("unknown journal seen at 192.168.1.100:5015")
         );
-        assert!(
-            health
-                .cli
-                .contains("Unknown journal seen at 192.168.1.100:5015:")
-        );
+        assert!(health.cli.contains("192.168.1.100:5015:"));
         assert!(
             health
                 .cli
@@ -5955,7 +5951,7 @@ mod tests {
         );
         let health_after = crate::sync_health::derive_health(&facts_after, 1000.0, 600.0);
         assert!(!health_after.tooltip.contains("unknown journal"));
-        assert!(!health_after.cli.contains("Unknown journal"));
+        assert!(!health_after.cli.contains("192.168.1.100:5015"));
 
         service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
