@@ -779,7 +779,7 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                     return 1;
                 }
                 let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
-                let _ = write_line(output, crate::journal_mark::MARK_MISMATCH_LINE);
+                let _ = write_line(output, crate::journal_mark::CONFIRM_MARK_MISMATCH_LINE);
                 1
             }
         }
@@ -823,7 +823,7 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                     return 1;
                 }
                 let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
-                let _ = write_line(output, crate::journal_mark::MISMATCH_BODY);
+                let _ = write_line(output, crate::journal_mark::CONFIRM_MISMATCH_BODY);
                 1
             }
             crate::journal_mark::QuestionOutcome::Cancel => {
@@ -839,7 +839,7 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                     let _ = write_line(errors, format!("Error: {error}"));
                     return 1;
                 }
-                let _ = write_line(output, crate::journal_mark::CANCEL_LINE);
+                let _ = write_line(output, crate::journal_mark::CONFIRM_CANCEL_LINE);
                 1
             }
             crate::journal_mark::QuestionOutcome::WalkedAway => {
@@ -2527,7 +2527,7 @@ mod tests {
 
         let t = tempfile::tempdir().unwrap();
         let config = status_config(&t);
-        let cred = Credential {
+        let mut cred = Credential {
             instance_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
             ca_fp_prefix: vec![0xaa, 0xbb],
             endpoints: vec![],
@@ -2541,6 +2541,13 @@ mod tests {
             device_token: None,
             device_token_expires_at: None,
         };
+        let with_ca = crate::journal_mark::sample_credential(
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "ca-source",
+        );
+        cred.instance_id = with_ca.instance_id;
+        cred.ca_chain_pem = with_ca.ca_chain_pem;
+        cred.ca_fp_prefix = with_ca.ca_fp_prefix;
         crate::private_link::persist_credential(&config.config_dir, &cred).unwrap();
         let identity_key = crate::private_link::journal_identity_key(&cred);
 
@@ -2607,7 +2614,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let config = status_config(&t);
         let _ = fs::remove_file(config.config_dir.join("credentials.json"));
-        let cred = Credential {
+        let mut cred = Credential {
             instance_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
             ca_fp_prefix: vec![0xaa, 0xbb],
             endpoints: vec![],
@@ -2621,6 +2628,13 @@ mod tests {
             device_token: None,
             device_token_expires_at: None,
         };
+        let with_ca = crate::journal_mark::sample_credential(
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "ca-source",
+        );
+        cred.instance_id = with_ca.instance_id;
+        cred.ca_chain_pem = with_ca.ca_chain_pem;
+        cred.ca_fp_prefix = with_ca.ca_fp_prefix;
         let mark = spl_core::mark::mark_from_jid(&cred.instance_id)
             .expect("test jid must resolve to a mark");
         let spec = mark.to_render_spec();
@@ -2753,6 +2767,7 @@ mod tests {
         let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
         let mut cred = peer.credential();
         cred.instance_id = "invalid-jid".into();
+        cred.ca_chain_pem = Vec::new();
 
         struct DirectPairer(spl_transport::credential::Credential);
         impl crate::private_link::Pairer for DirectPairer {
@@ -2889,6 +2904,7 @@ mod tests {
         let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
         let mut cred = peer.credential();
         cred.instance_id = "invalid-jid".into();
+        cred.ca_chain_pem = Vec::new();
 
         struct DirectPairer(spl_transport::credential::Credential);
         impl crate::private_link::Pairer for DirectPairer {
@@ -3005,6 +3021,7 @@ mod tests {
             let mut cred_y = peer_y.credential();
             if !readable {
                 cred_y.instance_id = "invalid-jid".into();
+                cred_y.ca_chain_pem = Vec::new();
             }
             let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
             tty_peer.write_all(answer).unwrap();
@@ -3366,6 +3383,7 @@ mod tests {
         let (mut tty_peer, tty_child) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut unparseable_cred = cred_y.clone();
         unparseable_cred.instance_id = "invalid-jid".into();
+        unparseable_cred.ca_chain_pem = Vec::new();
         tty_peer.write_all(b"cancel\n").unwrap();
         let _ = crate::private_link::setup_with_pairer_and_stream_with_fault(
             &CustomPairer {

@@ -1100,6 +1100,90 @@ async fn stored_id_that_is_not_its_cas_refuses_words_from_the_stored_id() {
     assert!(!app_config.join("credentials.json").exists());
 }
 
+/// Stored chains that can't show what a dial pins: nothing kept, a chain leading
+/// with the owner's real public CA while the pin names the forger's, and a copy of
+/// the owner's key under someone else's signature.
+#[tokio::test]
+async fn stored_pairing_with_no_readable_ca_is_held_and_shows_no_mark_from_its_id() {
+    use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
+    let bin = env!("CARGO_BIN_EXE_solstone-linux");
+    let owner_jid = "f30ed159-ef46-8e9c-913f-e49f0fe7d201";
+    let spec = spl_core::mark::mark_from_jid(owner_jid)
+        .unwrap()
+        .to_render_spec();
+    let owner_row = format!("journal: {}\u{b7}{}", spec.words[0], spec.words[1]);
+    let owner_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let owner_ca = CertificateParams::new(Vec::<String>::new())
+        .unwrap()
+        .self_signed(&owner_key)
+        .unwrap();
+    let signer_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let signer = CertificateParams::new(Vec::<String>::new())
+        .unwrap()
+        .self_signed(&signer_key)
+        .unwrap();
+    let copied = CertificateParams::new(Vec::<String>::new())
+        .unwrap()
+        .signed_by(&owner_key, &signer, &signer_key)
+        .unwrap();
+
+    let forger = generate_test_credential();
+    let mut empty_chain = forger.clone();
+    empty_chain.ca_chain_pem = Vec::new();
+    let mut owner_at_head = forger.clone();
+    owner_at_head.ca_chain_pem.insert(0, owner_ca.pem());
+    let mut copied_key = forger.clone();
+    copied_key.ca_chain_pem = vec![copied.pem()];
+    copied_key.ca_fp_prefix = spl_core::ca::sha256(copied.der())[..16].to_vec();
+
+    for (name, mut stored) in [
+        ("empty", empty_chain),
+        ("owner-at-head", owner_at_head),
+        ("copied-key", copied_key),
+    ] {
+        stored.instance_id = owner_jid.to_string();
+        let temp = tempdir().unwrap();
+        let xdg_config = temp.path().join("config");
+        let xdg_data = temp.path().join("data");
+        let app_config = xdg_config.join("solstone-linux");
+        fs::create_dir_all(&app_config).unwrap();
+        fs::create_dir_all(xdg_data.join("solstone-linux")).unwrap();
+        let path = app_config.join("credentials.json");
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let status = Command::new(bin)
+            .arg("status")
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .env("XDG_DATA_HOME", &xdg_data)
+            .output()
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&status.stdout).into_owned();
+        assert!(text.contains("unavailable right now"), "{name}: {text}");
+        assert!(!text.contains(&owner_row), "{name}: {text}");
+
+        // Words from the claimed id can't confirm it, and it stays held.
+        let output = Command::new(bin)
+            .args([
+                "confirm",
+                "--mark",
+                &format!("{} {}", spec.words[0], spec.words[1]),
+            ])
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("SOLSTONE_LINUX_MARK_TTY", "/nonexistent")
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5), "{name}: {output:?}");
+        let answer: serde_json::Value =
+            serde_json::from_slice(&fs::read(app_config.join("pairing-answer.json")).unwrap())
+                .unwrap();
+        assert_eq!(answer["confirmed"], "", "{name}");
+    }
+}
+
 #[tokio::test]
 async fn setup_prompt_when_x_already_confirmed_re_pair_terminal_no_exits_1() {
     let bin = env!("CARGO_BIN_EXE_solstone-linux");

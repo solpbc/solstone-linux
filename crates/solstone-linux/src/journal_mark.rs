@@ -30,11 +30,17 @@ pub(crate) const ANSWER_LOCK_FILENAME: &str = ".solstone-linux.pairing-answer.lo
 pub(crate) const ANSWER_LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const JOURNAL_MARK_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+pub(crate) const UNVERIFIED_FILENAME: &str = "pairing-unverified";
 pub(crate) const HELD_BOTH_SENTENCES: &str = "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.";
 pub(crate) const HELD_FIRST_SENTENCE: &str = "waiting for you to confirm your journal's mark";
 pub(crate) const RUN_LINE: &str = "when you're ready, run: solstone-linux confirm";
 pub(crate) const SUCCESS_LINE: &str = "the solstone app can now connect to your journal.";
 pub(crate) const NOT_PAIRED: &str = "not paired.";
+// `confirm` can end a pairing that was already sending, so these say nothing about
+// what reached that journal.
+pub(crate) const CONFIRM_MISMATCH_BODY: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and run setup again, or email support@solstone.app and we'll help.";
+pub(crate) const CONFIRM_CANCEL_LINE: &str = "pairing cancelled. get a fresh pairing link from your journal and run setup again when you're ready.";
+pub(crate) const CONFIRM_MARK_MISMATCH_LINE: &str = "the mark words you gave don't match the journal's mark, so this computer isn't paired. check the words, get a fresh pairing link from your journal and run setup again.";
 pub(crate) const MISMATCH_BODY: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired, and nothing it has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and run setup again, or email support@solstone.app and we'll help.";
 pub(crate) const CANCEL_LINE: &str = "pairing cancelled. nothing this computer has kept went to that journal through this link. get a fresh pairing link from your journal and run setup again when you're ready.";
 pub(crate) const MARK_WORDS_WRONG_LINE: &str =
@@ -230,7 +236,35 @@ pub(crate) fn write_pairing_answer(
     Ok(())
 }
 
+/// The owner's answer. Going ahead on a pairing with no readable CA is noted, so
+/// the next start doesn't ask again.
 pub(crate) fn write_pairing_answer_with_fault(
+    config_root: &Path,
+    confirmed: &str,
+    fault: &dyn DurableWriteFault,
+) -> Result<(), PrivateStateError> {
+    if !confirmed.is_empty()
+        && let Ok(Some(credential)) = load_credential(config_root)
+        && compute_pairing_id(&credential.client_cert_pem) == confirmed
+        && pinned_ca_jid(&credential).is_none()
+    {
+        atomic_write_bytes_with_fault(
+            &config_root.join(UNVERIFIED_FILENAME),
+            confirmed.as_bytes(),
+            fault,
+        )
+        .map_err(|error| {
+            map_private_file(
+                error,
+                PrivateTargetKind::PairingAnswer,
+                PrivateIoOperation::Persist,
+            )
+        })?;
+    }
+    store_answer(config_root, confirmed, fault)
+}
+
+pub(crate) fn store_answer(
     config_root: &Path,
     confirmed: &str,
     fault: &dyn DurableWriteFault,
@@ -338,39 +372,50 @@ pub(crate) fn is_pairing_confirmed(config_root: &Path, pairing_id: &str) -> bool
     }
 }
 
-/// The journal id of the CA this pairing pinned, when its stored chain holds
-/// that CA in a form an id can be worked out from.
+/// The journal id of the CA this pairing pins on every dial, when the stored
+/// chain can show it.
 pub(crate) fn pinned_ca_jid(credential: &Credential) -> Option<String> {
-    credential.ca_chain_pem.iter().find_map(|pem| {
-        let certs = spl_transport::tls::parse_certs(pem).ok()?;
-        let pinned = certs.iter().find(|cert| {
-            spl_core::ca::cert_matches_prefix(cert.as_ref(), &credential.ca_fp_prefix)
-        })?;
-        let spki = spl_core::ca::extract_spki_der(pinned.as_ref()).ok()?;
-        spl_core::relay_window::jid_from_spki(&spki).ok()
-    })
+    spl_transport::tls::pinned_ca_jid(&credential.ca_chain_pem, &credential.ca_fp_prefix)
 }
 
-/// A stored pairing whose id isn't its own CA's is asked about again, with the
-/// mark that CA gives, whatever its answer file says. One with no readable CA
-/// can't be judged and carries on. The answer goes first, so a stop between the
-/// two writes leaves it held, and the next start finishes the job.
-fn hold_mismatched_stored_id(
+/// The id a stored pairing's mark comes from: the CA it pins, never a claim beside
+/// it. Empty when no such CA can be read, which no mark derives from.
+pub(crate) fn mark_jid(credential: &Credential) -> String {
+    pinned_ca_jid(credential).unwrap_or_default()
+}
+
+fn unverified_pairing_accepted(config_root: &Path, pairing_id: &str) -> bool {
+    fs::read_to_string(config_root.join(UNVERIFIED_FILENAME))
+        .is_ok_and(|text| !pairing_id.is_empty() && text == pairing_id)
+}
+
+/// A stored pairing is asked about again if its id isn't its pinned CA's, with the
+/// mark that CA gives, or if no such CA can be read and the owner hasn't said to go
+/// on without one. The answer goes first, so a stop between the two writes leaves
+/// it held, and the next start finishes the job.
+fn hold_stored_pairing_that_cant_stand(
     config_root: &Path,
     fault: &dyn DurableWriteFault,
 ) -> Result<(), PrivateStateError> {
     let Ok(Some(mut credential)) = load_credential(config_root) else {
         return Ok(());
     };
-    let Some(jid) = pinned_ca_jid(&credential) else {
-        return Ok(());
-    };
-    if jid == credential.instance_id {
-        return Ok(());
+    match pinned_ca_jid(&credential) {
+        Some(jid) if jid == credential.instance_id => Ok(()),
+        Some(jid) => {
+            store_answer(config_root, "", fault)?;
+            credential.instance_id = jid;
+            crate::private_link::persist_credential(config_root, &credential)
+        }
+        None => {
+            let pairing_id = compute_pairing_id(&credential.client_cert_pem);
+            if unverified_pairing_accepted(config_root, &pairing_id) {
+                Ok(())
+            } else {
+                store_answer(config_root, "", fault)
+            }
+        }
     }
-    write_pairing_answer_with_fault(config_root, "", fault)?;
-    credential.instance_id = jid;
-    crate::private_link::persist_credential(config_root, &credential)
 }
 
 pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
@@ -381,7 +426,12 @@ pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
         Ok(Some(cred)) => cred,
         _ => return false,
     };
-    if pinned_ca_jid(&cred).is_some_and(|jid| jid != cred.instance_id) {
+    let pairing_id_held = compute_pairing_id(&cred.client_cert_pem);
+    let needs_asking = match pinned_ca_jid(&cred) {
+        Some(jid) => jid != cred.instance_id,
+        None => !unverified_pairing_accepted(config_root, &pairing_id_held),
+    };
+    if needs_asking {
         return true;
     }
     let pairing_id = compute_pairing_id(&cred.client_cert_pem);
@@ -396,11 +446,17 @@ pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
 /// confirmed it, never before.
 pub(crate) fn journal_status_row(config_root: &Path) -> String {
     if journal_mark_held_on_disk(config_root) {
-        return JOURNAL_ROW_WAITING.to_owned();
+        // A held pairing with no readable CA has no mark to wait on.
+        return match load_credential(config_root) {
+            Ok(Some(credential)) if pinned_ca_jid(&credential).is_none() => {
+                MARK_UNAVAILABLE_LINE.to_owned()
+            }
+            _ => JOURNAL_ROW_WAITING.to_owned(),
+        };
     }
     match load_credential(config_root) {
         Ok(None) => JOURNAL_ROW_NOT_PAIRED.to_owned(),
-        Ok(Some(credential)) => spl_core::mark::mark_from_jid(&credential.instance_id)
+        Ok(Some(credential)) => spl_core::mark::mark_from_jid(&mark_jid(&credential))
             .map(|mark| {
                 let spec = mark.to_render_spec();
                 format!("journal: {}·{}", spec.words[0], spec.words[1])
@@ -476,17 +532,17 @@ pub(crate) fn grandfather_answer_file_with_fault(
                 Some(cred) => {
                     let id = compute_pairing_id(&cred.client_cert_pem);
                     if candidate_pairing_id == Some(id.as_str()) {
-                        write_pairing_answer_with_fault(config_root, "", fault)?;
+                        store_answer(config_root, "", fault)?;
                     } else {
-                        write_pairing_answer_with_fault(config_root, &id, fault)?;
+                        store_answer(config_root, &id, fault)?;
                     }
                 }
-                None => write_pairing_answer_with_fault(config_root, "", fault)?,
+                None => store_answer(config_root, "", fault)?,
             }
         }
         Err(_) => {}
     }
-    hold_mismatched_stored_id(config_root, fault)
+    hold_stored_pairing_that_cant_stand(config_root, fault)
 }
 
 pub(crate) fn apply_live_owner_journal_mark_held(
@@ -522,7 +578,7 @@ pub(crate) fn compare_mark_to_credential(
     credential: &Credential,
     mark_words: &[String; 2],
 ) -> Result<bool, ()> {
-    let mark = spl_core::mark::mark_from_jid(&credential.instance_id).map_err(|_| ())?;
+    let mark = spl_core::mark::mark_from_jid(&mark_jid(credential)).map_err(|_| ())?;
     let spec = mark.to_render_spec();
     let spec_words = [spec.words[0].to_lowercase(), spec.words[1].to_lowercase()];
     Ok(mark_words == &spec_words)
@@ -540,7 +596,7 @@ pub(crate) async fn ask_terminal_question<Fd: AsFd>(
     terminal_fd: Fd,
     credential: &Credential,
 ) -> QuestionOutcome {
-    let spoken = format_spoken_mark(&credential.instance_id);
+    let spoken = format_spoken_mark(&mark_jid(credential));
     let (initial_prompt, ask_line, is_identified) = match spoken {
         Some(spoken) => (
             format!(
@@ -711,14 +767,42 @@ pub(crate) async fn retire_client_registration(credential: &Credential) {
 
 #[cfg(test)]
 pub(crate) fn sample_credential(instance_id: &str, cert_pem: &str) -> Credential {
+    // A well-formed id stands for a pairing with its own readable CA; anything else
+    // for one with no CA to read.
+    static CA: std::sync::OnceLock<(String, Vec<u8>, String)> = std::sync::OnceLock::new();
+    let (ca_pem, ca_pin, ca_jid) = CA.get_or_init(|| {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key).unwrap();
+        let spki = spl_core::ca::extract_spki_der(cert.der()).unwrap();
+        (
+            cert.pem(),
+            spl_core::ca::sha256(cert.der())[..16].to_vec(),
+            spl_core::relay_window::jid_from_spki(&spki).unwrap(),
+        )
+    });
+    let readable = spl_core::mark::mark_from_jid(instance_id).is_ok();
     Credential {
-        instance_id: instance_id.to_string(),
-        ca_fp_prefix: vec![0x11, 0x22],
+        instance_id: if readable {
+            ca_jid.clone()
+        } else {
+            instance_id.to_string()
+        },
+        ca_fp_prefix: if readable {
+            ca_pin.clone()
+        } else {
+            vec![0x11, 0x22]
+        },
         endpoints: vec![],
         local_endpoints: None,
         client_cert_pem: cert_pem.to_string(),
         client_key_pem: String::new(),
-        ca_chain_pem: vec![],
+        ca_chain_pem: if readable {
+            vec![ca_pem.clone()]
+        } else {
+            vec![]
+        },
         home_label: "home".into(),
         home_attestation: None,
         relay_origin: None,
@@ -762,13 +846,18 @@ mod tests {
         assert_eq!(journal_status_row(root), JOURNAL_ROW_WAITING);
 
         write_pairing_answer(root, &id).unwrap();
-        let spec = spl_core::mark::mark_from_jid(jid).unwrap().to_render_spec();
+        let spec = spl_core::mark::mark_from_jid(&cred.instance_id)
+            .unwrap()
+            .to_render_spec();
         let row = journal_status_row(root);
         assert!(row.contains(&spec.words[0]) && row.contains(&spec.words[1]));
         assert_ne!(row, JOURNAL_ROW_WAITING);
 
         cred.instance_id = "invalid-jid".into();
+        cred.ca_chain_pem = Vec::new();
         crate::private_link::persist_credential(root, &cred).unwrap();
+        assert_eq!(journal_status_row(root), MARK_UNAVAILABLE_LINE);
+        write_pairing_answer(root, &id).unwrap();
         assert_eq!(journal_status_row(root), MARK_UNAVAILABLE_LINE);
     }
 

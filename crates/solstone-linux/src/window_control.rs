@@ -827,7 +827,7 @@ pub(crate) fn assemble_document(
     let confirmed_mark = if phase.durable == "confirmed" {
         let config_root = resolve_config_dir(config_paths);
         match load_credential(&config_root) {
-            Ok(Some(cred)) => spl_core::mark::mark_from_jid(&cred.instance_id)
+            Ok(Some(cred)) => spl_core::mark::mark_from_jid(&crate::journal_mark::mark_jid(&cred))
                 .ok()
                 .map(|m| m.to_render_spec().into()),
             _ => None,
@@ -844,7 +844,7 @@ pub(crate) fn assemble_document(
                 .flatten()
         })
         .flatten()
-        .map(|cred| cred.instance_id);
+        .map(|cred| crate::journal_mark::mark_jid(&cred));
     let pending_mark = phase
         .pending_instance_id
         .as_deref()
@@ -2643,11 +2643,8 @@ mod tests {
                 } else {
                     ""
                 };
-                let _ = crate::journal_mark::write_pairing_answer_with_fault(
-                    &config_root,
-                    confirmed_id,
-                    &NoWriteFault,
-                );
+                let _ =
+                    crate::journal_mark::store_answer(&config_root, confirmed_id, &NoWriteFault);
             }
 
             let config_paths = ConfigPaths {
@@ -3259,8 +3256,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stored_id_with_no_readable_ca_starts_as_it_did() {
-        let stored = sample_valid_credential("unreadable-ca-cert");
+    async fn stored_pairing_with_no_readable_ca_starts_held_with_no_mark() {
+        let mut stored = sample_tls_credential();
+        stored.ca_chain_pem = Vec::new();
         let starter = Arc::new(FakeOwnerStarter::default());
         let harness = TestHarness::new(
             Some(stored),
@@ -3272,7 +3270,9 @@ mod tests {
         .await;
         harness.handler.open_journal().await;
         let model = decode_control_str(&harness.handler.get_control_state()).unwrap();
-        assert_eq!(model.durable, "confirmed");
+        assert_eq!(model.durable, "held");
+        assert_eq!(model.pending_mark, None);
+        assert_eq!(starter.starts.load(Ordering::SeqCst), 0);
         harness.shutdown().await;
     }
 

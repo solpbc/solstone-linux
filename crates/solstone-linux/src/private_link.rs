@@ -3430,7 +3430,7 @@ async fn start_private_link_session_inner(
     };
     let config_root = state_lock.root().to_path_buf();
     let facts = options.shared_facts.unwrap_or_default();
-    facts.set_paired_jid(Some(credential.instance_id.clone()));
+    facts.set_paired_jid(crate::journal_mark::pinned_ca_jid(&credential));
     let paths = private_config_paths(&config_root);
     let sanitized = match sanitize_link_authority(&paths) {
         Ok(config) => config,
@@ -7233,6 +7233,7 @@ pub(crate) mod tests {
         credential.instance_id = paired_jid.clone();
 
         let temp = tempfile::tempdir().unwrap();
+        let expected_paired = crate::journal_mark::pinned_ca_jid(&credential);
         let session = start_private_link_session(temp.path(), credential, "stream")
             .await
             .unwrap();
@@ -7247,16 +7248,11 @@ pub(crate) mod tests {
 
         let facts_snapshot = session.opener.facts.snapshot();
         assert_eq!(facts_snapshot.unknown_journals, sightings);
-        assert_eq!(
-            facts_snapshot.paired_jid.as_deref(),
-            Some(paired_jid.as_str())
-        );
+        let expected_mark = expected_paired.as_deref().and_then(format_spoken_mark);
+        assert_eq!(facts_snapshot.paired_jid, expected_paired);
         assert_eq!(facts_snapshot.unknown_spoken_marks.len(), 1);
         assert!(facts_snapshot.unknown_spoken_marks[0].is_some());
-        assert_eq!(
-            facts_snapshot.paired_spoken_mark.as_deref(),
-            Some("pink, cyan · distrust·chokehold")
-        );
+        assert_eq!(facts_snapshot.paired_spoken_mark, expected_mark);
 
         session.shutdown().await.unwrap();
         impostor_peer.shutdown().await;
