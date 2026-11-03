@@ -37,6 +37,8 @@ pub(crate) const SUCCESS_LINE: &str = "the solstone app can now connect to your 
 pub(crate) const NOT_PAIRED: &str = "not paired.";
 pub(crate) const MISMATCH_BODY: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired, and nothing it has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and run setup again, or email support@solstone.app and we'll help.";
 pub(crate) const CANCEL_LINE: &str = "pairing cancelled. nothing this computer has kept went to that journal through this link. get a fresh pairing link from your journal and run setup again when you're ready.";
+pub(crate) const MARK_WORDS_WRONG_LINE: &str =
+    "the mark words you gave don't match the journal's mark.";
 pub(crate) const PAIRING_KEPT_LINE: &str = "not changed. your current pairing stays in use. nothing this computer has kept went to that journal through this link.";
 pub(crate) const PAIRING_KEPT_STOPPED_LINE: &str =
     "pairing cancelled. your current pairing stays in use.";

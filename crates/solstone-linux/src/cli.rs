@@ -897,6 +897,11 @@ pub(crate) fn render_setup_result(
             let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
             1
         }
+        Ok(crate::private_link::SetupOutcome::ReplacementWordsWrong) => {
+            let _ = write_line(output, crate::journal_mark::MARK_WORDS_WRONG_LINE);
+            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
+            1
+        }
         Ok(crate::private_link::SetupOutcome::ReplacementUnverifiable) => {
             let _ = write_line(output, crate::journal_mark::COULDNT_VERIFY);
             let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
@@ -2966,13 +2971,20 @@ mod tests {
             }
         }
 
-        use crate::journal_mark::{COULDNT_VERIFY, PAIRING_KEPT_LINE, PAIRING_KEPT_STOPPED_LINE};
+        use crate::journal_mark::{
+            COULDNT_VERIFY, MARK_WORDS_WRONG_LINE, PAIRING_KEPT_LINE, PAIRING_KEPT_STOPPED_LINE,
+        };
         // (typed answer, given mark words, new link's mark readable, expected lines)
         type RefusalCase<'a> = (&'a [u8], Option<&'a str>, bool, &'a [&'a str]);
         let cases: [RefusalCase; 4] = [
             (b"no\n", None, true, &[PAIRING_KEPT_LINE]),
             (b"cancel\n", None, false, &[PAIRING_KEPT_STOPPED_LINE]),
-            (b"", Some("wrong words"), true, &[PAIRING_KEPT_LINE]),
+            (
+                b"",
+                Some("wrong words"),
+                true,
+                &[MARK_WORDS_WRONG_LINE, PAIRING_KEPT_LINE],
+            ),
             (
                 b"",
                 Some("wrong words"),

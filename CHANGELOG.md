@@ -8,6 +8,8 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- this is a security fix. someone who got you to use a pairing link they had swapped could pair this computer with something that isn't your journal, while showing you your own journal's mark, so the check would have looked right. what you shared with the solstone app, like your screen and audio, would then have gone to them. the solstone app now refuses a link when what answers claims to be a different journal from the one the link points to, before it asks you anything or saves anything.
+- on a computer that's already paired, setup with the wrong --mark words now says the words didn't match before it says your current pairing stays in use.
 - after you stop at the mark question, the window and tray now say it's waiting for your answer, instead of asking you to pair again. answering no while you're already paired no longer says you aren't.
 - setup now asks for the pairing link at a terminal, and goes on when you press enter.
 

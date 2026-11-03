@@ -703,6 +703,7 @@ pub(crate) enum SetupOutcome {
     WalkedAwayHeld,
     /// The new link was refused and the confirmed pairing it would have replaced stands.
     ReplacementRefused,
+    ReplacementWordsWrong,
     /// As `ReplacementRefused`, when the new link's mark couldn't be worked out.
     ReplacementUnverifiable,
     /// The owner stopped at the question and the confirmed pairing stands.
@@ -915,7 +916,7 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                 let replacing = existing_pairing_confirmed(state_lock.root()).await?;
                 crate::journal_mark::retire_client_registration(&credential).await;
                 return Ok(if replacing {
-                    SetupOutcome::ReplacementRefused
+                    SetupOutcome::ReplacementWordsWrong
                 } else {
                     SetupOutcome::MarkMismatch
                 });

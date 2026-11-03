@@ -46,10 +46,17 @@ mod pair_listener {
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
         request_arrived: Arc<Notify>,
         issued_client_der: Arc<Mutex<Vec<Vec<u8>>>>,
+        claimed_jid: Arc<Mutex<Option<String>>>,
+    }
+
+    pub(crate) fn jid_of(cert: &CertificateDer<'_>) -> String {
+        let spki = spl_core::ca::extract_spki_der(cert.as_ref()).unwrap();
+        spl_core::relay_window::jid_from_spki(&spki).unwrap()
     }
 
     pub(crate) struct PairListener {
         link: String,
+        jid: String,
         state: ListenerState,
         task: JoinHandle<()>,
     }
@@ -98,10 +105,12 @@ mod pair_listener {
             blob.extend_from_slice(&ca_fp[..16]);
             let link = spl_core::crockford::encode(&blob);
 
+            let jid = jid_of(&ca_der);
             let state = ListenerState {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 request_arrived: Arc::new(Notify::new()),
                 issued_client_der: Arc::new(Mutex::new(Vec::new())),
+                claimed_jid: Arc::new(Mutex::new(None)),
             };
 
             let task_state = state.clone();
@@ -130,11 +139,27 @@ mod pair_listener {
                 }
             });
 
-            Self { link, state, task }
+            Self {
+                link,
+                jid,
+                state,
+                task,
+            }
         }
 
         pub(crate) fn link(&self) -> &str {
             &self.link
+        }
+
+        /// The id this listener's CA derives, which it answers with by default.
+        pub(crate) fn jid(&self) -> &str {
+            &self.jid
+        }
+
+        /// Answer pairings as another journal: this listener's CA and pin, that
+        /// journal's id.
+        pub(crate) fn claim_journal(&self, jid: &str) {
+            *self.state.claimed_jid.lock().unwrap() = Some(jid.to_owned());
         }
 
         pub(crate) fn client_der(&self) -> Vec<u8> {
@@ -296,7 +321,12 @@ mod pair_listener {
             let pair_resp = PairResponse {
                 client_cert: client_cert.pem(),
                 ca_chain: vec![ca_pem.to_owned()],
-                instance_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+                instance_id: state
+                    .claimed_jid
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| jid_of(ca.der())),
                 home_label: "test home".to_string(),
                 fingerprint: format!("sha256:{}", spl_core::ca::sha256_hex(&client_der)),
                 home_attestation: None,
@@ -908,6 +938,69 @@ async fn setup_prompt_pty_read_error_exits_5_with_held_guidance() {
     let ans_content = fs::read_to_string(&ans_path).unwrap();
     assert!(ans_content.contains(r#""confirmed":"""#));
     peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn setup_refuses_a_peer_claiming_another_journals_id_and_pairs_a_genuine_one() {
+    let bin = env!("CARGO_BIN_EXE_solstone-linux");
+    let temp = tempdir().unwrap();
+    let xdg_config = temp.path().join("config");
+    let xdg_data = temp.path().join("data");
+    let app_config = xdg_config.join("solstone-linux");
+    fs::create_dir_all(&app_config).unwrap();
+    fs::create_dir_all(xdg_data.join("solstone-linux")).unwrap();
+
+    let genuine = PairListener::start().await;
+    let forger = PairListener::start().await;
+    forger.claim_journal(genuine.jid());
+
+    // The pin holds, since the link names the forger's own CA. The claimed id
+    // gives it away, so the owner is asked nothing and nothing is kept.
+    let mut terminal = MarkTerminal::new();
+    let mut child = Command::new(bin)
+        .arg("setup")
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(forger.link().as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
+    }
+    let status = wait_for_exit(&mut child).await;
+    assert_eq!(status.code(), Some(1));
+    assert_eq!(forger.requests().len(), 1);
+    assert!(!app_config.join("credentials.json").exists());
+    forger.shutdown().await;
+
+    let mut child = Command::new(bin)
+        .arg("setup")
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("SOLSTONE_LINUX_MARK_TTY", &terminal.path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(genuine.link().as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
+    }
+    terminal.wait_for_prompt().await.unwrap();
+    terminal.answer(b"yes\n").await;
+    let status = wait_for_exit(&mut child).await;
+    assert_eq!(status.code(), Some(0));
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(app_config.join("credentials.json")).unwrap()).unwrap();
+    assert_eq!(stored["instance_id"], genuine.jid());
+    genuine.shutdown().await;
 }
 
 #[tokio::test]
