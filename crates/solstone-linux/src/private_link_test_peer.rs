@@ -480,7 +480,10 @@ fn credential_and_acceptor(
             client_cert_pem: client.pem(),
             ca_chain_pem: vec![ca.pem()],
             ca_fp_prefix: spl_core::ca::sha256(ca_der.as_ref())[..16].to_vec(),
-            instance_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+            instance_id: spl_core::relay_window::jid_from_spki(
+                &spl_core::ca::extract_spki_der(ca_der.as_ref()).unwrap(),
+            )
+            .unwrap(),
             home_label: "test home".into(),
             endpoints: vec![EndpointAddr {
                 host: "127.0.0.1".into(),

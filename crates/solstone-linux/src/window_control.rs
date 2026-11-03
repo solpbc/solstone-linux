@@ -2559,7 +2559,10 @@ mod tests {
                     client_cert_pem: client.pem(),
                     ca_chain_pem: vec![ca.pem()],
                     ca_fp_prefix: spl_core::ca::sha256(ca_der.as_ref())[..16].to_vec(),
-                    instance_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+                    instance_id: spl_core::relay_window::jid_from_spki(
+                        &spl_core::ca::extract_spki_der(ca_der.as_ref()).unwrap(),
+                    )
+                    .unwrap(),
                     home_label: "home".into(),
                     endpoints: vec![EndpointAddr {
                         host: "127.0.0.1".into(),
@@ -3223,6 +3226,53 @@ mod tests {
         let check_durable = harness.check_durable_state_on_root();
         assert_eq!(check_durable, "unpaired");
 
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stored_id_that_is_not_its_cas_starts_held_with_the_cas_mark() {
+        let genuine = sample_tls_credential();
+        let ca_jid = genuine.instance_id.clone();
+        let mut stored = genuine;
+        stored.instance_id = "f30ed159-ef46-8e9c-913f-e49f0fe7d201".into();
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(
+            Some(stored),
+            true,
+            Arc::new(FakePairer::new(sample_valid_credential("next-cert"))),
+            starter.clone(),
+            Arc::new(NoWriteFault),
+        )
+        .await;
+        harness.handler.open_journal().await;
+        let model = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert_eq!(model.durable, "held");
+        assert_eq!(model.view, SessionView::Held);
+        assert_eq!(
+            model.pending_mark.as_ref().map(|mark| mark.words.clone()),
+            spl_core::mark::mark_from_jid(&ca_jid)
+                .ok()
+                .map(|mark| mark.to_render_spec().words)
+        );
+        assert_eq!(starter.starts.load(Ordering::SeqCst), 0);
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stored_id_with_no_readable_ca_starts_as_it_did() {
+        let stored = sample_valid_credential("unreadable-ca-cert");
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(
+            Some(stored),
+            true,
+            Arc::new(FakePairer::new(sample_valid_credential("next-cert"))),
+            starter.clone(),
+            Arc::new(NoWriteFault),
+        )
+        .await;
+        harness.handler.open_journal().await;
+        let model = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert_eq!(model.durable, "confirmed");
         harness.shutdown().await;
     }
 

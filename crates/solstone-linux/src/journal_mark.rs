@@ -338,6 +338,41 @@ pub(crate) fn is_pairing_confirmed(config_root: &Path, pairing_id: &str) -> bool
     }
 }
 
+/// The journal id of the CA this pairing pinned, when its stored chain holds
+/// that CA in a form an id can be worked out from.
+pub(crate) fn pinned_ca_jid(credential: &Credential) -> Option<String> {
+    credential.ca_chain_pem.iter().find_map(|pem| {
+        let certs = spl_transport::tls::parse_certs(pem).ok()?;
+        let pinned = certs.iter().find(|cert| {
+            spl_core::ca::cert_matches_prefix(cert.as_ref(), &credential.ca_fp_prefix)
+        })?;
+        let spki = spl_core::ca::extract_spki_der(pinned.as_ref()).ok()?;
+        spl_core::relay_window::jid_from_spki(&spki).ok()
+    })
+}
+
+/// A stored pairing whose id isn't its own CA's is asked about again, with the
+/// mark that CA gives, whatever its answer file says. One with no readable CA
+/// can't be judged and carries on. The answer goes first, so a stop between the
+/// two writes leaves it held, and the next start finishes the job.
+fn hold_mismatched_stored_id(
+    config_root: &Path,
+    fault: &dyn DurableWriteFault,
+) -> Result<(), PrivateStateError> {
+    let Ok(Some(mut credential)) = load_credential(config_root) else {
+        return Ok(());
+    };
+    let Some(jid) = pinned_ca_jid(&credential) else {
+        return Ok(());
+    };
+    if jid == credential.instance_id {
+        return Ok(());
+    }
+    write_pairing_answer_with_fault(config_root, "", fault)?;
+    credential.instance_id = jid;
+    crate::private_link::persist_credential(config_root, &credential)
+}
+
 pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
     if pairing_commit_pending(config_root) {
         return true;
@@ -346,6 +381,9 @@ pub(crate) fn journal_mark_held_on_disk(config_root: &Path) -> bool {
         Ok(Some(cred)) => cred,
         _ => return false,
     };
+    if pinned_ca_jid(&cred).is_some_and(|jid| jid != cred.instance_id) {
+        return true;
+    }
     let pairing_id = compute_pairing_id(&cred.client_cert_pem);
     match read_pairing_answer(config_root) {
         Ok(Some(answer)) => answer.confirmed != pairing_id,
@@ -428,7 +466,7 @@ pub(crate) fn grandfather_answer_file_with_fault(
     }
     let path = config_root.join(PAIRING_ANSWER_FILENAME);
     match open_regular_readonly(&path) {
-        Ok(_) => Ok(()),
+        Ok(_) => {}
         Err(PrivateFileError::Io {
             kind: io::ErrorKind::NotFound,
             ..
@@ -438,16 +476,17 @@ pub(crate) fn grandfather_answer_file_with_fault(
                 Some(cred) => {
                     let id = compute_pairing_id(&cred.client_cert_pem);
                     if candidate_pairing_id == Some(id.as_str()) {
-                        write_pairing_answer_with_fault(config_root, "", fault)
+                        write_pairing_answer_with_fault(config_root, "", fault)?;
                     } else {
-                        write_pairing_answer_with_fault(config_root, &id, fault)
+                        write_pairing_answer_with_fault(config_root, &id, fault)?;
                     }
                 }
-                None => write_pairing_answer_with_fault(config_root, "", fault),
+                None => write_pairing_answer_with_fault(config_root, "", fault)?,
             }
         }
-        Err(_) => Ok(()),
+        Err(_) => {}
     }
+    hold_mismatched_stored_id(config_root, fault)
 }
 
 pub(crate) fn apply_live_owner_journal_mark_held(

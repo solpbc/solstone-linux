@@ -458,7 +458,7 @@ fn generate_test_credential() -> spl_transport::credential::Credential {
         client_cert_pem: client.pem(),
         ca_chain_pem: vec![ca.pem()],
         ca_fp_prefix: spl_core::ca::sha256(ca_der.as_ref())[..16].to_vec(),
-        instance_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+        instance_id: pair_listener::jid_of(&CertificateDer::from(ca_der.to_vec())),
         home_label: "test home".into(),
         endpoints: vec![],
         local_endpoints: None,
@@ -1001,6 +1001,103 @@ async fn setup_refuses_a_peer_claiming_another_journals_id_and_pairs_a_genuine_o
         serde_json::from_slice(&fs::read(app_config.join("credentials.json")).unwrap()).unwrap();
     assert_eq!(stored["instance_id"], genuine.jid());
     genuine.shutdown().await;
+}
+
+/// A stored pairing naming an id its own CA doesn't derive, with an answer on
+/// file that would otherwise let it send.
+fn write_mismatched_stored_pairing(
+    app_config: &std::path::Path,
+) -> (spl_transport::credential::Credential, String) {
+    let mut credential = generate_test_credential();
+    let ca_jid = credential.instance_id.clone();
+    credential.instance_id = "f30ed159-ef46-8e9c-913f-e49f0fe7d201".to_string();
+    let path = app_config.join("credentials.json");
+    fs::write(&path, serde_json::to_vec(&credential).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    (credential, ca_jid)
+}
+
+#[tokio::test]
+async fn stored_id_that_is_not_its_cas_is_held_and_asked_with_the_cas_mark() {
+    let bin = env!("CARGO_BIN_EXE_solstone-linux");
+    let temp = tempdir().unwrap();
+    let xdg_config = temp.path().join("config");
+    let xdg_data = temp.path().join("data");
+    let app_config = xdg_config.join("solstone-linux");
+    fs::create_dir_all(&app_config).unwrap();
+    fs::create_dir_all(xdg_data.join("solstone-linux")).unwrap();
+    let (stored, ca_jid) = write_mismatched_stored_pairing(&app_config);
+
+    // No answer file yet: an older pairing would be taken as confirmed. This one
+    // is held instead, and status says so without the app running.
+    let status = Command::new(bin)
+        .arg("status")
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .output()
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&status.stdout).into_owned();
+    assert!(text.contains("journal: your journal"), "{text}");
+
+    // Words from the id it stored are not the journal's mark.
+    let stored_spec = spl_core::mark::mark_from_jid(&stored.instance_id)
+        .unwrap()
+        .to_render_spec();
+    let stored_words = format!("{} {}", stored_spec.words[0], stored_spec.words[1]);
+    let ca_spec = spl_core::mark::mark_from_jid(&ca_jid)
+        .unwrap()
+        .to_render_spec();
+    let ca_words = format!("{} {}", ca_spec.words[0], ca_spec.words[1]);
+    assert_ne!(stored_words, ca_words);
+
+    // The mark asked about is the CA's, and yes keeps it under the CA's id.
+    let output = Command::new(bin)
+        .args(["confirm", "--mark", &ca_words])
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("SOLSTONE_LINUX_MARK_TTY", "/nonexistent")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let kept: serde_json::Value =
+        serde_json::from_slice(&fs::read(app_config.join("credentials.json")).unwrap()).unwrap();
+    assert_eq!(kept["instance_id"], ca_jid);
+    let answer: serde_json::Value =
+        serde_json::from_slice(&fs::read(app_config.join("pairing-answer.json")).unwrap()).unwrap();
+    assert!(!answer["confirmed"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stored_id_that_is_not_its_cas_refuses_words_from_the_stored_id() {
+    let bin = env!("CARGO_BIN_EXE_solstone-linux");
+    let temp = tempdir().unwrap();
+    let xdg_config = temp.path().join("config");
+    let xdg_data = temp.path().join("data");
+    let app_config = xdg_config.join("solstone-linux");
+    fs::create_dir_all(&app_config).unwrap();
+    fs::create_dir_all(xdg_data.join("solstone-linux")).unwrap();
+    let (stored, _) = write_mismatched_stored_pairing(&app_config);
+    let spec = spl_core::mark::mark_from_jid(&stored.instance_id)
+        .unwrap()
+        .to_render_spec();
+
+    let output = Command::new(bin)
+        .args([
+            "confirm",
+            "--mark",
+            &format!("{} {}", spec.words[0], spec.words[1]),
+        ])
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("SOLSTONE_LINUX_MARK_TTY", "/nonexistent")
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!app_config.join("credentials.json").exists());
 }
 
 #[tokio::test]
