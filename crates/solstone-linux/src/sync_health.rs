@@ -15,6 +15,26 @@ use std::{
 
 pub const SCHEMA_VERSION: u64 = 2;
 
+/// How long the app goes without hearing from the journal before it asks.
+pub const STATUS_CHECK_INTERVAL: f64 = 15.0;
+/// How long one answer from the journal keeps "connected" showing: a check interval, that
+/// check's own timeout, and a second of slack, so one slow or failed check never reads as a
+/// drop.
+pub const CONNECTED_LEASE: f64 =
+    STATUS_CHECK_INTERVAL + crate::private_link::SYSTEM_STATUS_TIMEOUT.as_secs_f64() + 1.0;
+/// How long the app tries to reach the journal before it says offline instead of connecting.
+pub const OFFLINE_AFTER: f64 = 30.0;
+/// A drop from connected shows for at least this long, so a quick reconnect is not a flash.
+pub const DOWN_DWELL: f64 = 1.0;
+/// After a wake or a returning network, how long the last shown state holds while a fresh
+/// check answers.
+pub const FRESH_CHECK_GRACE: f64 = 0.5;
+/// Once syncing shows, it stays this long after the queue drains.
+pub const SYNCING_LINGER: f64 = 1.5;
+/// The wall clock running ahead of the monotonic clock by more than this means the
+/// machine slept.
+const WAKE_GAP: f64 = 5.0;
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum ErrorType {
     Auth,
@@ -97,8 +117,12 @@ pub struct SyncFacts {
     pub last_error_class: Option<ErrorType>,
     pub last_error_code: Option<i64>,
     pub pending_confirmed: Option<i64>,
+    /// True only while something is being sent. A status check is not syncing.
     pub in_progress: bool,
     pub progress: String,
+    /// When the current attempt to reach the journal began: launch, wake, or the network
+    /// coming back. Offline counts from the later of this and the journal's last answer.
+    pub episode_started: Option<f64>,
     #[doc(hidden)]
     pub(crate) link: Option<LinkFactState>,
     #[doc(hidden)]
@@ -426,18 +450,33 @@ fn fill(template: &str, values: &HashMap<&str, String>) -> String {
 }
 
 pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncHealth {
+    health_for_state(derive_state(facts, now, stale_threshold), facts, now)
+}
+
+/// The one rule for what the connection status says, from facts alone. Connected needs the
+/// link up and an answer from the journal within the lease. Inside the lease a failed
+/// request changes nothing; a failed dial clears the carrier proof and shows at once.
+pub fn derive_state(facts: &SyncFacts, now: f64, stale_threshold: f64) -> HealthState {
     let link_missing = facts.link.is_none();
     let link = facts.link.clone().unwrap_or_default();
-    let stale = facts
-        .last_successful_contact
-        .is_some_and(|contact| now - contact > stale_threshold);
+    let contact = facts.last_successful_contact;
+    // A contact time ahead of the clock (the clock was set back) proves nothing.
+    let heard = contact.is_some_and(|contact| (0.0..=CONNECTED_LEASE).contains(&(now - contact)));
+    let unreached_since = match (contact, facts.episode_started) {
+        (Some(contact), Some(episode)) => Some(contact.max(episode)),
+        (contact, episode) => contact.or(episode),
+    };
+    // A configured stale threshold can only bring offline sooner.
+    let offline_after = OFFLINE_AFTER.min(stale_threshold);
+    let offline = unreached_since.is_some_and(|since| now - since >= offline_after);
     let terminal_auth =
         facts.last_error_class == Some(ErrorType::Auth) && facts.last_error_code != Some(401);
-    let connected = link.carrier_proven
+    // A refused credential is an answer, but not one that connects.
+    let link_up = link.carrier_proven
         && link.observer_registered
-        && facts.pending_confirmed == Some(0)
-        && !facts.in_progress;
-    let state = if link.private_state_invalid || link.config_sanitation_failed {
+        && facts.last_error_class != Some(ErrorType::Auth);
+    let waiting = facts.in_progress || facts.pending_confirmed != Some(0);
+    if link.private_state_invalid || link.config_sanitation_failed {
         HealthState::UnsafeLinkState
     } else if link.journal_mark_held {
         HealthState::JournalMarkHeld
@@ -451,19 +490,25 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
         HealthState::UpdateRequired
     } else if link.transport_unavailable {
         HealthState::TransportUnavailable
-    } else if facts.last_error_class == Some(ErrorType::Transient) || stale {
+    } else if link_up && heard {
+        if waiting {
+            HealthState::Syncing
+        } else {
+            HealthState::Connected
+        }
+    } else if offline {
         HealthState::Offline
     } else if link.listener_ready && !link.observer_registered {
         HealthState::ListenerReady
     } else if link_missing {
         HealthState::NotReported
-    } else if !link.observer_registered {
-        HealthState::Connecting
-    } else if connected {
-        HealthState::Connected
     } else {
-        HealthState::Syncing
-    };
+        HealthState::Connecting
+    }
+}
+
+pub(crate) fn health_for_state(state: HealthState, facts: &SyncFacts, now: f64) -> SyncHealth {
+    let link = facts.link.clone().unwrap_or_default();
     let surface = SURFACE_BY_STATE
         .get(&state)
         .expect("every health state must have a surface");
@@ -501,6 +546,86 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
     };
     apply_unknown_journal_overlay(&mut health, &link);
     health
+}
+
+/// What the live surfaces show (tray, panel, window and the D-Bus signal), from the derived
+/// state and how long things have been showing. A single reading can't know that.
+#[derive(Debug, Default)]
+pub(crate) struct Presenter {
+    shown: Option<Shown>,
+    syncing_seen: Option<f64>,
+    hold_until: Option<f64>,
+    last_clock: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Shown {
+    state: HealthState,
+    /// When the link last dropped from up, kept through connecting and offline.
+    dropped_at: Option<f64>,
+}
+
+fn is_up(state: HealthState) -> bool {
+    matches!(state, HealthState::Connected | HealthState::Syncing)
+}
+
+fn is_down(state: HealthState) -> bool {
+    matches!(state, HealthState::Connecting | HealthState::Offline)
+}
+
+impl Presenter {
+    /// Reports whether the machine slept since the last reading: the wall clock moved on
+    /// while the monotonic clock, which stops during suspend, did not.
+    pub(crate) fn woke(&mut self, wall: f64, mono: f64) -> bool {
+        let woke = self.last_clock.is_some_and(|(last_wall, last_mono)| {
+            (wall - last_wall) - (mono - last_mono) > WAKE_GAP
+        });
+        self.last_clock = Some((wall, mono));
+        woke
+    }
+
+    /// A fresh check is on its way: keep what is showing for a moment while it answers.
+    pub(crate) fn hold_for_fresh_check(&mut self, mono: f64) {
+        self.hold_until = Some(mono + FRESH_CHECK_GRACE);
+    }
+
+    /// `mono` is the monotonic clock; every hold and dwell here is measured on it.
+    pub(crate) fn present(&mut self, derived: HealthState, mono: f64) -> HealthState {
+        let mut state = derived;
+        if let Some(shown) = self.shown {
+            // A fresh check is answering: keep showing up for the grace.
+            let held = self.hold_until.is_some_and(|until| mono < until)
+                && is_up(shown.state)
+                && is_down(derived);
+            // A drop shows for at least the dwell before up returns.
+            let dwelling = is_up(derived)
+                && shown
+                    .dropped_at
+                    .is_some_and(|dropped| mono - dropped < DOWN_DWELL);
+            if held || dwelling {
+                state = shown.state;
+            }
+            if state == HealthState::Connected
+                && shown.state == HealthState::Syncing
+                && self
+                    .syncing_seen
+                    .is_some_and(|seen| mono - seen < SYNCING_LINGER)
+            {
+                state = HealthState::Syncing;
+            }
+        }
+        if derived == HealthState::Syncing {
+            self.syncing_seen = Some(mono);
+        }
+        let dropped_at = match self.shown {
+            _ if !is_down(state) => None,
+            Some(shown) if is_up(shown.state) => Some(mono),
+            Some(shown) => shown.dropped_at,
+            None => None,
+        };
+        self.shown = Some(Shown { state, dropped_at });
+        state
+    }
 }
 
 const UNKNOWN_JOURNAL_RESET_LINE: &str =
@@ -745,6 +870,7 @@ pub(crate) fn load_facts_with_liveness(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
+        episode_started: optional_float(&data, "episode_started"),
         link: load_link_facts(&data, liveness).unwrap_or(None),
         link_epoch: ProcessEpoch::parse(data.get("link_epoch").unwrap_or(&Value::Null)),
     }
@@ -804,6 +930,7 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
         "pending_confirmed": facts.pending_confirmed,
         "in_progress": facts.in_progress,
         "progress": facts.progress,
+        "episode_started": facts.episode_started,
         "link_epoch": facts.link_epoch.as_ref().map(ProcessEpoch::as_str),
         "link": link,
     }))
@@ -1054,6 +1181,7 @@ mod tests {
     #[test]
     fn connected_requires_carrier_and_registered_observer_facts() {
         let facts = SyncFacts {
+            last_successful_contact: Some(1000.0),
             pending_confirmed: Some(0),
             link: Some(LinkFactState {
                 listener_ready: true,
@@ -1075,7 +1203,6 @@ mod tests {
         for (error, expected) in [
             (ErrorType::Auth, HealthState::RePairRequired),
             (ErrorType::Incompatible, HealthState::UpdateRequired),
-            (ErrorType::Transient, HealthState::Offline),
         ] {
             let facts = SyncFacts {
                 last_error_class: Some(error),
@@ -1090,15 +1217,20 @@ mod tests {
         }
     }
 
-    // A 401 is its own state: not revoked, not connected, and not offline.
-    // The explicit 401 arm sits above Connected so persisted empty-queue facts cannot turn green.
+    // A 401 is its own state: not revoked and never connected, even on an empty queue with
+    // the link up. A transient failure inside the lease changes nothing.
     #[test]
-    fn auth_401_is_neither_revoked_nor_connected_nor_offline() {
+    fn auth_401_is_neither_revoked_nor_connected() {
         for pending_confirmed in [None, Some(0)] {
             let template = SyncFacts {
                 last_successful_contact: Some(990.0),
                 pending_confirmed,
                 in_progress: false,
+                link: Some(LinkFactState {
+                    carrier_proven: true,
+                    observer_registered: true,
+                    ..LinkFactState::default()
+                }),
                 ..SyncFacts::default()
             };
             let state_for = |error, code| {
@@ -1114,15 +1246,22 @@ mod tests {
                 .state
             };
             let unauthorized = state_for(ErrorType::Auth, Some(401));
-            let server_error = state_for(ErrorType::Transient, Some(500));
-            let timeout = state_for(ErrorType::Transient, None);
-            let forbidden = state_for(ErrorType::Auth, Some(403));
-
             assert_ne!(unauthorized, HealthState::RePairRequired);
-            assert_ne!(unauthorized, HealthState::Connected);
-            assert_ne!(unauthorized, server_error);
-            assert_ne!(unauthorized, timeout);
-            assert_eq!(forbidden, HealthState::RePairRequired);
+            assert!(!matches!(
+                unauthorized,
+                HealthState::Connected | HealthState::Syncing
+            ));
+            assert_eq!(
+                state_for(ErrorType::Auth, Some(403)),
+                HealthState::RePairRequired
+            );
+            let up = if pending_confirmed == Some(0) {
+                HealthState::Connected
+            } else {
+                HealthState::Syncing
+            };
+            assert_eq!(state_for(ErrorType::Transient, Some(500)), up);
+            assert_eq!(state_for(ErrorType::Transient, None), up);
         }
     }
 
@@ -1145,6 +1284,7 @@ mod tests {
     #[test]
     fn pending_confirmed_zero_and_link_evidence_gate_connected() {
         let connected = SyncFacts {
+            last_successful_contact: Some(1000.0),
             pending_confirmed: Some(0),
             link: Some(LinkFactState {
                 carrier_proven: true,
@@ -1176,6 +1316,7 @@ mod tests {
             last_successful_contact: Some(990.0),
             in_progress: true,
             link: Some(LinkFactState {
+                carrier_proven: true,
                 observer_registered: true,
                 ..Default::default()
             }),
@@ -1199,6 +1340,7 @@ mod tests {
             pending_confirmed: None,
             in_progress: true,
             progress: "uploading 120000_300".to_owned(),
+            episode_started: Some(150.0),
             link: None,
             link_epoch: None,
         };
@@ -1329,7 +1471,7 @@ mod tests {
             ),
             (
                 SyncFacts {
-                    last_error_class: Some(ErrorType::Transient),
+                    last_successful_contact: Some(0.0),
                     ..Default::default()
                 },
                 HealthState::Offline,
@@ -1353,6 +1495,18 @@ mod tests {
                     observer_registered: true,
                     ..Default::default()
                 }),
+                HealthState::Connecting,
+            ),
+            (
+                SyncFacts {
+                    last_successful_contact: Some(1_000.0),
+                    in_progress: true,
+                    ..link(LinkFactState {
+                        carrier_proven: true,
+                        observer_registered: true,
+                        ..Default::default()
+                    })
+                },
                 HealthState::Syncing,
             ),
         ];
@@ -1549,7 +1703,9 @@ mod tests {
         let facts = SyncFacts {
             in_progress: true,
             progress: "  ".to_owned(),
+            last_successful_contact: Some(1.0),
             link: Some(LinkFactState {
+                carrier_proven: true,
                 observer_registered: true,
                 ..Default::default()
             }),
@@ -1884,5 +2040,245 @@ mod tests {
         let expected_detail = "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.\nwhen you're ready, run: solstone-linux confirm";
         assert_eq!(health.cli, expected_detail);
         assert_eq!(health.doctor_detail, expected_detail);
+    }
+
+    /// Scripted traces for the connection-status rules. The wall clock and the monotonic
+    /// clock run together unless a trace sleeps the machine.
+    mod connection_status {
+        use super::*;
+
+        fn up(contact: f64) -> SyncFacts {
+            SyncFacts {
+                last_successful_contact: Some(contact),
+                pending_confirmed: Some(0),
+                episode_started: Some(0.0),
+                link: Some(LinkFactState {
+                    carrier_proven: true,
+                    observer_registered: true,
+                    ..LinkFactState::default()
+                }),
+                ..SyncFacts::default()
+            }
+        }
+
+        fn carrier(facts: &mut SyncFacts, proven: bool) {
+            facts.link.as_mut().unwrap().carrier_proven = proven;
+        }
+
+        #[derive(Default)]
+        struct Trace {
+            presenter: Presenter,
+        }
+
+        impl Trace {
+            fn at(&mut self, facts: &SyncFacts, t: f64) -> HealthState {
+                self.presenter.present(
+                    derive_state(facts, t, DEFAULT_SYNC_STALE_THRESHOLD as f64),
+                    t,
+                )
+            }
+        }
+
+        // I1
+        #[test]
+        fn a_failed_dial_shows_at_once() {
+            let mut trace = Trace::default();
+            let mut facts = up(100.0);
+            assert_eq!(trace.at(&facts, 100.5), HealthState::Connected);
+            carrier(&mut facts, false);
+            assert_eq!(trace.at(&facts, 101.0), HealthState::Connecting);
+        }
+
+        // I2
+        #[test]
+        fn connected_never_outlives_the_lease() {
+            let mut trace = Trace::default();
+            let facts = up(100.0);
+            let mut t = 100.0;
+            while t < 100.0 + 2.0 * CONNECTED_LEASE {
+                let shown = trace.at(&facts, t);
+                assert_eq!(
+                    shown == HealthState::Connected,
+                    t - 100.0 <= CONNECTED_LEASE,
+                    "at {t}"
+                );
+                t += 0.25;
+            }
+        }
+
+        // I3
+        #[test]
+        fn a_drop_shows_for_at_least_the_dwell() {
+            let mut trace = Trace::default();
+            let mut facts = up(200.0);
+            assert_eq!(trace.at(&facts, 200.0), HealthState::Connected);
+            carrier(&mut facts, false);
+            assert_eq!(trace.at(&facts, 200.1), HealthState::Connecting);
+            carrier(&mut facts, true);
+            facts.last_successful_contact = Some(200.2);
+            for t in [200.2, 200.5, 201.0] {
+                assert_eq!(trace.at(&facts, t), HealthState::Connecting, "at {t}");
+            }
+            assert_eq!(trace.at(&facts, 201.1), HealthState::Connected);
+        }
+
+        // I3, over a run of flaps sampled every 100 ms.
+        #[test]
+        fn no_dropped_state_is_shown_for_under_a_second() {
+            let mut trace = Trace::default();
+            let mut facts = up(0.0);
+            let mut shown = Vec::new();
+            for step in 0..400 {
+                let t = f64::from(step) * 0.1;
+                let proven = (step / 3) % 2 == 0;
+                carrier(&mut facts, proven);
+                if proven {
+                    facts.last_successful_contact = Some(t);
+                }
+                shown.push((t, trace.at(&facts, t)));
+            }
+            let mut down_since = None;
+            for (t, state) in shown {
+                match (state, down_since) {
+                    (HealthState::Connecting, None) => down_since = Some(t),
+                    (HealthState::Connected, Some(since)) => {
+                        assert!(t - since >= DOWN_DWELL - 1e-9, "down {since}..{t}");
+                        down_since = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // I3, when the drop passes from connecting to offline inside the dwell.
+        #[test]
+        fn the_dwell_holds_across_connecting_to_offline() {
+            let mut trace = Trace::default();
+            let mut facts = up(0.0);
+            assert_eq!(trace.at(&facts, 29.5), HealthState::Connected);
+            carrier(&mut facts, false);
+            assert_eq!(trace.at(&facts, 29.6), HealthState::Connecting);
+            assert_eq!(trace.at(&facts, 30.0), HealthState::Offline);
+            carrier(&mut facts, true);
+            facts.last_successful_contact = Some(30.1);
+            assert_eq!(trace.at(&facts, 30.1), HealthState::Offline);
+            assert_eq!(trace.at(&facts, 30.6), HealthState::Connected);
+        }
+
+        // I4
+        #[test]
+        fn one_failed_check_inside_the_lease_changes_nothing() {
+            let mut trace = Trace::default();
+            let mut facts = up(300.0);
+            assert_eq!(trace.at(&facts, 300.0), HealthState::Connected);
+            facts.last_error_class = Some(ErrorType::Transient);
+            let mut t = 315.0;
+            while t <= 300.0 + CONNECTED_LEASE {
+                assert_eq!(trace.at(&facts, t), HealthState::Connected, "at {t}");
+                t += 0.5;
+            }
+        }
+
+        // I5
+        #[test]
+        fn syncing_lingers_after_the_queue_drains() {
+            let mut trace = Trace::default();
+            let mut facts = up(10.0);
+            facts.in_progress = true;
+            assert_eq!(trace.at(&facts, 10.0), HealthState::Syncing);
+            facts.in_progress = false;
+            for t in [10.1, 11.0, 11.4] {
+                assert_eq!(trace.at(&facts, t), HealthState::Syncing, "at {t}");
+            }
+            assert_eq!(trace.at(&facts, 11.5), HealthState::Connected);
+        }
+
+        // I6
+        #[test]
+        fn a_fresh_launch_never_shows_connected_before_evidence() {
+            let mut trace = Trace::default();
+            // What the previous run left: a recent answer and an empty queue. This run has
+            // proven nothing yet.
+            let mut facts = SyncFacts {
+                last_successful_contact: Some(999.0),
+                pending_confirmed: Some(0),
+                episode_started: Some(1000.0),
+                link: Some(LinkFactState::default()),
+                ..SyncFacts::default()
+            };
+            for t in [1000.0, 1010.0, 1029.0] {
+                assert_eq!(trace.at(&facts, t), HealthState::Connecting, "at {t}");
+            }
+            assert_eq!(trace.at(&facts, 1030.0), HealthState::Offline);
+            facts.link = Some(LinkFactState {
+                observer_registered: true,
+                ..LinkFactState::default()
+            });
+            assert_eq!(trace.at(&facts, 1031.0), HealthState::Offline);
+            carrier(&mut facts, true);
+            facts.last_successful_contact = Some(1032.0);
+            assert_eq!(trace.at(&facts, 1032.0), HealthState::Connected);
+        }
+
+        #[test]
+        fn offline_waits_for_thirty_seconds_unreached_and_a_new_attempt_restarts_it() {
+            let mut trace = Trace::default();
+            let mut facts = up(0.0);
+            carrier(&mut facts, false);
+            assert_eq!(trace.at(&facts, 29.0), HealthState::Connecting);
+            assert_eq!(trace.at(&facts, OFFLINE_AFTER), HealthState::Offline);
+            facts.episode_started = Some(100.0);
+            assert_eq!(trace.at(&facts, 100.0), HealthState::Connecting);
+            assert_eq!(trace.at(&facts, 130.0), HealthState::Offline);
+        }
+
+        #[test]
+        fn a_status_check_alone_is_not_syncing() {
+            let mut trace = Trace::default();
+            let mut facts = up(50.0);
+            facts.progress = "checking journal...".to_owned();
+            assert_eq!(trace.at(&facts, 50.0), HealthState::Connected);
+            facts.pending_confirmed = Some(2);
+            assert_eq!(trace.at(&facts, 51.0), HealthState::Syncing);
+        }
+
+        #[test]
+        fn a_wake_holds_connected_briefly_while_a_fresh_check_answers() {
+            let mut presenter = Presenter::default();
+            let mut facts = up(500.0);
+            let stale = DEFAULT_SYNC_STALE_THRESHOLD as f64;
+            assert!(!presenter.woke(500.0, 500.0));
+            assert_eq!(
+                presenter.present(derive_state(&facts, 500.0, stale), 500.0),
+                HealthState::Connected
+            );
+            // An hour asleep: the monotonic clock barely moved.
+            assert!(presenter.woke(4100.0, 501.0));
+            presenter.hold_for_fresh_check(501.0);
+            facts.episode_started = Some(4100.0);
+            assert_eq!(
+                presenter.present(derive_state(&facts, 4100.0, stale), 501.0),
+                HealthState::Connected
+            );
+            // The check answers inside the grace: no blink.
+            facts.last_successful_contact = Some(4100.3);
+            assert_eq!(
+                presenter.present(derive_state(&facts, 4100.3, stale), 501.3),
+                HealthState::Connected
+            );
+
+            // When it does not answer, the truth shows once the grace ends.
+            assert!(presenter.woke(9000.0, 502.0));
+            presenter.hold_for_fresh_check(502.0);
+            facts.episode_started = Some(9000.0);
+            assert_eq!(
+                presenter.present(derive_state(&facts, 9000.0, stale), 502.0),
+                HealthState::Connected
+            );
+            assert_eq!(
+                presenter.present(derive_state(&facts, 9000.5, stale), 502.5),
+                HealthState::Connecting
+            );
+        }
     }
 }

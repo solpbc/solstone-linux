@@ -2318,6 +2318,7 @@ mod tests {
             &config.state_dir(),
             &SyncFacts {
                 last_error_class: Some(ErrorType::Transient),
+                last_successful_contact: Some(1.0),
                 ..Default::default()
             },
         )

@@ -340,7 +340,9 @@ mod tests {
             &crate::sync_health::SyncFacts {
                 in_progress: true,
                 progress: "30s until probe".into(),
+                last_successful_contact: Some(0.0),
                 link: Some(crate::private_link::LinkFactState {
+                    carrier_proven: true,
                     observer_registered: true,
                     ..Default::default()
                 }),

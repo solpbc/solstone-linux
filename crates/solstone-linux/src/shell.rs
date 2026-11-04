@@ -684,13 +684,11 @@ mod tests {
 
     fn sampler(facts: Arc<Mutex<SyncFacts>>) -> SyncSampler {
         let link_facts = crate::private_link::LinkFacts::default();
-        if facts
-            .lock()
-            .unwrap()
-            .link
-            .as_ref()
-            .is_some_and(|state| state.observer_registered)
-        {
+        let link = facts.lock().unwrap().link.clone().unwrap_or_default();
+        if link.carrier_proven {
+            link_facts.publish(crate::private_link::LinkFact::CarrierProven);
+        }
+        if link.observer_registered {
             link_facts.publish(crate::private_link::LinkFact::ObserverRegistered);
         }
         SyncSampler {
@@ -699,6 +697,8 @@ mod tests {
             stale_threshold: 600.0,
             poison_reports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             link_facts,
+            presenter: Arc::default(),
+            fresh_check: Default::default(),
         }
     }
 
@@ -774,7 +774,9 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         facts.lock().unwrap().in_progress = true;
         facts.lock().unwrap().progress = "2/4".into();
+        facts.lock().unwrap().last_successful_contact = Some(0.0);
         facts.lock().unwrap().link = Some(crate::private_link::LinkFactState {
+            carrier_proven: true,
             observer_registered: true,
             ..Default::default()
         });

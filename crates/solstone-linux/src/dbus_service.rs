@@ -640,7 +640,9 @@ mod tests {
             &crate::sync_health::SyncFacts {
                 in_progress: true,
                 progress: "uploading 120000_300".into(),
+                last_successful_contact: Some(0.0),
                 link: Some(crate::private_link::LinkFactState {
+                    carrier_proven: true,
                     observer_registered: true,
                     ..Default::default()
                 }),

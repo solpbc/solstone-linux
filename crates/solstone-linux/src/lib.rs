@@ -28,6 +28,7 @@ pub mod encoding;
 mod journal_mark;
 mod mark_cache;
 pub mod matching;
+mod network_watch;
 pub mod observer;
 pub mod panel_icon;
 pub mod pause_hold;

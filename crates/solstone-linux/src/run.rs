@@ -338,6 +338,7 @@ fn run_capture(
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
     sync.trigger();
+    runtime.spawn(crate::network_watch::watch(sync.new_episode_handle()));
     // Read before anything subscribes to state: the browser host and the panel
     // must see a held pause from the first snapshot, not after initialization.
     let starting_pause = crate::pause_hold::StartingPause::read(

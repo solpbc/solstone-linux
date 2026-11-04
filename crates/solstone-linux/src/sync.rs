@@ -24,7 +24,8 @@ use crate::{
     observer::Clock,
     private_link::{LinkFactState, LinkFacts},
     sync_health::{
-        ErrorType, ProcessEpoch, SyncFacts, SyncHealth, derive_health, load_facts, save_facts,
+        ErrorType, Presenter, ProcessEpoch, STATUS_CHECK_INTERVAL, SyncFacts, SyncHealth,
+        derive_state, health_for_state, load_facts, save_facts,
     },
     upload::{CapturedAssociation, FileDescriptor, ListingEntry, ListingFile, UploadClient},
 };
@@ -35,6 +36,10 @@ pub const CIRCUIT_COOLDOWN_INITIAL: f64 = 30.0;
 pub const CIRCUIT_COOLDOWN_FACTOR: f64 = 2.0;
 pub const CIRCUIT_COOLDOWN_MAX: f64 = 300.0;
 pub const CONTACT_FLUSH_INTERVAL: f64 = 30.0;
+/// A reconciliation pass runs this often when nothing triggers one sooner.
+const PASS_INTERVAL: f64 = 60.0;
+/// The shortest sleep between worker turns, so no state can make the loop spin.
+const MIN_WAKE: f64 = 0.5;
 pub const METADATA_FILENAME: &str = ".metadata";
 pub const SERVER_KEY_FILENAME: &str = ".server_key";
 pub const INGEST_ACK_FILENAME: &str = ".ingest_ack.json";
@@ -162,8 +167,10 @@ impl LinkFactPersistence {
 pub struct SyncService {
     notify: Arc<Notify>,
     pending_trigger: Arc<AtomicBool>,
+    check_requested: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     facts: Arc<Mutex<SyncFacts>>,
+    presenter: Arc<Mutex<Presenter>>,
     stale_threshold: f64,
     clock: Arc<dyn Clock + Send + Sync>,
     link_facts: LinkFacts,
@@ -184,14 +191,16 @@ pub struct SyncSampler {
     pub(crate) stale_threshold: f64,
     pub(crate) poison_reports: Arc<AtomicUsize>,
     pub(crate) link_facts: LinkFacts,
+    pub(crate) presenter: Arc<Mutex<Presenter>>,
+    pub(crate) fresh_check: FreshCheck,
 }
 
 impl SyncSampler {
-    fn with_facts<R>(&self, read: impl FnOnce(&SyncFacts) -> R) -> R {
+    fn with_facts<R>(&self, read: impl FnOnce(&mut SyncFacts) -> R) -> R {
         match self.facts.lock() {
             Ok(mut facts) => {
                 facts.link = Some(self.link_facts.snapshot());
-                read(&facts)
+                read(&mut facts)
             }
             Err(error) => {
                 if self
@@ -203,18 +212,36 @@ impl SyncSampler {
                 }
                 let mut facts = error.into_inner();
                 facts.link = Some(self.link_facts.snapshot());
-                read(&facts)
+                read(&mut facts)
             }
         }
     }
 
+    /// The presented status every live surface reads. A wake found here starts a new
+    /// attempt and asks the journal at once.
     pub fn sample(&self) -> (SyncHealth, String) {
-        self.with_facts(|facts| {
-            (
-                derive_health(facts, self.clock.wall_seconds(), self.stale_threshold),
-                facts.progress.clone(),
-            )
-        })
+        let wall = self.clock.wall_seconds();
+        let mono = self.clock.monotonic_seconds();
+        let mut presenter = self
+            .presenter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let woke = presenter.woke(wall, mono);
+        if woke {
+            presenter.hold_for_fresh_check(mono);
+        }
+        let sample = self.with_facts(|facts| {
+            if woke {
+                facts.episode_started = Some(wall);
+            }
+            let state = presenter.present(derive_state(facts, wall, self.stale_threshold), mono);
+            (health_for_state(state, facts, wall), facts.progress.clone())
+        });
+        drop(presenter);
+        if woke {
+            self.fresh_check.request();
+        }
+        sample
     }
 
     pub fn health(&self) -> SyncHealth {
@@ -230,10 +257,50 @@ impl SyncSampler {
     }
 }
 
+/// Asks the sync worker for a status check now, ahead of its cadence and past any
+/// cooldown: the machine woke, or the network came back.
+#[derive(Clone, Default)]
+pub(crate) struct FreshCheck {
+    notify: Arc<Notify>,
+    requested: Arc<AtomicBool>,
+}
+
+impl FreshCheck {
+    pub(crate) fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+}
+
+/// Starts a new attempt to reach the journal from outside the sampler, as when the network
+/// comes back.
+#[derive(Clone)]
+pub(crate) struct NewEpisode {
+    facts: Arc<Mutex<SyncFacts>>,
+    presenter: Arc<Mutex<Presenter>>,
+    clock: Arc<dyn Clock + Send + Sync>,
+    fresh_check: FreshCheck,
+}
+
+impl NewEpisode {
+    pub(crate) fn begin(&self) {
+        self.presenter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .hold_for_fresh_check(self.clock.monotonic_seconds());
+        self.facts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .episode_started = Some(self.clock.wall_seconds());
+        self.fresh_check.request();
+    }
+}
+
 #[derive(Clone)]
 struct SyncControl {
     notify: Arc<Notify>,
     pending_trigger: Arc<AtomicBool>,
+    check_requested: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     circuit_open_permanent: Arc<AtomicBool>,
     circuit_unblock_requested: Arc<AtomicBool>,
@@ -243,6 +310,7 @@ impl SyncControl {
     pub(crate) fn new(
         notify: Arc<Notify>,
         pending_trigger: Arc<AtomicBool>,
+        check_requested: Arc<AtomicBool>,
         running: Arc<AtomicBool>,
         circuit_open_permanent: Arc<AtomicBool>,
         circuit_unblock_requested: Arc<AtomicBool>,
@@ -250,6 +318,7 @@ impl SyncControl {
         Self {
             notify,
             pending_trigger,
+            check_requested,
             running,
             circuit_open_permanent,
             circuit_unblock_requested,
@@ -267,6 +336,7 @@ impl SyncControl {
         Self {
             notify,
             pending_trigger,
+            check_requested: Arc::new(AtomicBool::new(false)),
             running,
             circuit_open_permanent: Arc::new(AtomicBool::new(false)),
             circuit_unblock_requested: Arc::new(AtomicBool::new(false)),
@@ -303,6 +373,7 @@ impl SyncService {
     ) -> Self {
         let notify = Arc::new(Notify::new());
         let pending_trigger = Arc::new(AtomicBool::new(false));
+        let check_requested = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
         let shared_circuit_open_permanent = Arc::new(AtomicBool::new(false));
         let circuit_unblock_requested = Arc::new(AtomicBool::new(false));
@@ -310,6 +381,7 @@ impl SyncService {
         let mut facts = load_facts(&config.state_dir());
         facts.in_progress = false;
         facts.progress.clear();
+        facts.episode_started = Some(clock.wall_seconds());
         facts.link = Some(link_facts.snapshot());
         facts.link_epoch = process_epoch;
         let facts = Arc::new(Mutex::new(facts));
@@ -346,6 +418,7 @@ impl SyncService {
             SyncControl::new(
                 Arc::clone(&notify),
                 Arc::clone(&pending_trigger),
+                Arc::clone(&check_requested),
                 Arc::clone(&running),
                 Arc::clone(&shared_circuit_open_permanent),
                 Arc::clone(&circuit_unblock_requested),
@@ -359,8 +432,10 @@ impl SyncService {
         Self {
             notify,
             pending_trigger,
+            check_requested,
             running,
             facts,
+            presenter: Arc::new(Mutex::new(Presenter::default())),
             stale_threshold: config.sync_stale_threshold as f64,
             clock,
             link_facts,
@@ -386,8 +461,26 @@ impl SyncService {
         }
     }
 
+    fn fresh_check(&self) -> FreshCheck {
+        FreshCheck {
+            notify: Arc::clone(&self.notify),
+            requested: Arc::clone(&self.check_requested),
+        }
+    }
+
+    pub(crate) fn new_episode_handle(&self) -> NewEpisode {
+        NewEpisode {
+            facts: Arc::clone(&self.facts),
+            presenter: Arc::clone(&self.presenter),
+            clock: Arc::clone(&self.clock),
+            fresh_check: self.fresh_check(),
+        }
+    }
+
     pub(crate) fn reset_handle(&self) -> SyncResetHandle {
         SyncResetHandle {
+            presenter: Arc::clone(&self.presenter),
+            fresh_check: self.fresh_check(),
             facts: Arc::clone(&self.facts),
             link_facts: self.link_facts.clone(),
             state_dir: self.state_dir.clone(),
@@ -405,6 +498,8 @@ impl SyncService {
             stale_threshold: self.stale_threshold,
             poison_reports: Arc::new(AtomicUsize::new(0)),
             link_facts: self.link_facts.clone(),
+            presenter: Arc::clone(&self.presenter),
+            fresh_check: self.fresh_check(),
         }
     }
 
@@ -440,6 +535,8 @@ impl SyncService {
 
 #[derive(Clone)]
 pub(crate) struct SyncResetHandle {
+    presenter: Arc<Mutex<Presenter>>,
+    fresh_check: FreshCheck,
     clock: Arc<dyn Clock + Send + Sync>,
     stale_threshold: f64,
     facts: Arc<Mutex<SyncFacts>>,
@@ -457,6 +554,8 @@ impl SyncResetHandle {
             stale_threshold: self.stale_threshold,
             poison_reports: Arc::new(AtomicUsize::new(0)),
             link_facts: self.link_facts.clone(),
+            presenter: self.presenter.clone(),
+            fresh_check: self.fresh_check.clone(),
         }
     }
 
@@ -476,6 +575,7 @@ impl SyncResetHandle {
             facts.pending_confirmed = None;
             facts.in_progress = false;
             facts.progress.clear();
+            facts.episode_started = Some(self.clock.wall_seconds());
             if let Err(error) = crate::sync_health::save_facts(&self.state_dir, &facts) {
                 tracing::warn!(%error, "Failed to persist cleared sync facts during association reset");
             }
@@ -489,6 +589,8 @@ impl SyncResetHandle {
         state_dir: PathBuf,
     ) -> Self {
         Self {
+            presenter: Arc::default(),
+            fresh_check: FreshCheck::default(),
             clock: Arc::new(crate::run::SystemClock::new()),
             stale_threshold: 600.0,
             facts,
@@ -529,11 +631,15 @@ struct SyncWorker {
     clock: Arc<dyn Clock + Send + Sync>,
     notify: Arc<Notify>,
     pending_trigger: Arc<AtomicBool>,
+    check_requested: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     shared_circuit_open_permanent: Arc<AtomicBool>,
     circuit_unblock_requested: Arc<AtomicBool>,
     facts: Arc<Mutex<SyncFacts>>,
     recent_error_count: Arc<AtomicU8>,
+    last_pass: f64,
+    last_check: f64,
+    started: f64,
     browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
     link_facts: LinkFacts,
     association: CapturedAssociation,
@@ -577,17 +683,22 @@ impl SyncWorker {
     ) -> Self {
         let link_facts = client.link_facts();
         let association = client.capture_association();
+        let (last_pass, started) = (clock.monotonic_seconds(), clock.wall_seconds());
         Self {
             config,
             client,
             clock,
             notify: control.notify,
             pending_trigger: control.pending_trigger,
+            check_requested: control.check_requested,
             running: control.running,
             shared_circuit_open_permanent: control.circuit_open_permanent,
             circuit_unblock_requested: control.circuit_unblock_requested,
             facts,
             recent_error_count,
+            last_pass,
+            last_check: f64::NEG_INFINITY,
+            started,
             browser_custody,
             link_facts,
             association,
@@ -609,8 +720,11 @@ impl SyncWorker {
     async fn run(&mut self) {
         ensure_cutover(&self.config.state_dir(), &self.config.captures_dir());
         loop {
-            let _ = tokio::time::timeout(Duration::from_secs(60), self.notify.notified()).await;
+            let notified = tokio::time::timeout(self.next_wake(), self.notify.notified())
+                .await
+                .is_ok();
             let completion_pending = self.pending_trigger.swap(false, Ordering::AcqRel);
+            let fresh_check = self.check_requested.swap(false, Ordering::AcqRel);
             self.refresh_association();
             if self.circuit_unblock_requested.swap(false, Ordering::AcqRel) {
                 self.circuit_open_permanent = false;
@@ -645,13 +759,27 @@ impl SyncWorker {
                 }
                 continue;
             }
-            if self.circuit_open && !self.try_probe().await {
+            let probed = self.circuit_open;
+            if self.circuit_open && !self.try_probe(fresh_check).await {
                 self.finish_confirmed_locally();
+                continue;
+            }
+            // A wake from anything but a fresh-check request asks for a pass, as does the
+            // pass cadence; otherwise the wake is only for a status check.
+            let pass_due = probed
+                || completion_pending
+                || (notified && !fresh_check)
+                || self.clock.monotonic_seconds() - self.last_pass >= PASS_INTERVAL;
+            if !pass_due {
+                if fresh_check || self.check_due() {
+                    self.check_journal().await;
+                }
                 continue;
             }
             if completion_pending {
                 self.draining_shutdown = true;
             }
+            self.last_pass = self.clock.monotonic_seconds();
             let pass_res = self.execute_pass().await;
             self.draining_shutdown = false;
             if let Err(error) = pass_res {
@@ -663,6 +791,80 @@ impl SyncWorker {
 
     fn association_is_current(&self) -> bool {
         self.client.association_is_current(&self.association)
+    }
+
+    /// Seconds since the journal last answered; unbounded when it never has, or when the
+    /// recorded answer is ahead of the clock.
+    fn since_heard(&self) -> f64 {
+        let contact = self.facts.lock().unwrap().last_successful_contact;
+        match contact.map(|contact| self.clock.wall_seconds() - contact) {
+            Some(age) if age >= 0.0 => age,
+            _ => f64::INFINITY,
+        }
+    }
+
+    fn since_checked(&self) -> f64 {
+        self.clock.monotonic_seconds() - self.last_check
+    }
+
+    /// Nothing has been heard from the journal, and nothing asked of it, for a check
+    /// interval. An unanswered check waits out a full interval before the next.
+    fn check_due(&self) -> bool {
+        self.since_heard() >= STATUS_CHECK_INTERVAL && self.since_checked() >= STATUS_CHECK_INTERVAL
+    }
+
+    /// Sleep until the next pass or the next status check, whichever comes first. With the
+    /// circuit open, the probe's cooldown takes the status check's place.
+    /// A worker that has heard nothing yet counts from its own start, so starting up never
+    /// sends a request by itself: the startup trigger's pass makes the first one.
+    fn next_wake(&self) -> Duration {
+        let until_pass = PASS_INTERVAL - (self.clock.monotonic_seconds() - self.last_pass);
+        let until_check = if self.circuit_open_permanent {
+            PASS_INTERVAL
+        } else if self.circuit_open {
+            self.circuit_cooldown - (self.clock.monotonic_seconds() - self.circuit_open_since)
+        } else {
+            let quiet_for = self
+                .since_heard()
+                .min(self.clock.wall_seconds() - self.started)
+                .min(self.since_checked());
+            STATUS_CHECK_INTERVAL - quiet_for
+        };
+        Duration::from_secs_f64(until_pass.min(until_check).clamp(MIN_WAKE, PASS_INTERVAL))
+    }
+
+    /// Asks the journal whether it is there. An answer is heard evidence. A transient failure
+    /// only counts toward the circuit: the connection status leaves it to the lease, or to the
+    /// link facts when the dial itself failed. A refusal shows at once.
+    async fn check_journal(&mut self) -> Option<ErrorType> {
+        let capability = self.client.capability()?;
+        self.last_check = self.clock.monotonic_seconds();
+        let outcome = capability.system_status().await;
+        if !self.association_is_current() {
+            return None;
+        }
+        match outcome {
+            Ok(_) => {
+                self.reset_failures();
+                self.record_contact(true);
+                None
+            }
+            Err(outcome) => {
+                let err = UploadClient::classify_error(
+                    outcome.status_code(),
+                    outcome.is_transport_unavailable(),
+                );
+                let code = outcome.status_code().map(i64::from);
+                if err == ErrorType::Transient {
+                    self.last_error_type = Some(err);
+                    self.last_error_code = code;
+                    self.count_failure(err);
+                } else {
+                    self.record_failure(Some(err), code);
+                }
+                Some(err)
+            }
+        }
     }
 
     fn refresh_association(&mut self) {
@@ -757,7 +959,7 @@ impl SyncWorker {
         false
     }
 
-    async fn try_probe(&mut self) -> bool {
+    async fn try_probe(&mut self, fresh: bool) -> bool {
         self.refresh_association();
         if self.circuit_unblock_requested.swap(false, Ordering::AcqRel) {
             self.circuit_open_permanent = false;
@@ -769,14 +971,14 @@ impl SyncWorker {
             return false;
         }
         let elapsed = self.clock.monotonic_seconds() - self.circuit_open_since;
-        if elapsed < self.circuit_cooldown {
+        if !fresh && elapsed < self.circuit_cooldown {
             self.set_progress(
                 format!("{:.0}s until probe", self.circuit_cooldown - elapsed),
                 false,
             );
             return false;
         }
-        self.set_progress("probing journal...".to_owned(), true);
+        self.set_progress("probing journal...".to_owned(), false);
         let outcome = if let Some(capability) = self.client.capability() {
             capability.system_status().await
         } else {
@@ -805,7 +1007,7 @@ impl SyncWorker {
                 self.last_error_type = None;
                 self.last_error_code = None;
                 drop(facts);
-                self.set_progress("syncing...".to_owned(), true);
+                self.set_progress("syncing...".to_owned(), false);
                 true
             }
             Err(outcome) => {
@@ -839,13 +1041,12 @@ impl SyncWorker {
         let mut days: Vec<String> = segments_by_day.keys().cloned().collect();
         days.sort_by(|a, b| b.cmp(a));
 
-        self.set_progress("checking journal...".to_owned(), true);
+        self.set_progress("checking journal...".to_owned(), false);
         let mut pass_stopped = false;
         let mut pass_error_type = None;
         let mut pass_error_code = None;
         let mut pass_bounded_error_class = None;
         let mut pass_bounded_error_code = None;
-        let mut requests_made = 0;
         let mut uploaded_in_phase1 = HashSet::new();
 
         // Phase 1: Direct non-legacy uploads for due segments
@@ -905,7 +1106,6 @@ impl SyncWorker {
                 }
                 let segment_key = segment_dir.file_name().unwrap().to_string_lossy();
                 self.set_progress(format!("uploading {segment_key}"), true);
-                requests_made += 1;
                 match self.upload_segment(day, segment_dir).await {
                     UploadOutcome::Acked => {
                         uploaded_in_phase1.insert(segment_dir.to_path_buf());
@@ -1006,7 +1206,6 @@ impl SyncWorker {
                     break;
                 }
                 self.set_progress(format!("checking {day}..."), true);
-                requests_made += 1;
                 let custody = self.client.fetch_source_day_custody(&day, source).await;
                 if !self.association_is_current() {
                     return;
@@ -1048,7 +1247,6 @@ impl SyncWorker {
                                             != current_pairing.as_deref().unwrap_or_default()
                                 });
                                 if is_legacy || is_mismatch {
-                                    requests_made += 1;
                                     match self.upload_segment(&day, segment_dir).await {
                                         UploadOutcome::Acked => {}
                                         UploadOutcome::Bounded => {
@@ -1195,7 +1393,6 @@ impl SyncWorker {
                         }
 
                         if should_upload {
-                            requests_made += 1;
                             match self.upload_segment(&day, segment_dir).await {
                                 UploadOutcome::Acked => {}
                                 UploadOutcome::Bounded => {
@@ -1226,44 +1423,18 @@ impl SyncWorker {
             }
         }
 
-        // Phase 3: Idle system_status probe if 0 requests made and contact older than threshold/2
-        if requests_made == 0 && !pass_stopped && !self.circuit_open && self.is_active() {
-            let last_contact = self
-                .facts
-                .lock()
-                .unwrap()
-                .last_successful_contact
-                .unwrap_or(0.0);
-            let stale_interval = (self.config.sync_stale_threshold as f64 / 2.0).min(300.0);
-            if now - last_contact >= stale_interval
-                && let Some(capability) = self.client.capability()
-            {
-                let outcome = capability.system_status().await;
-                if !self.association_is_current() {
-                    return;
-                }
-                match outcome {
-                    Ok(_) => {
-                        self.record_contact(true);
-                    }
-                    Err(outcome) => {
-                        let err = UploadClient::classify_error(
-                            outcome.status_code(),
-                            outcome.is_transport_unavailable(),
-                        );
-                        let code = outcome.status_code().map(i64::from);
-                        self.record_failure(Some(err), code);
-                        // The probe is this pass's only word from the journal, so the pass
-                        // result carries it; a clean commit would erase it at once.
-                        if err == ErrorType::Transient
-                            || (err == ErrorType::Client
-                                && pass_bounded_error_class != Some(ErrorType::Transient))
-                        {
-                            pass_bounded_error_class = Some(err);
-                            pass_bounded_error_code = code;
-                        }
-                    }
-                }
+        // Phase 3: a status check when nothing was heard from the journal for a check interval.
+        // A listing that went unanswered still leaves one due; a failed send has already been
+        // counted.
+        if !pass_stopped
+            && pass_bounded_error_class.is_none()
+            && !self.circuit_open
+            && self.is_active()
+            && self.check_due()
+        {
+            self.check_journal().await;
+            if !self.association_is_current() {
+                return;
             }
         }
 
@@ -1332,14 +1503,13 @@ impl SyncWorker {
         let key = segment_dir.file_name().unwrap().to_string_lossy();
         let zone = crate::recovery::read_capture_zone(segment_dir);
         let result = self
-            .client
-            .upload_source_segment(
+            .keep_hearing(self.client.upload_source_segment(
                 day,
                 &key,
                 &files,
                 zone.as_ref(),
                 segment_source(segment_dir),
-            )
+            ))
             .await;
         if result.stale_capability || !self.association_is_current() {
             return UploadOutcome::Stale;
@@ -1675,6 +1845,37 @@ impl SyncWorker {
         }
     }
 
+    /// Runs a long send while still checking on the journal, so a large upload is never
+    /// mistaken for a silent journal. Only answers are recorded here; the send's own
+    /// outcome carries any failure.
+    async fn keep_hearing<F: std::future::Future>(&self, work: F) -> F::Output {
+        tokio::pin!(work);
+        let interval = Duration::from_secs_f64(STATUS_CHECK_INTERVAL);
+        loop {
+            tokio::select! {
+                output = &mut work => return output,
+                () = tokio::time::sleep(interval) => {}
+            }
+            let Some(capability) = self.client.capability() else {
+                return work.await;
+            };
+            let check = capability.system_status();
+            tokio::pin!(check);
+            let answered = tokio::select! {
+                output = &mut work => return output,
+                outcome = &mut check => outcome.is_ok(),
+            };
+            if answered {
+                let mut facts = self.facts.lock().unwrap();
+                if self.association_is_current() {
+                    facts.last_successful_contact = Some(self.clock.wall_seconds());
+                }
+                drop(facts);
+                self.save_health();
+            }
+        }
+    }
+
     fn record_contact(&mut self, force: bool) {
         {
             let mut facts = self.facts.lock().unwrap();
@@ -1701,24 +1902,29 @@ impl SyncWorker {
         facts.last_error_class = Some(error_type);
         facts.last_error_code = status_code;
         facts.pending_confirmed = None;
-        if error_type != ErrorType::Client {
-            self.consecutive_failures += 1;
-            self.recent_error_count
-                .store(self.consecutive_failures.min(99) as u8, Ordering::Release);
-            if self.consecutive_failures >= self.circuit_threshold() {
-                self.circuit_open = true;
-                let is_perm = error_type == ErrorType::Auth && self.client.is_revoked();
-                self.circuit_open_permanent = is_perm;
-                if is_perm {
-                    self.shared_circuit_open_permanent
-                        .store(true, Ordering::Release);
-                }
-                self.circuit_open_since = self.clock.monotonic_seconds();
-                self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
-            }
-        }
         drop(facts);
+        self.count_failure(error_type);
         self.save_health();
+    }
+
+    fn count_failure(&mut self, error_type: ErrorType) {
+        if error_type == ErrorType::Client {
+            return;
+        }
+        self.consecutive_failures += 1;
+        self.recent_error_count
+            .store(self.consecutive_failures.min(99) as u8, Ordering::Release);
+        if self.consecutive_failures >= self.circuit_threshold() {
+            self.circuit_open = true;
+            let is_perm = error_type == ErrorType::Auth && self.client.is_revoked();
+            self.circuit_open_permanent = is_perm;
+            if is_perm {
+                self.shared_circuit_open_permanent
+                    .store(true, Ordering::Release);
+            }
+            self.circuit_open_since = self.clock.monotonic_seconds();
+            self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
+        }
     }
 
     fn reset_failures(&mut self) {
@@ -2469,6 +2675,7 @@ fn remove_if_empty(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_health::derive_health;
 
     use crate::segment::timestamp_parts;
     use crate::{
@@ -2505,6 +2712,7 @@ mod tests {
         let facts = Arc::new(Mutex::new(SyncFacts {
             in_progress: true,
             progress: "1/2".into(),
+            last_successful_contact: Some(0.0),
             ..Default::default()
         }));
         let poison = Arc::clone(&facts);
@@ -2513,6 +2721,7 @@ mod tests {
             panic!("poison sampler facts");
         });
         let link_facts = LinkFacts::default();
+        link_facts.publish(crate::private_link::LinkFact::CarrierProven);
         link_facts.publish(crate::private_link::LinkFact::ObserverRegistered);
         let sampler = SyncSampler {
             facts,
@@ -2523,6 +2732,8 @@ mod tests {
             stale_threshold: 600.0,
             poison_reports: Arc::new(AtomicUsize::new(0)),
             link_facts,
+            presenter: Arc::default(),
+            fresh_check: FreshCheck::default(),
         };
         assert_eq!(sampler.health().dbus, "syncing");
         assert_eq!(sampler.progress(), "1/2");
@@ -2743,7 +2954,10 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(AtomicBool::new(true)),
             ),
-            Arc::new(Mutex::new(SyncFacts::default())),
+            Arc::new(Mutex::new(SyncFacts {
+                episode_started: Some(1_800_000_000.0),
+                ..SyncFacts::default()
+            })),
             Arc::new(AtomicU8::new(0)),
             None,
         );
@@ -4254,7 +4468,7 @@ mod tests {
         worker.sync_pass().await;
         assert_eq!(upload_hits(&server), 1);
         clock.set_mono(131.0);
-        assert!(worker.try_probe().await);
+        assert!(worker.try_probe(false).await);
         worker.sync_pass().await;
         assert!(
             upload_hits(&server) >= 2,
@@ -4307,7 +4521,7 @@ mod tests {
         assert_eq!(upload_hits(&server), 1);
         assert!(!worker.circuit_open_permanent);
         clock.set_mono(131.0);
-        assert!(worker.try_probe().await);
+        assert!(worker.try_probe(false).await);
         worker.sync_pass().await;
         assert!(upload_hits(&server) >= 2);
     }
@@ -4384,7 +4598,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) =
             open_probe_worker(&temp, vec![(200, json!({"status":"ok"}))]).await;
-        assert!(worker.try_probe().await);
+        assert!(worker.try_probe(false).await);
         assert!(!worker.circuit_open);
         assert_eq!(worker.consecutive_failures, 0);
     }
@@ -4395,7 +4609,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (server, mut worker) = open_probe_worker(&temp, vec![]).await;
         worker.circuit_open_permanent = true;
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert!(worker.circuit_open);
         assert!(server.requests().is_empty());
     }
@@ -4405,7 +4619,7 @@ mod tests {
     async fn backoff_increases_on_failed_probe() {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) = open_probe_worker(&temp, vec![(500, json!({}))]).await;
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert_eq!(worker.circuit_cooldown, 60.0);
     }
 
@@ -4419,19 +4633,19 @@ mod tests {
         worker.clock = clock.clone();
 
         assert_eq!(worker.circuit_cooldown, 30.0);
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert_eq!(worker.circuit_cooldown, 60.0);
         clock.set_mono(92.0);
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert_eq!(worker.circuit_cooldown, 120.0);
         clock.set_mono(213.0);
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert_eq!(worker.circuit_cooldown, 240.0);
         clock.set_mono(454.0);
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert_eq!(worker.circuit_cooldown, 300.0);
         clock.set_mono(755.0);
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert_eq!(worker.circuit_cooldown, 300.0);
     }
 
@@ -4446,7 +4660,7 @@ mod tests {
             wall: 1_800_000_000.0,
             mono: 121.0,
         });
-        assert!(worker.try_probe().await);
+        assert!(worker.try_probe(false).await);
         assert!(!worker.circuit_open);
         assert!(!worker.circuit_open_permanent);
         assert_eq!(worker.circuit_open_since, 0.0);
@@ -4465,7 +4679,7 @@ mod tests {
             wall: 1_800_000_000.0,
             mono: 301.0,
         });
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert_eq!(worker.circuit_cooldown, CIRCUIT_COOLDOWN_MAX);
     }
 
@@ -4475,7 +4689,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (server, mut worker) = open_probe_worker(&temp, vec![]).await;
         worker.circuit_open_since = 90.0;
-        assert!(!worker.try_probe().await);
+        assert!(!worker.try_probe(false).await);
         assert!(server.requests().is_empty());
     }
 
@@ -4495,8 +4709,9 @@ mod tests {
             worker.sync_pass().await;
         }
         assert!(worker.circuit_open);
+        let last_step = 1_800_000_000.0 + 4.0 * 3601.0;
         assert_eq!(
-            derive_health(&worker.facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
+            derive_health(&worker.facts.lock().unwrap(), last_step, 600.0).state,
             crate::sync_health::HealthState::Offline
         );
         assert_eq!(server.requests().len(), 5);
@@ -4521,13 +4736,13 @@ mod tests {
         notify.notify_one();
         task.await.unwrap();
         assert_eq!(
-            derive_health(&facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
+            derive_health(&facts.lock().unwrap(), last_step, 600.0).state,
             crate::sync_health::HealthState::Connected
         );
     }
 
-    // A journal that stops answering while nothing is due to send: the idle probe is the
-    // pass's only request, and its failure must survive the pass's own commit.
+    // A journal that stops answering while nothing is due to send: the pass's own clean
+    // commit must not make it read as answering.
     #[tokio::test]
     async fn failed_idle_probe_stays_offline_after_the_pass() {
         let temp = tempfile::tempdir().unwrap();
@@ -4536,15 +4751,92 @@ mod tests {
         {
             let mut facts = worker.facts.lock().unwrap();
             facts.last_successful_contact = Some(now - 301.0);
+            facts.episode_started = Some(now - 600.0);
             facts.pending_confirmed = Some(0);
         }
         worker.sync_pass().await;
         let facts = worker.facts.lock().unwrap().clone();
-        assert_eq!(facts.last_error_class, Some(ErrorType::Transient));
+        assert_eq!(facts.last_successful_contact, Some(now - 301.0));
         assert_eq!(
             derive_health(&facts, now, 600.0).state,
             crate::sync_health::HealthState::Offline
         );
+    }
+
+    // One failed status check is not a drop: it leaves the facts the status reads alone, and
+    // the next answer is heard at once.
+    #[tokio::test]
+    async fn a_failed_status_check_changes_nothing_the_status_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_server, mut worker) = test_worker(
+            &temp,
+            vec![(503, json!({})), (200, json!({"status": "ok"}))],
+        )
+        .await;
+        let now = worker.clock.wall_seconds();
+        {
+            let mut facts = worker.facts.lock().unwrap();
+            facts.last_successful_contact = Some(now - STATUS_CHECK_INTERVAL);
+            facts.pending_confirmed = Some(0);
+        }
+        assert_eq!(worker.check_journal().await, Some(ErrorType::Transient));
+        let facts = worker.facts.lock().unwrap().clone();
+        assert_eq!(
+            facts.last_successful_contact,
+            Some(now - STATUS_CHECK_INTERVAL)
+        );
+        assert_eq!(facts.pending_confirmed, Some(0));
+        assert_eq!(facts.last_error_class, None);
+
+        assert_eq!(worker.check_journal().await, None);
+        assert_eq!(
+            worker.facts.lock().unwrap().last_successful_contact,
+            Some(now)
+        );
+    }
+
+    // The worker asks the journal once nothing has been heard for a check interval, and a
+    // worker that has heard nothing yet waits a full interval from its own start.
+    #[tokio::test]
+    async fn the_next_wake_is_the_next_status_check_when_that_comes_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_server, mut worker) = test_worker(&temp, vec![]).await;
+        let now = worker.clock.wall_seconds();
+        worker.facts.lock().unwrap().last_successful_contact = Some(now - 10.0);
+        assert_eq!(
+            worker.next_wake(),
+            Duration::from_secs_f64(STATUS_CHECK_INTERVAL)
+        );
+        worker.started = now - 100.0;
+        assert_eq!(worker.next_wake(), Duration::from_secs(5));
+        assert!(!worker.check_due());
+        worker.facts.lock().unwrap().last_successful_contact = Some(now - 20.0);
+        assert_eq!(worker.next_wake(), Duration::from_secs_f64(MIN_WAKE));
+        assert!(worker.check_due());
+    }
+
+    // An unanswered check never makes the worker spin: the next one waits a full interval,
+    // and with the circuit open the probe's cooldown sets the pace.
+    #[tokio::test]
+    async fn an_unanswered_check_waits_a_full_interval_before_the_next() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_server, mut worker) = test_worker(&temp, vec![(503, json!({}))]).await;
+        worker.started -= 100.0;
+        assert!(worker.check_due());
+        assert_eq!(worker.check_journal().await, Some(ErrorType::Transient));
+        assert!(!worker.check_due());
+        assert_eq!(
+            worker.next_wake(),
+            Duration::from_secs_f64(STATUS_CHECK_INTERVAL)
+        );
+        worker.circuit_open = true;
+        worker.circuit_open_since = worker.clock.monotonic_seconds();
+        assert_eq!(
+            worker.next_wake(),
+            Duration::from_secs_f64(CIRCUIT_COOLDOWN_INITIAL)
+        );
+        worker.circuit_open_permanent = true;
+        assert_eq!(worker.next_wake(), Duration::from_secs_f64(PASS_INTERVAL));
     }
 
     // A pass that sends nothing and hears nothing must not move "last delivery" forward.
@@ -4553,10 +4845,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (_server, mut worker) = test_worker(&temp, vec![]).await;
         let now = worker.clock.wall_seconds();
-        worker.facts.lock().unwrap().last_successful_contact = Some(now - 100.0);
+        worker.facts.lock().unwrap().last_successful_contact = Some(now - 5.0);
         worker.sync_pass().await;
         let facts = worker.facts.lock().unwrap().clone();
-        assert_eq!(facts.last_successful_sync, Some(now - 100.0));
+        assert_eq!(facts.last_successful_sync, Some(now - 5.0));
         assert_eq!(facts.pending_confirmed, Some(0));
     }
 
@@ -7774,7 +8066,7 @@ mod tests {
                     if idle {
                         worker.sync_pass().await;
                     } else {
-                        assert!(!worker.try_probe().await);
+                        assert!(!worker.try_probe(false).await);
                     }
                 });
                 old_peer.wait_for_requests(1).await;

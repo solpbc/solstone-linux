@@ -60,7 +60,8 @@ const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 // LAN leg alone spends its full cap before the relay leg starts, so the probe
 // budget is that cap plus room for the relay leg.
 const RELAY_LEG_ALLOWANCE: Duration = Duration::from_secs(10);
-const SYSTEM_STATUS_TIMEOUT: Duration = LAN_CARRIER_TIMEOUT.saturating_add(RELAY_LEG_ALLOWANCE);
+pub(crate) const SYSTEM_STATUS_TIMEOUT: Duration =
+    LAN_CARRIER_TIMEOUT.saturating_add(RELAY_LEG_ALLOWANCE);
 // Retiring a client registration is a best-effort direct request that does not
 // go through the bridge; it keeps its own short bound.
 pub(crate) const RETIRE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1224,12 +1225,16 @@ impl LinkFacts {
         self.persist();
     }
 
-    fn begin_journal_dial(&self) {
+    fn begin_journal_dial(&self, optional: bool) {
         {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
             self.inner.owner_epoch.fetch_add(1, Ordering::AcqRel);
             state.journal_version_observed = false;
-            state.carrier_proven = false;
+            // The optional lane dials its own carrier. Starting it says nothing about the
+            // main carrier, which is the one the connection status reads.
+            if !optional {
+                state.carrier_proven = false;
+            }
         }
         self.persist();
     }
@@ -1618,7 +1623,7 @@ impl PrivateLinkOpener {
     ) -> Pin<Box<dyn Future<Output = Result<DialedCarrier, TransportError>> + Send + '_>> {
         Box::pin(async move {
             let association = self.facts.association_epoch();
-            self.facts.begin_journal_dial();
+            self.facts.begin_journal_dial(optional);
             let dial_result = self
                 .admit_dial(async {
                     let mut lan_error = None;

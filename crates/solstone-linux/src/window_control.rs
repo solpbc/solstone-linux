@@ -3863,6 +3863,8 @@ mod tests {
             stale_threshold: 600.0,
             poison_reports: Arc::new(AtomicUsize::new(0)),
             link_facts: link_facts.clone(),
+            presenter: Arc::default(),
+            fresh_check: Default::default(),
         };
 
         assert_eq!(sampler.health().dbus, "listener-ready");

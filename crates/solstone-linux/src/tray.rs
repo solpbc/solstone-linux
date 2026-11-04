@@ -489,6 +489,7 @@ mod tests {
             (
                 SyncFacts {
                     last_error_class: Some(ErrorType::Transient),
+                    last_successful_contact: Some(0.0),
                     ..Default::default()
                 },
                 generated::OFFLINE,
@@ -517,7 +518,9 @@ mod tests {
             (
                 SyncFacts {
                     in_progress: true,
+                    last_successful_contact: Some(1_000.0),
                     link: Some(LinkFactState {
+                        carrier_proven: true,
                         observer_registered: true,
                         ..Default::default()
                     }),
@@ -528,6 +531,7 @@ mod tests {
             (
                 SyncFacts {
                     pending_confirmed: Some(0),
+                    last_successful_contact: Some(1_000.0),
                     link: Some(LinkFactState {
                         carrier_proven: true,
                         observer_registered: true,
@@ -550,6 +554,7 @@ mod tests {
     fn capture_status_overlays_only_healthy_and_connecting() {
         let connected = SyncFacts {
             pending_confirmed: Some(0),
+            last_successful_contact: Some(1_000.0),
             link: Some(LinkFactState {
                 carrier_proven: true,
                 observer_registered: true,
@@ -559,7 +564,9 @@ mod tests {
         };
         let syncing = SyncFacts {
             in_progress: true,
+            last_successful_contact: Some(1_000.0),
             link: Some(LinkFactState {
+                carrier_proven: true,
                 observer_registered: true,
                 ..Default::default()
             }),
@@ -585,6 +592,7 @@ mod tests {
         };
         let offline = SyncFacts {
             last_error_class: Some(ErrorType::Transient),
+            last_successful_contact: Some(0.0),
             ..Default::default()
         };
         let cases = [

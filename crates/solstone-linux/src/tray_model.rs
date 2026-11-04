@@ -199,6 +199,7 @@ mod tests {
     };
     fn connected_facts() -> SyncFacts {
         SyncFacts {
+            last_successful_contact: Some(0.0),
             pending_confirmed: Some(0),
             link: Some(LinkFactState {
                 carrier_proven: true,
@@ -245,7 +246,7 @@ mod tests {
         }
     }
     fn connected_health() -> SyncHealth {
-        derive_health(&connected_facts(), 100.0, 600.0)
+        derive_health(&connected_facts(), 0.0, 600.0)
     }
     #[test]
     fn countdowns_are_computed_at_read_time() {
@@ -258,7 +259,9 @@ mod tests {
         let syncing = derive_health(
             &SyncFacts {
                 in_progress: true,
+                last_successful_contact: Some(100.0),
                 link: Some(LinkFactState {
+                    carrier_proven: true,
                     observer_registered: true,
                     ..Default::default()
                 }),
@@ -270,6 +273,7 @@ mod tests {
         let offline = derive_health(
             &SyncFacts {
                 last_error_class: Some(ErrorType::Transient),
+                last_successful_contact: Some(0.0),
                 ..Default::default()
             },
             100.0,
@@ -313,11 +317,19 @@ mod tests {
     #[test]
     fn recording_and_idle_headers_cover_complete_health_axis_from_surfaces() {
         let cases = [
-            (connected_facts(), HealthState::Connected),
+            (
+                SyncFacts {
+                    last_successful_contact: Some(1_000.0),
+                    ..connected_facts()
+                },
+                HealthState::Connected,
+            ),
             (
                 SyncFacts {
                     in_progress: true,
+                    last_successful_contact: Some(1_000.0),
                     link: Some(LinkFactState {
+                        carrier_proven: true,
                         observer_registered: true,
                         ..Default::default()
                     }),
@@ -328,6 +340,7 @@ mod tests {
             (
                 SyncFacts {
                     last_error_class: Some(ErrorType::Transient),
+                    last_successful_contact: Some(0.0),
                     ..Default::default()
                 },
                 HealthState::Offline,
@@ -398,7 +411,9 @@ mod tests {
             &SyncFacts {
                 in_progress: true,
                 progress: "2/5".into(),
+                last_successful_contact: Some(100.0),
                 link: Some(LinkFactState {
+                    carrier_proven: true,
                     observer_registered: true,
                     ..Default::default()
                 }),
@@ -464,6 +479,7 @@ mod tests {
             },
             SyncFacts {
                 last_error_class: Some(ErrorType::Transient),
+                last_successful_contact: Some(0.0),
                 ..Default::default()
             },
         ];
