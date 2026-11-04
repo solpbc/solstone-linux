@@ -649,6 +649,86 @@ fn create_status_page(
     (scrolled, update)
 }
 
+/// A labelled mark for the two-mark comparison: `slot` is that side's card.
+fn unknown_journal_mark_block(
+    label: CopyKey,
+    slot: &gtk::Widget,
+    caption: Option<CopyKey>,
+) -> gtk::FlowBoxChild {
+    let block = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    block.set_halign(gtk::Align::Center);
+    block.append(&gtk::Label::new(Some(label.as_str())));
+    block.append(slot);
+    if let Some(caption) = caption {
+        block.append(&gtk::Label::new(Some(caption.as_str())));
+    }
+    let child = gtk::FlowBoxChild::new();
+    child.set_focusable(false);
+    child.set_child(Some(&block));
+    child
+}
+
+/// One row: the address first, its own expand, and "pair again" only in the detail.
+fn unknown_journal_row(
+    row: &crate::copy_map::UnknownJournalRow,
+    your_journal: &gtk::Widget,
+) -> (gtk::Expander, gtk::Button) {
+    let title = gtk::Label::new(Some(&row.row));
+    title.set_wrap(true);
+    title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    title.set_xalign(0.0);
+    let view_details = gtk::Label::new(Some(CopyKey::UnknownJournalViewDetails.as_str()));
+    view_details.add_css_class("dim-label");
+    let summary = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    summary.append(&title);
+    summary.append(&view_details);
+
+    let heading = crate::mark_card::semibold_label(CopyKey::UnknownJournalHeading.as_str());
+    heading.set_wrap(true);
+    heading.set_xalign(0.0);
+    let body = gtk::Label::new(Some(&row.body));
+    body.set_wrap(true);
+    body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    body.set_xalign(0.0);
+
+    let what_answered = match row.what_answered.clone() {
+        Some(mark) => crate::mark_card::create_mark_card_widget(mark),
+        None => crate::mark_card::create_not_presented_mark_widget(),
+    };
+    let marks = gtk::FlowBox::new();
+    marks.set_selection_mode(gtk::SelectionMode::None);
+    marks.set_max_children_per_line(2);
+    marks.set_column_spacing(12);
+    marks.set_row_spacing(12);
+    marks.insert(
+        &unknown_journal_mark_block(
+            CopyKey::UnknownJournalWhatAnswered,
+            &what_answered,
+            Some(row.caption),
+        ),
+        -1,
+    );
+    marks.insert(
+        &unknown_journal_mark_block(CopyKey::UnknownJournalYourJournal, your_journal, None),
+        -1,
+    );
+
+    let pair_again = gtk::Button::with_label(CopyKey::UnknownJournalPairAgain.as_str());
+    pair_again.set_halign(gtk::Align::Start);
+
+    let detail = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    detail.set_margin_top(8);
+    detail.append(&heading);
+    detail.append(&body);
+    detail.append(&marks);
+    detail.append(&pair_again);
+
+    let expander = gtk::Expander::new(None);
+    expander.set_label_widget(Some(&summary));
+    expander.set_child(Some(&detail));
+    (expander, pair_again)
+}
+
 fn create_journal_page(
     controller: Rc<RefCell<Controller>>,
     changed: Changed,
@@ -683,6 +763,19 @@ fn create_journal_page(
     check_button.set_halign(gtk::Align::Start);
     connect_refresh(&check_button, Rc::clone(&controller), Rc::clone(&changed));
     container.append(&check_button);
+    let unknown_journals_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let rendered_unknown_journals = Rc::new(RefCell::new(
+        None::<(
+            Vec<crate::copy_map::UnknownJournalRow>,
+            Option<solstone_linux::window_control::MarkRenderDocument>,
+            bool,
+        )>,
+    ));
+    let unknown_journal_rows = Rc::new(RefCell::new(Vec::<(
+        Option<String>,
+        gtk::Expander,
+        gtk::Button,
+    )>::new()));
     let mark_container = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
     let pairing_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -730,6 +823,7 @@ fn create_journal_page(
     container.append(&status_label);
     container.append(&detail_label);
     container.append(&open_button);
+    container.append(&unknown_journals_box);
     container.append(&mark_container);
     container.append(&pairing_box);
     scrolled.set_child(Some(&container));
@@ -933,6 +1027,47 @@ fn create_journal_page(
 
             open_button.set_sensitive(c.browser_request.is_none());
             open_button.set_visible(journal_keys.action_open.is_some());
+
+            // Unknown journals: rebuilt only when what they show changes, so a row
+            // stays open across polls, and across another sighting coming or going.
+            let unknown_rows = crate::copy_map::unknown_journal_rows(&c.document);
+            let unknown_state = (
+                unknown_rows.clone(),
+                c.document.confirmed_mark.clone(),
+                crate::copy_map::empty_mark_is_unavailable(&c.document),
+            );
+            if rendered_unknown_journals.borrow().as_ref() != Some(&unknown_state) {
+                let mut rows = unknown_journal_rows.borrow_mut();
+                let was_open: Vec<Option<String>> = rows
+                    .iter()
+                    .filter(|(_, expander, _)| expander.is_expanded())
+                    .map(|(address, _, _)| address.clone())
+                    .collect();
+                while let Some(child) = unknown_journals_box.first_child() {
+                    unknown_journals_box.remove(&child);
+                }
+                rows.clear();
+                for row in &unknown_rows {
+                    let your_journal = match c.document.confirmed_mark.clone() {
+                        Some(mark) => crate::mark_card::create_mark_card_widget(mark),
+                        None => crate::mark_card::create_empty_mark_widget(unknown_state.2),
+                    };
+                    let (expander, pair_again) = unknown_journal_row(row, &your_journal);
+                    expander.set_expanded(was_open.contains(&row.address));
+                    let link_entry = link_entry.clone();
+                    pair_again.connect_clicked(move |_| {
+                        link_entry.grab_focus();
+                    });
+                    unknown_journals_box.append(&expander);
+                    rows.push((row.address.clone(), expander, pair_again));
+                }
+                *rendered_unknown_journals.borrow_mut() = Some(unknown_state);
+            }
+            unknown_journals_box.set_visible(!unknown_rows.is_empty());
+            // The pairing row it goes to is hidden while a mark question is open.
+            for (_, _, pair_again) in unknown_journal_rows.borrow().iter() {
+                pair_again.set_visible(!crate::copy_map::attempt_pending(&c.document));
+            }
 
             // Mark chip rendering
             let mark = crate::copy_map::mark_to_show(&c.document);

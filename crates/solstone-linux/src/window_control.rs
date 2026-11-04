@@ -117,6 +117,16 @@ impl From<spl_core::mark::MarkRenderSpec> for MarkRenderDocument {
     }
 }
 
+/// Something that answered where the paired journal was expected. No address means
+/// the relay; no mark means it presented no identity.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct UnknownJournalDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<MarkRenderDocument>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SampledInstantDocument {
     pub at: Option<f64>,
@@ -144,6 +154,8 @@ pub struct ControlDocument {
     pub pending_mark: Option<MarkRenderDocument>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_mark: Option<MarkRenderDocument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_journals: Vec<UnknownJournalDocument>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_bounded: Option<bool>,
     /// Paused, while desktop activity keeps going.
@@ -261,6 +273,7 @@ pub struct ControlModel {
     pub route_status: Option<RouteStatusModel>,
     pub pending_mark: Option<MarkRenderDocument>,
     pub confirmed_mark: Option<MarkRenderDocument>,
+    pub unknown_journals: Vec<UnknownJournalDocument>,
     pub pause_bounded: Option<bool>,
     pub activity_through_pause: bool,
     pub capture_attention: bool,
@@ -340,6 +353,7 @@ impl ControlModel {
             route_status: None,
             pending_mark: None,
             confirmed_mark: None,
+            unknown_journals: Vec::new(),
             pause_bounded: None,
             activity_through_pause: false,
             capture_attention: false,
@@ -421,6 +435,7 @@ pub fn decode_control<E: std::fmt::Display>(
         }),
         pending_mark: doc.pending_mark,
         confirmed_mark: doc.confirmed_mark,
+        unknown_journals: doc.unknown_journals,
         pause_bounded: doc.pause_bounded,
         activity_through_pause: doc.activity_through_pause,
         capture_attention: doc.capture_attention,
@@ -863,16 +878,26 @@ pub(crate) fn assemble_document(
 
     let capture_attention = tray_model::status(snapshot).needs_attention();
 
-    let (queue_count, last_delivery) = match sampler {
+    let (queue_count, last_delivery, unknown_journals) = match sampler {
         Some(s) => {
             let facts = s.facts();
             let q = facts.pending_confirmed;
             let l = Some(SampledInstantDocument {
                 at: facts.last_successful_sync,
             });
-            (q, l)
+            let u = facts.link.as_ref().map_or_else(Vec::new, |link| {
+                link.unknown_journals
+                    .iter()
+                    .zip(&link.unknown_marks)
+                    .map(|(sighting, mark)| UnknownJournalDocument {
+                        address: sighting.address.clone(),
+                        mark: mark.clone().map(Into::into),
+                    })
+                    .collect()
+            });
+            (q, l, u)
         }
-        None => (None, None),
+        None => (None, None, Vec::new()),
     };
 
     let quarantine_count = captures_dir.and_then(crate::capture_stats::strict_quarantine_count);
@@ -893,6 +918,7 @@ pub(crate) fn assemble_document(
         route_status: route_status.cloned(),
         pending_mark,
         confirmed_mark,
+        unknown_journals,
         pause_bounded,
         activity_through_pause: snapshot.paused && snapshot.activity_through_pause,
         capture_attention,
@@ -3844,6 +3870,75 @@ mod tests {
         };
 
         assert_eq!(sampler.health().dbus, "listener-ready");
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sightings_reach_the_document_beside_the_connections_own_state() {
+        let cred = sample_valid_credential("cert-pem-bytes");
+        let pairer = Arc::new(FakePairer::new(cred.clone()));
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(
+            Some(cred),
+            true,
+            pairer,
+            starter.clone(),
+            Arc::new(NoWriteFault),
+        )
+        .await;
+        let before = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert!(before.unknown_journals.is_empty());
+
+        let link_facts = starter.recorded_link_facts.lock().unwrap()[0].clone();
+        let claimed_jid = "b9b9cf9d-6318-894d-8688-cf3060a24f49";
+        link_facts.note_unknown_journals(vec![
+            spl_transport::UnknownJournal {
+                address: Some("192.168.1.100:5015".into()),
+                jid: Some(claimed_jid.into()),
+            },
+            spl_transport::UnknownJournal {
+                address: Some("192.168.1.101:5015".into()),
+                jid: None,
+            },
+            spl_transport::UnknownJournal {
+                address: None,
+                jid: Some(claimed_jid.into()),
+            },
+        ]);
+
+        let raw = harness.handler.get_control_state();
+        assert!(!raw.contains(claimed_jid), "the mark is shown, not the id");
+        let model = decode_control_str(&raw).unwrap();
+        let expected: MarkRenderDocument = spl_core::mark::mark_from_jid(claimed_jid)
+            .unwrap()
+            .to_render_spec()
+            .into();
+        assert_eq!(
+            model.unknown_journals,
+            vec![
+                UnknownJournalDocument {
+                    address: Some("192.168.1.100:5015".into()),
+                    mark: Some(expected.clone()),
+                },
+                UnknownJournalDocument {
+                    address: Some("192.168.1.101:5015".into()),
+                    mark: None,
+                },
+                UnknownJournalDocument {
+                    address: None,
+                    mark: Some(expected),
+                },
+            ]
+        );
+        assert_eq!(model.durable, before.durable);
+        assert_eq!(model.owner, before.owner);
+        assert_eq!(model.view, before.view);
+        assert_eq!(model.confirmed_mark, before.confirmed_mark);
+
+        link_facts.note_unknown_journals(Vec::new());
+        let cleared = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert!(cleared.unknown_journals.is_empty());
 
         harness.shutdown().await;
     }

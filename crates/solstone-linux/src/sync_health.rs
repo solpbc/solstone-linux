@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use crate::copy::{UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY, unknown_journal_seen_at};
 use crate::private_link::{LinkFactState, PrivateStateLockLiveness};
 use chrono::{DateTime, Local};
 use serde_json::{Map, Value, json};
@@ -502,14 +503,9 @@ pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncH
     health
 }
 
-const UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY: &str = "unknown journal seen through the relay";
 const UNKNOWN_JOURNAL_RESET_LINE: &str =
     "if you recently reset your journal, pair this device again.";
 const UNKNOWN_JOURNAL_RELAY_LINE: &str = "this is less certain than a direct connection.";
-
-fn unknown_journal_seen_at(address: &str) -> String {
-    format!("unknown journal seen at {address}")
-}
 
 fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) {
     if link.unknown_journals.is_empty() {
@@ -527,9 +523,9 @@ fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) 
             .get(index)
             .and_then(|m| m.as_deref());
         let what_answered = if let Some(spoken) = sighting_spoken {
-            format!("{spoken}  (claimed, not verified)")
+            format!("{spoken}  ({})", crate::copy::UNKNOWN_JOURNAL_CLAIMED)
         } else {
-            "no identity presented".to_owned()
+            crate::copy::UNKNOWN_JOURNAL_NO_IDENTITY.to_owned()
         };
 
         let your_journal = if let Some(paired) = paired_spoken {
@@ -716,6 +712,7 @@ pub(crate) fn load_link_facts(
         paired_jid,
         unknown_spoken_marks,
         paired_spoken_mark,
+        unknown_marks: Vec::new(),
     }))
 }
 

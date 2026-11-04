@@ -96,6 +96,15 @@ pub const PAIRING_CHECK_STATUS: &str = "check status";
 pub const PAIRING_CONFIRM_ACTION: &str = "confirm your journal's mark";
 pub const JOURNAL_MARK_LABEL: &str = "mark";
 pub const JOURNAL_MARK_SPEECH_TEMPLATE: &str = "{tint1}, {tint2} · {word1}·{word2}";
+pub const UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY: &str = "unknown journal seen through the relay";
+pub const UNKNOWN_JOURNAL_VIEW_DETAILS: &str = "view details";
+pub const UNKNOWN_JOURNAL_HEADING: &str = "something answered instead of your journal";
+pub const UNKNOWN_JOURNAL_BODY_RELAY: &str = "something answered this computer through the relay, and it isn't the journal this computer is paired with. this is less certain than a direct connection.";
+pub const UNKNOWN_JOURNAL_WHAT_ANSWERED: &str = "what answered";
+pub const UNKNOWN_JOURNAL_YOUR_JOURNAL: &str = "your journal";
+pub const UNKNOWN_JOURNAL_CLAIMED: &str = "claimed, not verified";
+pub const UNKNOWN_JOURNAL_NO_IDENTITY: &str = "no identity presented";
+pub const UNKNOWN_JOURNAL_PAIR_AGAIN: &str = "pair again";
 pub const SETTINGS_HEADING: &str = "settings";
 pub const SETTINGS_CURSOR: &str = "draw cursor";
 pub const SETTINGS_START_PAUSED: &str = "start paused";
@@ -217,6 +226,16 @@ pub fn journal_mark_speech(tint1: &str, tint2: &str, word1: &str, word2: &str) -
 
 pub fn journal_mark_label(word1: &str, word2: &str) -> String {
     format!("{word1}·{word2}")
+}
+
+pub fn unknown_journal_seen_at(address: &str) -> String {
+    format!("unknown journal seen at {address}")
+}
+
+pub fn unknown_journal_body_direct(address: &str) -> String {
+    format!(
+        "something answered this computer at {address}, and it isn't the journal this computer is paired with. this could be another device now using that address, or your journal, if its identity was reset. if the mark under \"what answered\" matches the one your journal shows now, pair this computer again."
+    )
 }
 
 pub fn launch_runtime_unavailable(path: &str) -> String {
@@ -384,6 +403,17 @@ pub enum CopyKey {
     MarkUnavailableFirst,
     MarkUnavailableSecond,
     MarkUnavailableSpeech,
+    MarkNotPresentedFirst,
+    MarkNotPresentedSecond,
+    UnknownJournalSeenThroughRelay,
+    UnknownJournalViewDetails,
+    UnknownJournalHeading,
+    UnknownJournalBodyRelay,
+    UnknownJournalWhatAnswered,
+    UnknownJournalYourJournal,
+    UnknownJournalClaimed,
+    UnknownJournalNoIdentity,
+    UnknownJournalPairAgain,
     HelpLinkFailed,
     ActionStart,
     ActionStarting,
@@ -551,6 +581,17 @@ impl CopyKey {
             Self::MarkUnavailableFirst => "mark",
             Self::MarkUnavailableSecond => "unavailable",
             Self::MarkUnavailableSpeech => "your journal's mark, unavailable right now",
+            Self::MarkNotPresentedFirst => "not",
+            Self::MarkNotPresentedSecond => "presented",
+            Self::UnknownJournalSeenThroughRelay => UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY,
+            Self::UnknownJournalViewDetails => UNKNOWN_JOURNAL_VIEW_DETAILS,
+            Self::UnknownJournalHeading => UNKNOWN_JOURNAL_HEADING,
+            Self::UnknownJournalBodyRelay => UNKNOWN_JOURNAL_BODY_RELAY,
+            Self::UnknownJournalWhatAnswered => UNKNOWN_JOURNAL_WHAT_ANSWERED,
+            Self::UnknownJournalYourJournal => UNKNOWN_JOURNAL_YOUR_JOURNAL,
+            Self::UnknownJournalClaimed => UNKNOWN_JOURNAL_CLAIMED,
+            Self::UnknownJournalNoIdentity => UNKNOWN_JOURNAL_NO_IDENTITY,
+            Self::UnknownJournalPairAgain => UNKNOWN_JOURNAL_PAIR_AGAIN,
             Self::HelpLinkFailed => {
                 "couldn't open that link. visit support.solstone.app or email support@solstone.app."
             }

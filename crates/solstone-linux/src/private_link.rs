@@ -1185,15 +1185,21 @@ pub(crate) struct LinkFactState {
     pub(crate) paired_jid: Option<String>,
     pub(crate) unknown_spoken_marks: Vec<Option<String>>,
     pub(crate) paired_spoken_mark: Option<String>,
+    /// What each entry of `unknown_journals` draws, for this process's window. Not
+    /// persisted: a sighting and its mark last as long as this process does.
+    pub(crate) unknown_marks: Vec<Option<spl_core::mark::MarkRenderSpec>>,
+}
+
+fn spoken_mark(spec: &spl_core::mark::MarkRenderSpec) -> String {
+    format!(
+        "{}, {} · {}·{}",
+        spec.icon1.color.name, spec.icon2.color.name, spec.words[0], spec.words[1]
+    )
 }
 
 pub(crate) fn format_spoken_mark(jid: &str) -> Option<String> {
     let mark = spl_core::mark::mark_from_jid(jid).ok()?;
-    let spec = mark.to_render_spec();
-    Some(format!(
-        "{}, {} · {}·{}",
-        spec.icon1.color.name, spec.icon2.color.name, spec.words[0], spec.words[1]
-    ))
+    Some(spoken_mark(&mark.to_render_spec()))
 }
 
 impl LinkFacts {
@@ -1382,10 +1388,29 @@ impl LinkFacts {
         if state.unknown_journals == unknown {
             return;
         }
-        state.unknown_spoken_marks = unknown
+        // A mark costs an argon2id run, so a sighting keeps its mark until its jid changes.
+        let marks: Vec<_> = unknown
             .iter()
-            .map(|item| item.jid.as_deref().and_then(format_spoken_mark))
+            .map(|item| {
+                state
+                    .unknown_journals
+                    .iter()
+                    .zip(&state.unknown_marks)
+                    .find(|(seen, _)| seen.address == item.address && seen.jid == item.jid)
+                    .map_or_else(
+                        || {
+                            let mark = spl_core::mark::mark_from_jid(item.jid.as_deref()?).ok()?;
+                            Some(mark.to_render_spec())
+                        },
+                        |(_, mark)| mark.clone(),
+                    )
+            })
             .collect();
+        state.unknown_spoken_marks = marks
+            .iter()
+            .map(|mark| mark.as_ref().map(spoken_mark))
+            .collect();
+        state.unknown_marks = marks;
         state.unknown_journals = unknown;
         drop(state);
         self.persist();
@@ -7854,5 +7879,40 @@ pub(crate) mod tests {
         }
 
         peer.shutdown().await;
+    }
+
+    #[test]
+    fn a_sighting_keeps_its_mark_until_its_jid_changes() {
+        let jid = "b9b9cf9d-6318-894d-8688-cf3060a24f49";
+        let other_jid = "c9b9cf9d-6318-894d-8688-cf3060a24f49";
+        let sighting = |address: &str, jid: Option<&str>| spl_transport::UnknownJournal {
+            address: Some(address.into()),
+            jid: jid.map(Into::into),
+        };
+        let facts = LinkFacts::default();
+        facts.note_unknown_journals(vec![sighting("a:1", Some(jid))]);
+        let derived = spl_core::mark::mark_from_jid(jid).unwrap().to_render_spec();
+        assert_eq!(facts.snapshot().unknown_marks, vec![Some(derived.clone())]);
+        assert!(facts.snapshot().unknown_spoken_marks[0].is_some());
+
+        // A mark nothing would derive, so a kept one can be told from a recomputed one.
+        let mut kept = derived.clone();
+        kept.words = ["kept".into(), "mark".into()];
+        facts.inner.state.lock().unwrap().unknown_marks = vec![Some(kept.clone())];
+
+        facts.note_unknown_journals(vec![sighting("a:1", Some(jid)), sighting("b:1", None)]);
+        let snapshot = facts.snapshot();
+        assert_eq!(snapshot.unknown_marks, vec![Some(kept.clone()), None]);
+        assert_eq!(snapshot.unknown_spoken_marks[1], None);
+
+        facts.note_unknown_journals(vec![sighting("a:1", Some(other_jid))]);
+        let changed = facts.snapshot().unknown_marks[0].clone().unwrap();
+        assert_ne!(changed, kept);
+        assert_eq!(
+            changed,
+            spl_core::mark::mark_from_jid(other_jid)
+                .unwrap()
+                .to_render_spec()
+        );
     }
 }

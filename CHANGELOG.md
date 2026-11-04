@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- when something other than your journal answers, the window now tells you and shows both marks to compare.
+
 ## [2.0.32] - 2026-11-03
 
 ### Fixed

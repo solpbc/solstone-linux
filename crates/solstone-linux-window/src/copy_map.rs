@@ -2,6 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use solstone_linux::copy::CopyKey;
+use solstone_linux::copy::{unknown_journal_body_direct, unknown_journal_seen_at};
 use solstone_linux::window_control::{
     ControlModel, MarkRenderDocument, SettingsModel, adapt_graphical_link,
 };
@@ -133,6 +134,48 @@ pub fn empty_mark_is_unavailable(model: &ControlModel) -> bool {
             .attempt
             .as_ref()
             .is_some_and(|attempt| matches!(attempt.state.as_str(), "pending" | "unverifiable"))
+}
+
+/// One unknown-journal row and what its detail shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnknownJournalRow {
+    pub address: Option<String>,
+    pub row: String,
+    pub body: String,
+    pub what_answered: Option<MarkRenderDocument>,
+    pub caption: CopyKey,
+}
+
+/// A row per sighting, in the tracker's order. It's a notice beside the connection's
+/// own state, and never changes it.
+pub fn unknown_journal_rows(model: &ControlModel) -> Vec<UnknownJournalRow> {
+    model
+        .unknown_journals
+        .iter()
+        .map(|sighting| {
+            let (row, body) = match &sighting.address {
+                Some(address) => (
+                    unknown_journal_seen_at(address),
+                    unknown_journal_body_direct(address),
+                ),
+                None => (
+                    CopyKey::UnknownJournalSeenThroughRelay.as_str().to_string(),
+                    CopyKey::UnknownJournalBodyRelay.as_str().to_string(),
+                ),
+            };
+            UnknownJournalRow {
+                address: sighting.address.clone(),
+                row,
+                body,
+                what_answered: sighting.mark.clone(),
+                caption: if sighting.mark.is_some() {
+                    CopyKey::UnknownJournalClaimed
+                } else {
+                    CopyKey::UnknownJournalNoIdentity
+                },
+            }
+        })
+        .collect()
 }
 
 pub fn map_journal_health(model: &ControlModel) -> JournalHealthKeys {
@@ -900,5 +943,79 @@ mod tests {
             Err(CopyKey::SettingsSegmentInvalid)
         );
         assert!(validate_settings_inputs("10").is_ok());
+    }
+
+    fn sighting_mark() -> MarkRenderDocument {
+        let icon = |name: &str, rot| solstone_linux::window_control::MarkIconDocument {
+            name: name.into(),
+            svg: "<path d=\"M0 0 L10 10\"/>".into(),
+            color: solstone_linux::window_control::MarkColorDocument {
+                name: "gold".into(),
+                hex: "#ffd700".into(),
+            },
+            rot,
+        };
+        MarkRenderDocument {
+            icon1: icon("star", 0),
+            icon2: icon("moon", 45),
+            words: ["amber".into(), "river".into()],
+        }
+    }
+
+    #[test]
+    fn each_sighting_gets_its_own_row_and_the_connection_stays_as_it_was() {
+        use solstone_linux::window_control::UnknownJournalDocument;
+
+        let mut model = ControlModel::unknown();
+        model.view = solstone_linux::window_control::SessionView::Confirmed;
+        model.durable = "confirmed".into();
+        model.owner = "running".into();
+        model.health = "connected".into();
+        model.confirmed_mark = Some(sighting_mark());
+        let health_alone = map_journal_health(&model);
+        assert!(unknown_journal_rows(&model).is_empty());
+
+        model.unknown_journals = vec![
+            UnknownJournalDocument {
+                address: Some("192.168.1.100:5015".into()),
+                mark: Some(sighting_mark()),
+            },
+            UnknownJournalDocument {
+                address: Some("192.168.1.101:5015".into()),
+                mark: None,
+            },
+            UnknownJournalDocument {
+                address: None,
+                mark: Some(sighting_mark()),
+            },
+        ];
+        assert_eq!(map_journal_health(&model), health_alone);
+        assert_eq!(health_alone.status, Some(CopyKey::JournalConnected));
+
+        let rows = unknown_journal_rows(&model);
+        assert_eq!(rows.len(), 3);
+
+        assert_eq!(rows[0].address.as_deref(), Some("192.168.1.100:5015"));
+        assert_eq!(
+            rows[0].row,
+            solstone_linux::copy::unknown_journal_seen_at("192.168.1.100:5015")
+        );
+        assert_eq!(
+            rows[0].body,
+            solstone_linux::copy::unknown_journal_body_direct("192.168.1.100:5015")
+        );
+        assert_eq!(rows[0].what_answered, Some(sighting_mark()));
+        assert_eq!(rows[0].caption, CopyKey::UnknownJournalClaimed);
+
+        assert_eq!(rows[1].what_answered, None);
+        assert_eq!(rows[1].caption, CopyKey::UnknownJournalNoIdentity);
+
+        assert_eq!(rows[2].address, None);
+        assert_eq!(
+            rows[2].row,
+            CopyKey::UnknownJournalSeenThroughRelay.as_str()
+        );
+        assert_eq!(rows[2].body, CopyKey::UnknownJournalBodyRelay.as_str());
+        assert_eq!(rows[2].caption, CopyKey::UnknownJournalClaimed);
     }
 }

@@ -123,16 +123,37 @@ pub fn render_mark_card_svg(svg_str: &str, scale: f32) -> Option<resvg::tiny_ski
     Some(pixmap)
 }
 
+pub fn semibold_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    let attributes = gtk::pango::AttrList::new();
+    attributes.insert(gtk::pango::AttrInt::new_weight(
+        gtk::pango::Weight::Semibold,
+    ));
+    label.set_attributes(Some(&attributes));
+    label
+}
+
 pub fn create_mark_card_widget(mark: MarkRenderDocument) -> gtk::Widget {
     let accessible_name = mark_card_accessible_name(&mark);
     let width = mark_card_width(&mark);
     create_card_widget(build_mark_card_svg(&mark), accessible_name, width)
 }
 
-fn empty_mark_card_svg(unavailable: bool) -> (String, &'static str) {
+/// What a mark slot draws when it has no mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmptyMark {
+    /// No journal identity here yet.
+    Generic,
+    /// A mark exists and can't be shown right now.
+    Unavailable,
+    /// Something answered and presented no identity. It isn't ours, so no brand colour.
+    NotPresented,
+}
+
+fn empty_mark_card_svg(state: EmptyMark) -> (String, &'static str) {
     let (first, second, speech, fill1, fill2, border1, border2, alpha, dash, rotation, glyph) =
-        if unavailable {
-            (
+        match state {
+            EmptyMark::Unavailable => (
                 CopyKey::MarkUnavailableFirst,
                 CopyKey::MarkUnavailableSecond,
                 CopyKey::MarkUnavailableSpeech,
@@ -144,9 +165,8 @@ fn empty_mark_card_svg(unavailable: bool) -> (String, &'static str) {
                 "none",
                 0,
                 "?",
-            )
-        } else {
-            (
+            ),
+            EmptyMark::Generic => (
                 CopyKey::MarkGenericFirst,
                 CopyKey::MarkGenericSecond,
                 CopyKey::MarkGenericSpeech,
@@ -158,7 +178,20 @@ fn empty_mark_card_svg(unavailable: bool) -> (String, &'static str) {
                 "5.69 4.27",
                 45,
                 "",
-            )
+            ),
+            EmptyMark::NotPresented => (
+                CopyKey::MarkNotPresentedFirst,
+                CopyKey::MarkNotPresentedSecond,
+                CopyKey::UnknownJournalNoIdentity,
+                "#6E6453",
+                "#6E6453",
+                "#6E6453",
+                "#6E6453",
+                "0.07",
+                "5.69 4.27",
+                45,
+                "",
+            ),
         };
     let w1 = gtk::glib::markup_escape_text(first.as_str());
     let w2 = gtk::glib::markup_escape_text(second.as_str());
@@ -175,7 +208,20 @@ fn empty_mark_card_svg(unavailable: bool) -> (String, &'static str) {
 }
 
 pub fn create_empty_mark_widget(unavailable: bool) -> gtk::Widget {
-    let (svg, speech) = empty_mark_card_svg(unavailable);
+    create_empty_state_widget(if unavailable {
+        EmptyMark::Unavailable
+    } else {
+        EmptyMark::Generic
+    })
+}
+
+/// The "what answered" slot when nothing was claimed.
+pub fn create_not_presented_mark_widget() -> gtk::Widget {
+    create_empty_state_widget(EmptyMark::NotPresented)
+}
+
+fn create_empty_state_widget(state: EmptyMark) -> gtk::Widget {
+    let (svg, speech) = empty_mark_card_svg(state);
     create_card_widget(svg, speech.into(), CARD_WIDTH)
 }
 
@@ -252,14 +298,18 @@ mod tests {
 
     #[test]
     fn empty_mark_words_and_unavailable_questions_draw_visible_ink() {
-        for unavailable in [false, true] {
-            let (svg, _) = empty_mark_card_svg(unavailable);
+        for state in [
+            EmptyMark::Generic,
+            EmptyMark::Unavailable,
+            EmptyMark::NotPresented,
+        ] {
+            let (svg, _) = empty_mark_card_svg(state);
             let pixmap = render_mark_card_svg(&svg, 1.0).unwrap();
             assert!(
                 dark_pixels(&pixmap, 20..220, 85..115) > 50,
                 "empty mark words must remain visible"
             );
-            if unavailable {
+            if state == EmptyMark::Unavailable {
                 assert!(
                     dark_pixels(&pixmap, 75..105, 25..60) > 10,
                     "first unavailable chip must contain its question mark"
@@ -270,6 +320,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn nothing_claimed_keeps_the_slot_and_speaks_its_own_name() {
+        let (not_presented, speech) = empty_mark_card_svg(EmptyMark::NotPresented);
+        let (generic, generic_speech) = empty_mark_card_svg(EmptyMark::Generic);
+        assert_eq!(speech, CopyKey::UnknownJournalNoIdentity.as_str());
+        assert_ne!(speech, generic_speech);
+
+        // Same two-word slot, so the layout doesn't jump, in its own colour.
+        let not_presented = render_mark_card_svg(&not_presented, 1.0).unwrap();
+        let generic = render_mark_card_svg(&generic, 1.0).unwrap();
+        assert_eq!(not_presented.width(), generic.width());
+        assert_eq!(not_presented.height(), generic.height());
+        assert_ne!(not_presented.data(), generic.data());
     }
 
     fn mark_with_words(word1: &str, word2: &str) -> MarkRenderDocument {

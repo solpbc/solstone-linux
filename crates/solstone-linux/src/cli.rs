@@ -3701,6 +3701,7 @@ mod tests {
             paired_jid: None,
             unknown_spoken_marks: vec![],
             paired_spoken_mark: None,
+            unknown_marks: vec![],
         };
         crate::sync_health::save_facts(&config.state_dir(), &make_facts(base_link.clone()))
             .unwrap();
