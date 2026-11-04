@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "888fc397a56265e53ffe9dd76e8043135f199b66401a0e3b996d47ee0a8879a0",
+  "cargo_lock_sha256": "ee53237e8875d283cbe77384794e6b7aff933b48813e7c023b08d00cbc754d8a",
   "notices_sha256": "e41b8480e43cca94d49716733d23125603fef9a34b9ef184ea6d9a5ff50eef6b",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux-window",
@@ -376,7 +376,7 @@
     },
     {
       "name": "async-executor",
-      "version": "1.14.0",
+      "version": "1.14.1",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "Apache-2.0 OR MIT",
       "members": [
