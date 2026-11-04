@@ -1251,7 +1251,17 @@ impl SyncWorker {
                             outcome.status_code(),
                             outcome.is_transport_unavailable(),
                         );
-                        self.record_failure(Some(err), outcome.status_code().map(i64::from));
+                        let code = outcome.status_code().map(i64::from);
+                        self.record_failure(Some(err), code);
+                        // The probe is this pass's only word from the journal, so the pass
+                        // result carries it; a clean commit would erase it at once.
+                        if err == ErrorType::Transient
+                            || (err == ErrorType::Client
+                                && pass_bounded_error_class != Some(ErrorType::Transient))
+                        {
+                            pass_bounded_error_class = Some(err);
+                            pass_bounded_error_code = code;
+                        }
                     }
                 }
             }
@@ -1733,8 +1743,10 @@ impl SyncWorker {
         facts.progress.clear();
         if success && error_type.is_none() {
             let now = self.clock.wall_seconds();
-            facts.last_successful_sync = Some(now);
-            facts.last_successful_contact.get_or_insert(now);
+            // A pass that heard nothing from the journal has nothing new to date, so the
+            // sync time ("last delivery", "up to date at") is the journal's last answer.
+            let contact = *facts.last_successful_contact.get_or_insert(now);
+            facts.last_successful_sync = Some(contact);
             facts.last_error_class = None;
             facts.last_error_code = None;
             facts.pending_confirmed = pending_count;
@@ -4512,6 +4524,40 @@ mod tests {
             derive_health(&facts.lock().unwrap(), 1_800_000_000.0, 600.0).state,
             crate::sync_health::HealthState::Connected
         );
+    }
+
+    // A journal that stops answering while nothing is due to send: the idle probe is the
+    // pass's only request, and its failure must survive the pass's own commit.
+    #[tokio::test]
+    async fn failed_idle_probe_stays_offline_after_the_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_server, mut worker) = test_worker(&temp, vec![(503, json!({}))]).await;
+        let now = worker.clock.wall_seconds();
+        {
+            let mut facts = worker.facts.lock().unwrap();
+            facts.last_successful_contact = Some(now - 301.0);
+            facts.pending_confirmed = Some(0);
+        }
+        worker.sync_pass().await;
+        let facts = worker.facts.lock().unwrap().clone();
+        assert_eq!(facts.last_error_class, Some(ErrorType::Transient));
+        assert_eq!(
+            derive_health(&facts, now, 600.0).state,
+            crate::sync_health::HealthState::Offline
+        );
+    }
+
+    // A pass that sends nothing and hears nothing must not move "last delivery" forward.
+    #[tokio::test]
+    async fn quiet_pass_dates_sync_from_the_journals_last_answer() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_server, mut worker) = test_worker(&temp, vec![]).await;
+        let now = worker.clock.wall_seconds();
+        worker.facts.lock().unwrap().last_successful_contact = Some(now - 100.0);
+        worker.sync_pass().await;
+        let facts = worker.facts.lock().unwrap().clone();
+        assert_eq!(facts.last_successful_sync, Some(now - 100.0));
+        assert_eq!(facts.pending_confirmed, Some(0));
     }
 
     // sustained_401_retries_stay_bounded drives only MutableClock and one wake per step.

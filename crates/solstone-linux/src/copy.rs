@@ -44,8 +44,10 @@ pub const STATUS_RESUME_FAILED: &str = "couldn't resume intake. try again.";
 pub const BROWSER_OPEN_FAILED: &str =
     "couldn't open your browser. try again, or open your journal from its usual address.";
 pub const JOURNAL_CONNECTED: &str = "connected";
+pub const JOURNAL_SYNCING: &str = "syncing to your journal…";
 pub const JOURNAL_OFFLINE: &str = "not reaching your journal right now";
 pub const JOURNAL_OFFLINE_DETAIL: &str = "anything waiting to sync stays on this computer. the solstone app will try again when your journal is reachable.";
+pub const JOURNAL_ATTENTION_DETAIL: &str = "anything waiting to sync stays on this computer. to see what to do, run: solstone-linux status";
 pub const JOURNAL_NOT_PAIRED: &str = "not paired";
 pub const JOURNAL_PAIR_TITLE: &str = "pair a device";
 pub const JOURNAL_PAIR_HELP: &str = "open the network app in your journal and get a pairing link.";
@@ -297,8 +299,10 @@ pub enum CopyKey {
     StatusResumeUnavailable,
     BrowserOpenFailed,
     JournalConnected,
+    JournalSyncing,
     JournalOffline,
     JournalOfflineDetail,
+    JournalAttentionDetail,
     JournalNotPaired,
     JournalPairTitle,
     JournalPairHelp,
@@ -476,8 +480,10 @@ impl CopyKey {
             }
             Self::BrowserOpenFailed => BROWSER_OPEN_FAILED,
             Self::JournalConnected => JOURNAL_CONNECTED,
+            Self::JournalSyncing => JOURNAL_SYNCING,
             Self::JournalOffline => JOURNAL_OFFLINE,
             Self::JournalOfflineDetail => JOURNAL_OFFLINE_DETAIL,
+            Self::JournalAttentionDetail => JOURNAL_ATTENTION_DETAIL,
             Self::JournalNotPaired => JOURNAL_NOT_PAIRED,
             Self::JournalPairTitle => JOURNAL_PAIR_TITLE,
             Self::JournalPairHelp => JOURNAL_PAIR_HELP,

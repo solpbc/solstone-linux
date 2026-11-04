@@ -220,10 +220,50 @@ pub fn map_journal_health(model: &ControlModel) -> JournalHealthKeys {
                 action_open,
             };
         }
+        // `syncing` is a send in flight or not yet confirmed. It says what this computer
+        // is doing, not that your journal is answering, which a send that hangs can't know.
+        if model.health == "syncing" {
+            return JournalHealthKeys {
+                status: Some(CopyKey::JournalSyncing),
+                detail: None,
+                action_open,
+            };
+        }
         if model.health == "offline" || model.health == "transport-unavailable" {
             return JournalHealthKeys {
                 status: Some(CopyKey::JournalOffline),
                 detail: Some(CopyKey::JournalOfflineDetail),
+                action_open,
+            };
+        }
+        if model.health == "journal-mark-held" {
+            // Same split as a held pairing below: a question asked in the window
+            // answers itself there; a mark held on disk is answered at the terminal.
+            return if attempt_pending(model) {
+                JournalHealthKeys {
+                    status: None,
+                    detail: None,
+                    action_open,
+                }
+            } else {
+                JournalHealthKeys {
+                    status: Some(CopyKey::PairingHeld),
+                    detail: Some(CopyKey::PairingHeldRun),
+                    action_open,
+                }
+            };
+        }
+        if matches!(
+            model.health.as_str(),
+            "unsafe-link-state"
+                | "re-pair-required"
+                | "token-persistence-failed"
+                | "pairing-required"
+                | "update-required"
+        ) {
+            return JournalHealthKeys {
+                status: Some(CopyKey::StatusAttention),
+                detail: Some(CopyKey::JournalAttentionDetail),
                 action_open,
             };
         }
@@ -639,13 +679,41 @@ mod tests {
             assert_eq!(keys.action_open, Some(CopyKey::ActionOpenJournal));
             match health {
                 "connected" => assert_eq!(keys.status, Some(CopyKey::JournalConnected)),
+                "syncing" => assert_eq!(keys.status, Some(CopyKey::JournalSyncing)),
                 "offline" | "transport-unavailable" => {
                     assert_eq!(keys.status, Some(CopyKey::JournalOffline));
                     assert_eq!(keys.detail, Some(CopyKey::JournalOfflineDetail));
                 }
-                _ => assert_ne!(keys.status, Some(CopyKey::JournalConnected)),
+                _ => assert_eq!(keys.status, Some(CopyKey::StatusChecking)),
             }
         }
+        for health in [
+            "unsafe-link-state",
+            "re-pair-required",
+            "token-persistence-failed",
+            "pairing-required",
+            "update-required",
+        ] {
+            let model = solstone_linux::window_control::decode_control_str(
+                &response.replace("connected", health),
+            )
+            .unwrap();
+            let keys = map_journal_health(&model);
+            assert_eq!(keys.status, Some(CopyKey::StatusAttention), "{health}");
+            assert_eq!(
+                keys.detail,
+                Some(CopyKey::JournalAttentionDetail),
+                "{health}"
+            );
+        }
+        let model = solstone_linux::window_control::decode_control_str(
+            &response.replace("connected", "journal-mark-held"),
+        )
+        .unwrap();
+        assert_eq!(
+            map_journal_health(&model).status,
+            Some(CopyKey::PairingHeld)
+        );
         let model = solstone_linux::window_control::decode_control_str(
             &response
                 .replace("confirmed", "unpaired")

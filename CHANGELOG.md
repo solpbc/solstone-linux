@@ -10,6 +10,10 @@ and this project adheres to Semantic Versioning.
 
 - when something other than your journal answers, the window now tells you and shows both marks to compare.
 
+### Fixed
+
+- when your journal stops answering, `solstone-linux status` no longer says it's receiving, and the window no longer says it's checking status or moves "last delivery" forward. while a send waits, both now say it's syncing. once a status check goes unanswered, both show your journal as not reachable, instead of clearing that a moment later. when this computer needs pairing again or the solstone app needs an update, the window now says it needs attention and how to find out what to do.
+
 ## [2.0.32] - 2026-11-03
 
 ### Fixed
