@@ -55,7 +55,8 @@ pub(crate) const JOURNAL_ROW_NOT_PAIRED: &str = "journal: not paired";
 pub(crate) const JOURNAL_ROW_WAITING: &str = "journal: your journal";
 pub(crate) const MARK_UNAVAILABLE_LINE: &str = "your journal's mark: unavailable right now";
 pub(crate) const CONFIRM_DONE: &str = "your journal's mark is already confirmed. nothing to do.";
-pub(crate) const CONFIRM_UNPAIRED: &str = "not paired. to pair, run: solstone-linux setup";
+pub(crate) const CONFIRM_UNPAIRED: &str =
+    "not paired. get a fresh pairing link from your journal and pair this computer.";
 pub(crate) const COULDNT_VERIFY: &str = "couldn't verify.";
 pub(crate) const SETUP_NO_TERMINAL: &str = "setup can't ask you about your journal's mark here. run it in a terminal, or give the mark's two words with --mark \"word word\".";
 pub(crate) const CONFIRM_NO_TERMINAL: &str = "confirm can't ask you about your journal's mark here. run it in a terminal, or give the mark's two words with --mark \"word word\".";
