@@ -16,7 +16,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
-- the connection status now follows your journal closely without flickering. connected now means your journal answered within about the last 30 seconds, so a journal that stops answering shows as offline about then, instead of up to 5 minutes later. one slow answer no longer reads as a drop, and a status check no longer flashes "syncing". after this computer wakes or its network comes back, the app checks at once instead of waiting for its next retry.
+- the connection status now follows your journal closely without flickering. connected now means your journal answered within about the last 30 seconds, so a journal that stops answering shows as offline about then, instead of up to 5 minutes later. one slow answer no longer reads as a drop, and a status check no longer flashes "syncing". when this computer loses its network and your journal stops answering, the status says offline at once. after this computer wakes or its network comes back, the app checks at once instead of waiting for its next retry.
 - when your journal stops answering, `solstone-linux status` no longer says it's receiving, and the window no longer says it's checking status or moves "last delivery" forward. when this computer needs pairing again or the solstone app needs an update, the window now says it needs attention and how to find out what to do.
 
 ## [2.0.32] - 2026-11-03

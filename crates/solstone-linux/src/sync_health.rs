@@ -123,6 +123,11 @@ pub struct SyncFacts {
     /// When the current attempt to reach the journal began: launch, wake, or the network
     /// coming back. Offline counts from the later of this and the journal's last answer.
     pub episode_started: Option<f64>,
+    /// The OS reports no network (NetworkManager). Only ever read together with a down link
+    /// or an unanswered check.
+    pub no_network: bool,
+    /// The last status check went unanswered; cleared by any answer.
+    pub last_check_failed: bool,
     #[doc(hidden)]
     pub(crate) link: Option<LinkFactState>,
     #[doc(hidden)]
@@ -490,6 +495,11 @@ pub fn derive_state(facts: &SyncFacts, now: f64, stale_threshold: f64) -> Health
         HealthState::UpdateRequired
     } else if link.transport_unavailable {
         HealthState::TransportUnavailable
+    } else if !link_missing && facts.no_network && (!link.carrier_proven || facts.last_check_failed)
+    {
+        // No network and the journal not answering: offline at once. No network alone,
+        // while the journal is still heard, changes nothing.
+        HealthState::Offline
     } else if link_up && heard {
         if waiting {
             HealthState::Syncing
@@ -871,6 +881,14 @@ pub(crate) fn load_facts_with_liveness(
             .unwrap_or_default()
             .to_owned(),
         episode_started: optional_float(&data, "episode_started"),
+        no_network: data
+            .get("no_network")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        last_check_failed: data
+            .get("last_check_failed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         link: load_link_facts(&data, liveness).unwrap_or(None),
         link_epoch: ProcessEpoch::parse(data.get("link_epoch").unwrap_or(&Value::Null)),
     }
@@ -931,6 +949,8 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
         "in_progress": facts.in_progress,
         "progress": facts.progress,
         "episode_started": facts.episode_started,
+        "no_network": facts.no_network,
+        "last_check_failed": facts.last_check_failed,
         "link_epoch": facts.link_epoch.as_ref().map(ProcessEpoch::as_str),
         "link": link,
     }))
@@ -1341,6 +1361,8 @@ mod tests {
             in_progress: true,
             progress: "uploading 120000_300".to_owned(),
             episode_started: Some(150.0),
+            no_network: true,
+            last_check_failed: true,
             link: None,
             link_epoch: None,
         };
@@ -2230,6 +2252,54 @@ mod tests {
             facts.episode_started = Some(100.0);
             assert_eq!(trace.at(&facts, 100.0), HealthState::Connecting);
             assert_eq!(trace.at(&facts, 130.0), HealthState::Offline);
+        }
+
+        // R6: the OS reporting no network makes a down link offline at once.
+        #[test]
+        fn no_network_with_the_link_down_is_offline_at_once() {
+            let mut trace = Trace::default();
+            let mut facts = up(100.0);
+            assert_eq!(trace.at(&facts, 100.0), HealthState::Connected);
+            facts.no_network = true;
+            carrier(&mut facts, false);
+            assert_eq!(trace.at(&facts, 101.0), HealthState::Offline);
+        }
+
+        #[test]
+        fn no_network_and_an_unanswered_check_is_offline_at_once() {
+            let mut trace = Trace::default();
+            let mut facts = up(100.0);
+            assert_eq!(trace.at(&facts, 100.0), HealthState::Connected);
+            facts.no_network = true;
+            facts.last_check_failed = true;
+            assert_eq!(trace.at(&facts, 101.0), HealthState::Offline);
+            // The answer that comes back clears it, after the drop's dwell.
+            facts.no_network = false;
+            facts.last_check_failed = false;
+            facts.last_successful_contact = Some(101.5);
+            assert_eq!(trace.at(&facts, 101.5), HealthState::Offline);
+            assert_eq!(trace.at(&facts, 102.0), HealthState::Connected);
+        }
+
+        #[test]
+        fn no_network_alone_never_withdraws_connected_while_the_journal_is_heard() {
+            let mut trace = Trace::default();
+            let mut facts = up(100.0);
+            facts.no_network = true;
+            let mut t = 100.0;
+            while t <= 100.0 + CONNECTED_LEASE {
+                assert_eq!(trace.at(&facts, t), HealthState::Connected, "at {t}");
+                t += 0.5;
+            }
+        }
+
+        // I4 holds with a network: an unanswered check inside the lease changes nothing.
+        #[test]
+        fn an_unanswered_check_with_a_network_changes_nothing() {
+            let mut trace = Trace::default();
+            let mut facts = up(100.0);
+            facts.last_check_failed = true;
+            assert_eq!(trace.at(&facts, 116.0), HealthState::Connected);
         }
 
         #[test]

@@ -283,6 +283,16 @@ pub(crate) struct NewEpisode {
 }
 
 impl NewEpisode {
+    /// The OS reports no network. Ask the journal at once, so a link that is really down
+    /// shows offline without waiting out the lease.
+    pub(crate) fn network_lost(&self) {
+        self.facts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .no_network = true;
+        self.fresh_check.request();
+    }
+
     pub(crate) fn begin(&self) {
         self.presenter
             .lock()
@@ -292,6 +302,10 @@ impl NewEpisode {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .episode_started = Some(self.clock.wall_seconds());
+        self.facts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .no_network = false;
         self.fresh_check.request();
     }
 }
@@ -382,6 +396,9 @@ impl SyncService {
         facts.in_progress = false;
         facts.progress.clear();
         facts.episode_started = Some(clock.wall_seconds());
+        // Network state belongs to this run: the watcher reports it afresh.
+        facts.no_network = false;
+        facts.last_check_failed = false;
         facts.link = Some(link_facts.snapshot());
         facts.link_epoch = process_epoch;
         let facts = Arc::new(Mutex::new(facts));
@@ -576,6 +593,7 @@ impl SyncResetHandle {
             facts.in_progress = false;
             facts.progress.clear();
             facts.episode_started = Some(self.clock.wall_seconds());
+            facts.last_check_failed = false;
             if let Err(error) = crate::sync_health::save_facts(&self.state_dir, &facts) {
                 tracing::warn!(%error, "Failed to persist cleared sync facts during association reset");
             }
@@ -859,6 +877,10 @@ impl SyncWorker {
                     self.last_error_type = Some(err);
                     self.last_error_code = code;
                     self.count_failure(err);
+                    // Kept for the no-network rule only: on its own, inside the lease, an
+                    // unanswered check still changes nothing.
+                    self.facts.lock().unwrap().last_check_failed = true;
+                    self.save_health();
                 } else {
                     self.record_failure(Some(err), code);
                 }
@@ -994,6 +1016,7 @@ impl SyncWorker {
                     return false;
                 }
                 facts.last_successful_contact = Some(self.clock.wall_seconds());
+                facts.last_check_failed = false;
                 facts.last_error_class = None;
                 facts.last_error_code = None;
                 self.circuit_open = false;
@@ -1869,6 +1892,7 @@ impl SyncWorker {
                 let mut facts = self.facts.lock().unwrap();
                 if self.association_is_current() {
                     facts.last_successful_contact = Some(self.clock.wall_seconds());
+                    facts.last_check_failed = false;
                 }
                 drop(facts);
                 self.save_health();
@@ -1883,6 +1907,7 @@ impl SyncWorker {
                 return;
             }
             facts.last_successful_contact = Some(self.clock.wall_seconds());
+            facts.last_check_failed = false;
         }
         let mono = self.clock.monotonic_seconds();
         if force || mono - self.last_contact_flush >= CONTACT_FLUSH_INTERVAL {
@@ -4787,12 +4812,13 @@ mod tests {
         );
         assert_eq!(facts.pending_confirmed, Some(0));
         assert_eq!(facts.last_error_class, None);
+        assert!(facts.last_check_failed);
 
+        worker.last_check = f64::NEG_INFINITY;
         assert_eq!(worker.check_journal().await, None);
-        assert_eq!(
-            worker.facts.lock().unwrap().last_successful_contact,
-            Some(now)
-        );
+        let facts = worker.facts.lock().unwrap().clone();
+        assert_eq!(facts.last_successful_contact, Some(now));
+        assert!(!facts.last_check_failed);
     }
 
     // The worker asks the journal once nothing has been heard for a check interval, and a
@@ -4920,6 +4946,41 @@ mod tests {
         );
         service.shutdown(Duration::from_secs(1)).await.unwrap();
         assert_eq!(Arc::strong_count(&client), 1);
+    }
+
+    // A no-network reading left by an earlier run must not outlive it.
+    #[tokio::test]
+    async fn startup_forgets_an_earlier_runs_network_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let (server, _worker) = test_worker(&temp, vec![]).await;
+        let config = Config {
+            base_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        save_facts(
+            &config.state_dir(),
+            &SyncFacts {
+                no_network: true,
+                last_check_failed: true,
+                ..SyncFacts::default()
+            },
+        )
+        .unwrap();
+        let clock = Arc::new(FixedClock {
+            wall: 1_800_000_000.0,
+            mono: 0.0,
+        });
+        let client = Arc::new(UploadClient::new(
+            &config,
+            server.capability(),
+            clock.clone(),
+        ));
+        let service = SyncService::start(config, client, clock);
+        let facts = service.sampler_handle().facts();
+        assert!(!facts.no_network);
+        assert!(!facts.last_check_failed);
+        service.shutdown(Duration::from_secs(1)).await.unwrap();
     }
 
     // tests/test_sync.py::test_startup_forces_in_progress_false
