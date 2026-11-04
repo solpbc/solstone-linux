@@ -125,6 +125,12 @@ pub fn mark_to_show(model: &ControlModel) -> Option<MarkRenderDocument> {
     }
 }
 
+/// The heading over the card: only the confirmed mark, never one still being asked about.
+pub fn mark_heading(model: &ControlModel) -> Option<CopyKey> {
+    (model.durable == "confirmed" && !attempt_pending(model) && mark_to_show(model).is_some())
+        .then_some(CopyKey::JournalMarkHeading)
+}
+
 /// With no mark to draw: true when one exists and can't be shown right now,
 /// false when there's no journal identity here yet.
 pub fn empty_mark_is_unavailable(model: &ControlModel) -> bool {
@@ -1017,5 +1023,38 @@ mod tests {
         );
         assert_eq!(rows[2].body, CopyKey::UnknownJournalBodyRelay.as_str());
         assert_eq!(rows[2].caption, CopyKey::UnknownJournalClaimed);
+    }
+
+    #[test]
+    fn only_the_confirmed_mark_takes_the_heading() {
+        let mut model = ControlModel::unknown();
+        model.durable = "confirmed".into();
+        model.confirmed_mark = Some(sighting_mark());
+        assert_eq!(mark_heading(&model), Some(CopyKey::JournalMarkHeading));
+
+        // A confirmed pairing whose mark can't be read has nothing to call that.
+        model.confirmed_mark = None;
+        assert_eq!(mark_heading(&model), None);
+        model.confirmed_mark = Some(sighting_mark());
+
+        // A replacement still being asked about is a different journal's mark.
+        model.pending_mark = Some(sighting_mark());
+        model.attempt = Some(solstone_linux::window_control::AttemptModel {
+            id: "attempt".into(),
+            pairing_id: "pairing".into(),
+            state: "pending".into(),
+            mark: None,
+        });
+        assert_eq!(mark_heading(&model), None);
+
+        model.attempt = None;
+        model.fault = Some("unverifiable".into());
+        assert_eq!(mark_heading(&model), None);
+        model.fault = None;
+
+        model.durable = "held".into();
+        assert_eq!(mark_heading(&model), None);
+        model.durable = "unpaired".into();
+        assert_eq!(mark_heading(&model), None);
     }
 }

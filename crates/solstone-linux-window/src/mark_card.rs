@@ -139,6 +139,15 @@ pub fn create_mark_card_widget(mark: MarkRenderDocument) -> gtk::Widget {
     create_card_widget(build_mark_card_svg(&mark), accessible_name, width)
 }
 
+/// The card with its heading above it, for a mark the owner has confirmed.
+pub fn create_headed_mark_card_widget(mark: MarkRenderDocument, heading: CopyKey) -> gtk::Widget {
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    card.set_halign(gtk::Align::Center);
+    card.append(&semibold_label(heading.as_str()));
+    card.append(&create_mark_card_widget(mark));
+    card.upcast()
+}
+
 /// What a mark slot draws when it has no mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EmptyMark {

@@ -738,6 +738,7 @@ fn create_journal_page(
         None::<(
             Option<solstone_linux::window_control::MarkRenderDocument>,
             bool,
+            Option<CopyKey>,
         )>,
     ));
     let scrolled = gtk::ScrolledWindow::new();
@@ -1072,12 +1073,17 @@ fn create_journal_page(
             // Mark chip rendering
             let mark = crate::copy_map::mark_to_show(&c.document);
             let unavailable = crate::copy_map::empty_mark_is_unavailable(&c.document);
-            let mark_state = Some((mark.clone(), unavailable));
+            let heading = crate::copy_map::mark_heading(&c.document);
+            let mark_state = Some((mark.clone(), unavailable, heading));
             if *rendered_mark.borrow() != mark_state {
                 while let Some(child) = mark_container.first_child() {
                     mark_container.remove(&child);
                 }
-                if let Some(mark) = mark.clone() {
+                if let (Some(mark), Some(heading)) = (mark.clone(), heading) {
+                    mark_container.append(&crate::mark_card::create_headed_mark_card_widget(
+                        mark, heading,
+                    ));
+                } else if let Some(mark) = mark.clone() {
                     mark_container.append(&crate::mark_card::create_mark_card_widget(mark));
                 } else {
                     mark_container.append(&crate::mark_card::create_empty_mark_widget(unavailable));

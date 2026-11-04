@@ -95,6 +95,7 @@ pub const PAIRING_CONFIRMED_UNAVAILABLE: &str = "your journal's mark is confirme
 pub const PAIRING_CHECK_STATUS: &str = "check status";
 pub const PAIRING_CONFIRM_ACTION: &str = "confirm your journal's mark";
 pub const JOURNAL_MARK_LABEL: &str = "mark";
+pub const JOURNAL_MARK_HEADING: &str = "this is your journal";
 pub const JOURNAL_MARK_SPEECH_TEMPLATE: &str = "{tint1}, {tint2} · {word1}·{word2}";
 pub const UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY: &str = "unknown journal seen through the relay";
 pub const UNKNOWN_JOURNAL_VIEW_DETAILS: &str = "view details";
@@ -339,6 +340,7 @@ pub enum CopyKey {
     PairingCheckStatus,
     PairingConfirmAction,
     JournalMarkLabel,
+    JournalMarkHeading,
     SettingsHeading,
     SettingsCursor,
     SettingsStartPaused,
@@ -517,6 +519,7 @@ impl CopyKey {
             Self::PairingCheckStatus => PAIRING_CHECK_STATUS,
             Self::PairingConfirmAction => PAIRING_CONFIRM_ACTION,
             Self::JournalMarkLabel => JOURNAL_MARK_LABEL,
+            Self::JournalMarkHeading => JOURNAL_MARK_HEADING,
             Self::SettingsHeading => SETTINGS_HEADING,
             Self::SettingsCursor => SETTINGS_CURSOR,
             Self::SettingsStartPaused => SETTINGS_START_PAUSED,
