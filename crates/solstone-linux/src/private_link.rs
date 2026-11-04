@@ -1198,8 +1198,7 @@ fn spoken_mark(spec: &spl_core::mark::MarkRenderSpec) -> String {
 }
 
 pub(crate) fn format_spoken_mark(jid: &str) -> Option<String> {
-    let mark = spl_core::mark::mark_from_jid(jid).ok()?;
-    Some(spoken_mark(&mark.to_render_spec()))
+    Some(spoken_mark(&crate::mark_cache::render_spec(jid)?))
 }
 
 impl LinkFacts {
@@ -1388,23 +1387,9 @@ impl LinkFacts {
         if state.unknown_journals == unknown {
             return;
         }
-        // A mark costs an argon2id run, so a sighting keeps its mark until its jid changes.
         let marks: Vec<_> = unknown
             .iter()
-            .map(|item| {
-                state
-                    .unknown_journals
-                    .iter()
-                    .zip(&state.unknown_marks)
-                    .find(|(seen, _)| seen.address == item.address && seen.jid == item.jid)
-                    .map_or_else(
-                        || {
-                            let mark = spl_core::mark::mark_from_jid(item.jid.as_deref()?).ok()?;
-                            Some(mark.to_render_spec())
-                        },
-                        |(_, mark)| mark.clone(),
-                    )
-            })
+            .map(|item| crate::mark_cache::render_spec(item.jid.as_deref()?))
             .collect();
         state.unknown_spoken_marks = marks
             .iter()
@@ -7882,9 +7867,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_sighting_keeps_its_mark_until_its_jid_changes() {
-        let jid = "b9b9cf9d-6318-894d-8688-cf3060a24f49";
-        let other_jid = "c9b9cf9d-6318-894d-8688-cf3060a24f49";
+    fn a_sighting_derives_its_mark_once() {
+        let jid = "b1b9cf9d-6318-894d-8688-cf3060a24f49";
+        let other_jid = "c1b9cf9d-6318-894d-8688-cf3060a24f49";
         let sighting = |address: &str, jid: Option<&str>| spl_transport::UnknownJournal {
             address: Some(address.into()),
             jid: jid.map(Into::into),
@@ -7895,24 +7880,21 @@ pub(crate) mod tests {
         assert_eq!(facts.snapshot().unknown_marks, vec![Some(derived.clone())]);
         assert!(facts.snapshot().unknown_spoken_marks[0].is_some());
 
-        // A mark nothing would derive, so a kept one can be told from a recomputed one.
-        let mut kept = derived.clone();
-        kept.words = ["kept".into(), "mark".into()];
-        facts.inner.state.lock().unwrap().unknown_marks = vec![Some(kept.clone())];
-
+        // Another address coming and going keeps what this one derived.
         facts.note_unknown_journals(vec![sighting("a:1", Some(jid)), sighting("b:1", None)]);
         let snapshot = facts.snapshot();
-        assert_eq!(snapshot.unknown_marks, vec![Some(kept.clone()), None]);
+        assert_eq!(snapshot.unknown_marks, vec![Some(derived.clone()), None]);
         assert_eq!(snapshot.unknown_spoken_marks[1], None);
+        assert_eq!(crate::mark_cache::derivations(jid), 1);
 
+        // A new jid at that address is a new mark.
         facts.note_unknown_journals(vec![sighting("a:1", Some(other_jid))]);
         let changed = facts.snapshot().unknown_marks[0].clone().unwrap();
-        assert_ne!(changed, kept);
-        assert_eq!(
-            changed,
-            spl_core::mark::mark_from_jid(other_jid)
-                .unwrap()
-                .to_render_spec()
-        );
+        assert_ne!(changed, derived);
+        assert_eq!(crate::mark_cache::derivations(other_jid), 1);
+
+        facts.note_unknown_journals(vec![sighting("a:1", Some(jid))]);
+        assert_eq!(facts.snapshot().unknown_marks, vec![Some(derived)]);
+        assert_eq!(crate::mark_cache::derivations(jid), 1);
     }
 }

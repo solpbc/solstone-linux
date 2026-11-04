@@ -457,12 +457,9 @@ pub(crate) fn journal_status_row(config_root: &Path) -> String {
     }
     match load_credential(config_root) {
         Ok(None) => JOURNAL_ROW_NOT_PAIRED.to_owned(),
-        Ok(Some(credential)) => spl_core::mark::mark_from_jid(&mark_jid(&credential))
-            .map(|mark| {
-                let spec = mark.to_render_spec();
-                format!("journal: {}·{}", spec.words[0], spec.words[1])
-            })
-            .unwrap_or_else(|_| MARK_UNAVAILABLE_LINE.to_owned()),
+        Ok(Some(credential)) => crate::mark_cache::render_spec(&mark_jid(&credential))
+            .map(|spec| format!("journal: {}·{}", spec.words[0], spec.words[1]))
+            .unwrap_or_else(|| MARK_UNAVAILABLE_LINE.to_owned()),
         Err(_) => MARK_UNAVAILABLE_LINE.to_owned(),
     }
 }
@@ -579,8 +576,7 @@ pub(crate) fn compare_mark_to_credential(
     credential: &Credential,
     mark_words: &[String; 2],
 ) -> Result<bool, ()> {
-    let mark = spl_core::mark::mark_from_jid(&mark_jid(credential)).map_err(|_| ())?;
-    let spec = mark.to_render_spec();
+    let spec = crate::mark_cache::render_spec(&mark_jid(credential)).ok_or(())?;
     let spec_words = [spec.words[0].to_lowercase(), spec.words[1].to_lowercase()];
     Ok(mark_words == &spec_words)
 }

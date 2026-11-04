@@ -26,6 +26,7 @@ pub mod desktop_session;
 pub mod doctor;
 pub mod encoding;
 mod journal_mark;
+mod mark_cache;
 pub mod matching;
 pub mod observer;
 pub mod panel_icon;

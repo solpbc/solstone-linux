@@ -842,9 +842,8 @@ pub(crate) fn assemble_document(
     let confirmed_mark = if phase.durable == "confirmed" {
         let config_root = resolve_config_dir(config_paths);
         match load_credential(&config_root) {
-            Ok(Some(cred)) => spl_core::mark::mark_from_jid(&crate::journal_mark::mark_jid(&cred))
-                .ok()
-                .map(|m| m.to_render_spec().into()),
+            Ok(Some(cred)) => crate::mark_cache::render_spec(&crate::journal_mark::mark_jid(&cred))
+                .map(Into::into),
             _ => None,
         }
     } else {
@@ -864,11 +863,8 @@ pub(crate) fn assemble_document(
         .pending_instance_id
         .as_deref()
         .or(held_instance_id.as_deref())
-        .and_then(|jid| {
-            spl_core::mark::mark_from_jid(jid)
-                .ok()
-                .map(|m| m.to_render_spec().into())
-        });
+        .and_then(crate::mark_cache::render_spec)
+        .map(Into::into);
 
     let pause_bounded = if snapshot.paused {
         Some(snapshot.pause_until.is_some())
@@ -3939,6 +3935,24 @@ mod tests {
         link_facts.note_unknown_journals(Vec::new());
         let cleared = decode_control_str(&harness.handler.get_control_state()).unwrap();
         assert!(cleared.unknown_journals.is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reading_the_state_again_does_not_derive_the_mark_again() {
+        let cred = sample_valid_credential("cert-pem-bytes");
+        let jid = crate::journal_mark::mark_jid(&cred);
+        let pairer = Arc::new(FakePairer::new(cred.clone()));
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness =
+            TestHarness::new(Some(cred), true, pairer, starter, Arc::new(NoWriteFault)).await;
+
+        let first = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert!(first.confirmed_mark.is_some());
+        let second = decode_control_str(&harness.handler.get_control_state()).unwrap();
+        assert_eq!(second.confirmed_mark, first.confirmed_mark);
+        assert_eq!(crate::mark_cache::derivations(&jid), 1);
 
         harness.shutdown().await;
     }
