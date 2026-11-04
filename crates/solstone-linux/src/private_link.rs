@@ -25,8 +25,8 @@ use spl_transport::{
     TransportError,
     client::{DialedCarrier, TokenPersistHook, TransportClient},
     journal_bridge::{
-        BridgePolicy, CapabilityGate, CarrierOpener, JournalBridgeConfig, JournalBridgeHandle,
-        JournalBridgeStatusReader,
+        BootstrapMode, BridgePolicy, BrowserAuthorizer, CapabilityGate, CarrierOpener,
+        JournalBridgeConfig, JournalBridgeHandle, JournalBridgeStatusReader,
     },
 };
 
@@ -53,7 +53,6 @@ pub(crate) const DIRECT_PAIR_LINK_FOR_TEST: &str =
 pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 128 * 1024 * 1024;
 const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
-const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
 const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
 const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 // A journal probe is often the request that dials a fresh carrier, and the
@@ -1761,13 +1760,15 @@ pub(crate) struct PrivateLinkSession {
     optional_client: reqwest::Client,
     optional_origin: Url,
     token_persistence: Arc<TokenPersistence>,
-    bootstrap_target: Option<String>,
+    browser_authorizer: Option<BrowserAuthorizer>,
     _state_lock: Arc<PrivateStateLock>,
 }
 
 #[derive(Clone)]
 pub(crate) enum OpenJournalGate {
-    Open(String),
+    Open(BrowserAuthorizer),
+    #[cfg(test)]
+    Fixture(String),
     Closed,
 }
 
@@ -1789,7 +1790,7 @@ pub(crate) fn open_journal_fixture(
     target: &str,
 ) -> (Arc<OpenJournalTarget>, OpenJournalCapability) {
     let target = Arc::new(OpenJournalTarget {
-        gate: Mutex::new(OpenJournalGate::Open(target.to_owned())),
+        gate: Mutex::new(OpenJournalGate::Fixture(target.to_owned())),
     });
     let capability = OpenJournalCapability {
         target: Arc::downgrade(&target),
@@ -1817,7 +1818,7 @@ impl OpenJournalCapability {
                     .gate
                     .lock()
                     .ok()
-                    .map(|gate| matches!(*gate, OpenJournalGate::Open(_)))
+                    .map(|gate| !matches!(*gate, OpenJournalGate::Closed))
             })
             .unwrap_or(false)
     }
@@ -1859,7 +1860,12 @@ impl OpenJournalCapability {
         let target = self.target.upgrade().ok_or(())?;
         let gate = target.gate.lock().map_err(|_| ())?;
         match &*gate {
-            OpenJournalGate::Open(target) => opener(target),
+            OpenJournalGate::Open(authorizer) => {
+                let url = authorizer.issue_url().map_err(|_| ())?;
+                opener(&url)
+            }
+            #[cfg(test)]
+            OpenJournalGate::Fixture(target) => opener(target),
             OpenJournalGate::Closed => Err(()),
         }
     }
@@ -2450,14 +2456,14 @@ async fn finish_owner_start(
 ) -> Result<PrivateLinkOwner, PrivateStateError> {
     let capability = session.capability();
     let facts = capability.facts();
-    let bootstrap_target = session
-        .bootstrap_target
+    let browser_authorizer = session
+        .browser_authorizer
         .take()
         .ok_or(PrivateStateError::BootstrapFailed)?;
     Ok(PrivateLinkOwner {
         capability,
         open_journal_target: Arc::new(OpenJournalTarget {
-            gate: Mutex::new(OpenJournalGate::Open(bootstrap_target)),
+            gate: Mutex::new(OpenJournalGate::Open(browser_authorizer)),
         }),
         open_journal_access: None,
         session: Some(session),
@@ -3509,6 +3515,7 @@ async fn start_private_link_session_inner(
     let policy = BridgePolicy {
         port: 0,
         capability_gate: CapabilityGate::Enabled,
+        bootstrap_mode: BootstrapMode::OneTimeToken,
         stream_response: Arc::new(streams_journal_response),
         local_response: Arc::new(|_, _| None),
         attribution_headers: Arc::new(|_| Vec::new()),
@@ -3528,27 +3535,22 @@ async fn start_private_link_session_inner(
     .map_err(|_| PrivateStateError::BridgeUnavailable)?;
     let (optional_client, optional_origin) = {
         let handle = &optional_handle;
-        let bootstrap = handle
-            .bootstrap_url()
-            .ok_or(PrivateStateError::BootstrapFailed)?;
         let origin = Url::parse(&format!("http://127.0.0.1:{}", handle.port()))
             .map_err(|_| PrivateStateError::BridgeUnavailable)?;
+        let cookies = Arc::new(reqwest::cookie::Jar::default());
+        cookies.add_cookie_str(
+            &handle
+                .capability_cookie()
+                .ok_or(PrivateStateError::BootstrapFailed)?,
+            &origin,
+        );
         let client = reqwest::Client::builder()
-            .cookie_store(true)
+            .cookie_provider(cookies)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .connect_timeout(LOOPBACK_CONNECT_TIMEOUT)
             .build()
             .map_err(|_| PrivateStateError::BridgeUnavailable)?;
-        let response = client
-            .get(bootstrap)
-            .timeout(BOOTSTRAP_TIMEOUT)
-            .send()
-            .await
-            .map_err(|_| PrivateStateError::BootstrapFailed)?;
-        if response.status() != StatusCode::FOUND {
-            return Err(PrivateStateError::BootstrapFailed);
-        }
         (client, origin)
     };
     let handle = spl_transport::journal_bridge::start(JournalBridgeConfig {
@@ -3559,40 +3561,37 @@ async fn start_private_link_session_inner(
     })
     .await
     .map_err(|_| PrivateStateError::BridgeUnavailable)?;
-    let bootstrap_url = handle
-        .bootstrap_url()
+    let browser_authorizer = handle
+        .browser_authorizer()
         .ok_or(PrivateStateError::BootstrapFailed)?;
     #[cfg(test)]
     if let Some(capture) = options.test_capture.capability {
-        let capability = Url::parse(&bootstrap_url)
-            .ok()
-            .and_then(|url| {
-                url.query_pairs()
-                    .find(|(name, _)| name == "cap")
-                    .map(|(_, value)| value.into_owned())
-            })
+        let cookie = handle
+            .capability_cookie()
             .ok_or(PrivateStateError::BootstrapFailed)?;
+        let capability = cookie
+            .split_once('=')
+            .and_then(|(_, value)| value.split(';').next())
+            .ok_or(PrivateStateError::BootstrapFailed)?
+            .to_owned();
         *capture.lock().unwrap_or_else(|p| p.into_inner()) = Some(capability);
     }
     let origin = Url::parse(&format!("http://127.0.0.1:{}", handle.port()))
         .map_err(|_| PrivateStateError::BridgeUnavailable)?;
+    let cookies = Arc::new(reqwest::cookie::Jar::default());
+    cookies.add_cookie_str(
+        &handle
+            .capability_cookie()
+            .ok_or(PrivateStateError::BootstrapFailed)?,
+        &origin,
+    );
     let client = reqwest::Client::builder()
-        .cookie_store(true)
+        .cookie_provider(cookies)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .connect_timeout(LOOPBACK_CONNECT_TIMEOUT)
         .build()
         .map_err(|_| PrivateStateError::BridgeUnavailable)?;
-    let response = client
-        .get(&bootstrap_url)
-        .timeout(BOOTSTRAP_TIMEOUT)
-        .send()
-        .await
-        .map_err(|_| PrivateStateError::BootstrapFailed)?;
-    if response.status() != StatusCode::FOUND {
-        handle.begin_shutdown();
-        return Err(PrivateStateError::BootstrapFailed);
-    }
     facts.publish(LinkFact::ListenerReady);
     Ok(PrivateLinkSession {
         client,
@@ -3603,7 +3602,7 @@ async fn start_private_link_session_inner(
         optional_client,
         optional_origin,
         token_persistence,
-        bootstrap_target: Some(bootstrap_url),
+        browser_authorizer: Some(browser_authorizer),
         _state_lock: Arc::new(state_lock),
     })
 }
@@ -5928,7 +5927,7 @@ pub(crate) mod tests {
     #[test]
     fn open_journal_debug_is_always_redacted() {
         let (_target, capability) =
-            open_journal_fixture("http://127.0.0.1:49152/?cap=capability-secret");
+            open_journal_fixture("http://127.0.0.1:49152/_bridge/bootstrap?token=one-time-secret");
         assert_eq!(
             format!("{capability:?}"),
             "OpenJournalCapability(<redacted>)"
@@ -5938,7 +5937,8 @@ pub(crate) mod tests {
     #[test]
     fn open_journal_secrets_never_enter_owner_or_serialized_surfaces_at_any_epoch() {
         let secrets = [
-            "http://127.0.0.1:49152/?cap=capability-cookie-sentinel",
+            "http://127.0.0.1:49152/_bridge/bootstrap?token=browser-token-sentinel",
+            "browser-token-sentinel",
             "49152",
             "capability-cookie-sentinel",
             "credential-sentinel",
@@ -5996,6 +5996,93 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn every_open_issues_a_fresh_link_and_shutdown_never_retargets_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        let owner = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let capability = owner.open_journal_capability();
+        let mut links = Vec::new();
+        for _ in 0..2 {
+            capability
+                .open_with(|url| {
+                    links.push(url.to_owned());
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_ne!(links[0], links[1]);
+        assert!(
+            links
+                .iter()
+                .all(|url| url.contains("/_bridge/bootstrap?token=") && !url.contains("cap="))
+        );
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .unwrap();
+        for link in &links {
+            assert_eq!(
+                client.get(link).send().await.unwrap().status(),
+                StatusCode::FOUND
+            );
+            assert_eq!(
+                client.get(link).send().await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let origin = owner.session.as_ref().unwrap().origin.clone();
+        let cookie = owner
+            .session
+            .as_ref()
+            .unwrap()
+            .handle
+            .capability_cookie()
+            .unwrap();
+        let cap = cookie.split_once('=').unwrap().1.split(';').next().unwrap();
+        assert_eq!(
+            client
+                .get(
+                    origin
+                        .join(&format!("/_bridge/bootstrap?cap={cap}"))
+                        .unwrap()
+                )
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        owner.shutdown().await.unwrap();
+        assert!(
+            capability
+                .open_with(|_| panic!("stale issuer opened"))
+                .is_err()
+        );
+        let replacement = start_private_link_owner(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        assert!(
+            capability
+                .open_with(|_| panic!("stale issuer retargeted"))
+                .is_err()
+        );
+        let mut replacement_link = String::new();
+        replacement
+            .open_journal_capability()
+            .open_with(|url| {
+                replacement_link = url.to_owned();
+                Ok(())
+            })
+            .unwrap();
+        assert!(!links.contains(&replacement_link));
+        replacement.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     #[tokio::test]

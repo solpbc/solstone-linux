@@ -3731,7 +3731,7 @@ dependencies = [
 [[package]]
 name = "spl-core"
 version = "0.1.0"
-source = "git+https://github.com/solpbc/spl-rust?rev=d8cbad9917364f2649808053b69e96b7fa625fd1#d8cbad9917364f2649808053b69e96b7fa625fd1"
+source = "git+https://github.com/solpbc/spl-rust?rev=f1f080fa4138f8e1ac703e643b6f3f7c36ec2834#f1f080fa4138f8e1ac703e643b6f3f7c36ec2834"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3748,7 +3748,7 @@ dependencies = [
 [[package]]
 name = "spl-home"
 version = "0.1.0"
-source = "git+https://github.com/solpbc/spl-rust?rev=d8cbad9917364f2649808053b69e96b7fa625fd1#d8cbad9917364f2649808053b69e96b7fa625fd1"
+source = "git+https://github.com/solpbc/spl-rust?rev=f1f080fa4138f8e1ac703e643b6f3f7c36ec2834#f1f080fa4138f8e1ac703e643b6f3f7c36ec2834"
 dependencies = [
  "rustls",
  "spl-core",
@@ -3760,7 +3760,7 @@ dependencies = [
 [[package]]
 name = "spl-transport"
 version = "0.1.0"
-source = "git+https://github.com/solpbc/spl-rust?rev=d8cbad9917364f2649808053b69e96b7fa625fd1#d8cbad9917364f2649808053b69e96b7fa625fd1"
+source = "git+https://github.com/solpbc/spl-rust?rev=f1f080fa4138f8e1ac703e643b6f3f7c36ec2834#f1f080fa4138f8e1ac703e643b6f3f7c36ec2834"
 dependencies = [
  "base64 0.22.1",
  "futures-util",

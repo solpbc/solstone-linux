@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- security fix: opening your journal on linux no longer leaves a reusable link in the browser's command line that another account on this computer could use to access your journal.
+
 ### Added
 
 - when something other than your journal answers, the window now tells you and shows both marks to compare.
