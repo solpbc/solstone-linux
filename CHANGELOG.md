@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.32] - 2026-11-03
+
 ### Fixed
 
 - this is a security fix. someone who got you to use a pairing link they had swapped could pair this computer with something that isn't your journal, while showing you your own journal's mark, so the check would have looked right. what you shared with the solstone app, like your screen and audio, would then have gone to them instead of your journal. the solstone app now refuses a link when what answers claims to be a different journal from the one the link points to, before it asks you anything or saves anything. a swapped link that doesn't claim that reaches the mark question showing its own mark, so if it doesn't match your journal's, answer no. if you paired before this update, install it, restart the app (after a package install by hand, `solstone-linux install-service` does that), then compare the mark in the app's window or `solstone-linux status` with the one in your journal's network app. if they don't match, this computer isn't paired with your journal, and what you share keeps going to whatever it's paired with until you pair again with a fresh pairing link from your journal, which replaces the old pairing. if the app says it's waiting for you to confirm your journal's mark, run `solstone-linux confirm`. if `confirm` says it couldn't verify, type cancel, then pair again with a fresh pairing link from your journal.
