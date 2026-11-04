@@ -48,7 +48,7 @@ pub(crate) const MARK_WORDS_WRONG_LINE: &str =
 pub(crate) const PAIRING_KEPT_LINE: &str = "not changed. your current pairing stays in use. nothing this computer has kept went to that journal through this link.";
 pub(crate) const PAIRING_KEPT_STOPPED_LINE: &str =
     "pairing cancelled. your current pairing stays in use.";
-pub(crate) const SETUP_BAD_LINK_LINE: &str = "Setup failed: the pairing link was not valid.";
+pub(crate) const SETUP_BAD_LINK_LINE: &str = "setup failed: the pairing link was not valid.";
 pub(crate) const LINK_PROMPT: &str =
     "paste the pairing link from your journal, then press enter:\n";
 pub(crate) const JOURNAL_ROW_NOT_PAIRED: &str = "journal: not paired";

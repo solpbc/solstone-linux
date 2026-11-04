@@ -3757,7 +3757,7 @@ mod tests {
                 "on, connected",
                 "Active",
                 "connected",
-                "Sync: connected; up to date",
+                "sync: connected; up to date",
                 "ok",
             ),
             (
@@ -3769,7 +3769,7 @@ mod tests {
                 "on, update required",
                 "NeedsAttention",
                 "update-required",
-                "Sync: update required; update the solstone app",
+                "sync: update required; update the solstone app",
                 "fail",
             ),
         ];
@@ -3844,7 +3844,7 @@ mod tests {
         assert_eq!(model.sni_status, sampled.sni_status);
         assert_eq!(
             sampled.cli,
-            "Sync: connection unavailable; held on this device; restart the solstone app; if this continues, pair this device again"
+            "sync: connection unavailable; held on this device; restart the solstone app; if this continues, pair this device again"
         );
         assert_eq!(sampled.doctor_severity, "fail");
         assert_eq!(
@@ -4165,7 +4165,7 @@ mod tests {
         assert_eq!(health.header_recording, "on, update required");
         assert_eq!(health.sni_status, "NeedsAttention");
         assert_eq!(health.dbus, "update-required");
-        assert_eq!(health.cli, "Sync: update required; update the solstone app");
+        assert_eq!(health.cli, "sync: update required; update the solstone app");
         assert_eq!(health.doctor_severity, "fail");
     }
 

@@ -608,7 +608,7 @@ fn cmd_setup(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = write_line(errors, format!("Setup failed: {error}"));
+            let _ = write_line(errors, format!("setup failed: {error}"));
             return 1;
         }
     };
@@ -918,14 +918,14 @@ pub(crate) fn render_setup_result(
         Err(PrivateStateError::PairingFailed) => {
             let _ = write_line(
                 errors,
-                "Setup failed: the solstone app could not connect to your journal.",
+                "setup failed: the solstone app could not connect to your journal.",
             );
             1
         }
         Err(PrivateStateError::LockContended) => {
             let _ = write_line(
                 errors,
-                "Setup could not start because the solstone app is running. Stop the solstone app first and try again. No input was consumed; app state, config, and private state are unchanged.",
+                "setup could not start because the solstone app is running. stop the solstone app first and try again. no input was consumed; app state, config, and private state are unchanged.",
             );
             1
         }
@@ -935,19 +935,19 @@ pub(crate) fn render_setup_result(
                 ..
             },
         ) => {
-            let _ = write_line(errors, format!("Setup failed: {error}"));
+            let _ = write_line(errors, format!("setup failed: {error}"));
             1
         }
         Err(error @ (PrivateStateError::Io { .. } | PrivateStateError::InvalidTarget { .. })) => {
             let _ = write_line(
                 errors,
-                "Setup failed before pairing because the solstone app could not safely update its config.",
+                "setup failed before pairing because the solstone app could not safely update its config.",
             );
-            let _ = write_line(errors, format!("Config update error: {error}"));
+            let _ = write_line(errors, format!("config update error: {error}"));
             1
         }
         Err(error) => {
-            let _ = write_line(errors, format!("Setup failed: {error}"));
+            let _ = write_line(errors, format!("setup failed: {error}"));
             1
         }
     }
@@ -1214,7 +1214,7 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
         };
         (
             crate::journal_mark::journal_status_row(&config.config_dir),
-            Some(format!("Journal version: {version_str}")),
+            Some(format!("journal version: {version_str}")),
         )
     } else {
         (crate::journal_mark::JOURNAL_ROW_NOT_PAIRED.to_owned(), None)
@@ -1222,18 +1222,18 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
     let mut render = || -> io::Result<()> {
         write_line(
             output,
-            format!("Config: {}", config.config_path().display()),
+            format!("config: {}", config.config_path().display()),
         )?;
         write_line(output, &link_line)?;
         if let Some(line) = &version_line {
             write_line(output, line)?;
         }
-        write_line(output, format!("Stream: {stream}"))?;
+        write_line(output, format!("stream: {stream}"))?;
         write_line(output, "")?;
         let captures = config.captures_dir();
         if captures.exists() {
             let stats = compute_status_capture_stats(&captures);
-            write_line(output, format!("Cache:  {}", captures.display()))?;
+            write_line(output, format!("cache:  {}", captures.display()))?;
             write_line(
                 output,
                 format!(
@@ -1257,7 +1257,7 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
         } else {
             write_line(
                 output,
-                format!("Cache:  {} (not created yet)", captures.display()),
+                format!("cache:  {} (not created yet)", captures.display()),
             )?;
         }
         let now = SystemTime::now()
@@ -1288,7 +1288,7 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 &HashMap::new(),
             )
         {
-            write_line(output, format!("\nService: {}", result.stdout.trim()))?;
+            write_line(output, format!("\nservice: {}", result.stdout.trim()))?;
         }
         Ok(())
     };
@@ -1738,7 +1738,7 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            "Setup could not start because the solstone app is running. Stop the solstone app first and try again. No input was consumed; app state, config, and private state are unchanged.\n"
+            "setup could not start because the solstone app is running. stop the solstone app first and try again. no input was consumed; app state, config, and private state are unchanged.\n"
         );
         let after = std::fs::read_dir(&config_root)
             .unwrap()
@@ -1975,7 +1975,7 @@ mod tests {
         assert_eq!(status, 1);
         assert!(reads.load(Ordering::SeqCst) > 0);
         let errors = String::from_utf8(errors).unwrap();
-        assert!(errors.contains("Config update error:"));
+        assert!(errors.contains("config update error:"));
         let out = String::from_utf8(output).unwrap();
         assert!(!out.contains("paired."));
         assert!(!config_root.join("credentials.json").exists());
@@ -2328,13 +2328,13 @@ mod tests {
             0
         );
         let browser = if crate::browser::ENABLED {
-            "Browser: the solstone app is not running\n"
+            "browser: the solstone app is not running\n"
         } else {
             ""
         };
         let journal_row = crate::journal_mark::journal_status_row(&config.config_dir);
         let expected = format!(
-            "Config: {}\n{journal_row}\nJournal version: unknown\nStream: test-stream\n\nCache:  {}\n        0 segments across 0 day(s), 0.0 MB\nSync: offline; held on this device; will retry\n{browser}\nService: active\n",
+            "config: {}\n{journal_row}\njournal version: unknown\nstream: test-stream\n\ncache:  {}\n        0 segments across 0 day(s), 0.0 MB\nsync: offline; held on this device; will retry\n{browser}\nservice: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );
@@ -2357,7 +2357,7 @@ mod tests {
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("        Held: 1 segment(s) not sent, oldest 0d"));
-        assert!(!out.contains("Service:"));
+        assert!(!out.contains("service:"));
     }
 
     // tests/test_cli.py::test_cmd_status_handles_corrupt_config
@@ -2435,12 +2435,12 @@ mod tests {
         let config = status_config(&t);
         let _ = fs::remove_file(config.config_dir.join("credentials.json"));
 
-        // 1. Unpaired -> no Journal version line
+        // 1. Unpaired -> no journal version line
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains(crate::journal_mark::JOURNAL_ROW_NOT_PAIRED));
-        assert!(!out_str.contains("Journal version:"));
+        assert!(!out_str.contains("journal version:"));
 
         // Set up credential
         let cred = Credential {
@@ -2460,12 +2460,12 @@ mod tests {
         crate::private_link::persist_credential(&config.config_dir, &cred).unwrap();
         let identity_key = crate::private_link::journal_identity_key(&cred);
 
-        // 2. Paired but no paired_journal.json -> "Journal version: unknown"
+        // 2. Paired but no paired_journal.json -> "journal version: unknown"
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains(&crate::journal_mark::journal_status_row(&config.config_dir)));
-        assert!(out_str.contains("Journal version: unknown"));
+        assert!(out_str.contains("journal version: unknown"));
 
         // Save version in paired_journal.json
         crate::sync_health::save_paired_journal_version(
@@ -2476,11 +2476,11 @@ mod tests {
         )
         .unwrap();
 
-        // 3. Paired, cached (no live carrier) -> "Journal version: 1.4.0 (last known)"
+        // 3. Paired, cached (no live carrier) -> "journal version: 1.4.0 (last known)"
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains("Journal version: 1.4.0 (last known)"));
+        assert!(out_str.contains("journal version: 1.4.0 (last known)"));
 
         // 4. Paired, live owner + carrier_proven but NOT yet journal_version_observed -> still "(last known)"
         let mut state_lock =
@@ -2500,9 +2500,9 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains("Journal version: 1.4.0 (last known)"));
+        assert!(out_str.contains("journal version: 1.4.0 (last known)"));
 
-        // 5. Paired, live owner + journal_version_observed -> "Journal version: 1.4.0" (current)
+        // 5. Paired, live owner + journal_version_observed -> "journal version: 1.4.0" (current)
         let facts_observed = SyncFacts {
             link: Some(crate::private_link::LinkFactState {
                 carrier_proven: true,
@@ -2517,7 +2517,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains("Journal version: 1.4.0"));
+        assert!(out_str.contains("journal version: 1.4.0"));
         assert!(!out_str.contains("(last known)"));
     }
 
@@ -3781,7 +3781,7 @@ mod tests {
         assert_eq!(status4, 0);
         let out_str4 = String::from_utf8(out4).unwrap();
         assert!(out_str4.contains(
-            "Sync: pairing unsafe; repair this device's pairing and restart the solstone app"
+            "sync: pairing unsafe; repair this device's pairing and restart the solstone app"
         ));
         assert!(!out_str4.contains(crate::journal_mark::HELD_FIRST_SENTENCE));
 

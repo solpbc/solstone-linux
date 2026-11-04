@@ -87,7 +87,7 @@ pub fn status_lines(base_dir: &Path, now_ms: i64) -> Vec<String> {
             browsers.sort();
             browsers.dedup();
             if browsers.is_empty() {
-                lines.push("Browser: no browser connected".to_owned());
+                lines.push("browser: no browser connected".to_owned());
                 for (served, url) in STORE_LINKS {
                     lines.push(format!(
                         "        if you haven't yet, add the solstone extension to {served}: {url}"
@@ -95,7 +95,7 @@ pub fn status_lines(base_dir: &Path, now_ms: i64) -> Vec<String> {
                 }
             } else {
                 let names: Vec<&str> = browsers.iter().map(|b| brand_name(b)).collect();
-                lines.push(format!("Browser: {} connected", names.join(", ")));
+                lines.push(format!("browser: {} connected", names.join(", ")));
             }
             if running.full {
                 lines.push(
@@ -114,7 +114,7 @@ pub fn status_lines(base_dir: &Path, now_ms: i64) -> Vec<String> {
         }
         None => {
             let held = custody::held_bytes(&layout);
-            lines.push("Browser: the solstone app is not running".to_owned());
+            lines.push("browser: the solstone app is not running".to_owned());
             if held > 0 {
                 lines.push(format!(
                     "        {} of browser pages on this computer, waiting to go into your journal",
@@ -264,7 +264,7 @@ mod tests {
         fs::create_dir_all(&layout.root).unwrap();
         assert_eq!(
             status_lines(temp.path(), 1_000_000),
-            vec!["Browser: the solstone app is not running".to_owned()]
+            vec!["browser: the solstone app is not running".to_owned()]
         );
         write_running(
             &layout,
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(
             status_lines(temp.path(), 1_005_000),
             vec![
-                "Browser: Chrome, Firefox connected".to_owned(),
+                "browser: Chrome, Firefox connected".to_owned(),
                 "        2 KB of browser pages on this computer, waiting to go into your journal"
                     .to_owned(),
             ]
@@ -305,7 +305,7 @@ mod tests {
         // A status file the app stopped refreshing is not a running app.
         assert_eq!(
             status_lines(temp.path(), 1_000_000 + RUNNING_STALE_MS)[0],
-            "Browser: the solstone app is not running"
+            "browser: the solstone app is not running"
         );
     }
 
