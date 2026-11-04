@@ -1,7 +1,7 @@
 # solstone-linux Makefile
 # Standalone Linux desktop observer for solstone
 
-.PHONY: all bootstrap agent-setup install format brand-sync test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover sign-release-manifest verify-release-signature publish-origin publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
+.PHONY: all bootstrap agent-setup install format brand-sync test check-observer-contract check-rust-release-manifest check-transparency-minisign check-audit-signed-packet ci audit update-deps shellcheck ci-full install-service uninstall-service service-restart service-status service-logs versions clean clean-install release release-images release-candidate release-candidate-prove release-candidate-recover sign-release-manifest verify-release-signature publish-origin publish-release publish-transparency resign-transparency-pointer check-toolchain-env establish-toolchain rust-preflight check-cargo-deny
 
 APP := solstone-linux
 UNIT := solstone-linux.service
@@ -195,6 +195,12 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window
 	$(MAKE) shellcheck
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
+
+# The full gate: the routine gate, then the tests behind the full-tests feature
+# (processes, sockets, host state, wall-clock waits), linted and run.
+ci-full: ci
+	$(CARGO) clippy $(CARGO_LOCKED) -p solstone-linux --features full-tests --all-targets -- -D warnings
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux --features full-tests
 
 check-transparency-minisign:
 	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "the in-repo v1 transparency publisher is retired; v2 app records are produced outside this repository (see trust.solstone.app); TRANSPARENCY_ACTIVATED=1 does not by itself authorize a publish" >&2; exit 2; }

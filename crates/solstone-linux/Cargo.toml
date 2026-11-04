@@ -50,6 +50,9 @@ default = ["browser"]
 # release target sets it.
 browser = []
 browser-dev-host = ["browser"]
+# `full-tests` selects tests that start a process, open a socket, read host
+# state or wait on the wall clock; `make ci-full` runs them. Not a shipping feature.
+full-tests = []
 
 [build-dependencies]
 resvg = { version = "0.48.1", default-features = false }

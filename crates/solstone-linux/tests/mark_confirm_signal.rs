@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+// Every case here starts the CLI as a child process on a pty, most against a
+// loopback listener, and several deliver real signals, so the file runs in
+// `make ci-full` and not in the routine gate.
+#![cfg(feature = "full-tests")]
+
 mod pair_listener {
     use std::{
         collections::HashMap,
@@ -712,7 +717,12 @@ async fn setup_ceremony_sigint_kills_process_and_saves_nothing() {
 
     let terminal = MarkTerminal::new();
 
-    let mut child = Command::new(bin)
+    // A job started with `&` from a non-interactive shell inherits SIGINT as
+    // ignored, and an ignored signal survives exec. This case asserts the
+    // default action, so the child starts with SIGINT reset to its default.
+    let mut child = Command::new("env")
+        .arg("--default-signal=INT")
+        .arg(bin)
         .arg("setup")
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", &xdg_data)

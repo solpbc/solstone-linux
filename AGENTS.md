@@ -49,6 +49,7 @@ make release-candidate-prove  # Resume only missing package proofs
 make release-candidate-recover  # Read-only retained-candidate validation
 make publish-release RELEASE_DIR=dist/rust  # Publish the exact retained candidate
 make ci             # Host evidence: Rust format, lint, tests, offline policy
+make ci-full        # make ci, then the full-tests feature's tests
 make audit          # Refresh RustSec data, then check advisories
 make update-deps    # Sole unlocked Cargo dependency-update path
 make shellcheck     # Check release and installer shell scripts
@@ -159,6 +160,12 @@ no release target sets it.
 
 Run `make test` for the locked Rust suite or `make ci` for host evidence across
 Rust formatting, lint, tests, shell scripts, and offline dependency policy.
+
+A new `solstone-linux` test that starts a process, opens a socket, reads host
+state or waits on the wall clock goes behind the crate's non-default
+`full-tests` feature: `#[cfg(feature = "full-tests")]` on the test or module,
+`#![cfg(feature = "full-tests")]` at the top of an integration-test file.
+`make ci-full` lints and runs those tests; `make ci` does not.
 
 On a fresh checkout, run `make install` (or `cargo fetch --locked`) before
 `make ci`. Parts of the gate resolve the dependency graph offline, and that
