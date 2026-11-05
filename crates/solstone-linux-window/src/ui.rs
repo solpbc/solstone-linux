@@ -781,6 +781,7 @@ fn create_journal_page(
 
     let pairing_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let link_entry = gtk::Entry::new();
+    let submitted_link = Rc::new(RefCell::new(None::<glib::GString>));
     link_entry.set_placeholder_text(Some(CopyKey::JournalLinkPlaceholder.as_str()));
     let pair_button = gtk::Button::with_label(CopyKey::ActionPair.as_str());
     pair_button.set_halign(gtk::Align::Start);
@@ -834,6 +835,7 @@ fn create_journal_page(
     {
         let ctrl = Rc::clone(&controller);
         let link_entry = link_entry.clone();
+        let submitted_link = Rc::clone(&submitted_link);
         let pairing_notice = pairing_notice.clone();
         let changed = Rc::clone(&changed);
         pair_button.connect_clicked(move |_| {
@@ -849,6 +851,7 @@ fn create_journal_page(
                         let id = ctrl
                             .borrow_mut()
                             .start_pairing(&owner, PairingCommand::Begin(valid_link.clone()));
+                        *submitted_link.borrow_mut() = Some(text.clone());
                         notify(&changed);
                         let changed = Rc::clone(&changed);
                         let c_inner = Rc::clone(&ctrl);
@@ -1091,6 +1094,14 @@ fn create_journal_page(
                 *rendered_mark.borrow_mut() = mark_state;
             }
             mark_container.set_visible(true);
+
+            // A later confirmation or status refresh must not erase a new link.
+            if c.pairing_attempt_outcome.as_deref() == Some("confirmed")
+                && let Some(used_link) = submitted_link.borrow_mut().take()
+                && link_entry.text() == used_link
+            {
+                link_entry.set_text("");
+            }
 
             let pairing_keys = map_pairing(&c.document, c.pairing_attempt_outcome.as_deref());
             let notice = c.browser_error.or(pairing_keys.title);

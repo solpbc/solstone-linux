@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- after you confirm your journal's mark in the window, the pairing link field clears so the used link is no longer left there.
+
 ## [2.0.33] - 2026-11-04
 
 ### Added
