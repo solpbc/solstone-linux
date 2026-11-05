@@ -621,6 +621,7 @@ pub fn generate_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()>
         }
     }
 
+    notices_bytes.extend_from_slice(&runtime_notice_bytes(paths)?);
     let notices_sha256 = digest_bytes(&notices_bytes);
     let cargo_lock_sha256 = digest_file(&paths.cargo_lock)?;
 
@@ -696,6 +697,26 @@ pub fn generate_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()>
     })?;
 
     Ok(())
+}
+
+fn runtime_notice_bytes(paths: &DependencyNoticesPaths) -> Result<Vec<u8>> {
+    let toolchain: toml::Value = toml::from_str(
+        &fs::read_to_string(paths.workspace_root.join("rust-toolchain.toml"))
+            .map_err(|e| Error::new(e.to_string()))?,
+    )
+    .map_err(|e| Error::new(e.to_string()))?;
+    let version = toolchain["toolchain"]["channel"]
+        .as_str()
+        .ok_or_else(|| Error::new("Rust pin authority missing"))?;
+    let notice = paths
+        .workspace_root
+        .join(format!("licensing/runtime/{version}-NOTICES.txt"));
+    let bytes = fs::read(&notice)
+        .map_err(|e| Error::new(format!("runtime notices '{}': {e}", notice.display())))?;
+    if bytes.is_empty() {
+        return Err(Error::new("Rust runtime notices are empty"));
+    }
+    Ok(bytes)
 }
 
 pub fn check_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()> {
@@ -777,6 +798,12 @@ pub fn check_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()> {
             "RUST_DEPENDENCY_NOTICES.txt digest mismatch: index expected {}, actual {}",
             index_data.notices_sha256, actual_notices_sha256
         )));
+    }
+
+    if !notices_bytes.ends_with(&runtime_notice_bytes(paths)?) {
+        return Err(Error::new(
+            "Rust runtime notices changed; regenerate dependency notices",
+        ));
     }
 
     // Re-query metadata and re-read crate dirs
