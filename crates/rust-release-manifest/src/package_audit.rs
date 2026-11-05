@@ -57,12 +57,14 @@ const EXPECTED_NEEDED: [&str; 8] = [
     "libm.so.6",
     "libc.so.6",
 ];
-// Closed GTK4/Cairo/GLib and Rust/C runtime surface, plus the architecture's
+// Closed GTK4/Pango/Cairo/GLib and Rust/C runtime surface, plus the architecture's
 // own dynamic loader. The optimized candidate's actual imports are checked
 // against this set; no other native library is admitted just because GTK4 is
-// present.
-const WINDOW_ALLOWED_NEEDED: [&str; 8] = [
+// present. Pango is here because the window calls it directly (the mark card's
+// heading weight), and the deb and rpm GTK4 dependency already requires it.
+const WINDOW_ALLOWED_NEEDED: [&str; 9] = [
     "libgtk-4.so.1",
+    "libpango-1.0.so.0",
     "libcairo.so.2",
     "libgio-2.0.so.0",
     "libgobject-2.0.so.0",
