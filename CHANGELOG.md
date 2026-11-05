@@ -6,18 +6,18 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
-### Changed
-
-- security fix: opening your journal on linux no longer leaves a reusable link in the browser's command line that another account on this computer could use to access your journal.
+## [2.0.33] - 2026-11-04
 
 ### Added
 
-- when something other than your journal answers, the window now tells you and shows both marks to compare.
+- when something other than your journal answers, the window now tells you and shows what answered beside your journal's mark, to compare.
 
 ### Fixed
 
-- the connection status now follows your journal closely without flickering. connected now means your journal answered within about the last 30 seconds, so a journal that stops answering shows as offline about then, instead of up to 5 minutes later. one slow answer no longer reads as a drop, and a status check no longer flashes "syncing". when this computer loses its network and your journal stops answering, the status says offline at once. after this computer wakes or its network comes back, the app checks at once instead of waiting for its next retry.
-- when your journal stops answering, `solstone-linux status` no longer says it's receiving, and the window no longer says it's checking status or moves "last delivery" forward. when this computer needs pairing again or the solstone app needs an update, the window now says it needs attention and how to find out what to do.
+- security fix: opening your journal on linux no longer leaves a reusable link in the browser's command line that another account on this computer could use to access your journal. each link now works once, for a short time. if you installed a package or the archive by hand, run `solstone-linux install-service` to restart the app on the new version.
+- the connection status now follows your journal closely without flickering. connected now means your journal answered within about the last 30 seconds, so a journal that stops answering shows as offline about then, instead of minutes later. one slow answer no longer reads as a drop, and a status check no longer flashes "syncing".
+- when this computer loses its network and your journal stops answering, the status says offline at once. after this computer wakes or its network comes back, the app checks at once instead of waiting for its next retry. the network part needs NetworkManager.
+- when your journal stops answering, `solstone-linux status` no longer says it's receiving, and the window no longer keeps saying it's checking status or moves "last delivery" forward. when this computer needs pairing again or the solstone app needs an update, the window now says it needs attention and how to find out what to do.
 
 ## [2.0.32] - 2026-11-03
 
