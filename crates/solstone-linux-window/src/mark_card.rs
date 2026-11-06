@@ -160,17 +160,16 @@ enum EmptyMark {
 }
 
 fn empty_mark_card_svg(state: EmptyMark) -> (String, &'static str) {
-    let (first, second, speech, fill1, fill2, border1, border2, alpha, dash, rotation, glyph) =
+    let (first, second, speech, fill, border1, border2, backing, dash, rotation, glyph) =
         match state {
             EmptyMark::Unavailable => (
                 CopyKey::MarkUnavailableFirst,
                 CopyKey::MarkUnavailableSecond,
                 CopyKey::MarkUnavailableSpeech,
                 "#FEFCF8",
-                "#FEFCF8",
                 "#ECE3D0",
                 "#ECE3D0",
-                "1",
+                "0",
                 "none",
                 0,
                 "?",
@@ -179,11 +178,10 @@ fn empty_mark_card_svg(state: EmptyMark) -> (String, &'static str) {
                 CopyKey::MarkGenericFirst,
                 CopyKey::MarkGenericSecond,
                 CopyKey::MarkGenericSpeech,
-                "#E8913A",
-                "#D4A017",
-                "#E8913A",
-                "#D4A017",
-                "0.07",
+                "#FEFCF8",
+                "#B06A1A",
+                "#A57F0E",
+                "6",
                 "5.69 4.27",
                 45,
                 "",
@@ -192,11 +190,10 @@ fn empty_mark_card_svg(state: EmptyMark) -> (String, &'static str) {
                 CopyKey::MarkNotPresentedFirst,
                 CopyKey::MarkNotPresentedSecond,
                 CopyKey::UnknownJournalNoIdentity,
+                "#FEFCF8",
                 "#6E6453",
                 "#6E6453",
-                "#6E6453",
-                "#6E6453",
-                "0.07",
+                "6",
                 "5.69 4.27",
                 45,
                 "",
@@ -207,8 +204,9 @@ fn empty_mark_card_svg(state: EmptyMark) -> (String, &'static str) {
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="130" viewBox="0 0 240 130">
 <rect x="0.5" y="0.5" width="239" height="129" rx="12" fill="#fffdf9" stroke="#e7d8c6"/>
-<rect x="66.5" y="20" width="48" height="48" rx="12" fill="{fill1}" fill-opacity="{alpha}" stroke="{border1}" stroke-width="2" stroke-dasharray="{dash}"/>
-<g transform="rotate({rotation},149.5,44)"><rect x="125.5" y="20" width="48" height="48" rx="12" fill="{fill2}" fill-opacity="{alpha}" stroke="{border2}" stroke-width="2" stroke-dasharray="{dash}"/></g>
+<rect x="66.5" y="20" width="48" height="48" rx="12" fill="{fill}" stroke="{fill}" stroke-width="{backing}"/>
+<rect x="66.5" y="20" width="48" height="48" rx="12" fill="none" stroke="{border1}" stroke-width="2" stroke-dasharray="{dash}"/>
+<g transform="rotate({rotation},149.5,44)"><rect x="125.5" y="20" width="48" height="48" rx="12" fill="{fill}" stroke="{fill}" stroke-width="{backing}"/><rect x="125.5" y="20" width="48" height="48" rx="12" fill="none" stroke="{border2}" stroke-width="2" stroke-dasharray="{dash}"/></g>
 <text x="90.5" y="53" font-family="Comfortaa" font-size="28" text-anchor="middle" fill="#6E6453">{glyph}</text>
 <text x="149.5" y="53" font-family="Comfortaa" font-size="28" text-anchor="middle" fill="#6E6453">{glyph}</text>
 <text x="120" y="105" font-family="Comfortaa" font-weight="700" font-size="18" text-anchor="middle" xml:space="preserve"><tspan fill="#1A1A1A">{w1}</tspan><tspan fill="#6E6453"> · </tspan><tspan fill="#1A1A1A">{w2}</tspan></text></svg>"##
