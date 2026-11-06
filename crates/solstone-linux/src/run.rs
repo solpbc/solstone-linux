@@ -406,6 +406,7 @@ fn run_capture(
             captures_dir,
             Some(Arc::clone(&activity_prefs)),
             Arc::new(Mutex::new(None)),
+            Arc::new(crate::local_journal::SocketLocalJournal::default()),
         );
         supervisor.attach_activity_runtime(
             Arc::clone(&activity_fault),

@@ -270,6 +270,23 @@ pub(crate) fn window_launch_notice(
 /// The window's own argument for opening on its settings tab.
 pub const WINDOW_SETTINGS_ARG: &str = "--settings";
 
+fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
+    use std::os::unix::process::CommandExt;
+    if let Some(link) = argument
+        .to_str()
+        .and_then(crate::pending_link::clicked_link)
+        && let Err(error) = crate::pending_link::store(&crate::pending_link::default_path(), &link)
+    {
+        eprintln!("couldn't keep that pairing link for the window: {error}");
+    }
+    let Ok(current) = std::env::current_exe() else {
+        return launch_window(false, false);
+    };
+    let error = Command::new(current).arg("window").exec();
+    eprintln!("{error}");
+    launch_window(false, false)
+}
+
 pub(crate) fn spawn_window_from_tray() {
     thread::spawn(|| {
         let _ = launch_window(false, false);
@@ -404,6 +421,11 @@ pub fn run() -> i32 {
     }
     if arguments.len() == 1 && arguments[0] == "window" {
         return launch_window(false, false);
+    }
+    // The desktop hands a clicked link here. It's parked for the window and this process
+    // re-runs without it, so it doesn't sit on a command line for as long as the window is open.
+    if arguments.len() == 2 && arguments[0] == "window" {
+        return open_window_with_argument(&arguments[1]);
     }
     // A browser's native-messaging launch is recognised from argv alone, before any
     // other startup work: no logging, no config, and no credential lock.

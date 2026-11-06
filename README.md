@@ -32,8 +32,9 @@ sudo zypper install libgtk-4-1 glib2-tools libpulse0 gstreamer gstreamer-plugins
 ## Install
 
 Your journal must already be available. If it is not, start with the
-[solstone install](https://solstone.app/install). In your journal, create a pairing
-link for this device and save it as `pairing-link.txt`.
+[solstone install](https://solstone.app/install). If your journal is on another
+computer, create a pairing link for this device in your journal and save it as
+`pairing-link.txt`.
 
 Install a native Debian or RPM package from `updates.solstone.app`. Read
 `https://updates.solstone.app/solstone-linux/release/latest` for the current
@@ -55,9 +56,16 @@ the window, use [terminal setup](#setup-from-a-terminal).
 Open solstone from your app menu or the panel icon. The window shows status,
 pause and resume, journal pairing, settings and help. If the solstone app isn't
 running, choose `start the solstone app` when you're ready. Opening or closing
-the window does not start or stop intake. Choose `pair a device` in the `journal` tab, then compare
-the mark with the one in your journal before confirming it. `open your journal`
-opens your browser.
+the window does not start or stop intake.
+
+If your journal is running on this computer under your account, the `journal` tab
+says it found your journal. Press `connect to your journal`: the app verifies the
+mark itself, so there's no link to handle and no mark to compare.
+
+For a journal on another computer, paste its pairing link in the `journal` tab and
+choose `pair a device`, or open the link and choose `open in the solstone app`,
+which fills it in for you. Then compare the mark with the one in your journal
+before confirming it. `open your journal` opens your browser.
 
 The window needs GTK 4.6 or newer. The Debian and RPM packages declare that
 dependency; install it yourself for the portable archive. Intake runs in a
@@ -69,11 +77,12 @@ logs and save exactly that preview to a file you choose.
 
 The archive includes `INSTALL-NOTES`, the canonical runtime-dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-party crate license texts. See `INSTALL.md` for package installation, tray notes, and troubleshooting.
 
-Pairing is the only setup path. The pairing link comes from your journal. A journal
-on the same machine connects through the same private network path as any other journal;
-There is no URL, key, local Python installation, or direct fallback to configure.
+Connecting from the `journal` tab and pairing with a link from your journal are the
+only setup paths. A journal on the same machine connects through the same private
+network path as any other journal. There is no URL, key, local Python installation,
+or direct fallback to configure.
 The solstone app can continue taking in what you share while unpaired or offline.
-Setup asks you to confirm your journal's mark, or takes `--mark` when there is no terminal. Nothing goes into your journal until you confirm. `solstone-linux confirm` confirms a mark while the solstone app is running. Setup still needs the app stopped, because setup takes the private-state lock.
+With a pairing link, setup asks you to confirm your journal's mark, or takes `--mark` when there is no terminal. Nothing goes into your journal until that's done. `solstone-linux confirm` confirms a mark while the solstone app is running. Setup still needs the app stopped, because setup takes the private-state lock.
 
 ### Developers building from source
 

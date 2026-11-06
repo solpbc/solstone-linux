@@ -2,6 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use solstone_linux::dbus_client::ControlClientError;
+use solstone_linux::local_journal::LocalJournalOffer;
 use solstone_linux::window_control::{
     ControlModel, MarkRenderDocument, SessionView, SettingsModel, decode_control_str,
 };
@@ -28,6 +29,7 @@ pub enum PairingCommand {
         accept: bool,
     },
     Cancel(String),
+    ConnectLocalJournal(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -195,6 +197,11 @@ pub struct LogSlot {
     pub frozen: Option<crate::logs::FrozenLog>,
 }
 
+/// Whether the found journal may be offered at all, going by this app's own state.
+pub fn offer_applies(model: &ControlModel) -> bool {
+    model.durable == "unpaired" && !crate::copy_map::attempt_pending(model)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum StartActionKind {
@@ -226,6 +233,8 @@ pub struct Controller {
     pub pairing_attempt_outcome: Option<String>,
     pub pairing_error: Option<String>,
     pub last_answer_mark: Option<MarkRenderDocument>,
+    pub local_journal_offer: Option<LocalJournalOffer>,
+    pub connected_from_offer: bool,
     pub settings_draft: SettingsDraft,
     pub logs: LogSlot,
     pub start: Option<InFlight<StartActionKind>>,
@@ -268,6 +277,8 @@ impl Controller {
             pairing_attempt_outcome: None,
             pairing_error: None,
             last_answer_mark: None,
+            local_journal_offer: None,
+            connected_from_offer: false,
             settings_draft: SettingsDraft::default(),
             logs: LogSlot::default(),
             start: None,
@@ -358,6 +369,25 @@ impl Controller {
         self.pairing_error = None;
         self.pairing_attempt_outcome = None;
         id
+    }
+
+    /// The found journal, while this app holds no pairing and nothing else is under way.
+    pub fn offer_to_show(&self) -> Option<&LocalJournalOffer> {
+        offer_applies(&self.document)
+            .then_some(self.local_journal_offer.as_ref())
+            .flatten()
+    }
+
+    pub fn start_connect_local_journal(&mut self, bus_owner: &str) -> Option<(u64, String)> {
+        if self.pairing.is_some() {
+            return None;
+        }
+        let instance_id = self.offer_to_show()?.instance_id.clone();
+        let id = self.start_pairing(
+            bus_owner,
+            PairingCommand::ConnectLocalJournal(instance_id.clone()),
+        );
+        Some((id, instance_id))
     }
 
     pub fn pairing_presentation(&self) -> Option<PairingPresentation> {
@@ -709,8 +739,19 @@ impl Controller {
         {
             match reply {
                 Ok(payload) => {
+                    let from_offer =
+                        matches!(in_flight.payload, PairingCommand::ConnectLocalJournal(_));
                     self.pairing = None;
                     self.pairing_error = None;
+                    // A status poll answered during the press can make this reply the older
+                    // document, but it's still the only word on how the pairing came about.
+                    if from_offer
+                        && decode_control_str(&payload)
+                            .is_ok_and(|model| model.durable == "confirmed")
+                    {
+                        self.connected_from_offer = true;
+                        self.local_journal_offer = None;
+                    }
                     if id < self.last_status_id {
                         return;
                     }
@@ -1690,5 +1731,93 @@ mod tests {
             controller.answer_presented(&current, true),
             Err(CopyKey::PairingStale)
         );
+    }
+
+    mod local_journal_offer {
+        use super::*;
+        use solstone_linux::window_control::decode_control_str;
+
+        const UNPAIRED: &str = r#"{"v":1,"durable":"unpaired","owner":"absent","health":"not-reported","capture":"","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
+        const CONFIRMED: &str = r#"{"v":1,"durable":"confirmed","owner":"running","health":"connected","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#;
+
+        fn offer() -> LocalJournalOffer {
+            LocalJournalOffer {
+                instance_id: "instance".into(),
+                mark: MarkRenderDocument {
+                    icon1: serde_json::from_value(serde_json::json!({
+                        "name": "a", "svg": "", "color": {"name": "b", "hex": "#000000"}, "rot": 0
+                    }))
+                    .unwrap(),
+                    icon2: serde_json::from_value(serde_json::json!({
+                        "name": "c", "svg": "", "color": {"name": "d", "hex": "#000000"}, "rot": 0
+                    }))
+                    .unwrap(),
+                    words: ["one".into(), "two".into()],
+                },
+            }
+        }
+
+        fn unpaired_with_offer() -> Controller {
+            let mut c = Controller::new();
+            c.bus_owner = Some(":1.1".into());
+            c.document = decode_control_str(UNPAIRED).unwrap();
+            c.local_journal_offer = Some(offer());
+            c
+        }
+
+        #[test]
+        fn the_press_carries_the_journal_shown_and_only_one_runs_at_a_time() {
+            let mut c = unpaired_with_offer();
+            let (_, instance) = c.start_connect_local_journal(":1.1").unwrap();
+            assert_eq!(instance, "instance");
+            assert!(c.start_connect_local_journal(":1.1").is_none());
+        }
+
+        #[test]
+        fn nothing_is_offered_to_an_app_that_holds_a_pairing() {
+            let mut c = unpaired_with_offer();
+            c.document = decode_control_str(CONFIRMED).unwrap();
+            assert!(c.offer_to_show().is_none());
+            assert!(c.start_connect_local_journal(":1.1").is_none());
+            assert!(c.pairing.is_none());
+        }
+
+        #[test]
+        fn a_connect_that_lands_leaves_no_offer_and_remembers_how_it_connected() {
+            let mut c = unpaired_with_offer();
+            let (id, _) = c.start_connect_local_journal(":1.1").unwrap();
+            c.apply_pairing_reply(id, ":1.1", Ok(CONFIRMED.to_string()));
+            assert!(c.connected_from_offer);
+            assert!(c.offer_to_show().is_none());
+            assert!(c.pairing.is_none());
+        }
+
+        #[test]
+        fn a_status_poll_answered_during_the_press_doesnt_lose_how_it_connected() {
+            let mut c = unpaired_with_offer();
+            let (id, _) = c.start_connect_local_journal(":1.1").unwrap();
+            c.last_status_id = id + 1;
+            c.apply_pairing_reply(id, ":1.1", Ok(CONFIRMED.to_string()));
+            assert!(c.connected_from_offer);
+            assert!(c.local_journal_offer.is_none());
+        }
+
+        #[test]
+        fn a_connect_that_fails_keeps_the_offer_for_another_try() {
+            let mut c = unpaired_with_offer();
+            let (id, _) = c.start_connect_local_journal(":1.1").unwrap();
+            let failed = UNPAIRED.replacen(
+                r#""capture":"","#,
+                r#""capture":"","fault":"local-connect-failed","#,
+                1,
+            );
+            c.apply_pairing_reply(id, ":1.1", Ok(failed));
+            assert!(!c.connected_from_offer);
+            assert!(c.offer_to_show().is_some());
+            assert_eq!(
+                crate::copy_map::map_pairing(&c.document, None).title,
+                Some(solstone_linux::copy::CopyKey::LocalJournalConnectFailed)
+            );
+        }
     }
 }

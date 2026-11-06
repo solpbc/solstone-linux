@@ -131,6 +131,20 @@ pub fn mark_heading(model: &ControlModel) -> Option<CopyKey> {
         .then_some(CopyKey::JournalMarkHeading)
 }
 
+/// The mark's heading after a one-press connect. It says connected only while the
+/// journal is answering, and otherwise reads as it would for any pairing.
+pub fn mark_heading_after_connect(model: &ControlModel) -> Option<CopyKey> {
+    let answering = model.view == solstone_linux::window_control::SessionView::Confirmed
+        && matches!(model.health.as_str(), "connected" | "syncing");
+    mark_heading(model).map(|heading| {
+        if answering {
+            CopyKey::LocalJournalConnectedTo
+        } else {
+            heading
+        }
+    })
+}
+
 /// With no mark to draw: true when one exists and can't be shown right now,
 /// false when there's no journal identity here yet.
 pub fn empty_mark_is_unavailable(model: &ControlModel) -> bool {
@@ -370,6 +384,12 @@ pub fn map_pairing(model: &ControlModel, attempt_outcome: Option<&str>) -> Pairi
                 };
             }
             "commit-failed" => return PairingKeys::default(),
+            "local-connect-failed" => {
+                return PairingKeys {
+                    title: Some(CopyKey::LocalJournalConnectFailed),
+                    ..Default::default()
+                };
+            }
             "malformed-link" => {
                 return PairingKeys {
                     title: Some(CopyKey::PairingBadLink),
@@ -1124,5 +1144,38 @@ mod tests {
         assert_eq!(mark_heading(&model), None);
         model.durable = "unpaired".into();
         assert_eq!(mark_heading(&model), None);
+    }
+
+    #[test]
+    fn connected_to_is_only_said_while_the_journal_answers() {
+        use solstone_linux::window_control::decode_control_str;
+        let doc = |health: &str| {
+            let mut value: serde_json::Value = serde_json::from_str(
+                r#"{"v":1,"durable":"confirmed","owner":"running","health":"connected","capture":"recording","settings":{"draw_cursor":true,"start_paused":false,"segment_interval":300},"saved_available":true}"#,
+            )
+            .unwrap();
+            value["health"] = health.into();
+            let mut model = decode_control_str(&value.to_string()).unwrap();
+            model.confirmed_mark = Some(MarkRenderDocument {
+                icon1: serde_json::from_value(serde_json::json!({
+                    "name": "a", "svg": "", "color": {"name": "b", "hex": "#000000"}, "rot": 0
+                }))
+                .unwrap(),
+                icon2: serde_json::from_value(serde_json::json!({
+                    "name": "c", "svg": "", "color": {"name": "d", "hex": "#000000"}, "rot": 0
+                }))
+                .unwrap(),
+                words: ["one".into(), "two".into()],
+            });
+            model
+        };
+        assert_eq!(
+            mark_heading_after_connect(&doc("connected")),
+            Some(CopyKey::LocalJournalConnectedTo)
+        );
+        assert_eq!(
+            mark_heading_after_connect(&doc("offline")),
+            Some(CopyKey::JournalMarkHeading)
+        );
     }
 }

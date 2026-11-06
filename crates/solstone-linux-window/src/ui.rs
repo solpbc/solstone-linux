@@ -51,9 +51,32 @@ pub fn show_settings(app: &gtk::Application) {
     }
 }
 
+/// Puts a clicked pairing link on the journal tab. It never pairs: that waits for the press.
+type ShowClickedLink = Rc<dyn Fn(&str)>;
+
+thread_local! {
+    static SHOW_CLICKED_LINK: RefCell<Option<ShowClickedLink>> = const { RefCell::new(None) };
+}
+
+fn show_any_clicked_link() {
+    let path = solstone_linux::pending_link::default_path();
+    let Some(link) = solstone_linux::pending_link::take(&path) else {
+        return;
+    };
+    SHOW_CLICKED_LINK.with_borrow(|show| {
+        if let Some(show) = show {
+            show(&link);
+        }
+    });
+}
+
 pub fn build_ui(app: &gtk::Application) {
-    if let Some(window) = app.active_window() {
+    if let Some(window) = app
+        .active_window()
+        .or_else(|| app.windows().into_iter().next())
+    {
         window.present();
+        show_any_clicked_link();
         return;
     }
 
@@ -80,12 +103,21 @@ pub fn build_ui(app: &gtk::Application) {
     );
 
     // Page 2: Journal
-    let (journal_page, update_journal) =
+    let (journal_page, update_journal, link_entry) =
         create_journal_page(Rc::clone(&controller), Rc::clone(&changed));
     notebook.append_page(
         &journal_page,
         Some(&gtk::Label::new(Some(CopyKey::NavJournal.as_str()))),
     );
+
+    {
+        let notebook = notebook.clone();
+        let journal_page = journal_page.clone();
+        SHOW_CLICKED_LINK.set(Some(Rc::new(move |link: &str| {
+            link_entry.set_text(link);
+            notebook.set_current_page(notebook.page_num(&journal_page));
+        })));
+    }
 
     // Page 3: Settings
     let (settings_page, update_settings) =
@@ -120,6 +152,8 @@ pub fn build_ui(app: &gtk::Application) {
     *changed.borrow_mut() = Some(Rc::clone(&update_all));
     update_all();
 
+    show_any_clicked_link();
+
     // Kick off async poll loop
     spawn_poll_loop(Rc::clone(&controller), Rc::clone(&update_all));
 }
@@ -148,8 +182,22 @@ async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
         Ok(client) => match client.get_owner().await {
             Ok(owner) => {
                 let pid = client.get_connection_unix_process_id(&owner).await.ok();
-                let reply = client.expect_owner(owner.clone()).get_control_state().await;
-                Some((owner, pid, reply))
+                let client = client.expect_owner(owner.clone());
+                let reply = client.get_control_state().await;
+                // An older running app doesn't know this call, which reads as no offer.
+                let offer = match reply
+                    .as_deref()
+                    .map(solstone_linux::window_control::decode_control_str)
+                {
+                    Ok(Ok(model)) if crate::controller::offer_applies(&model) => client
+                        .local_journal_offer()
+                        .await
+                        .ok()
+                        .as_deref()
+                        .and_then(solstone_linux::local_journal::decode_offer),
+                    _ => None,
+                };
+                Some((owner, pid, reply, offer))
             }
             Err(_) => None,
         },
@@ -157,9 +205,11 @@ async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
     };
     let mut c = controller.borrow_mut();
     c.service_presence = presence;
-    if let Some((owner, pid, reply)) = result {
+    if let Some((owner, pid, reply, offer)) = result {
+        c.local_journal_offer = offer;
         c.observe_service_reply(id, &owner, pid, service_pid, reply);
     } else {
+        c.local_journal_offer = None;
         c.set_bus_owner(None);
     }
     let now = std::time::Instant::now();
@@ -753,7 +803,7 @@ fn unknown_journal_row(
 fn create_journal_page(
     controller: Rc<RefCell<Controller>>,
     changed: Changed,
-) -> (gtk::ScrolledWindow, Rc<dyn Fn()>) {
+) -> (gtk::ScrolledWindow, Rc<dyn Fn()>, gtk::Entry) {
     let presented = Rc::new(RefCell::new(None::<crate::controller::PairingPresentation>));
     let rendered_mark = Rc::new(RefCell::new(
         None::<(
@@ -799,6 +849,11 @@ fn create_journal_page(
         gtk::Button,
     )>::new()));
     let mark_container = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+    let local_connect_button = gtk::Button::with_label(CopyKey::LocalJournalConnect.as_str());
+    local_connect_button.add_css_class("suggested-action");
+    local_connect_button.set_halign(gtk::Align::Center);
+    local_connect_button.set_visible(false);
 
     let pairing_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let link_entry = gtk::Entry::new();
@@ -848,10 +903,47 @@ fn create_journal_page(
     container.append(&open_button);
     container.append(&unknown_journals_box);
     container.append(&mark_container);
+    container.append(&local_connect_button);
     container.append(&pairing_box);
     scrolled.set_child(Some(&container));
 
     connect_open_journal(&open_button, Rc::clone(&controller), Rc::clone(&changed));
+
+    {
+        let ctrl = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
+        let link_entry = link_entry.clone();
+        local_connect_button.connect_clicked(move |_| {
+            let Some(owner) = ctrl.borrow().bus_owner.clone() else {
+                return;
+            };
+            let Some((id, instance_id)) = ctrl.borrow_mut().start_connect_local_journal(&owner)
+            else {
+                return;
+            };
+            notify(&changed);
+            let c_inner = Rc::clone(&ctrl);
+            let changed = Rc::clone(&changed);
+            let link_entry = link_entry.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let res = match ControlClient::session().await {
+                    Ok(client) => {
+                        client
+                            .expect_owner(owner.clone())
+                            .connect_local_journal(&instance_id)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                c_inner.borrow_mut().apply_pairing_reply(id, &owner, res);
+                // A link waiting in the field has nothing left to do.
+                if c_inner.borrow().connected_from_offer {
+                    link_entry.set_text("");
+                }
+                notify(&changed);
+            });
+        });
+    }
 
     {
         let ctrl = Rc::clone(&controller);
@@ -1029,6 +1121,8 @@ fn create_journal_page(
         });
     }
 
+    let clicked_link_entry = link_entry.clone();
+
     let update = {
         let ctrl = Rc::clone(&controller);
         let presented = Rc::clone(&presented);
@@ -1095,9 +1189,30 @@ fn create_journal_page(
             }
 
             // Mark chip rendering
-            let mark = crate::copy_map::mark_to_show(&c.document);
+            let offer = c.offer_to_show();
+            let mark = offer
+                .map(|offer| offer.mark.clone())
+                .or_else(|| crate::copy_map::mark_to_show(&c.document));
             let unavailable = crate::copy_map::empty_mark_is_unavailable(&c.document);
-            let heading = crate::copy_map::mark_heading(&c.document);
+            let heading = if offer.is_some() {
+                Some(CopyKey::LocalJournalFound)
+            } else if c.connected_from_offer {
+                crate::copy_map::mark_heading_after_connect(&c.document)
+            } else {
+                crate::copy_map::mark_heading(&c.document)
+            };
+            local_connect_button.set_visible(offer.is_some());
+            local_connect_button.set_sensitive(c.pairing.is_none());
+            local_connect_button.set_label(
+                if c.pairing.as_ref().is_some_and(|command| {
+                    matches!(command.payload, PairingCommand::ConnectLocalJournal(_))
+                }) {
+                    CopyKey::LocalJournalConnecting
+                } else {
+                    CopyKey::LocalJournalConnect
+                }
+                .as_str(),
+            );
             let mark_state = Some((mark.clone(), unavailable, heading));
             if *rendered_mark.borrow() != mark_state {
                 while let Some(child) = mark_container.first_child() {
@@ -1179,7 +1294,7 @@ fn create_journal_page(
         })
     };
 
-    (scrolled, update)
+    (scrolled, update, clicked_link_entry)
 }
 
 fn split_exclusion_list(text: &str) -> Vec<String> {

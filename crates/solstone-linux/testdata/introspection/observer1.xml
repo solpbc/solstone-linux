@@ -6,6 +6,13 @@
           <arg name="attempt_id" direction="in" type="s" />
           <arg direction="out" type="s" />
         </method>
+    <method name="LocalJournalOffer">
+      <arg type="s" direction="out"/>
+    </method>
+    <method name="ConnectLocalJournal">
+      <arg name="instance_id" type="s" direction="in"/>
+      <arg type="s" direction="out"/>
+    </method>
       <method name="AnswerPairing">
           <arg name="attempt_id" direction="in" type="s" />
           <arg name="pairing_id" direction="in" type="s" />

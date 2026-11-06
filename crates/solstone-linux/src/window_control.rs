@@ -20,6 +20,7 @@ use crate::journal_mark::{
     finish_pairing_commit_with_fault, is_pairing_confirmed, pairing_commit_pending,
     read_pairing_answer, retire_client_registration, write_pairing_answer_with_fault,
 };
+use crate::local_journal::{LocalJournal, encode_offer, link_stays_on_this_computer};
 use crate::observer::{Mode, StateSnapshot};
 use crate::private_file::DurableWriteFault;
 use crate::private_link::{
@@ -481,10 +482,12 @@ fn derive_session_view(doc: &ControlDocument) -> SessionView {
             .attempt
             .as_ref()
             .is_some_and(|a| matches!(a.state.as_str(), "failed" | "unverifiable" | "malformed"));
-        let is_failed_fault = doc
-            .fault
-            .as_deref()
-            .is_some_and(|f| matches!(f, "pair-failed" | "unverifiable" | "malformed-link"));
+        let is_failed_fault = doc.fault.as_deref().is_some_and(|f| {
+            matches!(
+                f,
+                "pair-failed" | "unverifiable" | "malformed-link" | "local-connect-failed"
+            )
+        });
         if is_failed_attempt || is_failed_fault {
             SessionView::Failed
         } else {
@@ -659,6 +662,10 @@ pub(crate) enum SupervisorCommand {
     },
     AbandonPairing {
         attempt_id: String,
+        responder: oneshot::Sender<String>,
+    },
+    ConnectLocalJournal {
+        instance_id: String,
         responder: oneshot::Sender<String>,
     },
     WriteSetting {
@@ -1080,6 +1087,59 @@ fn validate_setting(field: &str, value: &str) -> Result<Value, &'static str> {
     }
 }
 
+/// A credential for the journal the owner was shown, proved over the pinned connection.
+/// A failure after the journal registered this app hands the credential back to retire.
+async fn verified_local_credential(
+    journal: Arc<dyn LocalJournal>,
+    pairer: Arc<dyn Pairer>,
+    clock: Arc<dyn CeremonyClock>,
+    device_label: String,
+    instance_id: String,
+) -> Result<Credential, Option<Credential>> {
+    let instance_id = instance_id.as_str();
+    if journal.committed_instance().await.as_deref() != Some(instance_id) {
+        tracing::warn!("same-computer connect: the journal shown is no longer the one answering");
+        return Err(None);
+    }
+    let Some(link) = journal.mint_link(&device_label).await else {
+        tracing::warn!("same-computer connect: the journal gave no link");
+        return Err(None);
+    };
+    if !link_stays_on_this_computer(&link) {
+        tracing::warn!("same-computer connect: the link reaches past this computer");
+        return Err(None);
+    }
+    // A journal restarted or rebound during the mint must not pair under the old offer.
+    if journal.committed_instance().await.as_deref() != Some(instance_id) {
+        tracing::warn!("same-computer connect: the journal changed during the mint");
+        return Err(None);
+    }
+
+    let deadline = clock.monotonic_seconds() + PAIR_BOUND.as_secs_f64();
+    let credential = tokio::select! {
+        paired = pair_and_admit(pairer.as_ref(), &link, &device_label) => paired,
+        _ = clock.sleep_until(deadline) => Err(PrivateStateError::PairingFailed),
+    }
+    .map_err(|_| {
+        tracing::warn!("same-computer connect: pairing didn't finish");
+        None
+    })?;
+
+    // The mark comes from the key this app pinned, whatever anything else says.
+    if crate::journal_mark::mark_jid(&credential) != instance_id
+        || credential.instance_id != instance_id
+        || format_spoken_mark(instance_id).is_none()
+    {
+        tracing::warn!("same-computer connect: the pinned key isn't the journal shown");
+        return Err(Some(credential));
+    }
+    if !journal.authenticated_as(&credential, instance_id).await {
+        tracing::warn!("same-computer connect: the authenticated read didn't prove the journal");
+        return Err(Some(credential));
+    }
+    Ok(credential)
+}
+
 pub struct WindowControlSupervisor {
     cloned_lock: PrivateStateLock,
     upload: Arc<UploadClient>,
@@ -1109,6 +1169,7 @@ pub struct WindowControlSupervisor {
     activation_blocked: bool,
     pending_candidate: Option<PendingCandidate>,
     attempt_counter: u64,
+    local_journal: Arc<dyn LocalJournal>,
     cmd_rx: mpsc::Receiver<SupervisorCommand>,
 }
 
@@ -1135,6 +1196,7 @@ impl WindowControlSupervisor {
         captures_dir: Option<PathBuf>,
         activity_prefs: Option<Arc<ActivityPrefs>>,
         route_status: Arc<Mutex<Option<RouteStatusDocument>>>,
+        local_journal: Arc<dyn LocalJournal>,
     ) -> (Self, WindowControlHandler) {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let sampler = Some(sync_reset.sampler_handle());
@@ -1165,6 +1227,7 @@ impl WindowControlSupervisor {
                 activity_capability: Arc::clone(&activity_capability),
                 captures_dir: captures_dir.clone(),
                 custom_opener: None,
+                local_journal: Some(Arc::clone(&local_journal)),
             }),
         };
         let supervisor = Self {
@@ -1196,6 +1259,7 @@ impl WindowControlSupervisor {
             activation_blocked: false,
             pending_candidate: None,
             attempt_counter: 0,
+            local_journal,
             cmd_rx,
         };
         (supervisor, handler)
@@ -1491,6 +1555,13 @@ impl WindowControlSupervisor {
                 let doc = self.handle_abandon_pairing(attempt_id).await;
                 let _ = responder.send(doc);
             }
+            SupervisorCommand::ConnectLocalJournal {
+                instance_id,
+                responder,
+            } => {
+                let doc = self.handle_connect_local_journal(instance_id).await;
+                let _ = responder.send(doc);
+            }
             SupervisorCommand::WriteSetting {
                 field,
                 value,
@@ -1640,6 +1711,61 @@ impl WindowControlSupervisor {
         }
 
         self.assemble_current(None)
+    }
+
+    /// The owner pressed connect on the journal this app found. The link comes from the
+    /// journal's owner socket and never from a caller, so this path can't be reached
+    /// with a pasted or clicked link. Those keep the owner's comparison.
+    async fn handle_connect_local_journal(&mut self, instance_id: String) -> String {
+        self.check_expiry().await;
+        if self.pending_candidate.is_some()
+            || self.owner.is_some()
+            || self.check_durable_state() != "unpaired"
+        {
+            return self.assemble_current(None);
+        }
+        self.attempt_counter += 1;
+        let attempt_id = self.attempt_counter.to_string();
+
+        let verified = verified_local_credential(
+            Arc::clone(&self.local_journal),
+            Arc::clone(&self.pairer),
+            Arc::clone(&self.clock),
+            self.device_label.clone(),
+            instance_id,
+        );
+        let credential = match verified.await {
+            Ok(credential) => credential,
+            Err(minted) => {
+                if let Some(credential) = minted {
+                    retire_client_registration(&credential).await;
+                }
+                {
+                    let mut phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
+                    phase.pending_instance_id = None;
+                    phase.attempt = Some(AttemptDocument {
+                        id: attempt_id,
+                        pairing_id: String::new(),
+                        state: "failed".into(),
+                        mark: None,
+                    });
+                    phase.fault = Some("local-connect-failed".into());
+                }
+                return self.assemble_current(None);
+            }
+        };
+
+        let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
+        // The app verified this itself, so the commit runs now and nothing asks the owner.
+        self.pending_candidate = Some(PendingCandidate {
+            attempt_id: attempt_id.clone(),
+            pairing_id: pairing_id.clone(),
+            spoken_mark: format_spoken_mark(&credential.instance_id).unwrap_or_default(),
+            credential,
+            expires_at: self.clock.monotonic_seconds() + CEREMONY_TTL.as_secs_f64(),
+        });
+        self.handle_answer_pairing(attempt_id, pairing_id, true)
+            .await
     }
 
     async fn handle_answer_pairing(
@@ -1996,6 +2122,7 @@ struct WindowControlHandlerInner {
     activity_capability: Arc<Mutex<Option<Arc<Mutex<crate::activity_source::CapabilityStatus>>>>>,
     captures_dir: Option<PathBuf>,
     custom_opener: Option<CustomOpener>,
+    local_journal: Option<Arc<dyn LocalJournal>>,
 }
 
 #[derive(Clone)]
@@ -2047,6 +2174,7 @@ impl Default for WindowControlHandler {
                 activity_capability: Arc::new(Mutex::new(None)),
                 captures_dir: None,
                 custom_opener: None,
+                local_journal: None,
             }),
         }
     }
@@ -2068,6 +2196,7 @@ impl WindowControlHandler {
                 activity_capability: Arc::clone(&self.inner.activity_capability),
                 captures_dir: self.inner.captures_dir.clone(),
                 custom_opener: Some(opener),
+                local_journal: self.inner.local_journal.clone(),
             }),
         }
     }
@@ -2145,6 +2274,43 @@ impl WindowControlHandler {
         if tx
             .send(SupervisorCommand::BeginPairing {
                 link,
+                responder: resp_tx,
+            })
+            .await
+            .is_err()
+        {
+            return self.get_control_state();
+        }
+        resp_rx
+            .await
+            .unwrap_or_else(|_| self.fallback_unavailable())
+    }
+
+    /// The journal to offer, encoded for the bus. Silent while this app holds any pairing
+    /// or has a mark question open.
+    pub async fn local_journal_offer(&self) -> String {
+        let eligible = {
+            let phase = self.inner.phase.lock().unwrap_or_else(|p| p.into_inner());
+            phase.durable == "unpaired" && phase.pending_instance_id.is_none()
+        };
+        let offer = match (&self.inner.local_journal, eligible) {
+            (Some(journal), true) => journal
+                .committed_instance()
+                .await
+                .and_then(crate::local_journal::offer_for),
+            _ => None,
+        };
+        encode_offer(offer.as_ref())
+    }
+
+    pub async fn connect_local_journal(&self, instance_id: String) -> String {
+        let Some(ref tx) = self.inner.tx else {
+            return self.get_control_state();
+        };
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if tx
+            .send(SupervisorCommand::ConnectLocalJournal {
+                instance_id,
                 responder: resp_tx,
             })
             .await
@@ -2378,6 +2544,55 @@ mod tests {
             Box::pin(async move {
                 let _ = rx.await;
             })
+        }
+    }
+
+    pub struct FakeLocalJournal {
+        pub instance: Arc<Mutex<Option<String>>>,
+        pub link: Arc<Mutex<Option<String>>>,
+        pub authenticated: Arc<AtomicBool>,
+        pub reads: Arc<AtomicUsize>,
+    }
+
+    impl FakeLocalJournal {
+        pub fn absent() -> Self {
+            Self {
+                instance: Arc::new(Mutex::new(None)),
+                link: Arc::new(Mutex::new(Some(
+                    crate::private_link::DIRECT_PAIR_LINK_FOR_TEST.to_string(),
+                ))),
+                authenticated: Arc::new(AtomicBool::new(true)),
+                reads: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl LocalJournal for FakeLocalJournal {
+        fn committed_instance(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>>
+        {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let found = self.instance.lock().unwrap().clone();
+            Box::pin(async move { found })
+        }
+
+        fn mint_link<'a>(
+            &'a self,
+            _device_label: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>>
+        {
+            let link = self.link.lock().unwrap().clone();
+            Box::pin(async move { link })
+        }
+
+        fn authenticated_as<'a>(
+            &'a self,
+            _credential: &'a Credential,
+            _instance_id: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            let ok = self.authenticated.load(Ordering::SeqCst);
+            Box::pin(async move { ok })
         }
     }
 
@@ -2618,6 +2833,7 @@ mod tests {
 
     #[allow(dead_code)]
     struct TestHarness {
+        local_journal: Arc<FakeLocalJournal>,
         _temp_dir: tempfile::TempDir,
         config_paths: ConfigPaths,
         config_root: PathBuf,
@@ -2647,6 +2863,7 @@ mod tests {
             starter: Arc<FakeOwnerStarter>,
             fault: Arc<dyn DurableWriteFault>,
         ) -> Self {
+            let local_journal = Arc::new(FakeLocalJournal::absent());
             let temp_dir = tempfile::tempdir().unwrap();
             let config_root = temp_dir.path().join("config");
             let state_dir = temp_dir.path().join("state");
@@ -2730,12 +2947,14 @@ mod tests {
                 None,
                 Some(Arc::clone(&activity_prefs)),
                 Arc::new(Mutex::new(None)),
+                Arc::clone(&local_journal) as Arc<dyn LocalJournal>,
             );
 
             let supervisor_task = tokio::spawn(supervisor.run());
             tokio::task::yield_now().await;
 
             Self {
+                local_journal,
                 _temp_dir: temp_dir,
                 config_paths,
                 config_root,
@@ -2800,6 +3019,7 @@ mod tests {
                 None,
                 Some(Arc::clone(&self.activity_prefs)),
                 Arc::new(Mutex::new(None)),
+                Arc::clone(&self.local_journal) as Arc<dyn LocalJournal>,
             );
             self.handler = handler;
             self.supervisor_task = tokio::spawn(supervisor.run());
@@ -4677,5 +4897,218 @@ mod tests {
         assert!(model3.effective.as_ref().unwrap().activity_through_pause);
 
         harness.shutdown().await;
+    }
+
+    mod same_computer_connect {
+        use super::*;
+        use crate::local_journal::decode_offer;
+
+        const CERT: &str = "cert-pem";
+
+        async fn unpaired_harness(found: bool) -> (TestHarness, Credential) {
+            let cred = sample_credential("01234567-89ab-cdef-0123-456789abcdef", CERT);
+            let harness = TestHarness::new(
+                None,
+                false,
+                Arc::new(FakePairer::new(cred.clone())),
+                Arc::new(FakeOwnerStarter::default()),
+                Arc::new(NoWriteFault),
+            )
+            .await;
+            if found {
+                *harness.local_journal.instance.lock().unwrap() = Some(cred.instance_id.clone());
+            }
+            (harness, cred)
+        }
+
+        async fn control(harness: &TestHarness) -> ControlModel {
+            decode_control_str(&harness.handler.get_control_state()).unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_committed_journal_is_offered_with_its_mark_and_nothing_starts() {
+            let (harness, cred) = unpaired_harness(true).await;
+            let offer = decode_offer(&harness.handler.local_journal_offer().await).unwrap();
+            assert_eq!(offer.instance_id, cred.instance_id);
+            assert_eq!(
+                offer.mark,
+                crate::mark_cache::render_spec(&cred.instance_id)
+                    .map(MarkRenderDocument::from)
+                    .unwrap()
+            );
+            assert_eq!(harness.pairer.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(control(&harness).await.durable, "unpaired");
+            assert_eq!(harness.starter.starts.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn no_journal_or_one_still_in_first_run_is_silent() {
+            let (harness, _) = unpaired_harness(false).await;
+            assert_eq!(
+                decode_offer(&harness.handler.local_journal_offer().await),
+                None
+            );
+        }
+
+        #[tokio::test]
+        async fn an_app_holding_a_pairing_is_offered_nothing_and_doesnt_even_look() {
+            let cred = sample_credential("01234567-89ab-cdef-0123-456789abcdef", CERT);
+            for confirmed in [true, false] {
+                let harness = TestHarness::new(
+                    Some(cred.clone()),
+                    confirmed,
+                    Arc::new(FakePairer::new(cred.clone())),
+                    Arc::new(FakeOwnerStarter::default()),
+                    Arc::new(NoWriteFault),
+                )
+                .await;
+                *harness.local_journal.instance.lock().unwrap() = Some(cred.instance_id.clone());
+                let before = control(&harness).await;
+                assert_eq!(
+                    decode_offer(&harness.handler.local_journal_offer().await),
+                    None
+                );
+                assert_eq!(harness.local_journal.reads.load(Ordering::SeqCst), 0);
+                let after: ControlModel = decode_control_str(
+                    &harness
+                        .handler
+                        .connect_local_journal(cred.instance_id.clone())
+                        .await,
+                )
+                .unwrap();
+                assert_eq!(after.durable, before.durable);
+                assert_eq!(harness.pairer.calls.load(Ordering::SeqCst), 0);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_mark_question_open_means_no_offer() {
+            let (harness, _) = unpaired_harness(true).await;
+            harness
+                .handler
+                .begin_pairing(TEST_PAIR_LINK.to_string())
+                .await;
+            assert_eq!(
+                decode_offer(&harness.handler.local_journal_offer().await),
+                None
+            );
+        }
+
+        #[tokio::test]
+        async fn one_press_connects_with_no_mark_question() {
+            let (harness, cred) = unpaired_harness(true).await;
+            let model = decode_control_str(
+                &harness
+                    .handler
+                    .connect_local_journal(cred.instance_id.clone())
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(model.durable, "confirmed");
+            assert_eq!(model.owner, "running");
+            assert!(model.attempt.is_none());
+            assert!(model.fault.is_none());
+            assert_eq!(harness.pairer.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.starter.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.check_durable_state_on_root(), "confirmed");
+        }
+
+        async fn assert_nothing_connected(harness: &TestHarness, model: ControlModel) {
+            assert_eq!(model.durable, "unpaired");
+            assert_eq!(model.owner, "absent");
+            assert_eq!(model.fault.as_deref(), Some("local-connect-failed"));
+            assert_eq!(harness.starter.starts.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.check_durable_state_on_root(), "unpaired");
+        }
+
+        #[tokio::test]
+        async fn a_failed_proof_connects_nothing_says_so_and_can_be_tried_again() {
+            let (harness, cred) = unpaired_harness(true).await;
+            harness
+                .local_journal
+                .authenticated
+                .store(false, Ordering::SeqCst);
+            let model = decode_control_str(
+                &harness
+                    .handler
+                    .connect_local_journal(cred.instance_id.clone())
+                    .await,
+            )
+            .unwrap();
+            assert_nothing_connected(&harness, model).await;
+            assert_eq!(harness.pairer.calls.load(Ordering::SeqCst), 1);
+
+            assert!(decode_offer(&harness.handler.local_journal_offer().await).is_some());
+            harness
+                .local_journal
+                .authenticated
+                .store(true, Ordering::SeqCst);
+            let model = decode_control_str(
+                &harness
+                    .handler
+                    .connect_local_journal(cred.instance_id.clone())
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(model.durable, "confirmed");
+            assert!(model.fault.is_none());
+        }
+
+        #[tokio::test]
+        async fn a_journal_other_than_the_one_shown_is_never_paired() {
+            let (harness, _) = unpaired_harness(true).await;
+            let model = decode_control_str(
+                &harness
+                    .handler
+                    .connect_local_journal("not-the-offered-journal".into())
+                    .await,
+            )
+            .unwrap();
+            assert_nothing_connected(&harness, model).await;
+            assert_eq!(harness.pairer.calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn a_link_reaching_past_this_computer_is_never_paired() {
+            let (harness, cred) = unpaired_harness(true).await;
+            *harness.local_journal.link.lock().unwrap() =
+                Some(crate::local_journal::tests::LAN_PAIR_LINK.to_string());
+            let model = decode_control_str(
+                &harness
+                    .handler
+                    .connect_local_journal(cred.instance_id.clone())
+                    .await,
+            )
+            .unwrap();
+            assert_nothing_connected(&harness, model).await;
+            assert_eq!(harness.pairer.calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn a_credential_whose_key_isnt_the_offered_journals_never_connects() {
+            let (harness, cred) = unpaired_harness(true).await;
+            let other = "fedcba98-7654-3210-fedc-ba9876543210".to_string();
+            *harness.local_journal.instance.lock().unwrap() = Some(other.clone());
+            let model =
+                decode_control_str(&harness.handler.connect_local_journal(other).await).unwrap();
+            assert_nothing_connected(&harness, model).await;
+            assert_eq!(harness.pairer.calls.load(Ordering::SeqCst), 1);
+            drop(cred);
+        }
+
+        #[tokio::test]
+        async fn a_pasted_link_to_this_computer_still_asks_the_owner_to_compare() {
+            let (harness, _) = unpaired_harness(true).await;
+            let model = decode_control_str(
+                &harness
+                    .handler
+                    .begin_pairing(TEST_PAIR_LINK.to_string())
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(model.view, SessionView::Pending);
+            assert_eq!(model.durable, "unpaired");
+            assert_eq!(harness.starter.starts.load(Ordering::SeqCst), 0);
+        }
     }
 }

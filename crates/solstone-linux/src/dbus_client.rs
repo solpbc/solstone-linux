@@ -6,6 +6,8 @@ use zbus::Connection;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const PAIRING_TIMEOUT: Duration = crate::window_control::PAIR_BOUND;
+// The pair itself, plus the journal's mint and the app's own proof around it.
+const CONNECT_LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ControlClientError {
@@ -193,6 +195,23 @@ impl ControlClient {
     pub async fn begin_pairing(&self, link: &str) -> Result<String, ControlClientError> {
         self.call_method("BeginPairing", &(link.to_string(),), PAIRING_TIMEOUT)
             .await
+    }
+
+    pub async fn local_journal_offer(&self) -> Result<String, ControlClientError> {
+        self.call_method("LocalJournalOffer", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn connect_local_journal(
+        &self,
+        instance_id: &str,
+    ) -> Result<String, ControlClientError> {
+        self.call_method(
+            "ConnectLocalJournal",
+            &(instance_id.to_string(),),
+            CONNECT_LOCAL_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn answer_pairing(

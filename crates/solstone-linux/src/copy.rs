@@ -49,6 +49,12 @@ pub const JOURNAL_OFFLINE: &str = "not reaching your journal right now";
 pub const JOURNAL_OFFLINE_DETAIL: &str = "anything waiting to sync stays on this computer. the solstone app will try again when your journal is reachable.";
 pub const JOURNAL_ATTENTION_DETAIL: &str = "anything waiting to sync stays on this computer. to see what to do, run: solstone-linux status";
 pub const JOURNAL_NOT_PAIRED: &str = "not paired";
+pub const LOCAL_JOURNAL_FOUND: &str = "found your journal on this computer";
+pub const LOCAL_JOURNAL_CONNECT: &str = "connect to your journal";
+pub const LOCAL_JOURNAL_CONNECTING: &str = "connecting…";
+pub const LOCAL_JOURNAL_CONNECTED_TO: &str = "connected to";
+pub const LOCAL_JOURNAL_CONNECT_FAILED: &str =
+    "couldn't verify your journal, so nothing connected. try again, or paste a pairing link.";
 pub const JOURNAL_PAIR_TITLE: &str = "pair a device";
 pub const JOURNAL_PAIR_HELP: &str = "open the network app in your journal and get a pairing link.";
 pub const JOURNAL_LINK_LABEL: &str = "pairing link";
@@ -306,6 +312,11 @@ pub enum CopyKey {
     JournalNotPaired,
     JournalPairTitle,
     JournalPairHelp,
+    LocalJournalFound,
+    LocalJournalConnect,
+    LocalJournalConnecting,
+    LocalJournalConnectedTo,
+    LocalJournalConnectFailed,
     JournalLinkLabel,
     JournalLinkPlaceholder,
     ActionPair,
@@ -487,6 +498,11 @@ impl CopyKey {
             Self::JournalNotPaired => JOURNAL_NOT_PAIRED,
             Self::JournalPairTitle => JOURNAL_PAIR_TITLE,
             Self::JournalPairHelp => JOURNAL_PAIR_HELP,
+            Self::LocalJournalFound => LOCAL_JOURNAL_FOUND,
+            Self::LocalJournalConnect => LOCAL_JOURNAL_CONNECT,
+            Self::LocalJournalConnecting => LOCAL_JOURNAL_CONNECTING,
+            Self::LocalJournalConnectedTo => LOCAL_JOURNAL_CONNECTED_TO,
+            Self::LocalJournalConnectFailed => LOCAL_JOURNAL_CONNECT_FAILED,
             Self::JournalLinkLabel => JOURNAL_LINK_LABEL,
             Self::JournalLinkPlaceholder => JOURNAL_LINK_PLACEHOLDER,
             Self::ActionPair => ACTION_PAIR,

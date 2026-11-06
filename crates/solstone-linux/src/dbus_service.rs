@@ -123,6 +123,12 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     async fn begin_pairing(&self, link: String) -> String {
         self.window_control.begin_pairing(link).await
     }
+    async fn local_journal_offer(&self) -> String {
+        self.window_control.local_journal_offer().await
+    }
+    async fn connect_local_journal(&self, instance_id: String) -> String {
+        self.window_control.connect_local_journal(instance_id).await
+    }
     async fn answer_pairing(&self, attempt_id: String, pairing_id: String, accept: bool) -> String {
         self.window_control
             .answer_pairing(attempt_id, pairing_id, accept)

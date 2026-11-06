@@ -6,6 +6,11 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- when your journal is running on this computer under your account, the `journal` tab says it found your journal, and one press connects. the app verifies the mark itself, so there's no link to handle and no mark to compare.
+- choosing `open in the solstone app` on a pairing link's page now opens the window with the link filled in. pairing still waits for you to press `pair a device` and compare the mark.
+
 ### Changed
 
 - the first item in the panel icon's menu now reads "open solstone", which opens the window. its settings menu adds "open settings", which opens the window at its settings tab, and "open config.json" stays beside it.

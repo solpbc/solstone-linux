@@ -487,6 +487,11 @@ fn permitted_capability(fact: &FunctionFact) -> bool {
         // Reduces a page address to origin and path. It does not open a connection.
         return true;
     }
+    if fact.item_path == "local_journal::impl SocketLocalJournal::client" {
+        // Reaches only this account's owner socket, to find its journal and ask for a
+        // same-computer link. It carries no linked authority: that starts at the pairing.
+        return true;
+    }
     fact.path
         .ends_with("crates/solstone-linux/src/private_link.rs")
         && (fact

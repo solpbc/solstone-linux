@@ -2,9 +2,10 @@
 Version=1.0
 Type=Application
 Name=solstone
-Exec=solstone-linux window
+Exec=solstone-linux window %u
 Icon=solstone-observer
 Terminal=false
 StartupNotify=true
 Categories=Utility;
 StartupWMClass=org.solpbc.solstone.Window
+MimeType=x-scheme-handler/solstone;

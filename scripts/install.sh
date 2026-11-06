@@ -216,12 +216,17 @@ while IFS= read -r LINE; do
     Exec=*)
       # The desktop-launched shell expands $1, never this installer.
       # shellcheck disable=SC2016
-      printf '%s%s%s\n' 'Exec=/bin/sh -c "exec \\"\\$1\\" window" sh "' "$DESKTOP_PREFIX" '/bin/solstone-linux"'
+      printf '%s%s%s\n' 'Exec=/bin/sh -c "app=\\"\\$1\\"; shift; exec \\"\\$app\\" window \\"\\$@\\"" sh "' "$DESKTOP_PREFIX" '/bin/solstone-linux" %u'
       ;;
     *) printf '%s\n' "$LINE" ;;
   esac
 done < "$SOURCE/share/applications/org.solpbc.solstone.Window.desktop" > "$PREFIX/share/applications/org.solpbc.solstone.Window.desktop"
 chmod 0644 "$PREFIX/share/applications/org.solpbc.solstone.Window.desktop"
+# Tells the desktop this app opens solstone: links. Without it a clicked link goes
+# nowhere, and pasting still works, so a missing tool isn't a failure.
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1 || true
+fi
 
 echo "installed solstone-linux $RELEASE_VERSION under $PREFIX"
 echo "next: solstone-linux window"

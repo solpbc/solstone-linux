@@ -5,7 +5,8 @@ solstone app on linux takes in what you share with it using PipeWire and
 GStreamer, and all of it goes into your journal.
 
 Your journal must already be available. If it is not, start there:
-https://solstone.app/install. Create a pairing link for this device in your journal.
+https://solstone.app/install. If your journal is on another computer, create a
+pairing link for this device in your journal.
 
 ## The quick way
 
@@ -17,8 +18,9 @@ curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop
 ```
 
 Install `minisign` and the system dependencies below first if your desktop
-doesn't have them. Then [open the window](#open-the-window) and paste your
-pairing link. The next sections install a release by hand; Verify and Desktop
+doesn't have them. Then [open the window](#open-the-window). It finds a journal
+running on this computer under your account and connects with one press. For a
+journal on another computer, paste its pairing link. The next sections install a release by hand; Verify and Desktop
 notes apply either way.
 
 ## System dependencies
@@ -182,9 +184,18 @@ If the solstone app isn't running, choose `start the solstone app` when you're
 ready. This sets it up to run now and when you sign in. Opening or closing the
 window does not start or stop intake.
 
-In `journal`, paste the pairing link from your journal. Compare the displayed mark
-with your journal's mark before confirming it. You can pair again while intake
-continues. `open your journal` opens it in your browser.
+In `journal`, the window says when it has found your journal running on this
+computer under your account. Press `connect to your journal`: the app verifies the
+mark itself, with no link to handle and no mark to compare. Nothing connects until
+you press it. A journal under another account is never offered.
+
+For a journal on another computer, paste its pairing link, or open the link and
+choose `open in the solstone app`, which fills it in here and waits for you. Either
+way, compare the displayed mark with your journal's mark before confirming it. You
+can pair again while intake continues. `open your journal` opens it in your browser.
+
+Packages register the `solstone:` link handler when the desktop's
+`update-desktop-database` is installed. If a clicked link goes nowhere, paste it.
 
 In `settings`, change whether to show the cursor, whether to start paused, or
 segment duration. The config file remains the source of truth:
@@ -213,7 +224,7 @@ solstone-linux setup < pairing-link.txt
 systemctl --user start solstone-linux
 ```
 
-Pairing is the only setup path:
+From a terminal, a pairing link is the only setup path:
 
 ```bash
 solstone-linux setup < pairing-link.txt
