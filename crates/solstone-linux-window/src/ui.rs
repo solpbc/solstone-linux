@@ -31,6 +31,26 @@ fn notify(changed: &Changed) {
     }
 }
 
+const SETTINGS_PAGE_NAME: &str = "settings";
+
+/// Brings the open window to its settings tab.
+pub fn show_settings(app: &gtk::Application) {
+    let Some(window) = app.windows().into_iter().next() else {
+        return;
+    };
+    let Some(notebook) = window.child().and_downcast::<gtk::Notebook>() else {
+        return;
+    };
+    let settings = (0..notebook.n_pages()).find(|&index| {
+        notebook
+            .nth_page(Some(index))
+            .is_some_and(|page| page.widget_name() == SETTINGS_PAGE_NAME)
+    });
+    if let Some(index) = settings {
+        notebook.set_current_page(Some(index));
+    }
+}
+
 pub fn build_ui(app: &gtk::Application) {
     if let Some(window) = app.active_window() {
         window.present();
@@ -70,6 +90,7 @@ pub fn build_ui(app: &gtk::Application) {
     // Page 3: Settings
     let (settings_page, update_settings) =
         create_settings_page(Rc::clone(&controller), Rc::clone(&changed));
+    settings_page.set_widget_name(SETTINGS_PAGE_NAME);
     notebook.append_page(
         &settings_page,
         Some(&gtk::Label::new(Some(CopyKey::NavSettings.as_str()))),

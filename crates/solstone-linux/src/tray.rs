@@ -111,7 +111,7 @@ impl Tray for KsniTray {
         };
         vec![
             StandardItem {
-                label: crate::copy::WINDOW_TITLE.into(),
+                label: "open solstone".into(),
                 activate: Box::new(|_: &mut KsniTray| {
                     crate::cli::spawn_window_from_tray();
                 }),
@@ -143,7 +143,18 @@ impl Tray for KsniTray {
             .into(),
             SubMenu {
                 label: "settings".into(),
-                submenu: vec![action("open config.json", TrayCommand::OpenConfig).into()],
+                submenu: vec![
+                    StandardItem {
+                        label: "open settings".into(),
+                        activate: Box::new(|_: &mut KsniTray| {
+                            crate::cli::spawn_settings_window_from_tray();
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                    // The config file stays reachable from here beside the window.
+                    action("open config.json", TrayCommand::OpenConfig).into(),
+                ],
                 ..Default::default()
             }
             .into(),
@@ -276,7 +287,7 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "solstone",
+                "open solstone",
                 tray.model.header.as_str(),
                 "<separator>",
                 "pause",
@@ -332,6 +343,16 @@ mod tests {
             (value.activate)(&mut tray);
         }
         assert_eq!(receiver.try_recv(), Ok(TrayCommand::OpenJournal));
+        // The settings window sits beside the config file, never in place of it.
+        let settings = match &menu[8] {
+            MenuItem::SubMenu(value) => value,
+            _ => panic!("settings submenu missing"),
+        };
+        assert_eq!(settings.submenu.len(), 2);
+        if let MenuItem::Standard(value) = &settings.submenu[1] {
+            (value.activate)(&mut tray);
+        }
+        assert_eq!(receiver.try_recv(), Ok(TrayCommand::OpenConfig));
         let about = match &menu[9] {
             MenuItem::SubMenu(value) => value,
             _ => panic!("about submenu missing"),

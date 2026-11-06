@@ -267,13 +267,22 @@ pub(crate) fn window_launch_notice(
     }
 }
 
+/// The window's own argument for opening on its settings tab.
+pub const WINDOW_SETTINGS_ARG: &str = "--settings";
+
 pub(crate) fn spawn_window_from_tray() {
     thread::spawn(|| {
-        let _ = launch_window(false);
+        let _ = launch_window(false, false);
     });
 }
 
-fn launch_window(in_scope: bool) -> i32 {
+pub(crate) fn spawn_settings_window_from_tray() {
+    thread::spawn(|| {
+        let _ = launch_window(false, true);
+    });
+}
+
+fn launch_window(in_scope: bool, settings: bool) -> i32 {
     let current = match env::current_exe() {
         Ok(exe) => exe,
         Err(error) => return handle_window_failure(&error.to_string(), false),
@@ -285,6 +294,7 @@ fn launch_window(in_scope: bool) -> i32 {
             .args(["--user", "--scope", "--collect", "--quiet", "--"])
             .arg(&current)
             .args(["window", "--in-scope"])
+            .args(settings.then_some(WINDOW_SETTINGS_ARG))
             .status()
         {
             Ok(status) if status.success() => 0,
@@ -297,7 +307,8 @@ fn launch_window(in_scope: bool) -> i32 {
         return handle_window_failure("missing executable directory", false);
     };
     let result = crate::bounded_process::run(
-        &mut Command::new(parent.join("solstone-linux-window")),
+        Command::new(parent.join("solstone-linux-window"))
+            .args(settings.then_some(WINDOW_SETTINGS_ARG)),
         None,
         64 * 1024,
     );
@@ -382,10 +393,17 @@ pub fn run() -> i32 {
             .map_or(1, |target| open_journal_in_scope(&SystemRunner, target));
     }
     if arguments.len() == 2 && arguments[0] == "window" && arguments[1] == "--in-scope" {
-        return launch_window(true);
+        return launch_window(true, false);
+    }
+    if arguments.len() == 3
+        && arguments[0] == "window"
+        && arguments[1] == "--in-scope"
+        && arguments[2] == WINDOW_SETTINGS_ARG
+    {
+        return launch_window(true, true);
     }
     if arguments.len() == 1 && arguments[0] == "window" {
-        return launch_window(false);
+        return launch_window(false, false);
     }
     // A browser's native-messaging launch is recognised from argv alone, before any
     // other startup work: no logging, no config, and no credential lock.

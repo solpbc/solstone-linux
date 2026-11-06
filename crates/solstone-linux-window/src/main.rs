@@ -30,10 +30,25 @@ fn main() {
         });
     let _runtime_context = runtime.enter();
 
+    // A second launch hands its arguments to the window already open, so the panel's
+    // "open settings" can bring that window to its settings tab.
     let app = gtk::Application::builder()
         .application_id("org.solpbc.solstone.Window")
+        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
     app.connect_activate(ui::build_ui);
+    app.connect_command_line(|app, command_line| {
+        app.activate();
+        if command_line
+            .arguments()
+            .iter()
+            .skip(1)
+            .any(|arg| arg.to_str() == Some(solstone_linux::cli::WINDOW_SETTINGS_ARG))
+        {
+            ui::show_settings(app);
+        }
+        gtk::glib::ExitCode::SUCCESS
+    });
     std::process::exit(app.run().into());
 }

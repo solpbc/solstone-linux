@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- the first item in the panel icon's menu now reads "open solstone", which opens the window. its settings menu adds "open settings", which opens the window at its settings tab, and "open config.json" stays beside it.
+
 ### Fixed
 
 - after you confirm your journal's mark in the window, the pairing link field clears so the used link is no longer left there.
