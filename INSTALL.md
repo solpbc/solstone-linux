@@ -194,8 +194,10 @@ choose `open in the solstone app`, which fills it in here and waits for you. Eit
 way, compare the displayed mark with your journal's mark before confirming it. You
 can pair again while intake continues. `open your journal` opens it in your browser.
 
-Packages register the `solstone:` link handler when the desktop's
-`update-desktop-database` is installed. If a clicked link goes nowhere, paste it.
+The solstone installer and the packages register the `solstone:` link handler when
+the desktop's `update-desktop-database` is installed. If you used the quick way and
+a clicked link goes nowhere, [update](#update-a-release). If it still goes nowhere,
+paste it.
 
 In `settings`, change whether to show the cursor, whether to start paused, or
 segment duration. The config file remains the source of truth:
