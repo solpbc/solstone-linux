@@ -6,9 +6,11 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.35] - 2026-11-06
+
 ### Changed
 
-- the empty "your · journal" mark is now easy to see on any background.
+- the empty "your · journal" mark in the window is now easier to see.
 
 ## [2.0.34] - 2026-11-05
 
