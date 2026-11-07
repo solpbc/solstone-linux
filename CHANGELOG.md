@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- the window's "help" tab now says "need a hand? reach us." an AI agent reads your request and drafts our answer, and a person at sol pbc may read it too.
+
 ## [2.0.35] - 2026-11-06
 
 ### Changed
