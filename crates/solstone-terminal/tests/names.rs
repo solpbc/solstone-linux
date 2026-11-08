@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 sol pbc
+
+use solstone_terminal::name::{NameError, derive_component};
+
+#[test]
+fn main_keeps_canonical_filename() {
+    let name = derive_component("main").expect("canonical name");
+    assert_eq!(name.as_str(), "main");
+    assert_eq!(name.session_filename(), "tmux_main_screen.jsonl");
+}
+
+#[test]
+fn slash_space_and_underscore_do_not_alias() {
+    let special = derive_component("my/session name").expect("special name");
+    let canonical = derive_component("my_session_name").expect("canonical name");
+    assert_eq!(
+        special.as_str(),
+        "my_session_name~6d792f73657373696f6e206e616d65"
+    );
+    assert_eq!(canonical.as_str(), "my_session_name");
+    assert_ne!(special, canonical);
+}
+
+#[test]
+fn ascii_case_variants_do_not_alias() {
+    let upper = derive_component("Main").expect("upper name");
+    let lower = derive_component("main").expect("lower name");
+    assert_eq!(upper.as_str(), "Main~4d61696e");
+    assert_ne!(upper.as_str().to_ascii_lowercase(), lower.as_str());
+}
+
+#[test]
+fn nfc_and_nfd_do_not_alias() {
+    let nfc = derive_component("café").expect("NFC name");
+    let nfd = derive_component("cafe\u{301}").expect("NFD name");
+    assert_eq!(nfc.as_str(), "caf_~636166c3a9");
+    assert_eq!(nfd.as_str(), "cafe_~63616665cc81");
+    assert_ne!(nfc, nfd);
+}
+
+#[test]
+fn reserved_suffix_marker_is_encoded() {
+    let name = derive_component("main~6d61696e").expect("noncanonical name");
+    assert_eq!(name.as_str(), "main_6d61696e~6d61696e7e3664363136393665");
+    assert_ne!(name.as_str(), "main~6d61696e");
+}
+
+#[test]
+fn absolute_and_parent_paths_are_rejected_before_open() {
+    assert_eq!(derive_component("/main"), Err(NameError::Absolute));
+    assert_eq!(derive_component("../main"), Err(NameError::Traversal));
+    assert_eq!(derive_component("main/../other"), Err(NameError::Traversal));
+    assert_eq!(derive_component("."), Err(NameError::Traversal));
+}
+
+#[test]
+fn overlong_stream_name_fails_startup_before_any_directory() {
+    let error = derive_component(&"a".repeat(201)).expect_err("overlong stream must fail");
+    assert_eq!(
+        error,
+        NameError::TooLong {
+            actual: 201,
+            limit: 200
+        }
+    );
+}

@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 sol pbc
+
+// Writes the solstone-terminal goldens with unmodified solstone-tmux 2.0.28.
+// Copy this file to native/solstone-tmux/tests/generate_extraction_goldens.rs
+// in a checkout of d5f92cbde08cd554f94d0841866f047714496f06 and run it as the
+// README beside it says. It writes nothing outside GOLDEN_OUT.
+
+mod support;
+
+use std::ffi::OsString;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use solstone_tmux::clock::{TestClock, Zone, ZoneSource};
+use solstone_tmux::command::{CommandInvocation, CommandOperation, DisplayField, TmuxOperation};
+use solstone_tmux::foreground::{ExeFailure, ForegroundLookup};
+use solstone_tmux::instance_lock::InstanceLock;
+use solstone_tmux::name::derive_component;
+use solstone_tmux::observer::{SegmentLifecycle, SegmentManager};
+use solstone_tmux::recovery::recover_capture_streams;
+use solstone_tmux::sync::SyncWake;
+use solstone_tmux::tmux::{StderrWarnings, TMUX_TIMEOUT, TmuxAdapter};
+use support::{ExpectedInvocation, FixtureRunner, output};
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+
+// The executable is never run: FixtureRunner answers every invocation.
+const TMUX: &str = "/usr/bin/tmux";
+
+struct FakeLookup(Result<String, ExeFailure>);
+
+impl ForegroundLookup for FakeLookup {
+    fn lookup<'a>(
+        &'a self,
+        _pane_pid: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ExeFailure>> + Send + 'a>> {
+        let result = self.0.clone();
+        Box::pin(async move { result })
+    }
+}
+
+struct StaticZone(Zone);
+
+impl ZoneSource for StaticZone {
+    fn read(&mut self) -> Result<Zone, String> {
+        Ok(self.0.clone())
+    }
+}
+
+fn invocation(operation: TmuxOperation, args: &[&str]) -> CommandInvocation {
+    CommandInvocation {
+        operation: CommandOperation::Tmux(operation),
+        executable: PathBuf::from(TMUX),
+        args: args.iter().map(OsString::from).collect(),
+        timeout: TMUX_TIMEOUT,
+    }
+}
+
+fn poll_fixture(client_activity: OffsetDateTime) -> FixtureRunner {
+    FixtureRunner::new([
+        ExpectedInvocation {
+            invocation: invocation(
+                TmuxOperation::ListClients,
+                &["list-clients", "-F", "#{client_session} #{client_activity}"],
+            ),
+            outcome: output(format!("main {}\n", client_activity.unix_timestamp()).into_bytes()),
+        },
+        ExpectedInvocation {
+            invocation: invocation(
+                TmuxOperation::ListWindows("main".to_owned()),
+                &[
+                    "list-windows",
+                    "-t",
+                    "main",
+                    "-F",
+                    "#{window_active} #{window_id} #{window_index} #{window_name}",
+                ],
+            ),
+            outcome: output(b"1 @0 0 active\n".to_vec()),
+        },
+        ExpectedInvocation {
+            invocation: invocation(
+                TmuxOperation::ListPanes("@0".to_owned()),
+                &[
+                    "list-panes",
+                    "-t",
+                    "@0",
+                    "-F",
+                    "#{pane_id} #{pane_index} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_active} #{cursor_x} #{cursor_y} #{cursor_flag} #{alternate_on} #{pane_in_mode}",
+                ],
+            ),
+            outcome: output(b"%0 0 0 0 80 24 1 0 0 1 0 0\n".to_vec()),
+        },
+        ExpectedInvocation {
+            invocation: invocation(
+                TmuxOperation::CapturePane("%0".to_owned()),
+                &["capture-pane", "-p", "-e", "-t", "%0"],
+            ),
+            outcome: output(b"hello terminal\n".to_vec()),
+        },
+        ExpectedInvocation {
+            invocation: invocation(
+                TmuxOperation::DisplayMessage {
+                    target: "%0".to_owned(),
+                    field: DisplayField::PaneTitle,
+                },
+                &["display-message", "-p", "-t", "%0", "#{pane_title}"],
+            ),
+            outcome: output(b"editor\n".to_vec()),
+        },
+        ExpectedInvocation {
+            invocation: invocation(
+                TmuxOperation::DisplayMessage {
+                    target: "%0".to_owned(),
+                    field: DisplayField::PaneCurrentPath,
+                },
+                &["display-message", "-p", "-t", "%0", "#{pane_current_path}"],
+            ),
+            outcome: output(b"/home/user/project\n".to_vec()),
+        },
+        ExpectedInvocation {
+            invocation: invocation(
+                TmuxOperation::DisplayMessage {
+                    target: "%0".to_owned(),
+                    field: DisplayField::PanePid,
+                },
+                &["display-message", "-p", "-t", "%0", "#{pane_pid}"],
+            ),
+            outcome: output(b"12345\n".to_vec()),
+        },
+    ])
+}
+
+/// One segment: opened at 18:00:00 UTC, one poll at +1 s, stopped at +5 s.
+async fn engine_golden(out: &Path, zone: Zone, offset: UtcOffset, exe: Result<String, ExeFailure>) {
+    let scratch = out.with_extension("scratch");
+    let t0 = PrimitiveDateTime::new(
+        Date::from_calendar_date(2026, Month::July, 1).expect("date"),
+        Time::from_hms(18, 0, 0).expect("time"),
+    )
+    .assume_utc();
+    let clock = TestClock::new(t0, Duration::ZERO, offset);
+    let stream = derive_component("golden.tmux").expect("stream");
+    let mut manager = SegmentManager::start(
+        scratch.clone(),
+        stream,
+        &clock,
+        Duration::from_secs(300),
+        SyncWake::default(),
+        Box::new(StaticZone(zone)),
+        Arc::new(StderrWarnings),
+    )
+    .expect("start segment manager");
+    let t_poll = t0 + Duration::from_secs(1);
+    let runner = poll_fixture(t_poll);
+    let adapter = TmuxAdapter::with_context(
+        PathBuf::from(TMUX),
+        runner.clone(),
+        StderrWarnings,
+        true,
+        true,
+        true,
+        Arc::new(FakeLookup(exe)),
+    )
+    .expect("adapter");
+    let poll = adapter
+        .poll_context(t_poll, Duration::from_secs(5))
+        .await
+        .expect("poll");
+    runner.assert_finished().expect("every fixture invocation used");
+    manager
+        .process_poll(
+            &poll.captures,
+            &poll.activity_jsonl,
+            t_poll,
+            Duration::from_secs(1),
+            Duration::from_secs(300),
+        )
+        .expect("process poll");
+    clock.set_monotonic(Duration::from_secs(5));
+    manager.shutdown(Duration::from_secs(5)).expect("shutdown");
+    let day = scratch.join("captures/20260701");
+    std::fs::rename(day.join("golden.tmux"), out).expect("move stream directory");
+    std::fs::remove_dir_all(&scratch).expect("remove scratch");
+}
+
+#[tokio::test]
+async fn generate_extraction_goldens() {
+    let out = PathBuf::from(std::env::var("GOLDEN_OUT").expect("GOLDEN_OUT"));
+    let pre = PathBuf::from(std::env::var("GOLDEN_LEGACY_PRE").expect("GOLDEN_LEGACY_PRE"));
+    std::fs::create_dir_all(out.join("engine")).expect("output directory");
+
+    let denver = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/america-denver.tzif"),
+    )
+    .expect("denver tzif");
+    engine_golden(
+        &out.join("engine/populated"),
+        Zone::from_tzif("America/Denver", &denver).expect("denver zone"),
+        UtcOffset::from_hms(-6, 0, 0).expect("offset"),
+        Ok("vim".to_owned()),
+    )
+    .await;
+    engine_golden(
+        &out.join("engine/availability"),
+        Zone::utc(),
+        UtcOffset::UTC,
+        Err(ExeFailure::Unavailable),
+    )
+    .await;
+
+    // The legacy tree: 2.0.28's own start-up recovery over a copy of the input.
+    let recovered = out.join("legacy/recovered");
+    std::fs::create_dir_all(out.join("legacy")).expect("legacy directory");
+    let copied = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(&pre)
+        .arg(&recovered)
+        .status()
+        .expect("copy legacy input");
+    assert!(copied.success());
+    let lock = InstanceLock::acquire(&recovered).expect("legacy lock");
+    for record in recover_capture_streams(&lock, &recovered, Duration::from_secs(300))
+        .expect("recover legacy tree")
+    {
+        println!(
+            "{:?} {} {}",
+            record.action,
+            record.candidate.display(),
+            record.detail
+        );
+    }
+}

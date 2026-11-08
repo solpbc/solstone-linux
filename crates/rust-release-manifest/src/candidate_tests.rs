@@ -83,7 +83,10 @@ fn normalize_fixture_lock_versions(path: &Path) {
         let line = if line.starts_with("version = ")
             && matches!(
                 package,
-                "rust-release-manifest" | "solstone-linux" | "solstone-linux-window"
+                "rust-release-manifest"
+                    | "solstone-linux"
+                    | "solstone-linux-window"
+                    | "solstone-terminal"
             ) {
             replaced += 1;
             "version = \"1.0.0\""
@@ -93,7 +96,7 @@ fn normalize_fixture_lock_versions(path: &Path) {
         normalized.push_str(line);
         normalized.push('\n');
     }
-    assert_eq!(replaced, 3, "fixture workspace lock authorities");
+    assert_eq!(replaced, 4, "fixture workspace lock authorities");
     fs::write(path, normalized).unwrap();
 }
 

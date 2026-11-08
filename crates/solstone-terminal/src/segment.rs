@@ -1,0 +1,513 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 sol pbc
+
+use std::collections::HashMap;
+use std::fmt;
+use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use time::{OffsetDateTime, UtcOffset};
+
+use crate::model::CaptureResult;
+use crate::name::derive_component;
+use crate::paths::ensure_private_directory;
+use crate::serialize::serialize_frame;
+use crate::storage::{
+    AppendFrame, CaptureTime, DurableStorage, FaultPlan, FileStorage, MetadataLifecycle,
+    SegmentMetadata, SessionMetadata, StorageError, atomic_write_metadata, sync_directory,
+    write_capture_time,
+};
+
+pub struct SegmentState {
+    stream_dir: PathBuf,
+    incomplete_dir: PathBuf,
+    metadata_path: PathBuf,
+    metadata: SegmentMetadata,
+    storage: Box<dyn DurableStorage>,
+    digests: HashMap<String, u64>,
+    start_monotonic: Duration,
+    segment_interval: Duration,
+    poisoned: bool,
+    closed: Option<SegmentClose>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppendOutcome {
+    Appended { frame_id: u64 },
+    Unchanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SegmentClose {
+    Finalized(PathBuf),
+    RemovedEmpty,
+}
+
+impl SegmentState {
+    pub fn create(
+        stream_dir: &Path,
+        stem: &str,
+        start_wall: OffsetDateTime,
+        start_monotonic: Duration,
+        local_offset: UtcOffset,
+        tz: Option<&str>,
+        segment_interval: Duration,
+    ) -> Result<Self, SegmentError> {
+        Self::create_with_faults(
+            stream_dir,
+            stem,
+            start_wall,
+            start_monotonic,
+            local_offset,
+            tz,
+            segment_interval,
+            FaultPlan::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_faults(
+        stream_dir: &Path,
+        stem: &str,
+        start_wall: OffsetDateTime,
+        start_monotonic: Duration,
+        local_offset: UtcOffset,
+        tz: Option<&str>,
+        segment_interval: Duration,
+        faults: FaultPlan,
+    ) -> Result<Self, SegmentError> {
+        ensure_private_directory(stream_dir).map_err(SegmentError::Path)?;
+        let incomplete_name = format!("{stem}.incomplete");
+        let metadata_name = format!("{stem}.incomplete.meta");
+        let incomplete_dir = stream_dir.join(&incomplete_name);
+        let metadata_path = stream_dir.join(metadata_name);
+        if fs::symlink_metadata(&incomplete_dir).is_ok()
+            || fs::symlink_metadata(&metadata_path).is_ok()
+        {
+            return Err(SegmentError::Collision(incomplete_dir));
+        }
+        let mut metadata = SegmentMetadata {
+            schema_version: SegmentMetadata::SCHEMA_VERSION,
+            lifecycle: MetadataLifecycle::Creating,
+            incomplete_dir: incomplete_name,
+            finalized_dir: String::new(),
+            start_wall_unix_nanos: start_wall.unix_timestamp_nanos(),
+            local_offset_seconds: local_offset.whole_seconds(),
+            tz: tz.filter(|name| !name.is_empty()).map(str::to_owned),
+            elapsed_nanos: 0,
+            last_durable_frame_id: 0,
+            durable_frame_count: 0,
+            has_durable_frames: false,
+            activity_durable_offset: 0,
+            sessions: Default::default(),
+        };
+        record_length(&mut metadata, Duration::ZERO, segment_interval);
+        atomic_write_metadata(&metadata_path, stream_dir, &metadata)?;
+        ensure_private_directory(&incomplete_dir).map_err(SegmentError::Path)?;
+        sync_directory(stream_dir)?;
+        metadata.lifecycle = MetadataLifecycle::Open;
+        atomic_write_metadata(&metadata_path, stream_dir, &metadata)?;
+        let storage = FileStorage::with_faults(
+            incomplete_dir.clone(),
+            metadata_path.clone(),
+            stream_dir.to_owned(),
+            faults,
+        );
+        Ok(Self {
+            stream_dir: stream_dir.to_owned(),
+            incomplete_dir,
+            metadata_path,
+            metadata,
+            storage: Box::new(storage),
+            digests: HashMap::new(),
+            start_monotonic,
+            segment_interval,
+            poisoned: false,
+            closed: None,
+        })
+    }
+
+    pub fn append_capture(
+        &mut self,
+        capture: &CaptureResult,
+        timestamp: f64,
+        now_monotonic: Duration,
+    ) -> Result<AppendOutcome, SegmentError> {
+        if self.poisoned {
+            return Err(SegmentError::Poisoned);
+        }
+        if self.closed.is_some() {
+            return Err(SegmentError::Closed);
+        }
+        let digest = capture_digest(capture);
+        if self.digests.get(&capture.session) == Some(&digest) {
+            return Ok(AppendOutcome::Unchanged);
+        }
+        let component = derive_component(&capture.session).map_err(SegmentError::Name)?;
+        let filename = component.session_filename();
+        let previous_offset = self
+            .metadata
+            .sessions
+            .get(&capture.session)
+            .map_or(0, |session| session.durable_offset);
+        let frame_id = self
+            .metadata
+            .last_durable_frame_id
+            .checked_add(1)
+            .ok_or(SegmentError::FrameIdOverflow)?;
+        let bytes =
+            serialize_frame(capture, frame_id, timestamp).map_err(SegmentError::Serialize)?;
+        let mut proposed = self.metadata.clone();
+        record_length(
+            &mut proposed,
+            now_monotonic.saturating_sub(self.start_monotonic),
+            self.segment_interval,
+        );
+        proposed.last_durable_frame_id = frame_id;
+        proposed.durable_frame_count += 1;
+        proposed.has_durable_frames = true;
+        proposed.sessions.insert(
+            capture.session.clone(),
+            SessionMetadata {
+                session: capture.session.clone(),
+                filename: filename.clone(),
+                last_frame_id: frame_id,
+                durable_offset: previous_offset + bytes.len() as u64,
+            },
+        );
+        let durable = self.storage.append_frame(AppendFrame {
+            filename: &filename,
+            previous_offset,
+            bytes: &bytes,
+            proposed_metadata: proposed,
+        });
+        let durable = match durable {
+            Ok(durable) => durable,
+            Err(error) => {
+                if error.is_poisoned() {
+                    self.poisoned = true;
+                }
+                return Err(SegmentError::Storage(error));
+            }
+        };
+
+        self.metadata = durable.into_metadata();
+        self.digests.insert(capture.session.clone(), digest);
+        Ok(AppendOutcome::Appended { frame_id })
+    }
+
+    pub fn append_activity(
+        &mut self,
+        bytes: &[u8],
+        now_monotonic: Duration,
+    ) -> Result<(), SegmentError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.poisoned {
+            return Err(SegmentError::Poisoned);
+        }
+        if self.closed.is_some() {
+            return Err(SegmentError::Closed);
+        }
+        let filename = format!(
+            "{}_desktop_activity.jsonl",
+            segment_stem(self.metadata.incomplete_dir.as_str())
+        );
+        let previous_offset = self.metadata.activity_durable_offset;
+        let mut proposed = self.metadata.clone();
+        proposed.activity_durable_offset = previous_offset
+            .checked_add(bytes.len() as u64)
+            .ok_or(SegmentError::ActivityOffsetOverflow)?;
+        record_length(
+            &mut proposed,
+            now_monotonic.saturating_sub(self.start_monotonic),
+            self.segment_interval,
+        );
+        let durable = self.storage.append_frame(AppendFrame {
+            filename: &filename,
+            previous_offset,
+            bytes,
+            proposed_metadata: proposed,
+        });
+        let durable = match durable {
+            Ok(durable) => durable,
+            Err(error) => {
+                if error.is_poisoned() {
+                    self.poisoned = true;
+                }
+                return Err(SegmentError::Storage(error));
+            }
+        };
+        self.metadata = durable.into_metadata();
+        Ok(())
+    }
+
+    pub fn rotation_due(&self, now_monotonic: Duration, interval: Duration) -> bool {
+        now_monotonic.saturating_sub(self.start_monotonic) >= interval
+    }
+
+    pub fn frame_timestamp(&self, wall_now: OffsetDateTime) -> f64 {
+        let start = OffsetDateTime::from_unix_timestamp_nanos(self.metadata.start_wall_unix_nanos)
+            .expect("stored segment wall timestamp was previously valid");
+        (wall_now - start).as_seconds_f64()
+    }
+
+    pub fn finalize(&mut self, now_monotonic: Duration) -> Result<SegmentClose, SegmentError> {
+        if let Some(closed) = &self.closed {
+            return Ok(closed.clone());
+        }
+        if self.poisoned {
+            return Err(SegmentError::Poisoned);
+        }
+        if !self.metadata.has_durable_frames && self.metadata.activity_durable_offset == 0 {
+            return self.remove_confirmed_empty();
+        }
+
+        record_length(
+            &mut self.metadata,
+            now_monotonic.saturating_sub(self.start_monotonic),
+            self.segment_interval,
+        );
+        self.metadata.lifecycle = MetadataLifecycle::Finalizing;
+        self.storage.write_metadata(&self.metadata)?;
+        self.storage.sync_and_close()?;
+
+        let finalized = self.stream_dir.join(&self.metadata.finalized_dir);
+        if fs::symlink_metadata(&finalized).is_ok() {
+            return Err(SegmentError::Collision(finalized));
+        }
+        fs::rename(&self.incomplete_dir, &finalized).map_err(|source| SegmentError::Io {
+            operation: "rename finalized segment",
+            path: self.incomplete_dir.clone(),
+            source,
+        })?;
+        sync_directory(&self.stream_dir)?;
+        write_capture_time(
+            &self.stream_dir,
+            &self.metadata.finalized_dir,
+            &CaptureTime {
+                tz: self.metadata.tz.clone(),
+                utc_offset_seconds: self.metadata.local_offset_seconds,
+            },
+        )?;
+        fs::remove_file(&self.metadata_path).map_err(|source| SegmentError::Io {
+            operation: "remove finalized metadata",
+            path: self.metadata_path.clone(),
+            source,
+        })?;
+        sync_directory(&self.stream_dir)?;
+        let closed = SegmentClose::Finalized(finalized);
+        self.closed = Some(closed.clone());
+        Ok(closed)
+    }
+
+    pub fn remove_confirmed_empty(&mut self) -> Result<SegmentClose, SegmentError> {
+        if let Some(closed) = &self.closed {
+            return Ok(closed.clone());
+        }
+        if self.metadata.has_durable_frames
+            || self.metadata.activity_durable_offset != 0
+            || self.metadata.durable_frame_count != 0
+            || self
+                .metadata
+                .sessions
+                .values()
+                .any(|session| session.durable_offset != 0)
+        {
+            return Err(SegmentError::NotEmpty);
+        }
+        self.storage.sync_and_close()?;
+        for entry in fs::read_dir(&self.incomplete_dir).map_err(|source| SegmentError::Io {
+            operation: "scan confirmed-empty segment",
+            path: self.incomplete_dir.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| SegmentError::Io {
+                operation: "read confirmed-empty entry",
+                path: self.incomplete_dir.clone(),
+                source,
+            })?;
+            let file_type = entry.file_type().map_err(|source| SegmentError::Io {
+                operation: "inspect confirmed-empty entry",
+                path: entry.path(),
+                source,
+            })?;
+            let metadata =
+                fs::symlink_metadata(entry.path()).map_err(|source| SegmentError::Io {
+                    operation: "inspect confirmed-empty file",
+                    path: entry.path(),
+                    source,
+                })?;
+            if file_type.is_symlink()
+                || metadata.file_type().is_symlink()
+                || !file_type.is_file()
+                || !metadata.is_file()
+                || metadata.len() != 0
+            {
+                return Err(SegmentError::NotEmpty);
+            }
+            fs::remove_file(entry.path()).map_err(|source| SegmentError::Io {
+                operation: "remove zero-length JSONL",
+                path: entry.path(),
+                source,
+            })?;
+        }
+        fs::remove_dir(&self.incomplete_dir).map_err(|source| SegmentError::Io {
+            operation: "remove confirmed-empty segment",
+            path: self.incomplete_dir.clone(),
+            source,
+        })?;
+        sync_directory(&self.stream_dir)?;
+        fs::remove_file(&self.metadata_path).map_err(|source| SegmentError::Io {
+            operation: "remove confirmed-empty metadata",
+            path: self.metadata_path.clone(),
+            source,
+        })?;
+        sync_directory(&self.stream_dir)?;
+        self.closed = Some(SegmentClose::RemovedEmpty);
+        Ok(SegmentClose::RemovedEmpty)
+    }
+
+    pub fn metadata(&self) -> &SegmentMetadata {
+        &self.metadata
+    }
+
+    pub fn incomplete_dir(&self) -> &Path {
+        &self.incomplete_dir
+    }
+
+    pub fn metadata_path(&self) -> &Path {
+        &self.metadata_path
+    }
+
+    pub fn stream_dir(&self) -> &Path {
+        &self.stream_dir
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    pub fn open_handle_count(&self) -> usize {
+        self.storage.open_handle_count()
+    }
+
+    pub fn has_durable_frames(&self) -> bool {
+        self.metadata.has_durable_frames
+    }
+
+    pub fn start_monotonic(&self) -> Duration {
+        self.start_monotonic
+    }
+}
+
+pub fn capture_digest(capture: &CaptureResult) -> u64 {
+    let mut panes = capture.panes.iter().collect::<Vec<_>>();
+    panes.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut parts = Vec::with_capacity(panes.len() + 1);
+    parts.push(capture.window.id.as_str());
+    parts.extend(panes.into_iter().map(|pane| pane.content.as_str()));
+    let mut hasher = DefaultHasher::new();
+    parts.join("\n").hash(&mut hasher);
+    hasher.finish()
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn segment_stem(incomplete_name: &str) -> &str {
+    incomplete_name
+        .strip_suffix(".incomplete")
+        .expect("segment metadata has an incomplete directory name")
+}
+
+/// Whole-second LEN of a segment key: the measured duration bounded to
+/// `[1, segment_interval]`. A poll that runs past the rotation mark, a stop
+/// that lands after a long suspension, or a segment stopped within its first
+/// second never names a span outside what one segment can hold.
+pub fn segment_length(elapsed: Duration, segment_interval: Duration) -> u64 {
+    elapsed
+        .as_secs()
+        .clamp(1, segment_interval.as_secs().max(1))
+}
+
+/// Records the bounded length of a segment and the finalized name derived
+/// from it. Every path that names a finalized segment goes through here.
+pub(crate) fn record_length(
+    metadata: &mut SegmentMetadata,
+    elapsed: Duration,
+    segment_interval: Duration,
+) {
+    let length = Duration::from_secs(segment_length(elapsed, segment_interval));
+    metadata.elapsed_nanos = duration_nanos(length);
+    metadata.finalized_dir = finalized_name(segment_stem(&metadata.incomplete_dir), length);
+}
+
+pub(crate) fn finalized_name(stem: &str, elapsed: Duration) -> String {
+    format!("{stem}_{:03}", elapsed.as_secs())
+}
+
+#[derive(Debug)]
+pub enum SegmentError {
+    Path(crate::paths::PathError),
+    Name(crate::name::NameError),
+    Serialize(serde_json::Error),
+    Storage(StorageError),
+    Collision(PathBuf),
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Poisoned,
+    Closed,
+    NotEmpty,
+    FrameIdOverflow,
+    ActivityOffsetOverflow,
+}
+
+impl From<StorageError> for SegmentError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl SegmentError {
+    pub fn is_recoverable_append(&self) -> bool {
+        matches!(self, Self::Storage(StorageError::Recoverable(_)))
+    }
+}
+
+impl fmt::Display for SegmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path(error) => error.fmt(formatter),
+            Self::Name(error) => error.fmt(formatter),
+            Self::Serialize(error) => write!(formatter, "frame serialization failed: {error}"),
+            Self::Storage(error) => error.fmt(formatter),
+            Self::Collision(path) => {
+                write!(formatter, "segment path already exists: {}", path.display())
+            }
+            Self::Io {
+                operation,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "{operation} failed for {}: {source}",
+                path.display()
+            ),
+            Self::Poisoned => write!(formatter, "segment is poisoned after a failed rollback"),
+            Self::Closed => write!(formatter, "segment is already closed"),
+            Self::NotEmpty => write!(formatter, "segment is not metadata-confirmed empty"),
+            Self::FrameIdOverflow => write!(formatter, "segment frame_id overflow"),
+            Self::ActivityOffsetOverflow => write!(formatter, "segment activity offset overflow"),
+        }
+    }
+}
+
+impl std::error::Error for SegmentError {}

@@ -128,7 +128,7 @@ brand-sync:
 	@echo "brand: synced from $(BRAND_DIR)"
 
 test: rust-preflight
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal
 
 check-observer-contract: rust-preflight
 	@echo "Client-ingest contract bundle: 14.0.0"
@@ -192,7 +192,7 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check
 	$(CARGO) clippy $(CARGO_LOCKED) --all-targets -- -D warnings
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal
 	$(MAKE) shellcheck
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 
@@ -201,6 +201,8 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 ci-full: ci
 	$(CARGO) clippy $(CARGO_LOCKED) -p solstone-linux --features full-tests --all-targets -- -D warnings
 	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux --features full-tests
+	$(CARGO) clippy $(CARGO_LOCKED) -p solstone-terminal --features full-tests --all-targets -- -D warnings
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-terminal --features full-tests
 
 check-transparency-minisign:
 	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "the in-repo v1 transparency publisher is retired; v2 app records are produced outside this repository (see trust.solstone.app); TRANSPARENCY_ACTIVATED=1 does not by itself authorize a publish" >&2; exit 2; }

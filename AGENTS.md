@@ -13,6 +13,7 @@ This is **not** part of the solstone monorepo. It is a standalone Rust package w
 ```
 crates/solstone-linux/src/  Shipping Rust observer, CLI, service, sync, and capture code
 crates/solstone-linux-window/src/ Separate GTK4 desktop window
+crates/solstone-terminal/src/  Terminal-capture engine and solstone-terminal helper
 crates/rust-release-manifest/src/transparency.rs  Retired v1 release-transparency publisher
 transparency-head-log.jsonl Tracked transparency head witness
 packaging/                  Native package Containerfile and install notes
@@ -166,6 +167,7 @@ state or waits on the wall clock goes behind the crate's non-default
 `full-tests` feature: `#[cfg(feature = "full-tests")]` on the test or module,
 `#![cfg(feature = "full-tests")]` at the top of an integration-test file.
 `make ci-full` lints and runs those tests; `make ci` does not.
+`solstone-terminal`'s process-spawning and real-timing tests use its own `full-tests` feature.
 
 On a fresh checkout, run `make install` (or `cargo fetch --locked`) before
 `make ci`. Parts of the gate resolve the dependency graph offline, and that
