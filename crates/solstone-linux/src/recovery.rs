@@ -195,6 +195,10 @@ pub fn recover_incomplete_segments(
             if !stream.path().is_dir() {
                 continue;
             }
+            // The terminal engine's own recovery repairs its segments.
+            if stream.file_name() == crate::terminal::STREAM_DIR {
+                continue;
+            }
             let Some(segments) = read_sorted_entries(&stream.path(), "stream directory") else {
                 continue;
             };
@@ -795,5 +799,23 @@ mod tests {
         assert!(final_dir.join(second).is_file());
         assert_eq!(fs::read(final_dir.join(first)).unwrap(), b"{\"v\":1}\n");
         assert_eq!(fs::read(final_dir.join(second)).unwrap(), b"{\"v\":1}\n");
+    }
+
+    #[test]
+    fn startup_recovery_leaves_the_terminal_folder_to_its_engine() {
+        let temp = tempfile::tempdir().unwrap();
+        let captures = temp.path().join("captures");
+        let stream = captures.join("20261108/_tmux");
+        let incomplete = stream.join("101500.incomplete");
+        fs::create_dir_all(&incomplete).unwrap();
+        fs::write(incomplete.join("tmux_main_screen.jsonl"), b"{}\n").unwrap();
+        fs::write(stream.join("101500.incomplete.meta"), b"{}").unwrap();
+        let recovered = recover_incomplete_segments(&captures, 300, 4_000_000_000.0, &NoMedia);
+        assert_eq!(recovered, 0);
+        assert!(
+            incomplete.is_dir(),
+            "it stays for the engine's own recovery"
+        );
+        assert!(stream.join("101500.incomplete.meta").exists());
     }
 }

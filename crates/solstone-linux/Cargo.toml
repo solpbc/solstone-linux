@@ -41,6 +41,7 @@ notify-rust = { version = "=4.18.0", default-features = false, features = ["z-wi
 zbus = { version = "=5.17.0", features = ["tokio"] }
 sd-notify = "0.5.0"
 solstone-vault = { version = "0.1.0", path = "../solstone-vault" }
+solstone-terminal = { version = "2.0.0", path = "../solstone-terminal" }
 native-browser-frame = { version = "1.0.0", path = "../../vendor/crates/native-browser-frame" }
 url = "=2.5.8"
 
@@ -81,7 +82,10 @@ maintainer = "sol pbc <jer@solpbc.org>"
 copyright = "2026 sol pbc"
 license-file = ["../../LICENSE", "0"]
 extended-description = "the solstone app for linux. it takes in the screen and audio you share with it, and all of it goes into your journal."
-depends = "$auto, libgtk-4-1 (>= 4.6), libglib2.0-bin"
+# Written out rather than `$auto`, which would make the window's GTK a hard requirement:
+# the app runs without GTK on a computer with no desktop. These are the daemon's own
+# linked libraries (the package audit pins them).
+depends = "libc6 (>= 2.35), libgcc-s1, libglib2.0-0 | libglib2.0-0t64, libgstreamer1.0-0, libpulse0, libglib2.0-bin"
 # GNOME shows no panel icon without an AppIndicator extension, so `solstone-linux
 # panel-icon` sets one up on request. The distribution's own package is the other route.
 #
@@ -93,11 +97,11 @@ depends = "$auto, libgtk-4-1 (>= 4.6), libglib2.0-bin"
 # and this package hard-`Depends: gnome-shell`, so it would pull GNOME Shell onto KDE and
 # headless installs. `suggests` is ignored by default (`Install-Suggests "0"`), which
 # records the relationship without imposing it.
-suggests = "gnome-shell-extension-appindicator"
+suggests = "gnome-shell-extension-appindicator, tmux"
 # The panel icon's "copy" hands its text to wl-copy on Wayland and xclip on X11: a
 # background app can't set a Wayland clipboard by itself. Recommended, so a missing
 # tool costs only the copy, never the install.
-recommends = "wl-clipboard, xclip"
+recommends = "libgtk-4-1 (>= 4.6), wl-clipboard, xclip"
 section = "utils"
 priority = "optional"
 assets = [
@@ -133,7 +137,9 @@ assets = [
 # before falling back to this package directory. Keep these paths root-relative.
 [package.metadata.generate-rpm]
 license = "AGPL-3.0-only"
-auto-req = "auto"
+# Disabled because the automatic scan would make the window's GTK a hard requirement.
+# The requires below are the daemon's own linked libraries (the package audit pins them).
+auto-req = "disabled"
 assets = [
     { source = "target/release/solstone-linux", dest = "/usr/bin/solstone-linux", mode = "755" },
     { source = "target/release/solstone-linux-window", dest = "/usr/bin/solstone-linux-window", mode = "755" },
@@ -172,10 +178,20 @@ assets = [
 # an explicit enable, which is exactly what `solstone-linux panel-icon` does. This makes
 # the bits present, not the icon visible.
 [package.metadata.generate-rpm.recommends]
+gtk4 = ">= 4.6"
 "(gnome-shell-extension-appindicator if gnome-shell)" = ""
 wl-clipboard = "*"
 xclip = "*"
 
+[package.metadata.generate-rpm.suggests]
+tmux = "*"
+
 [package.metadata.generate-rpm.requires]
-gtk4 = ">= 4.6"
 glib2 = "*"
+"libc.so.6(GLIBC_2.35)(64bit)" = "*"
+"libgcc_s.so.1()(64bit)" = "*"
+"libglib-2.0.so.0()(64bit)" = "*"
+"libgobject-2.0.so.0()(64bit)" = "*"
+"libgio-2.0.so.0()(64bit)" = "*"
+"libgstreamer-1.0.so.0()(64bit)" = "*"
+"libpulse.so.0()(64bit)" = "*"

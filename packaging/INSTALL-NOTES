@@ -10,7 +10,9 @@ when you choose it in the window or run `solstone-linux install-service`.
 Runtime requirements:
 
 - glibc 2.35 or newer
-- GTK 4.6 or newer for the window; intake runs separately without GTK
+- GTK 4.6 or newer for the window; the app itself runs without GTK, and a computer
+  with no desktop can run it terminal-only
+- tmux, if you turn on terminal capture
 - libpulse and a PulseAudio-compatible server (PipeWire Pulse is supported)
 - GStreamer 1.0 core, base, good, PipeWire, and X11 plugins
 - PipeWire and xdg-desktop-portal with ScreenCast support for Wayland screen frames

@@ -133,11 +133,18 @@ fn package_metadata_and_resolved_licenses() {
             Value::String("0".into())
         ]
     );
-    assert!(deb["depends"].as_str().unwrap().contains("$auto"));
+    let depends = deb["depends"].as_str().unwrap();
+    assert!(
+        !depends.contains("gtk"),
+        "the window's GTK is only recommended"
+    );
+    assert!(deb["recommends"].as_str().unwrap().contains("libgtk-4-1"));
 
     let rpm = &member["package"]["metadata"]["generate-rpm"];
     assert_eq!(rpm["license"].as_str(), Some("AGPL-3.0-only"));
-    assert_eq!(rpm["auto-req"].as_str(), Some("auto"));
+    assert_eq!(rpm["auto-req"].as_str(), Some("disabled"));
+    assert!(rpm["requires"].get("gtk4").is_none());
+    assert!(rpm["recommends"].get("gtk4").is_some());
 
     let flac = &member["dependencies"]["flac-bound"];
     assert_eq!(flac["default-features"].as_bool(), Some(false));

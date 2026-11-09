@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rustix::{
@@ -106,8 +107,35 @@ struct NativeState {
     registry_done: bool,
 }
 
+/// The compositor's socket: the name is relative to the runtime directory unless
+/// it is already absolute.
+fn wayland_socket_path(display: &str, runtime_dir: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let display = Path::new(display);
+    if display.is_absolute() {
+        return Some(display.to_owned());
+    }
+    Some(Path::new(runtime_dir?).join(display))
+}
+
+/// Connects to the compositor the user manager names now. An app that started
+/// before the desktop has no `WAYLAND_DISPLAY` of its own.
+fn connect_to_compositor() -> Result<Connection, String> {
+    crate::desktop_session::reread_manager_environment();
+    let display = crate::desktop_session::startup_environment().wayland_display;
+    let Some(path) = display
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .and_then(|name| wayland_socket_path(name, std::env::var_os("XDG_RUNTIME_DIR").as_deref()))
+    else {
+        return Connection::connect_to_env().map_err(|error| error.to_string());
+    };
+    let stream = std::os::unix::net::UnixStream::connect(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Connection::from_socket(stream).map_err(|error| error.to_string())
+}
+
 fn enumerate_native_outputs(timeout: Duration) -> Result<Vec<NativeOutput>, String> {
-    let connection = Connection::connect_to_env().map_err(|error| error.to_string())?;
+    let connection = connect_to_compositor()?;
     let mut queue = connection.new_event_queue();
     let handle = queue.handle();
     connection.display().get_registry(&handle, ());
@@ -284,6 +312,20 @@ delegate_noop!(NativeState: ignore zxdg_output_manager_v1::ZxdgOutputManagerV1);
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_wayland_name_is_relative_to_the_runtime_directory_unless_absolute() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            super::wayland_socket_path("wayland-1", Some(OsStr::new("/run/user/1000"))),
+            Some(std::path::PathBuf::from("/run/user/1000/wayland-1"))
+        );
+        assert_eq!(
+            super::wayland_socket_path("/tmp/wl", None),
+            Some(std::path::PathBuf::from("/tmp/wl"))
+        );
+        assert_eq!(super::wayland_socket_path("wayland-1", None), None);
+    }
+
     use super::*;
 
     fn output(

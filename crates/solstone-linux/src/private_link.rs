@@ -246,6 +246,86 @@ fn hex(byte: u8) -> Result<u8, PrivateStateError> {
     }
 }
 
+/// The `$HOME`-anchored capture-root lock. Whoever holds it is the running app:
+/// the daemon for its whole life, or a command that found no daemon and acts in
+/// its place. It is always taken before the private-state lock.
+pub(crate) struct CaptureRootLock {
+    file: File,
+}
+
+impl CaptureRootLock {
+    fn open(capture_root: &Path) -> Result<File, PrivateStateError> {
+        fs::create_dir_all(capture_root).map_err(|source| PrivateStateError::Io {
+            operation: PrivateIoOperation::EnsureDirectory,
+            source,
+        })?;
+        let descriptor = rustix::fs::openat(
+            rustix::fs::CWD,
+            capture_root.join(CAPTURE_ROOT_LOCK_FILENAME),
+            rustix::fs::OFlags::RDWR
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CREATE,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .map_err(|source| PrivateStateError::Io {
+            operation: PrivateIoOperation::Open,
+            source: source.into(),
+        })?;
+        Ok(File::from(descriptor))
+    }
+
+    /// `None` when another process holds it.
+    pub(crate) fn try_acquire(capture_root: &Path) -> Result<Option<Self>, PrivateStateError> {
+        let file = Self::open(capture_root)?;
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+            Err(source) => Err(PrivateStateError::Io {
+                operation: PrivateIoOperation::Lock,
+                source: source.into(),
+            }),
+        }
+    }
+
+    /// Waits up to `limit` for the lock, calling `waiting` before each wait.
+    /// `CaptureRootInUse` when it is still held after that.
+    pub(crate) fn acquire_waiting(
+        capture_root: &Path,
+        poll: std::time::Duration,
+        limit: std::time::Duration,
+        waiting: &mut dyn FnMut(),
+    ) -> Result<Self, PrivateStateError> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if let Some(lock) = Self::try_acquire(capture_root)? {
+                return Ok(lock);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(PrivateStateError::CaptureRootInUse);
+            }
+            waiting();
+            std::thread::sleep(poll);
+        }
+    }
+
+    /// Whether some process holds the capture root now: the daemon is running,
+    /// or a command is acting in its place.
+    pub(crate) fn is_held(capture_root: &Path) -> bool {
+        let path = capture_root.join(CAPTURE_ROOT_LOCK_FILENAME);
+        let Ok(file) = File::open(&path) else {
+            return false;
+        };
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
+            Ok(()) => {
+                let _ = rustix::fs::flock(&file, rustix::fs::FlockOperation::Unlock);
+                false
+            }
+            Err(_) => true,
+        }
+    }
+}
+
 pub(crate) struct PrivateStateLock {
     _file: File,
     readiness_file: Option<File>,
@@ -459,41 +539,9 @@ impl PrivateStateLock {
         Ok(())
     }
 
-    /// Take the capture root for this run, refusing if another process holds it.
-    pub(crate) fn hold_capture_root(
-        &mut self,
-        capture_root: &Path,
-    ) -> Result<(), PrivateStateError> {
-        fs::create_dir_all(capture_root).map_err(|source| PrivateStateError::Io {
-            operation: PrivateIoOperation::EnsureDirectory,
-            source,
-        })?;
-        let descriptor = rustix::fs::openat(
-            rustix::fs::CWD,
-            capture_root.join(CAPTURE_ROOT_LOCK_FILENAME),
-            rustix::fs::OFlags::RDWR
-                | rustix::fs::OFlags::CLOEXEC
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::CREATE,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .map_err(|source| PrivateStateError::Io {
-            operation: PrivateIoOperation::Open,
-            source: source.into(),
-        })?;
-        let file = File::from(descriptor);
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::WOULDBLOCK) => return Err(PrivateStateError::CaptureRootInUse),
-            Err(source) => {
-                return Err(PrivateStateError::Io {
-                    operation: PrivateIoOperation::Lock,
-                    source: source.into(),
-                });
-            }
-        }
-        self.capture_root_file = Some(file);
-        Ok(())
+    /// Keep a capture-root lock taken before this lock for as long as this lock.
+    pub(crate) fn adopt_capture_root(&mut self, lock: CaptureRootLock) {
+        self.capture_root_file = Some(lock.file);
     }
 
     pub(crate) fn root(&self) -> &Path {

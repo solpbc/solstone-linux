@@ -378,12 +378,32 @@ impl SyncService {
         Self::start_with_browser_custody(config, client, clock, ProcessEpoch::generate().ok(), None)
     }
 
+    #[cfg(test)]
     pub(crate) fn start_with_browser_custody(
         config: Config,
         client: Arc<UploadClient>,
         clock: Arc<dyn Clock + Send + Sync>,
         process_epoch: Option<ProcessEpoch>,
         browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
+    ) -> Self {
+        Self::start_with_sources(
+            config,
+            client,
+            clock,
+            process_epoch,
+            browser_custody,
+            crate::terminal::TerminalSync::default(),
+        )
+    }
+
+    /// Starts sync with every source's custody hooks.
+    pub(crate) fn start_with_sources(
+        config: Config,
+        client: Arc<UploadClient>,
+        clock: Arc<dyn Clock + Send + Sync>,
+        process_epoch: Option<ProcessEpoch>,
+        browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
+        terminal: crate::terminal::TerminalSync,
     ) -> Self {
         let notify = Arc::new(Notify::new());
         let pending_trigger = Arc::new(AtomicBool::new(false));
@@ -444,6 +464,7 @@ impl SyncService {
             Arc::clone(&recent_error_count),
             browser_custody,
         );
+        worker.terminal = terminal;
         let task = tokio::spawn(async move { worker.run().await });
         let abort = task.abort_handle();
         Self {
@@ -659,6 +680,7 @@ struct SyncWorker {
     last_check: f64,
     started: f64,
     browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
+    terminal: crate::terminal::TerminalSync,
     link_facts: LinkFacts,
     association: CapturedAssociation,
     consecutive_failures: u32,
@@ -718,6 +740,7 @@ impl SyncWorker {
             last_check: f64::NEG_INFINITY,
             started,
             browser_custody,
+            terminal: crate::terminal::TerminalSync::default(),
             link_facts,
             association,
             consecutive_failures: 0,
@@ -1161,7 +1184,12 @@ impl SyncWorker {
         if !pass_stopped && !self.circuit_open && self.is_active() {
             let mut custody_days = HashSet::new();
             for ((day, source), segments) in segments_by_day.iter().flat_map(|(day, segments)| {
-                [None, Some(crate::browser::SOURCE)].map(|source| {
+                [
+                    None,
+                    Some(crate::browser::SOURCE),
+                    Some(crate::terminal::SOURCE),
+                ]
+                .map(|source| {
                     let class: Vec<&PathBuf> = segments
                         .iter()
                         .filter(|segment| segment_source(segment) == source)
@@ -1461,7 +1489,11 @@ impl SyncWorker {
             }
         }
 
-        cleanup_empty_capture_dirs(&self.config.captures_dir());
+        let keep_terminal_day = self
+            .terminal
+            .is_enabled()
+            .then(|| crate::segment::timestamp_parts(self.clock.wall_seconds()).0);
+        cleanup_empty_capture_dirs(&self.config.captures_dir(), keep_terminal_day.as_deref());
 
         let pending_count = count_unacked_segments(
             &self.config.captures_dir(),
@@ -1524,7 +1556,12 @@ impl SyncWorker {
         }
 
         let key = segment_dir.file_name().unwrap().to_string_lossy();
-        let zone = crate::recovery::read_capture_zone(segment_dir);
+        let zone = segment_capture_zone(segment_dir);
+        let terminal_segment = crate::terminal::is_terminal_segment(segment_dir);
+        if terminal_segment {
+            self.terminal
+                .set_activity(crate::terminal::SyncActivity::Working);
+        }
         let result = self
             .keep_hearing(self.client.upload_source_segment(
                 day,
@@ -1534,6 +1571,10 @@ impl SyncWorker {
                 segment_source(segment_dir),
             ))
             .await;
+        if terminal_segment {
+            self.terminal
+                .set_activity(crate::terminal::SyncActivity::Idle);
+        }
         if result.stale_capability || !self.association_is_current() {
             return UploadOutcome::Stale;
         }
@@ -2172,6 +2213,11 @@ fn remove_confirmed_segment(
                 fs::remove_file(path)?;
             }
         }
+        // A terminal segment's capture time sits beside it: the zone file goes
+        // first, then the directory.
+        if crate::terminal::is_terminal_segment(dir) {
+            crate::terminal::layout::remove_zone(dir)?;
+        }
         fs::remove_dir(dir)?;
         if browser_segment && let Some(custody) = browser_custody {
             custody
@@ -2189,6 +2235,9 @@ fn remove_confirmed_segment(
 
 fn remove_segment_removed(dir: &Path) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
+        if crate::terminal::is_terminal_segment(dir) {
+            crate::terminal::layout::remove_zone(dir)?;
+        }
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -2643,13 +2692,23 @@ fn sorted_dirs(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn cleanup_empty_capture_dirs(captures_dir: &Path) {
+/// Removes empty stream and day folders. While terminal capture is on, today's
+/// `_tmux` folder stays: the engine owns it.
+fn cleanup_empty_capture_dirs(captures_dir: &Path, keep_terminal_day: Option<&str>) {
     let Ok(day_entries) = sorted_dirs(captures_dir) else {
         return;
     };
     for day_dir in day_entries {
+        let keeps_terminal = keep_terminal_day
+            .is_some_and(|day| day_dir.file_name().and_then(|name| name.to_str()) == Some(day));
         if let Ok(streams) = sorted_dirs(&day_dir) {
             for stream in streams {
+                if keeps_terminal
+                    && stream.file_name().and_then(|name| name.to_str())
+                        == Some(crate::terminal::STREAM_DIR)
+                {
+                    continue;
+                }
                 remove_if_empty(&stream);
             }
         }
@@ -2672,6 +2731,12 @@ fn collect_segments(root: &Path) -> HashMap<String, Vec<PathBuf>> {
                     let name = path.file_name().unwrap().to_string_lossy();
                     !name.ends_with(".incomplete") && !name.ends_with(".failed")
                 })
+                // A terminal segment is deliverable once its finalize has
+                // completed, so it never goes without its capture time.
+                .filter(|path| {
+                    !crate::terminal::is_terminal_segment(path)
+                        || !crate::terminal::layout::awaiting_capture_time(path)
+                })
                 .collect();
             if !segments.is_empty() {
                 result
@@ -2685,10 +2750,26 @@ fn collect_segments(root: &Path) -> HashMap<String, Vec<PathBuf>> {
 }
 
 /// The journal source a capture segment goes in as: browser periods under their own
-/// stream folder are the `browser` source; every other stream folder is this device's
-/// primary capture.
+/// stream folder are the `browser` source, terminal segments under theirs the
+/// `tmux` source; every other stream folder is this device's primary capture.
 fn segment_source(segment_dir: &Path) -> Option<&'static str> {
-    crate::browser::is_browser_segment(segment_dir).then_some(crate::browser::SOURCE)
+    if crate::browser::is_browser_segment(segment_dir) {
+        Some(crate::browser::SOURCE)
+    } else if crate::terminal::is_terminal_segment(segment_dir) {
+        Some(crate::terminal::SOURCE)
+    } else {
+        None
+    }
+}
+
+/// A segment's capture time: terminal segments keep it in the engine's sibling
+/// zone file, every other stream inside the segment.
+fn segment_capture_zone(segment_dir: &Path) -> Option<crate::recovery::CaptureZone> {
+    if crate::terminal::is_terminal_segment(segment_dir) {
+        crate::terminal::layout::read_zone(segment_dir)
+    } else {
+        crate::recovery::read_capture_zone(segment_dir)
+    }
 }
 
 fn remove_if_empty(path: &Path) {
@@ -7653,6 +7734,222 @@ mod tests {
             "missing {expected_meta:?} in {body}"
         );
         assert!(body.contains(&format!("\"segment\":\"{seg_name}\"")));
+    }
+
+    fn terminal_segment(temp: &tempfile::TempDir, name: &str) -> PathBuf {
+        let stream = temp.path().join("captures/20270115/_tmux");
+        let segment = stream.join(name);
+        fs::create_dir_all(&segment).unwrap();
+        fs::write(
+            segment.join("tmux_main_screen.jsonl"),
+            b"{\"frame_id\":1}\n",
+        )
+        .unwrap();
+        fs::write(
+            stream.join(format!("{name}.zone.json")),
+            br#"{"tz":"Asia/Kolkata","utc_offset_seconds":19800}"#,
+        )
+        .unwrap();
+        segment
+    }
+
+    #[tokio::test]
+    async fn a_terminal_segment_goes_in_as_the_tmux_source_with_its_zone() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = terminal_segment(&temp, "101500_300");
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                json!({
+                    "status": "ok",
+                    "segment": "101500_300",
+                    "file_descriptors": [{
+                        "submitted": "tmux_main_screen.jsonl",
+                        "written": "tmux_main_screen.jsonl",
+                        "size": 15,
+                        "sha256": sha256_file(&segment.join("tmux_main_screen.jsonl")).unwrap(),
+                        "disposition": "written",
+                    }]
+                }),
+            )],
+        )
+        .await;
+        assert_eq!(
+            worker.upload_segment("20270115", &segment).await,
+            UploadOutcome::Acked
+        );
+        let request = &server.requests()[0];
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(body.contains("\"source\":\"tmux\""), "{body}");
+        assert!(
+            body.contains("\"meta\":{\"tz\":\"Asia/Kolkata\",\"utc_offset_seconds\":19800}"),
+            "{body}"
+        );
+        assert!(body.contains("{\"frame_id\":1}"), "{body}");
+        for forbidden in ["stream", "observer", "host", "platform"] {
+            assert!(!body.contains(&format!("\"{forbidden}\":")));
+        }
+    }
+
+    #[test]
+    fn a_confirmed_terminal_segment_leaves_with_its_zone_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = terminal_segment(&temp, "101500_300");
+        remove_segment_removed(&segment).unwrap();
+        assert!(!segment.exists());
+        assert!(!segment.with_file_name("101500_300.zone.json").exists());
+    }
+
+    #[test]
+    fn a_terminal_segment_is_not_deliverable_while_its_meta_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let segment = terminal_segment(&temp, "101500_300");
+        let stream = segment.parent().unwrap().to_owned();
+        fs::remove_file(stream.join("101500_300.zone.json")).unwrap();
+        fs::write(stream.join("101500.incomplete.meta"), b"{}").unwrap();
+        let captures = temp.path().join("captures");
+        assert!(collect_segments(&captures).is_empty());
+        fs::remove_file(stream.join("101500.incomplete.meta")).unwrap();
+        assert_eq!(collect_segments(&captures)["20270115"], [segment]);
+    }
+
+    #[test]
+    fn cleanup_keeps_todays_terminal_folder_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let captures = temp.path().join("captures");
+        fs::create_dir_all(captures.join("20270115/_tmux")).unwrap();
+        fs::create_dir_all(captures.join("20270114/_tmux")).unwrap();
+        cleanup_empty_capture_dirs(&captures, Some("20270115"));
+        assert!(captures.join("20270115/_tmux").is_dir());
+        assert!(!captures.join("20270114").exists());
+        cleanup_empty_capture_dirs(&captures, None);
+        assert!(!captures.join("20270115").exists());
+    }
+
+    /// One real chain: the supervisor runs the engine over a fake tmux, the engine
+    /// finishes a segment, and sync delivers it.
+    #[cfg(feature = "full-tests")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_segment_the_engine_finished_reaches_the_journal_as_tmux() {
+        use crate::terminal::fake_tmux as support;
+        use crate::terminal::supervisor::{SupervisorConfig, TerminalSupervisor};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let captures = temp.path().join("captures");
+        fs::create_dir_all(&captures).unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("tmux"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(bin.join("tmux"), fs::Permissions::from_mode(0o755)).unwrap();
+        let fake = support::FakeTmux::with_server(&[
+            ("status-left", "OWNER"),
+            ("status-left-length", "10"),
+        ]);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_count = Arc::clone(&wakes);
+        let (_sender, activity) = tokio::sync::watch::channel(crate::terminal::SyncActivity::Idle);
+        let mut config = SupervisorConfig::new(
+            captures.clone(),
+            temp.path().join("state"),
+            Arc::new(Default::default),
+            Arc::new(move || {
+                wake_count.fetch_add(1, Ordering::SeqCst);
+            }),
+            activity,
+        );
+        config.enabled = true;
+        config.path_env = Some(bin.clone().into_os_string());
+        config.settings.capture.capture_interval = 1;
+        let runner = fake.clone();
+        config.dependencies = Some(Arc::new(move || solstone_terminal::EngineDependencies {
+            runner: Arc::new(runner.clone()),
+            clock: Arc::new(solstone_terminal::clock::SystemClock::utc()),
+            zone_source: Box::new(support::UtcZoneSource),
+            lookup: None,
+        }));
+        let supervisor = TerminalSupervisor::spawn(config).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while fake.polls() < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the engine never polled"
+            );
+            fake.change_content();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        tokio::task::spawn_blocking(move || supervisor.shutdown())
+            .await
+            .unwrap();
+        assert!(
+            wakes.load(Ordering::SeqCst) >= 1,
+            "a finished segment wakes sync"
+        );
+
+        let by_day = collect_segments(&captures);
+        assert_eq!(by_day.len(), 1, "{by_day:?}");
+        let (day, segments) = by_day.into_iter().next().unwrap();
+        assert_eq!(segments.len(), 1);
+        let segment = segments.into_iter().next().unwrap();
+        let name = segment.file_name().unwrap().to_string_lossy().into_owned();
+        let mut files: Vec<_> = fs::read_dir(&segment)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        files.sort();
+        assert!(!files.is_empty());
+        let originals: Vec<Vec<u8>> = files.iter().map(|path| fs::read(path).unwrap()).collect();
+        let zone = segment.with_file_name(format!("{name}.zone.json"));
+        assert!(
+            zone.exists(),
+            "the engine wrote the zone beside the segment"
+        );
+        let descriptors: Vec<Value> = files
+            .iter()
+            .map(|path| {
+                let file = path.file_name().unwrap().to_string_lossy().into_owned();
+                json!({
+                    "submitted": file.clone(),
+                    "written": file,
+                    "size": fs::metadata(path).unwrap().len(),
+                    "sha256": sha256_file(path).unwrap(),
+                    "disposition": "written",
+                })
+            })
+            .collect();
+        let (server, mut worker) = test_worker(
+            &temp,
+            vec![(
+                200,
+                json!({"status": "ok", "segment": &name, "file_descriptors": descriptors}),
+            )],
+        )
+        .await;
+        assert_eq!(
+            worker.upload_segment(&day, &segment).await,
+            UploadOutcome::Acked
+        );
+        let request = &server.requests()[0];
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(body.contains("\"source\":\"tmux\""), "{body}");
+        assert!(body.contains("\"meta\":{"), "{body}");
+        for (path, bytes) in files.iter().zip(&originals) {
+            assert!(
+                request
+                    .body
+                    .windows(bytes.len())
+                    .any(|window| window == bytes.as_slice()),
+                "{} went in unchanged",
+                path.display()
+            );
+        }
+        assert!(
+            !segment.exists(),
+            "the journal's receipt removes the segment"
+        );
+        assert!(!zone.exists(), "the zone file goes with its segment");
     }
 
     /// Keep one browser batch and finish its period into a capture segment.

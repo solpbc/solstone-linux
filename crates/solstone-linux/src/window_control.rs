@@ -242,6 +242,25 @@ pub struct SettingsDocument {
     pub activity_through_pause: bool,
     #[serde(default)]
     pub activity_only: bool,
+    #[serde(default)]
+    pub terminal: bool,
+    #[serde(default = "default_true")]
+    pub desktop_capture: bool,
+    /// One line on what terminal capture is doing now.
+    #[serde(default)]
+    pub terminal_status: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Applies a saved owner switch to the running app, without a restart.
+pub trait LiveSettings: Send + Sync {
+    fn terminal(&self, enabled: bool);
+    fn desktop_capture(&self, enabled: bool);
+    fn pause(&self, minutes: Option<u64>);
+    fn resume(&self);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +324,9 @@ pub struct SettingsModel {
     pub activity_exclude_titles: Vec<String>,
     pub activity_through_pause: bool,
     pub activity_only: bool,
+    pub terminal: bool,
+    pub desktop_capture: bool,
+    pub terminal_status: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -345,6 +367,9 @@ impl ControlModel {
                 activity_exclude_titles: Vec::new(),
                 activity_through_pause: crate::config::DEFAULT_ACTIVITY_THROUGH_PAUSE,
                 activity_only: false,
+                terminal: false,
+                desktop_capture: true,
+                terminal_status: String::new(),
             },
             restart_required: None,
             open_journal: None,
@@ -410,6 +435,9 @@ pub fn decode_control<E: std::fmt::Display>(
             activity_exclude_titles: doc.settings.activity_exclude_titles,
             activity_through_pause: doc.settings.activity_through_pause,
             activity_only: doc.settings.activity_only,
+            terminal: doc.settings.terminal,
+            desktop_capture: doc.settings.desktop_capture,
+            terminal_status: doc.settings.terminal_status.clone(),
         },
         restart_required: doc.restart_required,
         open_journal: doc.open_journal,
@@ -426,6 +454,9 @@ pub fn decode_control<E: std::fmt::Display>(
             activity_exclude_titles: s.activity_exclude_titles,
             activity_through_pause: s.activity_through_pause,
             activity_only: s.activity_only,
+            terminal: s.terminal,
+            desktop_capture: s.desktop_capture,
+            terminal_status: s.terminal_status.clone(),
         }),
         route_status: doc.route_status.map(|r| RouteStatusModel {
             route: r.route,
@@ -700,6 +731,9 @@ pub fn default_settings_doc() -> SettingsDocument {
         activity_exclude_titles: Vec::new(),
         activity_through_pause: crate::config::DEFAULT_ACTIVITY_THROUGH_PAUSE,
         activity_only: false,
+        terminal: crate::config::DEFAULT_TERMINAL,
+        desktop_capture: crate::config::DEFAULT_DESKTOP_CAPTURE,
+        terminal_status: String::new(),
     }
 }
 
@@ -766,6 +800,19 @@ pub fn read_saved_settings(config_paths: &ConfigPaths) -> (SettingsDocument, boo
                 activity_exclude_titles: activity.exclude_titles,
                 activity_through_pause: activity.through_pause,
                 activity_only: aonly,
+                terminal: obj
+                    .get("terminal")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(crate::config::DEFAULT_TERMINAL),
+                desktop_capture: obj
+                    .get("desktop_capture")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(crate::config::DEFAULT_DESKTOP_CAPTURE),
+                terminal_status: crate::terminal::state::TerminalState::read(
+                    &crate::config::resolve_config_paths(config_paths).state_dir(),
+                )
+                .map(|state| state.engine_line())
+                .unwrap_or_default(),
             },
             true,
         ),
@@ -1036,7 +1083,7 @@ fn validate_setting(field: &str, value: &str) -> Result<Value, &'static str> {
     }
     match field {
         "draw_cursor" | "start_paused" | "activity_source" | "activity_titles"
-        | "activity_urls" | "activity_only" => {
+        | "activity_urls" | "activity_only" | "terminal" | "desktop_capture" => {
             let normalized = value.trim().to_lowercase();
             match normalized.as_str() {
                 "y" | "yes" | "true" => Ok(Value::Bool(true)),
@@ -1164,6 +1211,7 @@ pub struct WindowControlSupervisor {
     route_status: Arc<Mutex<Option<RouteStatusDocument>>>,
     activity_fault: Arc<Mutex<Option<Arc<crate::activity_source::ActivityFault>>>>,
     activity_capability: Arc<Mutex<Option<Arc<Mutex<crate::activity_source::CapabilityStatus>>>>>,
+    live_settings: Mutex<Option<Arc<dyn LiveSettings>>>,
     captures_dir: Option<PathBuf>,
     owner: Option<Box<dyn ManagedOwner>>,
     activation_blocked: bool,
@@ -1254,6 +1302,7 @@ impl WindowControlSupervisor {
             route_status,
             activity_fault,
             activity_capability,
+            live_settings: Mutex::new(None),
             captures_dir,
             owner: None,
             activation_blocked: false,
@@ -1263,6 +1312,13 @@ impl WindowControlSupervisor {
             cmd_rx,
         };
         (supervisor, handler)
+    }
+
+    pub(crate) fn attach_live_settings(&self, live: Arc<dyn LiveSettings>) {
+        *self
+            .live_settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(live);
     }
 
     pub(crate) fn attach_activity_runtime(
@@ -2045,7 +2101,26 @@ impl WindowControlSupervisor {
         let result = set_guided_field(&self.config_paths, &field, normalized.clone());
         match result {
             Ok(saved) => {
-                if field == "activity_policy" || is_lone_activity_field(&field) {
+                if field == "terminal" || field == "desktop_capture" {
+                    let live = self
+                        .live_settings
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    if let Some(live) = live {
+                        let enabled = normalized.as_bool().unwrap_or_default();
+                        if field == "terminal" {
+                            live.terminal(enabled);
+                        } else {
+                            live.desktop_capture(enabled);
+                        }
+                    }
+                    {
+                        let mut phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
+                        phase.fault = None;
+                    }
+                    self.assemble_current(None)
+                } else if field == "activity_policy" || is_lone_activity_field(&field) {
                     // The saved file, read back with its defaults, is the policy.
                     apply_live_activity_policy(self, ActivityPolicy::from_config(&saved));
                     {

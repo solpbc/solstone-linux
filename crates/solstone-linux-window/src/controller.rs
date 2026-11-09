@@ -62,6 +62,10 @@ pub struct SettingsDraft {
     pub activity_through_pause_dirty: bool,
     pub activity_only: Option<bool>,
     pub activity_only_dirty: bool,
+    pub terminal: Option<bool>,
+    pub terminal_dirty: bool,
+    pub desktop_capture: Option<bool>,
+    pub desktop_capture_dirty: bool,
     pub in_flight: Option<InFlight<SettingsModel>>,
     pub saved_verified: bool,
     pub write_failed: bool,
@@ -90,6 +94,8 @@ impl SettingsDraft {
             || self.activity_exclude_titles_dirty
             || self.activity_through_pause_dirty
             || self.activity_only_dirty
+            || self.terminal_dirty
+            || self.desktop_capture_dirty
     }
 
     pub fn changed_writes(&self) -> Vec<(&'static str, String)> {
@@ -148,6 +154,16 @@ impl SettingsDraft {
                 serde_json::Value::Object(policy).to_string(),
             ));
         }
+        if self.terminal_dirty
+            && let Some(val) = self.terminal
+        {
+            writes.push(("terminal", val.to_string()));
+        }
+        if self.desktop_capture_dirty
+            && let Some(val) = self.desktop_capture
+        {
+            writes.push(("desktop_capture", val.to_string()));
+        }
         if self.activity_only_dirty
             && let Some(val) = self.activity_only
         {
@@ -162,6 +178,8 @@ impl SettingsDraft {
             "start_paused" => settings.start_paused.to_string() == *expected,
             "segment_interval" => settings.segment_interval.to_string() == *expected,
             "activity_only" => settings.activity_only.to_string() == *expected,
+            "terminal" => settings.terminal.to_string() == *expected,
+            "desktop_capture" => settings.desktop_capture.to_string() == *expected,
             "activity_policy" => {
                 let Ok(serde_json::Value::Object(val)) =
                     serde_json::from_str::<serde_json::Value>(expected)
@@ -645,6 +663,17 @@ impl Controller {
             {
                 self.settings_draft.activity_through_pause_dirty = false;
             }
+            if self.settings_draft.terminal_dirty
+                && self.settings_draft.terminal == Some(self.document.settings.terminal)
+            {
+                self.settings_draft.terminal_dirty = false;
+            }
+            if self.settings_draft.desktop_capture_dirty
+                && self.settings_draft.desktop_capture
+                    == Some(self.document.settings.desktop_capture)
+            {
+                self.settings_draft.desktop_capture_dirty = false;
+            }
             if self.settings_draft.activity_only_dirty
                 && let Some(val) = self.settings_draft.activity_only
                 && val == self.document.settings.activity_only
@@ -961,6 +990,9 @@ mod tests {
                 activity_exclude_titles: Vec::new(),
                 activity_through_pause: false,
                 activity_only: false,
+                terminal: false,
+                desktop_capture: true,
+                terminal_status: String::new(),
             },
         )
     }
@@ -1071,6 +1103,9 @@ mod tests {
             activity_exclude_titles: Vec::new(),
             activity_through_pause: false,
             activity_only: false,
+            terminal: false,
+            desktop_capture: true,
+            terminal_status: String::new(),
         }
     }
 

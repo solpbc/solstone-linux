@@ -25,7 +25,7 @@ use std::{
     fs, io,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -295,19 +295,74 @@ pub fn managed_xauthority_path(runtime_dir: Option<&str>, uid: u32) -> PathBuf {
 #[derive(Clone, Debug, Default)]
 pub struct StartupEnvironment {
     pub display: Option<String>,
+    pub wayland_display: Option<String>,
     pub xauthority: Option<String>,
     pub home: Option<PathBuf>,
 }
 
-static STARTUP: OnceLock<StartupEnvironment> = OnceLock::new();
+static STARTUP: std::sync::RwLock<Option<StartupEnvironment>> = std::sync::RwLock::new(None);
 
 /// Called once, before `XAUTHORITY` is pointed at the private file.
 pub fn remember_startup_environment(environment: StartupEnvironment) {
-    let _ = STARTUP.set(environment);
+    let mut slot = STARTUP
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_none() {
+        *slot = Some(environment);
+    }
+}
+
+/// Replaces the remembered session environment with what the user manager holds
+/// now, for an app that started before any desktop session existed. Values the
+/// manager does not have are kept.
+pub fn refresh_startup_environment(manager: &std::collections::HashMap<String, String>) {
+    let mut slot = STARTUP
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current = slot.get_or_insert_with(StartupEnvironment::default);
+    if let Some(display) = manager.get("DISPLAY").filter(|value| !value.is_empty()) {
+        current.display = Some(display.clone());
+    }
+    if let Some(wayland) = manager
+        .get("WAYLAND_DISPLAY")
+        .filter(|value| !value.is_empty())
+    {
+        current.wayland_display = Some(wayland.clone());
+    }
+    if let Some(xauthority) = manager.get("XAUTHORITY").filter(|value| !value.is_empty()) {
+        current.xauthority = Some(xauthority.clone());
+    }
+}
+
+/// Reads the user manager's environment into the remembered one. The desktop
+/// imports its variables there as it starts, which can be after this app did.
+pub fn reread_manager_environment() {
+    let manager = crate::session_env::manager_environment(&crate::cli::SystemRunner);
+    if !manager.is_empty() {
+        refresh_startup_environment(&manager);
+    }
+}
+
+/// The display variables a program this app launches needs. An app that started
+/// before the desktop did was not given them in its own environment.
+pub fn display_environment_for_children() -> Vec<(&'static str, String)> {
+    let environment = startup_environment();
+    [
+        ("DISPLAY", environment.display),
+        ("WAYLAND_DISPLAY", environment.wayland_display),
+        ("XAUTHORITY", environment.xauthority),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| Some((name, value.filter(|value| !value.is_empty())?)))
+    .collect()
 }
 
 pub fn startup_environment() -> StartupEnvironment {
-    STARTUP.get().cloned().unwrap_or_default()
+    STARTUP
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_default()
 }
 
 /// The last live resolution of a session, reused until [`RECHECK_INTERVAL`] passes.
@@ -371,6 +426,20 @@ impl<L: LoginSessions, P: SessionProcesses, X: XServer> Resolver<L, P, X> {
 
     pub fn current(&self) -> &CaptureTarget {
         &self.current
+    }
+
+    /// Takes the session environment the user manager holds now, for an app that
+    /// started before any desktop session existed.
+    pub fn adopt_startup(&mut self, startup: StartupEnvironment) {
+        let mut fallback_files = Vec::new();
+        if let Some(path) = startup.xauthority.filter(|value| !value.is_empty()) {
+            fallback_files.push(PathBuf::from(path));
+        }
+        if let Some(home) = startup.home {
+            fallback_files.push(home.join(".Xauthority"));
+        }
+        self.fallback_files = fallback_files;
+        self.fallback_display = startup.display.filter(|value| !value.is_empty());
     }
 
     pub fn route_environment(&mut self, session_id: &str) -> SessionRouteEnv {
@@ -1044,6 +1113,7 @@ pub fn doctor_resolver() -> io::Result<NativeResolver> {
         uid,
         managed_xauthority_path(std::env::var("XDG_RUNTIME_DIR").ok().as_deref(), uid),
         StartupEnvironment {
+            wayland_display: std::env::var("WAYLAND_DISPLAY").ok(),
             display: std::env::var("DISPLAY").ok(),
             xauthority: std::env::var("XAUTHORITY").ok(),
             home: std::env::var_os("HOME").map(PathBuf::from),
@@ -1064,12 +1134,20 @@ pub type NativeResolver = Resolver<NativeLogind, ProcSessionProcesses, NativeXSe
 pub struct SessionFollower {
     resolver: NativeResolver,
     shared: SharedTarget,
+    environment_read_at: Option<Instant>,
 }
+
+/// While no desktop is live, how often the user manager's environment is read again.
+const SESSION_ENVIRONMENT_RECHECK: Duration = Duration::from_secs(60);
 
 impl SessionFollower {
     pub fn new(resolver: NativeResolver) -> Self {
         let shared = Arc::new(Mutex::new(resolver.current().clone()));
-        Self { resolver, shared }
+        Self {
+            resolver,
+            shared,
+            environment_read_at: None,
+        }
     }
 
     pub fn shared(&self) -> SharedTarget {
@@ -1077,7 +1155,22 @@ impl SessionFollower {
     }
 
     pub fn resolve(&mut self) -> CaptureTarget {
-        let target = self.resolver.resolve(Instant::now());
+        let now = Instant::now();
+        let was_live = self.resolver.current().presence.is_live();
+        if !was_live
+            && self
+                .environment_read_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= SESSION_ENVIRONMENT_RECHECK)
+        {
+            self.environment_read_at = Some(now);
+            reread_manager_environment();
+            self.resolver.adopt_startup(startup_environment());
+        }
+        let target = self.resolver.resolve(now);
+        if !was_live && self.resolver.current().presence.is_live() {
+            reread_manager_environment();
+            self.resolver.adopt_startup(startup_environment());
+        }
         *self.shared.lock().expect("capture target lock") = target.clone();
         target
     }
@@ -1257,6 +1350,7 @@ mod tests {
             1000,
             temp.path().join("run/solstone-linux/Xauthority"),
             StartupEnvironment {
+                wayland_display: None,
                 display: Some(":0".into()),
                 xauthority: startup_xauthority.map(str::to_owned),
                 home: Some(temp.path().join("home")),

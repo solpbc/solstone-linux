@@ -108,13 +108,16 @@ fn normalize_fixture_release_helper_dependency(path: &Path) {
         let line = if line.starts_with("rust-release-manifest = { version = ") {
             replaced += 1;
             "rust-release-manifest = { version = \"1.0.0\", path = \"../rust-release-manifest\" }"
+        } else if line.starts_with("solstone-terminal = { version = ") {
+            replaced += 1;
+            "solstone-terminal = { version = \"1.0.0\", path = \"../solstone-terminal\" }"
         } else {
             line
         };
         normalized.push_str(line);
         normalized.push('\n');
     }
-    assert_eq!(replaced, 1, "fixture release-helper dependency authority");
+    assert_eq!(replaced, 2, "fixture internal dependency authority");
     fs::write(path, normalized).unwrap();
 }
 

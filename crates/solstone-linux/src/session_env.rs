@@ -64,6 +64,35 @@ pub fn recover_session_env(
     }
 }
 
+/// The user manager's environment, as `systemctl --user show-environment`
+/// reports it. Empty when the manager cannot be asked.
+pub fn manager_environment(runner: &dyn Runner) -> HashMap<String, String> {
+    let Some(systemctl) = runner.which("systemctl") else {
+        return HashMap::new();
+    };
+    let Ok(output) = runner.run(
+        &systemctl,
+        &["--user", "show-environment"],
+        SESSION_TIMEOUT,
+        &HashMap::new(),
+    ) else {
+        return HashMap::new();
+    };
+    if !output.success {
+        return HashMap::new();
+    }
+    parse_environment(&output.stdout)
+}
+
+/// `KEY=VALUE` lines; a line without `=` is skipped.
+pub fn parse_environment(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| !key.is_empty())
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
 pub fn check_session_ready(
     environment: &HashMap<String, String>,
     runner: &dyn Runner,

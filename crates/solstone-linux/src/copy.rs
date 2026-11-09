@@ -201,6 +201,11 @@ pub const SETTINGS_ACTIVITY_THROUGH_PAUSE_HELP: &str =
     "screen and audio still pause. desktop activity keeps going.";
 pub const SETTINGS_ACTIVITY_TITLES: &str = "window titles";
 pub const SETTINGS_ACTIVITY_URLS: &str = "web addresses (turns on desktop accessibility)";
+pub const SETTINGS_TERMINAL: &str = "terminal";
+pub const SETTINGS_TERMINAL_HELP: &str = "takes in your tmux sessions. needs tmux on this computer, and works over ssh and with no desktop.";
+pub const SETTINGS_DESKTOP_CAPTURE: &str = "screen, audio and desktop activity";
+pub const SETTINGS_DESKTOP_CAPTURE_HELP: &str =
+    "off keeps all three closed, whatever your desktop is doing.";
 pub const SETTINGS_ACTIVITY_ONLY: &str = "activity only";
 pub const SETTINGS_ACTIVITY_ONLY_HELP: &str =
     "desktop activity only, with screen and audio intake off.";
@@ -434,6 +439,10 @@ pub enum CopyKey {
     SettingsActivityThroughPauseHelp,
     SettingsActivityTitles,
     SettingsActivityUrls,
+    SettingsTerminal,
+    SettingsTerminalHelp,
+    SettingsDesktopCapture,
+    SettingsDesktopCaptureHelp,
     SettingsActivityOnly,
     SettingsActivityOnlyHelp,
     SettingsActivityPrivateWindowsNote,
@@ -620,6 +629,10 @@ impl CopyKey {
             Self::SettingsActivityThroughPauseHelp => SETTINGS_ACTIVITY_THROUGH_PAUSE_HELP,
             Self::SettingsActivityTitles => SETTINGS_ACTIVITY_TITLES,
             Self::SettingsActivityUrls => SETTINGS_ACTIVITY_URLS,
+            Self::SettingsTerminal => SETTINGS_TERMINAL,
+            Self::SettingsTerminalHelp => SETTINGS_TERMINAL_HELP,
+            Self::SettingsDesktopCapture => SETTINGS_DESKTOP_CAPTURE,
+            Self::SettingsDesktopCaptureHelp => SETTINGS_DESKTOP_CAPTURE_HELP,
             Self::SettingsActivityOnly => SETTINGS_ACTIVITY_ONLY,
             Self::SettingsActivityOnlyHelp => SETTINGS_ACTIVITY_ONLY_HELP,
             Self::SettingsActivityPrivateWindowsNote => SETTINGS_ACTIVITY_PRIVATE_WINDOWS_NOTE,

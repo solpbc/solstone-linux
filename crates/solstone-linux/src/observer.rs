@@ -65,6 +65,9 @@ pub trait VideoCapture {
         self.stop()
     }
     fn is_healthy(&self) -> bool;
+    /// Lets go of the backend while desktop capture is off; the next start opens
+    /// it again.
+    fn release(&mut self) {}
 }
 pub trait AudioCapture {
     /// Must be a nonblocking drain; device probing belongs to the backend worker.
@@ -72,6 +75,12 @@ pub trait AudioCapture {
     fn audio_available(&self) -> bool;
     fn fatal_error(&self) -> Option<String>;
     fn stop(&mut self);
+    /// Opens the audio stream if it is not open yet. Called as capture starts.
+    fn ensure_started(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    /// Closes the audio stream while desktop capture is off.
+    fn release(&mut self) {}
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActivityState {
@@ -265,6 +274,8 @@ pub struct ObserverState {
     /// Until this monotonic time, video that died on its own is not restarted, so
     /// the restart waits for a fresh reading of the lock.
     pub video_retry_after: f64,
+    /// Screen-share starts that have failed in a row; each waits longer.
+    pub video_start_failures: u32,
     /// The main pause is holding desktop activity, and the desktop readers know it.
     pub activity_held: bool,
     /// Screen and audio are paused while desktop activity keeps going on its own,
@@ -351,6 +362,7 @@ where
                 waited_for_session: false,
                 session_settle_until: f64::NEG_INFINITY,
                 video_retry_after: f64::NEG_INFINITY,
+                video_start_failures: 0,
                 activity_held: starting.paused,
                 activity_alone: false,
             },
@@ -397,7 +409,10 @@ where
             return Ok(());
         }
         if !self.state.paused && self.session_live() {
-            self.start_capture(target)?;
+            match self.start_capture(target) {
+                Err(ObserverError::VideoStart(error)) => self.note_video_start_failure(&error),
+                other => other?,
+            }
         } else if !self.session_live() {
             self.state.mode = Mode::Idle;
         }
@@ -606,6 +621,7 @@ where
                     // keep the segment open for sound and retry on the next tick.
                     tracing::warn!(%error, "video did not start right after a session change; retrying");
                 }
+                Err(ObserverError::VideoStart(error)) => self.note_video_start_failure(&error),
                 other => other?,
             }
         }
@@ -683,8 +699,35 @@ where
         self.foreground.set_paused(true);
     }
 
+    /// A session of the owner's is in front and desktop capture is on: the only
+    /// time screen, audio and desktop activity are taken in.
     fn session_live(&self) -> bool {
+        self.config.desktop_capture && self.session_in_front()
+    }
+
+    fn session_in_front(&self) -> bool {
         self.state.cached_activity.session.is_live()
+    }
+
+    /// The owner's desktop-capture switch, applied live. Off closes the open
+    /// screen and audio segment as a lost session does and lets go of the
+    /// backends; on takes in again from the next tick a session is in front.
+    pub fn set_desktop_capture(&mut self, enabled: bool) -> Result<(), ObserverError> {
+        if self.config.desktop_capture == enabled {
+            return Ok(());
+        }
+        self.config.desktop_capture = enabled;
+        if enabled {
+            tracing::info!("desktop capture on");
+            self.publish();
+            return Ok(());
+        }
+        tracing::info!("desktop capture off");
+        let result = self.wait_for_session();
+        self.state.activity_alone = false;
+        self.backends.video.release();
+        self.backends.audio.release();
+        result
     }
 
     /// No live session: close any open segment with what it already holds, discard
@@ -743,6 +786,9 @@ where
         Ok(())
     }
     fn start_capture(&mut self, target: Mode) -> Result<(), ObserverError> {
+        if let Err(error) = self.backends.audio.ensure_started() {
+            tracing::warn!(%error, "audio did not start; the segment goes on without it");
+        }
         let dir = self.start_segment()?;
         self.state.segment_session_epoch = self.state.cached_activity.session_epoch;
         if target == Mode::Screencast && !self.state.cached_activity.screen_locked {
@@ -756,9 +802,24 @@ where
             }
             self.state.current_streams = streams;
             self.state.video_started = true;
+            self.state.video_start_failures = 0;
         }
         Ok(())
     }
+
+    /// Screen share didn't start: the portal refused, the owner dismissed its
+    /// prompt, or no compositor is reachable yet. Sync and terminal capture run
+    /// regardless, so the app stays up and asks again later, less often each time.
+    fn note_video_start_failure(&mut self, error: &str) {
+        self.state.video_start_failures = self.state.video_start_failures.saturating_add(1);
+        let doublings = self.state.video_start_failures.saturating_sub(1).min(16);
+        let delay =
+            (VIDEO_RETRY_SECONDS * f64::from(1u32 << doublings)).min(VIDEO_RETRY_MAX_SECONDS);
+        tracing::warn!(%error, retry_seconds = delay, "screen share did not start; trying again later");
+        self.state.video_retry_after = self.backends.clock.monotonic_seconds() + delay;
+        self.state.mode = Mode::Idle;
+    }
+
     fn start_segment(&mut self) -> Result<PathBuf, ObserverError> {
         let wall = self.backends.clock.wall_seconds();
         let mono = self.backends.clock.monotonic_seconds();
@@ -1239,7 +1300,7 @@ where
             session: self.state.cached_activity.session,
             activity_through_pause: self.state.paused && !self.state.activity_held,
             // The same test desktop activity uses for someone being here.
-            away: self.state.cached_activity.screen_locked || !self.session_live(),
+            away: self.state.cached_activity.screen_locked || !self.session_in_front(),
         })
     }
 }
@@ -1250,6 +1311,7 @@ const SESSION_SETTLE_SECONDS: f64 = 30.0;
 /// How long video that died on its own stays down before a restart: at least one
 /// more activity poll.
 const VIDEO_RETRY_SECONDS: f64 = 10.0;
+const VIDEO_RETRY_MAX_SECONDS: f64 = 1800.0;
 
 fn bump_stem(day: &str, hms: &str) -> (String, String) {
     if hms.len() != 6 {
@@ -2209,9 +2271,9 @@ pub(crate) mod tests {
         assert!(f.events.completed.borrow()[0].key.ends_with("_4"))
     }
     // observer.py:663-733 restarts on the same tick; this waits for a fresh poll.
-    // A failed restart is still fatal.
+    // A failed restart leaves the app running and tries again later.
     #[test]
-    fn watchdog_active_restarts_after_a_fresh_poll_and_failure_is_fatal() {
+    fn watchdog_active_restarts_after_a_fresh_poll_and_failure_backs_off() {
         let mut f = fixture(false);
         initialize(&mut f);
         f.observer.backends.video.healthy = false;
@@ -2224,9 +2286,24 @@ pub(crate) mod tests {
         f.observer.tick().unwrap();
         assert_eq!(f.starts.get(), 1);
         f.mono.set(f.mono.get() + 5.0);
-        let e = f.observer.tick().unwrap_err();
-        assert!(matches!(e, ObserverError::VideoStart(_)));
-        assert_eq!(f.starts.get(), 2)
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 2);
+        assert_eq!(f.observer.state.mode, Mode::Idle);
+        f.mono.set(f.mono.get() + 9.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 2, "the first retry waits its full interval");
+        f.mono.set(f.mono.get() + 2.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 3);
+        f.mono.set(f.mono.get() + 15.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 3, "each failure waits longer than the last");
+        f.mono.set(f.mono.get() + 6.0);
+        f.observer.backends.video.fail_start = false;
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 4);
+        assert_eq!(f.observer.state.mode, Mode::Screencast);
+        assert_eq!(f.observer.state.video_start_failures, 0);
     }
     // No Python ancestor: the stream ends as the desktop locks, and the lock is
     // only reported on the next poll. Nothing asks the locked desktop for the screen.
@@ -2308,7 +2385,7 @@ pub(crate) mod tests {
     }
     // No 1:1 Python ancestor: startup activity failure defaults to screencast.
     #[test]
-    fn startup_activity_failure_defaults_screencast_and_start_failure_is_fatal() {
+    fn startup_activity_failure_defaults_screencast_and_start_failure_keeps_running() {
         let mut f = fixture(false);
         f.observer
             .backends
@@ -2316,10 +2393,9 @@ pub(crate) mod tests {
             .0
             .push_back(Err("probe".into()));
         f.observer.backends.video.fail_start = true;
-        assert!(matches!(
-            f.observer.initialize(),
-            Err(ObserverError::VideoStart(_))
-        ))
+        f.observer.initialize().unwrap();
+        assert_eq!(f.observer.state.mode, Mode::Idle);
+        assert!(f.observer.state.video_retry_after > f.mono.get());
     }
     // No 1:1 Python ancestor: empty stream lists follow initialize_screencast's RuntimeError policy.
     #[test]
@@ -3804,5 +3880,40 @@ pub(crate) mod tests {
         unique.dedup();
         assert_eq!(unique.len(), lines.len());
         assert!(!text.contains("pairing_id"));
+    }
+
+    #[test]
+    fn desktop_capture_off_opens_nothing_with_a_session_in_front() {
+        let mut f = fixture(false);
+        f.observer.config.desktop_capture = false;
+        initialize(&mut f);
+        for _ in 0..3 {
+            f.observer.backends.activity.0.push_back(Ok(active()));
+            f.mono.set(f.mono.get() + 5.0);
+            f.observer.tick().unwrap();
+        }
+        assert_eq!(f.starts.get(), 0, "no screen sharing starts");
+        assert_eq!(segment_dirs(&f), 0);
+        assert!(f.events.completed.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_desktop_capture_switch_closes_the_open_segment_and_reopens_later() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        assert_eq!(f.starts.get(), 1);
+        f.observer.set_desktop_capture(false).unwrap();
+        assert_eq!(f.stops.get(), 1);
+        assert_eq!(f.events.completed.borrow().len(), 1);
+        assert!(f.observer.state.segment_dir.is_none());
+        f.observer.backends.activity.0.push_back(Ok(active()));
+        f.mono.set(f.mono.get() + 5.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 1, "off stays off");
+        f.observer.set_desktop_capture(true).unwrap();
+        f.observer.backends.activity.0.push_back(Ok(active()));
+        f.mono.set(f.mono.get() + 5.0);
+        f.observer.tick().unwrap();
+        assert_eq!(f.starts.get(), 2, "on takes in again");
     }
 }

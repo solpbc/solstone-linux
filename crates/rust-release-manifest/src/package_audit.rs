@@ -430,6 +430,18 @@ fn forbidden_dependency(value: &str) -> Option<&str> {
         })
 }
 
+/// The app runs with no desktop, so the window's libraries may only be recommended.
+fn hard_window_dependency(value: &str) -> Option<&str> {
+    value
+        .split(|character: char| !(character.is_ascii_alphanumeric() || ".+-_".contains(character)))
+        .find(|token| {
+            let token = token.to_ascii_lowercase();
+            ["libgtk-4", "gtk4", "libpango", "libcairo"]
+                .iter()
+                .any(|name| token.starts_with(name))
+        })
+}
+
 fn valid_deb_dependency_field(value: &str) -> bool {
     !value.is_empty()
         && !value.chars().any(char::is_control)
@@ -733,6 +745,16 @@ fn deb_members(path: &Path) -> Result<Vec<Member>> {
                     &format!("deb:control/{dependency_field}"),
                 ));
             }
+            if matches!(dependency_field, "Depends" | "Pre-Depends")
+                && let Some(token) = hard_window_dependency(value)
+            {
+                return Err(audit_error(
+                    path,
+                    "HardWindowDependency",
+                    token,
+                    &format!("deb:control/{dependency_field}"),
+                ));
+            }
         }
     }
     let (data_name, data_bytes) =
@@ -769,6 +791,16 @@ fn rpm_members(path: &Path) -> Result<Vec<Member>> {
                     "ForbiddenDependency",
                     token,
                     &format!("rpm:{field}"),
+                ));
+            }
+            if field == "Requires"
+                && let Some(token) = hard_window_dependency(&dependency.name)
+            {
+                return Err(audit_error(
+                    path,
+                    "HardWindowDependency",
+                    token,
+                    "rpm:Requires",
                 ));
             }
         }

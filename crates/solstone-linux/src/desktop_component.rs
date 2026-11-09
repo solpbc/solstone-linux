@@ -58,6 +58,9 @@ impl SignalState {
     }
 }
 
+/// Present while the running daemon has no session bus.
+pub const NO_BUS_MARKER: &str = "no-session-bus";
+
 #[derive(Clone)]
 pub struct DesktopComponent {
     pub config: Config,
@@ -94,14 +97,20 @@ impl DesktopComponent {
             Ok(
                 zbus::fdo::RequestNameReply::PrimaryOwner
                 | zbus::fdo::RequestNameReply::AlreadyOwner,
-            ) => true,
+            ) => {
+                let _ = std::fs::remove_file(self.config.state_dir().join(NO_BUS_MARKER));
+                true
+            }
             Ok(_) => {
                 log(ALREADY_RUNNING_MESSAGE);
                 false
             }
+            // The capture-root lock already keeps this the only copy. Without a session
+            // bus the app runs on, with terminal capture and sync.
             Err(error) => {
-                tracing::error!(%error, "Failed to acquire Observer1 bus name");
-                false
+                let _ = std::fs::write(self.config.state_dir().join(NO_BUS_MARKER), b"");
+                tracing::warn!(%error, "No session bus; running without window control, the panel icon and screen sharing");
+                true
             }
         }
     }
@@ -129,23 +138,20 @@ impl DesktopComponent {
     }
     pub fn perform_desktop_command(&self, command: crate::tray::TrayCommand) -> Result<(), String> {
         match command {
+            // Handled by the observer before a command reaches this point.
+            crate::tray::TrayCommand::SetDesktopCapture(_) => Ok(()),
             crate::tray::TrayCommand::OpenJournal => self
                 .open_journal
                 .open()
                 .map_err(|_| OPEN_JOURNAL_REMEDIATION.into()),
-            crate::tray::TrayCommand::OpenUrl(url) => {
-                open::that_detached(url).map_err(|e| e.to_string())
-            }
-            crate::tray::TrayCommand::ReportProblem(status, about) => open::that_detached(
+            crate::tray::TrayCommand::OpenUrl(url) => open_detached(url),
+            crate::tray::TrayCommand::ReportProblem(status, about) => open_detached(
                 crate::support::report_url(crate::tray_model::status_name(status), &about),
-            )
-            .map_err(|e| e.to_string()),
-            crate::tray::TrayCommand::OpenConfig => {
-                open::that_detached(self.config.config_path()).map_err(|e| e.to_string())
-            }
+            ),
+            crate::tray::TrayCommand::OpenConfig => open_detached(self.config.config_path()),
             crate::tray::TrayCommand::CopyAbout(about) => {
                 let session = std::env::var_os("XDG_SESSION_TYPE");
-                let display = std::env::var_os("WAYLAND_DISPLAY");
+                let display = wayland_display();
                 let wayland = crate::clipboard::is_wayland(session.as_deref(), display.as_deref());
                 match crate::clipboard::copy(&about.text, wayland) {
                     Ok(true) => Ok(()),
@@ -164,7 +170,7 @@ impl DesktopComponent {
                     &self.config.captures_dir().display().to_string(),
                 );
                 let session_type = std::env::var_os("XDG_SESSION_TYPE");
-                let display = std::env::var_os("WAYLAND_DISPLAY");
+                let display = wayland_display();
                 let wayland =
                     crate::clipboard::is_wayland(session_type.as_deref(), display.as_deref());
                 crate::clipboard::copy(&text, wayland)
@@ -184,6 +190,35 @@ impl DesktopComponent {
             }
         }
     }
+}
+
+/// Opens a file or link with the owner's handler, giving it the display this app
+/// may have learned only after it started.
+fn open_detached(target: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
+    let mut last = None;
+    for mut command in open::commands(target) {
+        command
+            .envs(crate::desktop_session::display_environment_for_children())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match command.spawn() {
+            Ok(_) => return Ok(()),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.map_or_else(
+        || "nothing can open this".to_owned(),
+        |error| error.to_string(),
+    ))
+}
+
+fn wayland_display() -> Option<std::ffi::OsString> {
+    crate::desktop_session::startup_environment()
+        .wayland_display
+        .filter(|value| !value.is_empty())
+        .map(Into::into)
+        .or_else(|| std::env::var_os("WAYLAND_DISPLAY"))
 }
 
 #[cfg(test)]

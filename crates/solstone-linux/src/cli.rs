@@ -99,12 +99,38 @@ enum Commands {
     },
     #[command(about = "resume intake")]
     Resume,
+    #[command(about = "terminal capture: on, off or status", subcommand)]
+    Terminal(TerminalAction),
+    #[command(
+        name = "desktop-capture",
+        about = "screen, audio and desktop activity: on or off"
+    )]
+    DesktopCapture {
+        #[arg(value_enum)]
+        state: OnOff,
+    },
     #[cfg(feature = "browser")]
     #[command(
         name = "discard-browser-pages",
         about = "discard waiting browser pages"
     )]
     DiscardBrowserPages,
+}
+
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+enum TerminalAction {
+    #[command(about = "show whether terminal capture is on and what it is doing")]
+    Status,
+    #[command(about = "turn terminal capture on")]
+    On,
+    #[command(about = "turn terminal capture off")]
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 pub struct SystemRunner;
@@ -156,6 +182,7 @@ impl Runner for SystemRunner {
 
 #[derive(Debug, PartialEq)]
 enum RunFailure {
+    #[cfg(test)]
     NotReady(&'static str),
     Other,
 }
@@ -163,6 +190,7 @@ enum RunFailure {
 fn exit_code(result: Result<(), RunFailure>) -> i32 {
     match result {
         Ok(()) => 0,
+        #[cfg(test)]
         Err(RunFailure::NotReady(_)) => session_env::EXIT_TEMPFAIL,
         Err(RunFailure::Other) => 1,
     }
@@ -480,6 +508,34 @@ pub fn run() -> i32 {
             &mut io::stderr(),
         ),
         Commands::Resume => cmd_control(Control::Resume, &mut io::stdout(), &mut io::stderr()),
+        Commands::Terminal(action) => {
+            let paths = ConfigPaths::default();
+            let (output, errors) = (&mut io::stdout(), &mut io::stderr());
+            match action {
+                TerminalAction::Status => crate::terminal::control::terminal_status(paths, output),
+                TerminalAction::On => crate::terminal::control::set_terminal(
+                    paths,
+                    true,
+                    &SystemRunner,
+                    output,
+                    errors,
+                ),
+                TerminalAction::Off => crate::terminal::control::set_terminal(
+                    paths,
+                    false,
+                    &SystemRunner,
+                    output,
+                    errors,
+                ),
+            }
+        }
+        Commands::DesktopCapture { state } => crate::terminal::control::set_desktop_capture(
+            ConfigPaths::default(),
+            state == OnOff::On,
+            &SystemRunner,
+            &mut io::stdout(),
+            &mut io::stderr(),
+        ),
         Commands::Doctor => crate::doctor::run_doctor(
             &mut crate::doctor::RealDoctor::new(&SystemRunner),
             &mut io::stdout(),
@@ -532,25 +588,28 @@ fn cmd_control(control: Control, output: &mut dyn Write, errors: &mut dyn Write)
             return 1;
         }
     };
-    runtime.block_on(async {
-        let connection = match zbus::Connection::session().await {
-            Ok(connection) => connection,
-            Err(error) => {
-                let _ = write_line(
-                    errors,
-                    format!("no session bus, so the solstone app cannot be reached: {error}"),
-                );
-                return 1;
-            }
-        };
+    let bus_outcome = runtime.block_on(async {
+        let connection = zbus::Connection::session().await.ok()?;
         let outcome = match control {
             Control::Pause(minutes) => crate::panel_icon::pause(&connection, minutes).await,
             Control::Resume => crate::panel_icon::resume(&connection).await,
         };
-        let (message, code) = crate::panel_icon::control_result(&outcome);
-        let _ = write_line(if code == 0 { output } else { errors }, message);
-        code
-    })
+        (outcome != crate::panel_icon::ControlOutcome::NotRunning).then_some(outcome)
+    });
+    let Some(outcome) = bus_outcome else {
+        return crate::terminal::control::control_without_bus(
+            ConfigPaths::default(),
+            match control {
+                Control::Pause(minutes) => crate::control_request::Command::Pause { minutes },
+                Control::Resume => crate::control_request::Command::Resume,
+            },
+            output,
+            errors,
+        );
+    };
+    let (message, code) = crate::panel_icon::control_result(&outcome);
+    let _ = write_line(if code == 0 { output } else { errors }, message);
+    code
 }
 
 /// The path an owner can always reach, including where the in-app offer cannot run --
@@ -1320,6 +1379,13 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 write_line(output, line)?;
             }
         }
+        let terminal_config = crate::terminal::control::config_for_status(&config, runner);
+        for line in crate::terminal::control::status_lines(&terminal_config, false) {
+            write_line(output, line)?;
+        }
+        for line in crate::terminal::control::desktop_lines(&config) {
+            write_line(output, line)?;
+        }
         if let Some(systemctl) = runner.which("systemctl")
             && let Ok(result) = runner.run(
                 &systemctl,
@@ -1375,6 +1441,7 @@ fn cmd_run(interval: Option<i64>) -> i32 {
     crate::desktop_session::remember_startup_environment(
         crate::desktop_session::StartupEnvironment {
             display: environment.get("DISPLAY").cloned(),
+            wayland_display: environment.get("WAYLAND_DISPLAY").cloned(),
             xauthority: environment.get("XAUTHORITY").cloned(),
             home: environment.get("HOME").map(std::path::PathBuf::from),
         },
@@ -1386,15 +1453,12 @@ fn cmd_run(interval: Option<i64>) -> i32 {
     environment.insert("XAUTHORITY".into(), managed.to_string_lossy().into_owned());
     apply_session_environment(&environment);
     let logind_answers = crate::desktop_session::logind_answers(uid);
-    let gate_result =
+    // A computer with no desktop runs terminal capture and sync; screen and audio wait
+    // for a desktop session of the owner's.
+    if let Some(reason) =
         session_env::check_session_ready_following(&environment, &SystemRunner, !logind_answers)
-            .map_or(Ok(()), |reason| Err(RunFailure::NotReady(reason)));
-    if let Err(failure) = gate_result {
-        if let RunFailure::NotReady(reason) = failure {
-            tracing::warn!("Session not ready: {reason}");
-            return session_env::EXIT_TEMPFAIL;
-        }
-        return 1;
+    {
+        tracing::info!("No desktop session yet: {reason}");
     }
     crate::run::run_observer(config, state_lock, transport_enabled, process_epoch)
 }
@@ -1414,22 +1478,62 @@ fn run_preparation_error_guidance(error: &PrivateStateError) -> &'static str {
     }
 }
 
+/// How long a daemon waits for a command acting in its place to finish.
+const CAPTURE_ROOT_WAIT: Duration = Duration::from_secs(300);
+const CAPTURE_ROOT_POLL: Duration = Duration::from_secs(1);
+/// Each wait for the capture root asks systemd for this much more start time.
+const CAPTURE_ROOT_EXTEND_USEC: u32 = 30_000_000;
+
 pub(crate) fn prepare_run_config(
     paths: ConfigPaths,
 ) -> Result<
     (PrivateStateLock, Config, bool, Option<ProcessEpoch>),
     crate::private_link::PrivateStateError,
 > {
+    prepare_run_config_waiting(paths, CAPTURE_ROOT_WAIT)
+}
+
+/// The capture-root lock comes first, waiting for it if a command acting without a
+/// daemon holds it, and only then the private-state lock, the config load, migration,
+/// sanitizing and the marker step, so this start reads the config after that command's
+/// write and never races it.
+pub(crate) fn prepare_run_config_waiting(
+    paths: ConfigPaths,
+    wait: Duration,
+) -> Result<
+    (PrivateStateLock, Config, bool, Option<ProcessEpoch>),
+    crate::private_link::PrivateStateError,
+> {
+    let resolved = crate::config::resolve_config_paths(&paths);
+    let mut told_waiting = false;
+    let capture_lock = crate::private_link::CaptureRootLock::acquire_waiting(
+        &resolved.base_dir,
+        CAPTURE_ROOT_POLL,
+        wait,
+        &mut || {
+            if !told_waiting {
+                told_waiting = true;
+                tracing::info!(
+                    "waiting for another solstone-linux process to release the capture folder"
+                );
+            }
+            let _ = sd_notify::notify(&[sd_notify::NotifyState::ExtendTimeoutUsec(
+                CAPTURE_ROOT_EXTEND_USEC,
+            )]);
+        },
+    )?;
     let config_root = paths
         .config_dir
         .clone()
         .unwrap_or_else(|| Config::default().config_dir);
     let mut state_lock = PrivateStateLock::acquire(&config_root)?;
+    state_lock.adopt_capture_root(capture_lock);
     let loaded = load_config(paths.clone());
     for warning in &loaded.warnings {
         tracing::warn!("{warning}");
     }
     let mut config = loaded.config;
+    let marker = crate::config::settle_desktop_capture_marker(&paths);
     let transport_enabled = match sanitize_link_authority(&paths) {
         Ok(sanitized) => {
             config = sanitized;
@@ -1440,7 +1544,9 @@ pub(crate) fn prepare_run_config(
             false
         }
     };
-    state_lock.hold_capture_root(&config.base_dir)?;
+    if marker.forces_desktop_capture_off() {
+        config.desktop_capture = false;
+    }
     let process_epoch = match ProcessEpoch::generate() {
         Ok(epoch) => Some(epoch),
         Err(error) => {
@@ -1526,6 +1632,8 @@ mod tests {
             "activity-helpers",
             "pause",
             "resume",
+            "terminal",
+            "desktop-capture",
         ];
         if crate::browser::ENABLED {
             expected.push("discard-browser-pages");
@@ -1786,6 +1894,77 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(after, before);
         drop(lock);
+    }
+
+    #[test]
+    fn the_marker_turns_a_first_start_terminal_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(&temp);
+        let resolved = crate::config::resolve_config_paths(&paths);
+        std::fs::create_dir_all(&resolved.base_dir).unwrap();
+        std::fs::write(resolved.desktop_capture_marker_path(), b"").unwrap();
+        let (_lock, config, _, _) =
+            prepare_run_config_waiting(paths.clone(), Duration::ZERO).unwrap();
+        assert!(!config.desktop_capture);
+        assert!(!resolved.desktop_capture_marker_path().exists());
+        assert!(
+            !load_config(paths).config.desktop_capture,
+            "recorded in the file"
+        );
+    }
+
+    #[test]
+    fn the_marker_never_changes_an_app_already_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(&temp);
+        let resolved = crate::config::resolve_config_paths(&paths);
+        save_config(&Config {
+            stream: "desk".into(),
+            ..resolved.clone()
+        })
+        .unwrap();
+        std::fs::create_dir_all(&resolved.base_dir).unwrap();
+        std::fs::write(resolved.desktop_capture_marker_path(), b"").unwrap();
+        let (_lock, config, _, _) = prepare_run_config_waiting(paths, Duration::ZERO).unwrap();
+        assert!(config.desktop_capture);
+        assert!(!resolved.desktop_capture_marker_path().exists());
+    }
+
+    #[test]
+    fn a_second_copy_does_not_wait_past_its_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(&temp);
+        let (_first, ..) = prepare_run_config_waiting(paths.clone(), Duration::ZERO).unwrap();
+        assert!(matches!(
+            prepare_run_config_waiting(paths, Duration::ZERO),
+            Err(crate::private_link::PrivateStateError::CaptureRootInUse)
+        ));
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[test]
+    fn a_daemon_starting_behind_a_cli_write_waits_and_loses_neither_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(&temp);
+        let resolved = crate::config::resolve_config_paths(&paths);
+        std::fs::create_dir_all(&resolved.base_dir).unwrap();
+        std::fs::write(resolved.desktop_capture_marker_path(), b"").unwrap();
+        let lock = crate::private_link::CaptureRootLock::try_acquire(&resolved.base_dir)
+            .unwrap()
+            .unwrap();
+        let cli_paths = paths.clone();
+        let cli = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            crate::config::set_guided_field(&cli_paths, "terminal", serde_json::Value::Bool(true))
+                .unwrap();
+            drop(lock);
+        });
+        let (_lock, config, _, _) =
+            prepare_run_config_waiting(paths, Duration::from_secs(20)).unwrap();
+        cli.join().unwrap();
+        assert!(config.terminal);
+        assert!(!config.desktop_capture);
+        assert!(!resolved.desktop_capture_marker_path().exists());
     }
 
     #[test]
@@ -2375,7 +2554,7 @@ mod tests {
         };
         let journal_row = crate::journal_mark::journal_status_row(&config.config_dir);
         let expected = format!(
-            "config: {}\n{journal_row}\njournal version: unknown\nstream: test-stream\n\ncache:  {}\n        0 segments across 0 day(s), 0.0 MB\nsync: offline; held on this device; will retry\n{browser}\nservice: active\n",
+            "config: {}\n{journal_row}\njournal version: unknown\nstream: test-stream\n\ncache:  {}\n        0 segments across 0 day(s), 0.0 MB\nsync: offline; held on this device; will retry\n{browser}terminal: off\n\nservice: active\n",
             config.config_path().display(),
             config.captures_dir().display()
         );

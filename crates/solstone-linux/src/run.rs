@@ -278,19 +278,26 @@ fn run_capture(
         native_resolver().map_err(|error| ObserverError::Io(error.to_string()))?,
     );
     let first_target = follower.resolve();
+    // Neither opens a device until capture starts: a computer with no desktop, or with
+    // desktop capture off, never touches screen sharing or audio.
+    let shared_probe: SharedMuteProbe = Arc::new(Mutex::new(None));
     let media = open_media_stack(
         config.activity_only,
         || {
-            VideoBackend::new(&config, portal_startup_cancellation, follower.shared())
-                .map_err(ObserverError::VideoStart)
+            Ok(VideoBackend::new(
+                &config,
+                portal_startup_cancellation,
+                follower.shared(),
+                Arc::clone(&notifier),
+            ))
         },
-        || PulseAudioCapture::spawn().map_err(ObserverError::Io),
+        || Ok(LazyAudio::new(Arc::clone(&shared_probe))),
     )?;
     let (video, audio, mute) = match media {
-        Some((video, (audio, mute))) => (
+        Some((video, audio)) => (
             CaptureVideo::Live(video),
             CaptureAudio::Live(audio),
-            CaptureMute::Live(mute),
+            CaptureMute::Live(shared_probe),
         ),
         None => (CaptureVideo::Idle, CaptureAudio::Idle, CaptureMute::Idle),
     };
@@ -328,12 +335,14 @@ fn run_capture(
     let linked_state_lock = state_lock
         .try_clone()
         .map_err(|error| ObserverError::Io(format!("linked state lock clone failed: {error}")))?;
-    let sync = SyncService::start_with_browser_custody(
+    let (terminal_sync, terminal_activity) = crate::terminal::TerminalSync::new(config.terminal);
+    let sync = SyncService::start_with_sources(
         config.clone(),
         Arc::clone(&upload),
         Arc::new(clock.clone()),
         process_epoch.clone(),
         browser_custody.clone(),
+        terminal_sync.clone(),
     );
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
@@ -368,6 +377,50 @@ fn run_capture(
         Arc::clone(&upload),
         tray_receiver.clone(),
     );
+    let (command_sender, command_receiver) = std::sync::mpsc::channel();
+    let commands = CommandSender::new(command_sender.clone());
+    let legacy_probe = crate::terminal::control::production_legacy_probe();
+    let terminal = {
+        let wake = sync_trigger.clone();
+        let mut terminal_config = crate::terminal::supervisor::SupervisorConfig::new(
+            config.captures_dir(),
+            config.state_dir(),
+            Arc::clone(&legacy_probe),
+            Arc::new(move || wake.trigger()),
+            terminal_activity,
+        );
+        terminal_config.enabled = config.terminal;
+        terminal_config.paused = starting_pause.paused;
+        terminal_config.settings = crate::terminal::settings::TerminalSettings::from_saved(
+            config.terminal_settings.as_ref(),
+        );
+        crate::terminal::supervisor::TerminalSupervisor::spawn(terminal_config)
+            .map_err(|error| ObserverError::Io(format!("terminal capture thread: {error}")))?
+    };
+    let terminal_switches = terminal.switches();
+    runtime.spawn(forward_pause_to_terminal(
+        tray_receiver.clone(),
+        terminal_switches.clone(),
+    ));
+    let live_settings: Arc<dyn crate::window_control::LiveSettings> =
+        Arc::new(crate::terminal::control::DaemonLiveSettings {
+            terminal: terminal_switches.clone(),
+            terminal_sync: terminal_sync.clone(),
+            commands: Mutex::new(commands.tray_sender()),
+        });
+    let requests = crate::control_request::RequestServer::spawn(
+        &config.state_dir(),
+        Arc::new(crate::terminal::control::DaemonApplier {
+            paths: crate::config::ConfigPaths {
+                base_dir: Some(config.base_dir.clone()),
+                config_dir: Some(config.config_dir.clone()),
+            },
+            live: Arc::clone(&live_settings),
+            legacy: legacy_probe,
+        }),
+        crate::control_request::POLL_INTERVAL,
+    )
+    .map_err(|error| ObserverError::Io(format!("control requests: {error}")))?;
     let (initial_health, initial_progress) = sync_sampler.sample();
     let health = Arc::new(Mutex::new(initial_health));
     let progress = Arc::new(Mutex::new(initial_progress));
@@ -387,6 +440,9 @@ fn run_capture(
                 activity_exclude_titles: config.activity_exclude_titles.clone(),
                 activity_through_pause: config.activity_through_pause,
                 activity_only: config.activity_only,
+                terminal: config.terminal,
+                desktop_capture: config.desktop_capture,
+                terminal_status: String::new(),
             })));
         let captures_dir = Some(config.captures_dir());
         let (supervisor, handler) = crate::window_control::WindowControlSupervisor::new(
@@ -415,6 +471,7 @@ fn run_capture(
             Arc::new(Mutex::new(None)),
             Arc::new(crate::local_journal::SocketLocalJournal::default()),
         );
+        supervisor.attach_live_settings(Arc::clone(&live_settings));
         supervisor.attach_activity_runtime(
             Arc::clone(&activity_fault),
             Arc::clone(&activity_capability),
@@ -445,8 +502,6 @@ fn run_capture(
         None
     };
     let signal_receiver = tray_receiver.clone();
-    let (command_sender, command_receiver) = std::sync::mpsc::channel();
-    let commands = CommandSender::new(command_sender.clone());
     let _command_lifetime_sender = command_sender;
     let backends = Backends {
         video,
@@ -560,6 +615,10 @@ fn run_capture(
     if let Err(error) = notifier.stopping() {
         tracing::warn!(%error, "Failed to notify systemd stopping state");
     }
+    requests.stop();
+    // The engine finalizes its open segment and restores the owner's tmux options
+    // here, before sync takes its last pass.
+    terminal.shutdown();
     if let Some(browser) = browser {
         runtime.block_on(browser.shutdown());
     }
@@ -804,6 +863,11 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
     match route_command(command) {
         ObserverAction::Pause(seconds) => observer.pause(seconds),
         ObserverAction::Resume => observer.resume(),
+        ObserverAction::SetDesktopCapture(enabled) => {
+            if let Err(error) = observer.set_desktop_capture(enabled) {
+                tracing::warn!(?error, "Failed to apply the desktop capture switch");
+            }
+        }
         ObserverAction::Desktop(command) => {
             if let Err(error) = crate::desktop_component::DesktopComponent::with_open_journal(
                 observer.config.clone(),
@@ -848,6 +912,7 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
 enum ObserverAction {
     Pause(u64),
     Resume,
+    SetDesktopCapture(bool),
     Desktop(TrayCommand),
 }
 
@@ -856,6 +921,7 @@ fn route_command(command: TrayCommand) -> ObserverAction {
         TrayCommand::Pause(seconds) => ObserverAction::Pause(seconds),
         TrayCommand::PauseIndefinite => ObserverAction::Pause(0),
         TrayCommand::Resume => ObserverAction::Resume,
+        TrayCommand::SetDesktopCapture(enabled) => ObserverAction::SetDesktopCapture(enabled),
         command => ObserverAction::Desktop(command),
     }
 }
@@ -926,13 +992,74 @@ enum CaptureVideo {
 }
 
 enum CaptureAudio {
-    Live(PulseAudioCapture),
+    Live(LazyAudio),
     Idle,
 }
 
+type SharedMuteProbe = Arc<Mutex<Option<crate::audio::backend::PulseMuteProbe>>>;
+
 enum CaptureMute {
-    Live(crate::audio::backend::PulseMuteProbe),
+    Live(SharedMuteProbe),
     Idle,
+}
+
+/// The audio devices, opened when capture first starts and closed while desktop
+/// capture is off.
+struct LazyAudio {
+    capture: Option<PulseAudioCapture>,
+    probe: SharedMuteProbe,
+}
+
+impl LazyAudio {
+    fn new(probe: SharedMuteProbe) -> Self {
+        Self {
+            capture: None,
+            probe,
+        }
+    }
+
+    fn set_probe(&self, probe: Option<crate::audio::backend::PulseMuteProbe>) {
+        *self.probe.lock().expect("mute probe lock") = probe;
+    }
+}
+
+impl AudioCapture for LazyAudio {
+    fn drain(&mut self) -> crate::chunking::DrainedChunk {
+        match &mut self.capture {
+            Some(audio) => audio.drain(),
+            None => crate::chunking::DrainedChunk::silent(),
+        }
+    }
+
+    fn audio_available(&self) -> bool {
+        self.capture
+            .as_ref()
+            .is_some_and(AudioCapture::audio_available)
+    }
+
+    fn fatal_error(&self) -> Option<String> {
+        self.capture.as_ref().and_then(AudioCapture::fatal_error)
+    }
+
+    fn stop(&mut self) {
+        self.set_probe(None);
+        if let Some(mut audio) = self.capture.take() {
+            audio.stop();
+        }
+    }
+
+    fn ensure_started(&mut self) -> Result<(), String> {
+        if self.capture.is_none() {
+            let (audio, probe) = PulseAudioCapture::spawn()?;
+            self.capture = Some(audio);
+            self.set_probe(Some(probe));
+        }
+        Ok(())
+    }
+
+    fn release(&mut self) {
+        self.stop();
+    }
 }
 
 impl VideoCapture for CaptureVideo {
@@ -967,6 +1094,12 @@ impl VideoCapture for CaptureVideo {
             Self::Idle => true,
         }
     }
+
+    fn release(&mut self) {
+        if let Self::Live(video) = self {
+            video.active = None;
+        }
+    }
 }
 
 impl AudioCapture for CaptureAudio {
@@ -996,12 +1129,28 @@ impl AudioCapture for CaptureAudio {
             audio.stop();
         }
     }
+
+    fn ensure_started(&mut self) -> Result<(), String> {
+        match self {
+            Self::Live(audio) => audio.ensure_started(),
+            Self::Idle => Ok(()),
+        }
+    }
+
+    fn release(&mut self) {
+        if let Self::Live(audio) = self {
+            audio.release();
+        }
+    }
 }
 
 impl MuteProbe for CaptureMute {
     fn probe_muted(&mut self) -> Result<bool, String> {
         match self {
-            Self::Live(probe) => probe.probe_muted(),
+            Self::Live(probe) => match probe.lock().expect("mute probe lock").as_mut() {
+                Some(probe) => probe.probe_muted(),
+                None => Ok(false),
+            },
             Self::Idle => Ok(false),
         }
     }
@@ -1016,10 +1165,12 @@ enum ActiveVideo {
 /// current target, so a change of X display or of desktop kind is followed without a
 /// restart.
 struct VideoBackend {
-    active: ActiveVideo,
+    /// Built when capture first starts, so no desktop means no backend at all.
+    active: Option<ActiveVideo>,
     target: SharedTarget,
     restore_token_path: std::path::PathBuf,
     portal_startup_cancellation: CancellationToken,
+    notifier: Arc<dyn ServiceNotifier>,
 }
 
 fn backend_kind(target: &CaptureTarget) -> BackendKind {
@@ -1040,21 +1191,15 @@ impl VideoBackend {
         config: &Config,
         portal_startup_cancellation: CancellationToken,
         target: SharedTarget,
-    ) -> Result<Self, String> {
-        let current = target.lock().expect("capture target lock").clone();
-        let restore_token_path = config.restore_token_path();
-        let active = Self::build(
-            backend_kind(&current),
-            &current,
-            &restore_token_path,
-            portal_startup_cancellation.clone(),
-        )?;
-        Ok(Self {
-            active,
+        notifier: Arc<dyn ServiceNotifier>,
+    ) -> Self {
+        Self {
+            active: None,
             target,
-            restore_token_path,
+            restore_token_path: config.restore_token_path(),
             portal_startup_cancellation,
-        })
+            notifier,
+        }
     }
 
     fn build(
@@ -1082,33 +1227,38 @@ impl VideoBackend {
         }
     }
 
-    fn follow_target(&mut self) -> Result<(), String> {
+    fn follow_target(&mut self) -> Result<&mut ActiveVideo, String> {
         let target = self.target.lock().expect("capture target lock").clone();
-        if target.kind.is_none() {
-            return Ok(());
-        }
         let wanted = backend_kind(&target);
-        match (&mut self.active, wanted) {
-            (ActiveVideo::X11(capture), BackendKind::X11) => {
+        let rebuild = match (&mut self.active, target.kind) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(ActiveVideo::X11(capture)), Some(_)) if wanted == BackendKind::X11 => {
                 if let Some(x_display) = target.display.as_deref()
                     && capture.display() != x_display
                 {
                     tracing::info!(x_display, "X11 capture follows the active session");
                     capture.set_display(x_display);
                 }
+                false
             }
-            (ActiveVideo::Portal(_), BackendKind::Portal) => {}
-            _ => {
+            (Some(ActiveVideo::Portal(_)), Some(_)) if wanted == BackendKind::Portal => false,
+            (Some(_), Some(_)) => {
                 tracing::info!(kind = ?wanted, "the active session is another kind of desktop; switching video backend");
-                self.active = Self::build(
-                    wanted,
-                    &target,
-                    &self.restore_token_path,
-                    self.portal_startup_cancellation.clone(),
-                )?;
+                true
             }
+        };
+        if rebuild {
+            self.active = Some(Self::build(
+                wanted,
+                &target,
+                &self.restore_token_path,
+                self.portal_startup_cancellation.clone(),
+            )?);
         }
-        Ok(())
+        self.active
+            .as_mut()
+            .ok_or_else(|| "no screen capture backend".to_owned())
     }
 }
 
@@ -1118,22 +1268,51 @@ impl VideoCapture for VideoBackend {
         directory: &std::path::Path,
         draw_cursor: bool,
     ) -> Result<Vec<VideoStream>, String> {
-        self.follow_target()?;
-        match &mut self.active {
-            ActiveVideo::Portal(value) => value.start(directory, draw_cursor),
-            ActiveVideo::X11(value) => value.start(directory, draw_cursor),
-        }
+        // A portal consent prompt can outlast the watchdog: this keeps feeding it
+        // for as long as the start blocks the tick thread.
+        let notifier = Arc::clone(&self.notifier);
+        with_watchdog(notifier, STARTUP_WATCHDOG_INTERVAL, || {
+            match self.follow_target()? {
+                ActiveVideo::Portal(value) => value.start(directory, draw_cursor),
+                ActiveVideo::X11(value) => value.start(directory, draw_cursor),
+            }
+        })
     }
     fn stop(&mut self) -> Result<Vec<StoppedStream>, String> {
         match &mut self.active {
-            ActiveVideo::Portal(value) => value.stop(),
-            ActiveVideo::X11(value) => value.stop(),
+            Some(ActiveVideo::Portal(value)) => value.stop(),
+            Some(ActiveVideo::X11(value)) => value.stop(),
+            None => Ok(Vec::new()),
         }
     }
     fn is_healthy(&self) -> bool {
         match &self.active {
-            ActiveVideo::Portal(value) => value.is_healthy(),
-            ActiveVideo::X11(value) => value.is_healthy(),
+            Some(ActiveVideo::Portal(value)) => value.is_healthy(),
+            Some(ActiveVideo::X11(value)) => value.is_healthy(),
+            None => true,
+        }
+    }
+}
+
+/// Keeps the systemd watchdog fed while `work` blocks the tick thread.
+fn with_watchdog<T>(
+    notifier: Arc<dyn ServiceNotifier>,
+    interval: Duration,
+    work: impl FnOnce() -> T,
+) -> T {
+    let _heartbeat = WatchdogHeartbeat::spawn(notifier, interval);
+    work()
+}
+
+/// Pause reaches terminal capture through the same state every other surface reads.
+async fn forward_pause_to_terminal(
+    mut states: tokio::sync::watch::Receiver<StateSnapshot>,
+    switches: crate::terminal::supervisor::TerminalSwitches,
+) {
+    loop {
+        switches.set_paused(states.borrow_and_update().paused);
+        if states.changed().await.is_err() {
+            return;
         }
     }
 }
@@ -1220,6 +1399,39 @@ mod tests {
                 true
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn the_watchdog_stays_fed_while_a_screen_share_start_blocks() {
+        #[derive(Default)]
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl ServiceNotifier for Counting {
+            fn ready(&self) -> io::Result<()> {
+                Ok(())
+            }
+            fn watchdog(&self) -> io::Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn stopping(&self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let notifier = Arc::new(Counting::default());
+        with_watchdog(notifier.clone(), Duration::from_millis(5), || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while notifier.0.load(Ordering::SeqCst) < 3 {
+                assert!(Instant::now() < deadline, "no heartbeat while blocked");
+                thread::yield_now();
+            }
+        });
+        let seen = notifier.0.load(Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            notifier.0.load(Ordering::SeqCst),
+            seen,
+            "it stops with the work"
         );
     }
 
@@ -2037,7 +2249,7 @@ mod tests {
         let before = tree_snapshot(&base_dir);
 
         assert!(matches!(
-            crate::cli::prepare_run_config(paths_for("config-b")),
+            crate::cli::prepare_run_config_waiting(paths_for("config-b"), Duration::ZERO),
             Err(PrivateStateError::CaptureRootInUse)
         ));
         assert_eq!(tree_snapshot(&base_dir), before);
@@ -2051,6 +2263,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_run_config_lock_failure_does_not_mutate_config_or_private_state() {
         let temp = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
         let lock = PrivateStateLock::acquire(temp.path()).unwrap();
         let before = std::fs::read_dir(temp.path())
             .unwrap()
@@ -2058,7 +2271,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(matches!(
             crate::cli::prepare_run_config(crate::config::ConfigPaths {
-                base_dir: Some(temp.path().join("data")),
+                base_dir: Some(data.path().to_path_buf()),
                 config_dir: Some(temp.path().to_path_buf()),
             }),
             Err(PrivateStateError::LockContended)

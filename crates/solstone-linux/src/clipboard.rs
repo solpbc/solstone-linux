@@ -15,6 +15,7 @@ pub const AGENT_INSTRUCTIONS: &str = "solstone app for linux (repo: solstone-lin
 fn invoke(program: &str, args: &[&str], text: &str) -> io::Result<bool> {
     let mut child = Command::new(program)
         .args(args)
+        .envs(crate::desktop_session::display_environment_for_children())
         .stdin(Stdio::piped())
         .spawn()?;
     if let Some(mut input) = child.stdin.take() {

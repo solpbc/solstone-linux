@@ -963,6 +963,9 @@ mod tests {
             activity_exclude_titles: Vec::new(),
             activity_through_pause: false,
             activity_only: false,
+            terminal: false,
+            desktop_capture: true,
+            terminal_status: String::new(),
         };
         assert_eq!(validate_settings_changes(&saved, None), Ok(saved.clone()));
         assert_eq!(
@@ -1162,6 +1165,9 @@ mod tests {
             activity_exclude_titles: Vec::new(),
             activity_through_pause: false,
             activity_only: false,
+            terminal: false,
+            desktop_capture: true,
+            terminal_status: String::new(),
         };
         let keys_unavailable = map_settings_state(false, &saved, None, false, true, false, false);
         assert_eq!(

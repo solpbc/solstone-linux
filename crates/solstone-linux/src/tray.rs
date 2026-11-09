@@ -21,6 +21,8 @@ pub enum TrayCommand {
     CopyAbout(crate::about::AboutBlock),
     OpenConfig,
     CopyInstructions,
+    /// The owner's desktop-capture switch, already saved.
+    SetDesktopCapture(bool),
 }
 
 pub struct KsniTray {

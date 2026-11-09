@@ -128,6 +128,45 @@ fn service_is_active(runner: &dyn Runner) -> bool {
     )
 }
 
+/// Earlier releases enabled the service under the graphical session. It starts with
+/// the account now, so that enablement goes before `enable` adds the new one.
+fn remove_graphical_enablement(paths: &ServicePaths, output: &mut dyn io::Write) {
+    let link = paths
+        .unit()
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("graphical-session.target.wants")
+        .join("solstone-linux.service");
+    match fs::remove_file(&link) {
+        Ok(()) => {
+            let _ = writeln!(output, "Removed {}", link.display());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            let _ = writeln!(
+                output,
+                "Warning: could not remove {}: {error}",
+                link.display()
+            );
+        }
+    }
+}
+
+fn write_unit(paths: &ServicePaths, output: &mut dyn io::Write) -> Result<(), String> {
+    let path =
+        service_path(&paths.binary, paths.path.as_deref()).map_err(|error| error.to_string())?;
+    let unit = UNIT_TEMPLATE
+        .replace("{BINARY}", &paths.binary.to_string_lossy())
+        .replace("{PATH}", &path);
+    let unit_path = paths.unit();
+    fs::create_dir_all(unit_path.parent().unwrap_or(Path::new(".")))
+        .and_then(|()| fs::write(&unit_path, unit))
+        .map_err(|error| error.to_string())?;
+    let _ = writeln!(output, "Wrote {}", unit_path.display());
+    remove_graphical_enablement(paths, output);
+    Ok(())
+}
+
 pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::Write) -> i32 {
     // Preserve update semantics without racing a freshly-created service: an existing
     // owner is stopped before its replacement starts, while a first install reaches
@@ -171,6 +210,7 @@ pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::W
             "Warning: could not write every browser registration: {error}"
         );
     }
+    remove_graphical_enablement(paths, output);
     systemctl_nonfatal(
         runner,
         &["--user", "daemon-reload"],
@@ -309,6 +349,17 @@ pub fn start_for_window(
         ServicePresence::Active => WindowStart::AlreadyActive,
         ServicePresence::Uncertain => WindowStart::Uncertain,
         ServicePresence::Inactive => {
+            // An install made under the graphical session moves to the account here.
+            if let Err(error) = write_unit(paths, output) {
+                let _ = writeln!(output, "Error writing service files: {error}");
+                return WindowStart::Failed;
+            }
+            systemctl_nonfatal(
+                runner,
+                &["--user", "daemon-reload"],
+                "daemon-reload",
+                output,
+            );
             match systemctl(
                 runner,
                 &["--user", "enable", "--now", "solstone-linux.service"],
@@ -791,9 +842,10 @@ mod tests {
                 WindowStart::Started
             );
             let calls = runner.calls.borrow();
-            assert_eq!(calls.len(), 2);
+            assert_eq!(calls.len(), 3);
+            assert_eq!(calls[1], ["--user", "daemon-reload"]);
             assert_eq!(
-                calls[1],
+                calls[2],
                 ["--user", "enable", "--now", "solstone-linux.service"]
             );
             assert!(
@@ -931,5 +983,59 @@ mod tests {
             MatchingRestart::Uncertain
         );
         assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn install_moves_an_old_graphical_enablement_to_the_account() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = fixture(&t, None);
+        let wants = paths
+            .unit()
+            .parent()
+            .unwrap()
+            .join("graphical-session.target.wants");
+        fs::create_dir_all(&wants).unwrap();
+        fs::write(wants.join("solstone-linux.service"), "").unwrap();
+        let runner = FakeRunner::ok();
+        assert_eq!(install(&paths, &runner, &mut Vec::new()), 0);
+        assert!(!wants.join("solstone-linux.service").exists());
+        assert!(
+            runner
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call == &["--user", "enable", "--now", "solstone-linux.service"])
+        );
+    }
+
+    #[test]
+    fn the_window_start_moves_an_inactive_old_unit_too() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = fixture(&t, None);
+        let wants = paths
+            .unit()
+            .parent()
+            .unwrap()
+            .join("graphical-session.target.wants");
+        fs::create_dir_all(&wants).unwrap();
+        fs::write(wants.join("solstone-linux.service"), "").unwrap();
+        fs::write(
+            paths.unit(),
+            "[Install]\nWantedBy=graphical-session.target\n",
+        )
+        .unwrap();
+        let runner = FakeRunner {
+            found: true,
+            success: true,
+            active: false,
+            stdout: "LoadState=loaded\nActiveState=inactive\n".into(),
+            error: false,
+            calls: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            start_for_window(&paths, &runner, &mut Vec::new()),
+            WindowStart::Started
+        );
+        assert!(!wants.join("solstone-linux.service").exists());
     }
 }

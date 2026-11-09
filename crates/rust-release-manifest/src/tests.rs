@@ -1391,6 +1391,67 @@ fn package_audit_rejects_malformed_and_non_utf8_deb_control_metadata() {
 }
 
 #[test]
+fn package_audit_refuses_the_windows_libraries_as_hard_dependencies() {
+    for (field, library) in [
+        ("Depends", "libgtk-4-1"),
+        ("Pre-Depends", "libpango-1.0-0"),
+        ("Depends", "libcairo2"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let rpm = audit_rpm(root.path(), &executable);
+        let control = format!(
+            "Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\n{field}: {library}\n"
+        );
+        let deb = audit_deb_with(
+            root.path(),
+            &executable,
+            control.as_bytes(),
+            &[],
+            &AuditPayloadOptions::default(),
+        );
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(
+            error,
+            &deb,
+            "HardWindowDependency",
+            library,
+            &format!("deb:control/{field}"),
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root.path(), &executable);
+    let deb = audit_deb(root.path(), &executable);
+    let rpm = audit_rpm_with(
+        root.path(),
+        &executable,
+        &AuditPayloadOptions::default(),
+        |builder| {
+            builder.requires(rpm::Dependency::any("gtk4"));
+        },
+    );
+    let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+    assert_package_audit_diagnostic(error, &rpm, "HardWindowDependency", "gtk4", "rpm:Requires");
+
+    // Recommended is what the package does, and passes.
+    let root = tempfile::tempdir().unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root.path(), &executable);
+    let rpm = audit_rpm(root.path(), &executable);
+    let deb = audit_deb_with(
+        root.path(),
+        &executable,
+        b"Package: solstone-linux\nVersion: 1.0.0-1\nArchitecture: amd64\nDepends: libc6\nRecommends: libgtk-4-1 (>= 4.6)\n",
+        &[],
+        &AuditPayloadOptions::default(),
+    );
+    audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap();
+}
+
+#[test]
 fn package_audit_rejects_each_rpm_dependency_and_accepts_product_name() {
     for forbidden in ["python3", "pip", "pipx", "sol", "journal"] {
         let root = tempfile::tempdir().unwrap();

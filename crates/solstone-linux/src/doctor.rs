@@ -35,6 +35,7 @@ pub enum Severity {
     Ok,
     Warn,
     Fail,
+    NotApplicable,
 }
 impl Severity {
     fn label(self) -> &'static str {
@@ -42,6 +43,7 @@ impl Severity {
             Self::Ok => "ok",
             Self::Warn => "warn",
             Self::Fail => "fail",
+            Self::NotApplicable => "n/a",
         }
     }
 }
@@ -90,7 +92,29 @@ pub trait DoctorChecks {
     fn browser(&mut self) -> Vec<String> {
         Vec::new()
     }
+    /// Why the desktop-only checks do not apply here, if they don't: logind reports
+    /// no desktop session for this user, or desktop capture is off.
+    fn desktop_not_applicable(&mut self) -> Option<&'static str> {
+        None
+    }
+    /// The owner turned desktop capture off, so the session check is moot too.
+    fn desktop_capture_off(&mut self) -> bool {
+        false
+    }
+    /// What terminal capture is doing.
+    fn terminal(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
+
+/// The checks that only mean something for a desktop session.
+const DESKTOP_ONLY_CHECKS: [&str; 5] = [
+    "session type",
+    "xdg-desktop-portal",
+    "pipewire (pulse)",
+    "gstreamer",
+    "x11 capture",
+];
 
 pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> i32 {
     let names = [
@@ -117,10 +141,24 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
     ];
     let mut failures = 0;
     let mut warnings = 0;
+    let not_applicable =
+        catch_unwind(AssertUnwindSafe(|| checks.desktop_not_applicable())).unwrap_or(None);
+    let capture_off =
+        catch_unwind(AssertUnwindSafe(|| checks.desktop_capture_off())).unwrap_or(false);
     for (name, function) in names.into_iter().zip(functions) {
-        let result = catch_unwind(AssertUnwindSafe(|| function(checks))).unwrap_or_else(|_| {
-            CheckResult::fail(name, "probe panicked; inspect service logs and retry")
+        let skip = not_applicable.filter(|_| {
+            DESKTOP_ONLY_CHECKS.contains(&name) || (capture_off && name == "desktop session")
         });
+        let result = match skip {
+            Some(reason) => CheckResult {
+                name,
+                severity: Severity::NotApplicable,
+                detail: reason.to_owned(),
+            },
+            None => catch_unwind(AssertUnwindSafe(|| function(checks))).unwrap_or_else(|_| {
+                CheckResult::fail(name, "probe panicked; inspect service logs and retry")
+            }),
+        };
         let result = if result.name == name {
             result
         } else {
@@ -136,13 +174,16 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
         match result.severity {
             Severity::Fail => failures += 1,
             Severity::Warn => warnings += 1,
-            Severity::Ok => {}
+            Severity::Ok | Severity::NotApplicable => {}
         }
     }
     if let Some(line) = checks.quarantine() {
         let _ = writeln!(output, "{line}");
     }
     for line in checks.browser() {
+        let _ = writeln!(output, "{line}");
+    }
+    for line in checks.terminal() {
         let _ = writeln!(output, "{line}");
     }
     let _ = writeln!(
@@ -555,6 +596,29 @@ impl DoctorChecks for RealDoctor<'_> {
         let health = derive_health(&facts, now, config.sync_stale_threshold as f64);
         sync_health_result(health)
     }
+    fn desktop_capture_off(&mut self) -> bool {
+        !self.config().desktop_capture
+    }
+
+    fn desktop_not_applicable(&mut self) -> Option<&'static str> {
+        if !self.config().desktop_capture {
+            return Some("desktop capture is off");
+        }
+        let presence = crate::desktop_session::doctor_resolver()
+            .ok()?
+            .resolve(std::time::Instant::now())
+            .presence;
+        (presence == crate::desktop_session::SessionPresence::NoDesktop)
+            .then_some("no desktop session of yours on this computer; screen and audio need one")
+    }
+
+    fn terminal(&mut self) -> Vec<String> {
+        let config = self.config();
+        let mut lines = crate::terminal::control::status_lines(config, false);
+        lines.extend(crate::terminal::control::session_bus_line(config));
+        lines
+    }
+
     fn browser(&mut self) -> Vec<String> {
         if !crate::browser::ENABLED {
             return Vec::new();
@@ -1087,5 +1151,122 @@ mod tests {
         }
         let mut value = Panic(FakeChecks::all(Severity::Ok));
         assert_eq!(run_doctor(&mut value, &mut Vec::new()), 1);
+    }
+
+    struct NoDesktop(FakeChecks);
+    impl DoctorChecks for NoDesktop {
+        fn session_type(&mut self) -> CheckResult {
+            self.0.session_type()
+        }
+        fn desktop_session(&mut self) -> CheckResult {
+            self.0.desktop_session()
+        }
+        fn portal(&mut self) -> CheckResult {
+            self.0.portal()
+        }
+        fn pulse(&mut self) -> CheckResult {
+            self.0.pulse()
+        }
+        fn gstreamer(&mut self) -> CheckResult {
+            self.0.gstreamer()
+        }
+        fn x11(&mut self) -> CheckResult {
+            self.0.x11()
+        }
+        fn systemd(&mut self) -> CheckResult {
+            self.0.systemd()
+        }
+        fn panel_icon(&mut self) -> CheckResult {
+            self.0.panel_icon()
+        }
+        fn sync_health(&mut self) -> CheckResult {
+            self.0.sync_health()
+        }
+        fn quarantine(&mut self) -> Option<String> {
+            None
+        }
+        fn desktop_not_applicable(&mut self) -> Option<&'static str> {
+            Some("no desktop session")
+        }
+    }
+
+    struct CaptureOff(FakeChecks);
+    impl DoctorChecks for CaptureOff {
+        fn session_type(&mut self) -> CheckResult {
+            self.0.session_type()
+        }
+        fn desktop_session(&mut self) -> CheckResult {
+            self.0.desktop_session()
+        }
+        fn portal(&mut self) -> CheckResult {
+            self.0.portal()
+        }
+        fn pulse(&mut self) -> CheckResult {
+            self.0.pulse()
+        }
+        fn gstreamer(&mut self) -> CheckResult {
+            self.0.gstreamer()
+        }
+        fn x11(&mut self) -> CheckResult {
+            self.0.x11()
+        }
+        fn systemd(&mut self) -> CheckResult {
+            CheckResult::ok("systemd --user", "ok")
+        }
+        fn panel_icon(&mut self) -> CheckResult {
+            CheckResult::ok("panel icon", "ok")
+        }
+        fn sync_health(&mut self) -> CheckResult {
+            CheckResult::ok("sync health", "ok")
+        }
+        fn desktop_not_applicable(&mut self) -> Option<&'static str> {
+            Some("desktop capture is off")
+        }
+        fn desktop_capture_off(&mut self) -> bool {
+            true
+        }
+        fn quarantine(&mut self) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn with_desktop_capture_off_an_unreachable_session_check_does_not_fail() {
+        let mut out = Vec::new();
+        assert_eq!(
+            run_doctor(&mut CaptureOff(FakeChecks::all(Severity::Fail)), &mut out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    #[test]
+    fn with_no_desktop_the_desktop_checks_are_not_applicable_and_do_not_fail() {
+        let mut out = Vec::new();
+        let code = run_doctor(&mut NoDesktop(FakeChecks::all(Severity::Fail)), &mut out);
+        let out = String::from_utf8(out).unwrap();
+        for name in DESKTOP_ONLY_CHECKS {
+            let line = out.lines().find(|line| line.contains(name)).unwrap();
+            assert!(line.starts_with(Severity::NotApplicable.label()), "{out}");
+        }
+        assert_eq!(code, 1, "the checks that still apply can fail");
+
+        let mut out = Vec::new();
+        assert_eq!(
+            run_doctor(&mut NoDesktop(FakeChecks::all(Severity::Ok)), &mut out),
+            0
+        );
+    }
+
+    #[test]
+    fn with_a_desktop_a_failing_portal_still_fails() {
+        let mut out = Vec::new();
+        assert_eq!(
+            run_doctor(&mut FakeChecks::all(Severity::Fail), &mut out),
+            1
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("n/a"), "{out}");
     }
 }

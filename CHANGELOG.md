@@ -9,6 +9,13 @@ and this project adheres to Semantic Versioning.
 ### Added
 
 - Obsidian is now a source. in the solstone app's settings, pick a vault or choose a folder, and every note in that vault goes into your journal, then each one as it changes. your vault stays as it is.
+- the app can now take in your tmux sessions. it's off until you turn it on, in settings or with `solstone-linux terminal on`, and needs tmux on this computer. it uses this app's connection to your journal, and works over ssh and with no desktop.
+- `solstone-linux desktop-capture off` keeps screen, audio and desktop activity closed. the window has the same switch.
+
+### Changed
+
+- the app now starts when your account does, not only with your desktop. screen and audio still follow only your own desktop session, while it's the one in front.
+- on a computer with no desktop, the app runs without GTK. the window still needs GTK 4.6 or newer.
 
 ## [2.0.36] - 2026-11-07
 

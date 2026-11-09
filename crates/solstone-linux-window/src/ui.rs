@@ -510,11 +510,16 @@ fn create_status_page(
     let version_label = gtk::Label::new(None);
     version_label.set_halign(gtk::Align::Start);
     version_label.set_visible(false);
+    let terminal_label = gtk::Label::new(None);
+    terminal_label.set_halign(gtk::Align::Start);
+    terminal_label.set_wrap(true);
+    terminal_label.set_visible(false);
 
     stats_box.append(&queue_label);
     stats_box.append(&quarantine_label);
     stats_box.append(&delivery_label);
     stats_box.append(&version_label);
+    stats_box.append(&terminal_label);
 
     let expander = gtk::Expander::new(Some(CopyKey::StatusDetails.as_str()));
     let fault_label = gtk::Label::new(None);
@@ -709,6 +714,10 @@ fn create_status_page(
             } else {
                 delivery_label.set_visible(false);
             }
+
+            let terminal_status = &c.document.settings.terminal_status;
+            terminal_label.set_text(&format!("terminal: {terminal_status}"));
+            terminal_label.set_visible(c.document.settings.terminal && !terminal_status.is_empty());
 
             if let Some(v) = &c.document.daemon_version {
                 version_label.set_text(&solstone_linux::copy::value_copy(
@@ -1441,6 +1450,22 @@ fn create_settings_page(
         gtk::Label::new(Some(CopyKey::SettingsActivityExcludeTitles.as_str()));
     activity_exclude_titles_label.set_halign(gtk::Align::Start);
     activity_exclude_titles_label.set_mnemonic_widget(Some(&activity_exclude_titles_entry));
+    let terminal_switch = gtk::Switch::new();
+    terminal_switch.set_halign(gtk::Align::Start);
+    let terminal_settings_label = gtk::Label::new(Some(CopyKey::SettingsTerminal.as_str()));
+    terminal_settings_label.set_halign(gtk::Align::Start);
+    terminal_settings_label.set_mnemonic_widget(Some(&terminal_switch));
+    let terminal_help = gtk::Label::new(Some(CopyKey::SettingsTerminalHelp.as_str()));
+    terminal_help.set_halign(gtk::Align::Start);
+    terminal_help.set_wrap(true);
+    let desktop_capture_switch = gtk::Switch::new();
+    desktop_capture_switch.set_halign(gtk::Align::Start);
+    let desktop_capture_label = gtk::Label::new(Some(CopyKey::SettingsDesktopCapture.as_str()));
+    desktop_capture_label.set_halign(gtk::Align::Start);
+    desktop_capture_label.set_mnemonic_widget(Some(&desktop_capture_switch));
+    let desktop_capture_help = gtk::Label::new(Some(CopyKey::SettingsDesktopCaptureHelp.as_str()));
+    desktop_capture_help.set_halign(gtk::Align::Start);
+    desktop_capture_help.set_wrap(true);
     let activity_only_switch = gtk::Switch::new();
     activity_only_switch.set_halign(gtk::Align::Start);
     let activity_only_label = gtk::Label::new(Some(CopyKey::SettingsActivityOnly.as_str()));
@@ -1512,6 +1537,12 @@ fn create_settings_page(
     form_box.append(&activity_exclude_apps_entry);
     form_box.append(&activity_exclude_titles_label);
     form_box.append(&activity_exclude_titles_entry);
+    form_box.append(&terminal_settings_label);
+    form_box.append(&terminal_switch);
+    form_box.append(&terminal_help);
+    form_box.append(&desktop_capture_label);
+    form_box.append(&desktop_capture_switch);
+    form_box.append(&desktop_capture_help);
     form_box.append(&activity_only_label);
     form_box.append(&activity_only_switch);
     form_box.append(&activity_only_help);
@@ -1631,6 +1662,32 @@ fn create_settings_page(
     {
         let ctrl = Rc::clone(&controller);
         let rendering = Rc::clone(&rendering);
+        terminal_switch.connect_state_set(move |_, state| {
+            if !rendering.get() {
+                let mut c = ctrl.borrow_mut();
+                c.settings_draft.terminal = Some(state);
+                c.settings_draft.terminal_dirty =
+                    !c.document.saved_available || state != c.document.settings.terminal;
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    {
+        let ctrl = Rc::clone(&controller);
+        let rendering = Rc::clone(&rendering);
+        desktop_capture_switch.connect_state_set(move |_, state| {
+            if !rendering.get() {
+                let mut c = ctrl.borrow_mut();
+                c.settings_draft.desktop_capture = Some(state);
+                c.settings_draft.desktop_capture_dirty =
+                    !c.document.saved_available || state != c.document.settings.desktop_capture;
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    {
+        let ctrl = Rc::clone(&controller);
+        let rendering = Rc::clone(&rendering);
         activity_only_switch.connect_state_set(move |_, state| {
             if !rendering.get() {
                 let mut c = ctrl.borrow_mut();
@@ -1691,6 +1748,8 @@ fn create_settings_page(
         let activity_exclude_apps_entry = activity_exclude_apps_entry.clone();
         let activity_exclude_titles_entry = activity_exclude_titles_entry.clone();
         let activity_only_switch = activity_only_switch.clone();
+        let terminal_switch = terminal_switch.clone();
+        let desktop_capture_switch = desktop_capture_switch.clone();
         let activity_route_label = activity_route_label.clone();
         let cursor_switch_for_mode = cursor_switch.clone();
         let segment_entry_for_mode = segment_entry.clone();
@@ -1712,6 +1771,8 @@ fn create_settings_page(
                 activity_exclude_titles_dirty,
                 activity_through_pause_dirty,
                 activity_only_dirty,
+                terminal_dirty,
+                desktop_capture_dirty,
                 saved_cursor,
                 saved_start_paused,
                 saved_segment,
@@ -1722,6 +1783,8 @@ fn create_settings_page(
                 saved_exclude_titles,
                 saved_activity_through_pause,
                 saved_activity_only,
+                saved_terminal,
+                saved_desktop_capture,
                 route_line,
                 write_failed,
                 write_uncertain,
@@ -1751,6 +1814,8 @@ fn create_settings_page(
                     c.settings_draft.activity_exclude_titles_dirty,
                     c.settings_draft.activity_through_pause_dirty,
                     c.settings_draft.activity_only_dirty,
+                    c.settings_draft.terminal_dirty,
+                    c.settings_draft.desktop_capture_dirty,
                     c.document.settings.draw_cursor,
                     c.document.settings.start_paused,
                     c.document.settings.segment_interval,
@@ -1761,6 +1826,8 @@ fn create_settings_page(
                     c.document.settings.activity_exclude_titles.clone(),
                     c.document.settings.activity_through_pause,
                     c.document.settings.activity_only,
+                    c.document.settings.terminal,
+                    c.document.settings.desktop_capture,
                     activity_route_line(c.document.route_status.as_ref()),
                     c.settings_draft.write_failed,
                     c.settings_draft.write_uncertain,
@@ -1843,6 +1910,18 @@ fn create_settings_page(
                         &activity_exclude_titles_entry,
                         &join_exclusion_list(&saved_exclude_titles),
                     );
+                }
+                if !terminal_dirty
+                    && !terminal_switch.has_focus()
+                    && terminal_switch.is_active() != saved_terminal
+                {
+                    terminal_switch.set_active(saved_terminal);
+                }
+                if !desktop_capture_dirty
+                    && !desktop_capture_switch.has_focus()
+                    && desktop_capture_switch.is_active() != saved_desktop_capture
+                {
+                    desktop_capture_switch.set_active(saved_desktop_capture);
                 }
                 if !activity_only_dirty
                     && !activity_only_switch.has_focus()

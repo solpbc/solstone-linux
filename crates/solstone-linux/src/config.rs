@@ -30,6 +30,15 @@ pub const DEFAULT_ACTIVITY_TITLES: bool = true;
 /// also given the address consent, which turns on desktop accessibility.
 pub const DEFAULT_ACTIVITY_URLS: bool = true;
 pub const DEFAULT_ACTIVITY_THROUGH_PAUSE: bool = false;
+/// Terminal capture is off until the owner turns it on.
+pub const DEFAULT_TERMINAL: bool = false;
+/// Screen, audio and desktop activity stay as every earlier release had them.
+pub const DEFAULT_DESKTOP_CAPTURE: bool = true;
+/// The installer leaves this empty file in the data directory to mean "this
+/// computer starts terminal-only". Whichever process creates `config.json` while
+/// it exists records `desktop_capture: false` in that write; only the daemon
+/// removes it.
+pub const DESKTOP_CAPTURE_OFF_MARKER: &str = "desktop-capture-off";
 const ACTIVITY_OWNER_VERSION: u64 = 1;
 const SETTINGS_OWNER_VERSION: u64 = 2;
 /// Saved files at this version keep a settings key when the owner set it.
@@ -90,10 +99,24 @@ pub struct Config {
     pub activity_through_pause: bool,
     #[serde(default)]
     pub activity_only: bool,
+    /// Terminal capture, which the owner turns on.
+    #[serde(default, skip_serializing)]
+    pub terminal: bool,
+    /// Screen, audio and desktop activity together.
+    #[serde(default = "default_desktop_capture", skip_serializing)]
+    pub desktop_capture: bool,
+    /// The engine's capture settings and `tmux_path`, as saved. Read key by key
+    /// by `terminal::settings`; never written from a settings snapshot.
+    #[serde(skip)]
+    pub terminal_settings: Option<Value>,
     #[serde(skip)]
     pub base_dir: PathBuf,
     #[serde(skip)]
     pub config_dir: PathBuf,
+}
+
+fn default_desktop_capture() -> bool {
+    DEFAULT_DESKTOP_CAPTURE
 }
 
 fn home_dir() -> PathBuf {
@@ -126,6 +149,9 @@ impl Default for Config {
             activity_exclude_titles: Vec::new(),
             activity_through_pause: DEFAULT_ACTIVITY_THROUGH_PAUSE,
             activity_only: false,
+            terminal: DEFAULT_TERMINAL,
+            desktop_capture: DEFAULT_DESKTOP_CAPTURE,
+            terminal_settings: None,
             base_dir: home.join(".local/share/solstone-linux"),
             config_dir: config_dir_for(home, env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)),
         }
@@ -144,6 +170,9 @@ impl Config {
     }
     pub fn restore_token_path(&self) -> PathBuf {
         self.config_dir.join("restore_token")
+    }
+    pub fn desktop_capture_marker_path(&self) -> PathBuf {
+        self.base_dir.join(DESKTOP_CAPTURE_OFF_MARKER)
     }
     pub fn ensure_dirs(&self) -> io::Result<()> {
         fs::create_dir_all(self.captures_dir())?;
@@ -241,6 +270,23 @@ fn load_string(
             // Named deviation: Python retains raw values; Rust warns and preserves the typed string contract.
             warnings.push(warning(field, value, ""));
             String::new()
+        }
+    }
+}
+
+/// A boolean the owner sets. Anything but `true` or `false` keeps the default.
+fn load_owner_bool(
+    values: &Map<String, Value>,
+    field: &'static str,
+    default: bool,
+    warnings: &mut Vec<ConfigWarning>,
+) -> bool {
+    match values.get(field) {
+        None => default,
+        Some(Value::Bool(flag)) => *flag,
+        Some(value) => {
+            warnings.push(warning(field, value, default));
+            default
         }
     }
 }
@@ -563,6 +609,14 @@ fn load_resolved_config(mut config: Config) -> LoadedConfig {
     config.panel_icon_offer = json_truthy(values.get("panel_icon_offer"), true);
     apply_loaded_activity_policy(values, &mut config, &mut warnings);
     config.activity_only = json_truthy(values.get("activity_only"), false);
+    config.terminal = load_owner_bool(values, "terminal", DEFAULT_TERMINAL, &mut warnings);
+    config.desktop_capture = load_owner_bool(
+        values,
+        "desktop_capture",
+        DEFAULT_DESKTOP_CAPTURE,
+        &mut warnings,
+    );
+    config.terminal_settings = values.get("terminal_settings").cloned();
     LoadedConfig { config, warnings }
 }
 
@@ -710,6 +764,11 @@ fn write_config_merge(
     }
     if saved_config_version(&map) < SETTINGS_OWNER_VERSION {
         strip_saved_setting_defaults(&mut map);
+    }
+    // The installer's terminal-only marker: the write that creates this file
+    // records it. An owner choice in this same write still wins below.
+    if merge_basis.is_none() && resolved.desktop_capture_marker_path().exists() {
+        map.insert("desktop_capture".into(), Value::Bool(false));
     }
 
     let mut warnings = Vec::new();
@@ -942,6 +1001,18 @@ fn write_config_merge(
                     activity_only = b;
                     Value::Bool(b)
                 }
+                "terminal" => {
+                    let b = value.as_bool().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid terminal")
+                    })?;
+                    Value::Bool(b)
+                }
+                "desktop_capture" => {
+                    let b = value.as_bool().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid desktop_capture")
+                    })?;
+                    Value::Bool(b)
+                }
                 "activity_exclude_apps" => {
                     let arr = value.as_array().ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid activity_exclude_apps")
@@ -1068,6 +1139,13 @@ fn write_config_merge(
         ConfigOverlay::Sanitize => {}
     }
 
+    let terminal = load_owner_bool(&map, "terminal", DEFAULT_TERMINAL, &mut warnings);
+    let desktop_capture = load_owner_bool(
+        &map,
+        "desktop_capture",
+        DEFAULT_DESKTOP_CAPTURE,
+        &mut warnings,
+    );
     let returned_config = Config {
         stream: stream.clone(),
         segment_interval,
@@ -1084,6 +1162,9 @@ fn write_config_merge(
         activity_exclude_titles: activity_exclude_titles.clone(),
         activity_through_pause,
         activity_only,
+        terminal,
+        desktop_capture,
+        terminal_settings: map.get("terminal_settings").cloned(),
         base_dir: resolved.base_dir.clone(),
         config_dir: resolved.config_dir.clone(),
     };
@@ -1218,6 +1299,68 @@ pub(crate) fn set_guided_field_with_fault(
     fault: &dyn DurableWriteFault,
 ) -> io::Result<Config> {
     write_config_merge(paths, ConfigOverlay::GuidedField(key, value), fault)
+}
+
+/// What the daemon's start did with the installer's terminal-only marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerOutcome {
+    /// No marker.
+    Absent,
+    /// A `config.json` already existed: the marker is gone and nothing changed.
+    RemovedExisting,
+    /// There was no `config.json`: `desktop_capture` is now recorded off and the
+    /// marker is gone.
+    RecordedOff,
+    /// Recording `desktop_capture` off failed: the marker stays, and this run
+    /// treats desktop capture as off.
+    KeptWriteFailed,
+}
+
+impl MarkerOutcome {
+    /// Whether this run must keep screen, audio and desktop activity closed,
+    /// whatever the loaded config says.
+    pub fn forces_desktop_capture_off(self) -> bool {
+        matches!(self, Self::RecordedOff | Self::KeptWriteFailed)
+    }
+}
+
+/// The daemon's marker step, run once at start after migration and before
+/// anything else writes the config. Only the daemon calls this.
+pub(crate) fn settle_desktop_capture_marker(paths: &ConfigPaths) -> MarkerOutcome {
+    settle_desktop_capture_marker_with_fault(paths, &NoWriteFault)
+}
+
+pub(crate) fn settle_desktop_capture_marker_with_fault(
+    paths: &ConfigPaths,
+    fault: &dyn DurableWriteFault,
+) -> MarkerOutcome {
+    let resolved = resolve_config_paths(paths);
+    let marker = resolved.desktop_capture_marker_path();
+    if fs::symlink_metadata(&marker).is_err() {
+        return MarkerOutcome::Absent;
+    }
+    if fs::symlink_metadata(resolved.config_path()).is_ok() {
+        if let Err(error) = fs::remove_file(&marker) {
+            tracing::warn!(%error, "Could not remove the terminal-only marker");
+        }
+        return MarkerOutcome::RemovedExisting;
+    }
+    match write_config_merge(
+        paths,
+        ConfigOverlay::GuidedField("desktop_capture", Value::Bool(false)),
+        fault,
+    ) {
+        Ok(_) => {
+            if let Err(error) = fs::remove_file(&marker) {
+                tracing::warn!(%error, "Could not remove the terminal-only marker");
+            }
+            MarkerOutcome::RecordedOff
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Could not record desktop capture off; screen and audio stay closed");
+            MarkerOutcome::KeptWriteFailed
+        }
+    }
 }
 
 fn migrate(config: &Config) -> io::Result<()> {
@@ -3334,5 +3477,34 @@ mod tests {
             let saved_json = fs::read_to_string(config_dir.join("config.json")).unwrap();
             assert!(!saved_json.contains("cache_retention_days"));
         }
+    }
+
+    #[test]
+    fn terminal_is_off_and_desktop_capture_on_when_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = load_config(ConfigPaths {
+            base_dir: Some(temp.path().join("data")),
+            config_dir: Some(temp.path().join("config")),
+        })
+        .config;
+        assert!(!config.terminal);
+        assert!(config.desktop_capture);
+    }
+
+    #[test]
+    fn a_failed_marker_write_keeps_the_marker_and_keeps_capture_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            base_dir: Some(temp.path().join("data")),
+            config_dir: Some(temp.path().join("config")),
+        };
+        let resolved = resolve_config_paths(&paths);
+        fs::create_dir_all(&resolved.base_dir).unwrap();
+        fs::write(resolved.desktop_capture_marker_path(), b"").unwrap();
+        let outcome =
+            settle_desktop_capture_marker_with_fault(&paths, &FailStage(DurableWriteStage::Rename));
+        assert_eq!(outcome, MarkerOutcome::KeptWriteFailed);
+        assert!(outcome.forces_desktop_capture_off());
+        assert!(resolved.desktop_capture_marker_path().exists());
     }
 }
