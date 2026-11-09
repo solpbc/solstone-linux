@@ -545,7 +545,7 @@ fn takeover_lines(config: &Config) -> Vec<String> {
             reason,
             needs_attention,
         }) => {
-            lines.push(format!("  terminal history: starts fresh ({reason})"));
+            lines.push(format!("  new terminal history from here, and what's already in your journal stays ({reason})"));
             if *needs_attention {
                 lines.push("  this needs attention: please contact support".to_owned());
             }
