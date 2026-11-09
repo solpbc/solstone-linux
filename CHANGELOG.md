@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.37] - 2026-11-08
+
 ### Added
 
 - Obsidian is now a source. in the solstone app's settings, pick a vault or choose a folder, and every note in that vault goes into your journal, then each one as it changes. your vault stays as it is.
