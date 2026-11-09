@@ -17,7 +17,7 @@ and this project adheres to Semantic Versioning.
 
 ### Changed
 
-- the app now starts when your account does, not only with your desktop. screen and audio still follow only your own desktop session, while it's the one in front.
+- the app now starts when you log in to this computer, over SSH too, not only with your desktop. screen and audio still follow only your own desktop session, while it's the one in front.
 - on a computer with no desktop, the app runs without GTK. the window still needs GTK 4.6 or newer.
 
 ## [2.0.36] - 2026-11-07
