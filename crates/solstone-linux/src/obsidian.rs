@@ -435,7 +435,11 @@ impl<T: Transport> Worker<T> {
 
     fn publish(&self) {
         let Some(engine) = &self.engine else { return };
-        let status = engine.status(self.paused(), self.capability);
+        let mut status = engine.status(self.paused(), self.capability);
+        // The vault check waits for a journal that takes notes.
+        if status.state == State::Checking && self.capability == Some(false) {
+            status.state = State::WaitingForJournalUpdate;
+        }
         *self.status.lock().unwrap_or_else(|p| p.into_inner()) = status;
     }
 
@@ -497,6 +501,11 @@ impl<T: Transport> Worker<T> {
             return false;
         }
         if self.engine.as_ref().and_then(Engine::phase) == Some(&Phase::Checking) {
+            // The first send is only worth warning about for a journal that can
+            // take it, so the check waits until this one lists the capability.
+            if !self.journal_supports_notes().await {
+                return false;
+            }
             return self.check_vault_list().await;
         }
         if !self.engine.as_ref().is_some_and(Engine::should_scan) {
@@ -585,6 +594,21 @@ impl<T: Transport> Worker<T> {
         let Some(delivery) = self.engine.as_ref().and_then(Engine::next_delivery) else {
             return false;
         };
+        // Something outside the app removed it. Its notes go back to the vault scan;
+        // offering it to the journal again would only fail the same way.
+        if matches!(tokio::fs::try_exists(&delivery.path).await, Ok(false)) {
+            let recorded = self
+                .with_engine(move |engine| engine.record_file_missing(&delivery))
+                .await;
+            return match recorded {
+                Some(Ok(())) => true,
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "Couldn't record a missing Obsidian file");
+                    false
+                }
+                None => false,
+            };
+        }
         // Turning off doesn't wait on the journal. The file stays in the outbox, and
         // if the journal did take it, sending it again answers `duplicate`.
         let answer = tokio::select! {
@@ -608,7 +632,7 @@ impl<T: Transport> Worker<T> {
 mod tests {
     use super::*;
     use crate::observer::{Mode, StateSnapshot};
-    use solstone_vault::Clock;
+    use solstone_vault::{Attention, Clock};
     use std::{collections::VecDeque, fs, path::Path, sync::atomic::AtomicI64};
 
     const T0: i64 = 1_794_155_400_000;
@@ -705,13 +729,15 @@ mod tests {
         worker: Worker<Arc<FakeJournal>>,
         handle: ObsidianHandle,
         paused: watch::Sender<StateSnapshot>,
+        clock: Arc<AtomicI64>,
     }
 
     fn fixture() -> Fixture {
         let temp = tempfile::tempdir().unwrap();
         let vault = temp.path().join("Notes");
         fs::create_dir_all(vault.join(".obsidian")).unwrap();
-        let clock = TestClock(Arc::new(AtomicI64::new(T0)));
+        let now = Arc::new(AtomicI64::new(T0));
+        let clock = TestClock(Arc::clone(&now));
         let engine = Engine::open(temp.path().join("state"), Arc::new(clock)).unwrap();
         let journal = Arc::new(FakeJournal::default());
         let (paused, paused_rx) = watch::channel(snapshot(false));
@@ -723,6 +749,7 @@ mod tests {
             worker,
             handle,
             paused,
+            clock: now,
         }
     }
 
@@ -773,20 +800,22 @@ mod tests {
         *f.journal.current_capability.lock().unwrap() = Some(Capability::NotListed);
         write_note(&f.vault, "a.md", "alpha", T0 - 3_600_000);
         turn_on(&mut f).await;
-        // Past the capability retry.
         f.worker.step().await;
         assert!(
             f.journal.delivered.lock().unwrap().is_empty(),
             "nothing sent"
         );
-        let doc = state(&f);
-        assert_eq!(doc.status.state, State::WaitingForJournalUpdate);
-        assert_eq!(doc.status.waiting, 1);
+        assert_eq!(
+            state(&f).status.state,
+            State::WaitingForJournalUpdate,
+            "waiting, not checking and not a fault"
+        );
 
-        // The journal is updated.
+        // The journal is updated: only now does the vault check happen, then the send.
         *f.journal.current_capability.lock().unwrap() = Some(Capability::Supported);
         f.worker.capability_checked = None;
-        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.step().await;
+        f.worker.next_scan = Instant::now();
         f.worker.step().await;
         assert_eq!(
             f.journal.delivered.lock().unwrap().len(),
@@ -794,6 +823,57 @@ mod tests {
             "delivered now"
         );
         assert_eq!(state(&f).status.state, State::On);
+    }
+
+    #[tokio::test]
+    async fn the_vault_check_waits_for_a_journal_that_takes_notes() {
+        let mut f = fixture();
+        *f.journal.current_capability.lock().unwrap() = Some(Capability::NotListed);
+        *f.journal.vaults.lock().unwrap() = Some(VaultList::Listed(vec![ListedVault {
+            vault: "Notes".into(),
+            device: Some("studio".into()),
+            last_synced_at: None,
+        }]));
+        turn_on(&mut f).await;
+        assert!(
+            f.journal.vaults.lock().unwrap().is_some(),
+            "the list wasn't asked for yet"
+        );
+
+        *f.journal.current_capability.lock().unwrap() = Some(Capability::Supported);
+        f.worker.capability_checked = None;
+        f.worker.step().await;
+        assert_eq!(state(&f).status.state, State::Confirm);
+        assert!(f.journal.delivered.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_gone_from_the_outbox_is_sent_again_from_the_vault() {
+        let mut f = fixture();
+        write_note(&f.vault, "a.md", "alpha", T0 - 7_200_000);
+        f.journal.answers.lock().unwrap().push_back(Answer::Retry);
+        turn_on(&mut f).await;
+        let first = f.journal.delivered.lock().unwrap()[0].clone();
+        fs::remove_file(&first.path).unwrap();
+
+        // Past the retry: the file is gone, so it isn't offered again.
+        f.clock.fetch_add(60 * 60_000, Ordering::SeqCst);
+        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.step().await;
+        assert_eq!(f.journal.delivered.lock().unwrap().len(), 1);
+        let doc = state(&f);
+        assert_eq!(doc.status.attention, Some(Attention::FileRefused));
+        assert_eq!(doc.status.waiting, 0, "the entry was dropped");
+
+        // The next scan reports the note again, and it goes through.
+        f.worker.next_scan = Instant::now();
+        f.clock.fetch_add(11 * 60_000, Ordering::SeqCst);
+        f.worker.step().await;
+        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.clock.fetch_add(11 * 60_000, Ordering::SeqCst);
+        f.worker.step().await;
+        assert_eq!(f.journal.delivered.lock().unwrap().len(), 2, "sent again");
+        assert_eq!(state(&f).status.attention, None);
     }
 
     #[tokio::test]
