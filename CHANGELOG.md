@@ -6,6 +6,11 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- if something other than the app removes the copy of a note that's waiting to go into your journal, the app takes that note in again from your vault and it goes into your journal, instead of holding up the notes behind it until the app restarts.
+- if your journal doesn't take Obsidian notes yet, the app now waits for your journal to update before checking whether it already has a vault with this name from another device, so you're still asked about it after the update.
+
 ## [2.0.37] - 2026-11-08
 
 ### Added
