@@ -323,7 +323,13 @@ fn version_line_with_and_without_source_commit() {
         .expect("run solstone-terminal --version");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert_eq!(stdout, "solstone-terminal 2.0.36 (source development)\n");
+    assert_eq!(
+        stdout,
+        format!(
+            "solstone-terminal {} (source development)\n",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
 }
 
 #[test]
@@ -341,7 +347,7 @@ fn run_prints_ready_then_a_rotation_segment() {
     // 1. Ready event
     let ready = proc.recv_stdout_json(Duration::from_secs(3));
     assert_eq!(ready["event"], "ready");
-    assert_eq!(ready["version"], "2.0.36");
+    assert_eq!(ready["version"], env!("CARGO_PKG_VERSION"));
 
     // 2. Health event
     let health = proc.recv_stdout_json(Duration::from_secs(3));
