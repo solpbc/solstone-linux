@@ -407,6 +407,14 @@ fn adopt_with_no_daemon(
     0
 }
 
+/// The owner's latest word stands: a move still under way must not turn terminal back on.
+fn keep_terminal_off(state: &mut TakeoverState) {
+    if !state.terminal_settled {
+        state.service_was_on = false;
+        state.owner_turned_on = false;
+    }
+}
+
 fn set_terminal_with_sources(
     paths: ConfigPaths,
     enabled: bool,
@@ -439,6 +447,11 @@ fn set_terminal_with_sources(
     let (command, confirmation) = if enabled {
         (Command::TerminalOn, "terminal is on.")
     } else {
+        // A daemon does this as it applies the request; with none running, this is the only place.
+        let state_dir = resolve_config_paths(&paths).state_dir();
+        if !running(&resolve_config_paths(&paths)) {
+            let _ = takeover_state::update(&state_dir, keep_terminal_off);
+        }
         (Command::TerminalOff, "terminal is off.")
     };
     set_owner_switch(
@@ -786,6 +799,7 @@ impl Applier for DaemonApplier {
                 })
             }
             Command::TerminalOff => self.save("terminal", false).map(|()| {
+                let _ = takeover_state::update(&self.state_dir, keep_terminal_off);
                 self.live.terminal(false);
                 "terminal is off."
             }),
@@ -1330,6 +1344,24 @@ mod tests {
         state.settings_applied = true;
         takeover_state::save(&state_dir, &state).unwrap();
         assert!(!engine_hold(&state_dir, &sources).found());
+    }
+
+    #[test]
+    fn turning_terminal_off_during_a_move_keeps_it_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = Arc::new(Recording::default());
+        let applier = applier(temp.path(), live, false);
+        let state = TakeoverState {
+            service_was_on: true,
+            owner_turned_on: true,
+            ..TakeoverState::default()
+        };
+        takeover_state::save(&applier.state_dir, &state).unwrap();
+        assert_eq!(applier.apply(&Command::TerminalOff).code, 0);
+        let Stored::Present(after) = takeover_state::load(&applier.state_dir) else {
+            panic!("no record");
+        };
+        assert!(!after.service_was_on && !after.owner_turned_on);
     }
 
     #[test]
