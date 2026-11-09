@@ -1660,3 +1660,32 @@ fn a_scan_cancelled_by_turning_off_resumes_without_duplicate_lines() {
     let lines: Vec<&Line> = delivered.iter().flat_map(|(_, l)| l.iter()).collect();
     assert_eq!(lines.len(), 1500, "one line per note");
 }
+
+#[test]
+fn a_file_gone_from_the_outbox_sends_its_notes_again_and_says_so() {
+    let mut h = Harness::turned_on();
+    h.write("a.md", "alpha", T0 - 3_600_000);
+    assert_eq!(h.scan(), ScanOutcome::Done);
+    h.clock.advance_s(10 * 60);
+    assert_eq!(h.close_due(), 1);
+    let delivery = h.engine.next_delivery().unwrap();
+    fs::remove_file(&delivery.path).unwrap();
+    h.engine.record_file_missing(&delivery).unwrap();
+    assert!(h.engine.next_delivery().is_none(), "the entry is dropped");
+    assert_eq!(h.status().attention, Some(crate::Attention::FileRefused));
+
+    h.clock.advance_s(60);
+    assert_eq!(h.scan(), ScanOutcome::Done);
+    h.clock.advance_s(10 * 60);
+    h.close_due();
+    let delivered = h.deliver_all();
+    let lines = line_for(&delivered, "a.md");
+    assert_eq!(lines.len(), 1, "the note is reported again");
+    assert_eq!(lines[0].text.as_deref(), Some("alpha"));
+    assert_eq!(lines[0].change, Change::Changed);
+    assert_eq!(
+        h.status().attention,
+        None,
+        "delivered again, so nothing to flag"
+    );
+}

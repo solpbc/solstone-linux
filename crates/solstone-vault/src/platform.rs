@@ -5,7 +5,7 @@
 //! file is a placeholder for content not on this device, and opening a file for
 //! reading without touching it.
 
-use std::{fs, io, path::Path, time::UNIX_EPOCH};
+use std::{collections::HashMap, fs, io, path::Path, time::UNIX_EPOCH};
 
 const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 const RECALL_ON_OPEN: u32 = 0x0004_0000;
@@ -27,9 +27,13 @@ fn compose_file_id(dev: u64, ino: u64, created: Option<std::time::SystemTime>) -
     }
 }
 
-/// A stable identity for the file, where the platform offers one without
-/// opening it. On Windows that is left to the content-hash pairing, as the
-/// file-index API is not stable in std.
+/// Where the platform's file metadata doesn't carry an id (Windows), a caller may
+/// supply one directory at a time: every entry's stable id, by name, read without
+/// opening any entry. An empty map means no ids here, and pairing falls back to
+/// content.
+pub type DirFileIds = dyn Fn(&Path) -> HashMap<String, String> + Send + Sync;
+
+/// A stable identity for the file, where its metadata carries one.
 pub fn file_id(metadata: &fs::Metadata) -> Option<String> {
     #[cfg(unix)]
     {
@@ -73,8 +77,27 @@ pub fn mtime_ms(metadata: &fs::Metadata) -> i64 {
     }
 }
 
+/// Open for reading, and refuse a file whose content isn't here: the scan decided
+/// this one was local, but it may have become a placeholder since, and opening a
+/// placeholder for its data asks the cloud for it. `FILE_FLAG_OPEN_NO_RECALL`
+/// doesn't stop that for a Cloud Files placeholder, so its attributes are read
+/// first, from an attribute-only open that fetches nothing.
+#[cfg(windows)]
+pub fn open_for_read(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_FLAG_OPEN_NO_RECALL: u32 = 0x0010_0000;
+    if attrs_are_placeholder(fs::metadata(path)?.file_attributes()) {
+        return Err(io::Error::other("this file's content isn't on this device"));
+    }
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_NO_RECALL)
+        .open(path)
+}
+
 /// Open for reading. On Linux, without updating the file's access time where the
 /// kernel allows it; a file the app doesn't own opens normally.
+#[cfg(not(windows))]
 pub fn open_for_read(path: &Path) -> io::Result<fs::File> {
     #[cfg(target_os = "linux")]
     {

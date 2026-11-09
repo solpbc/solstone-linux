@@ -4,7 +4,10 @@
 //! The walk of a vault: what is a note, what is skipped, and what is only a
 //! placeholder. Reads directory entries and file metadata; opens no note.
 
-use crate::{platform, wire::MAX_NOTE_BYTES};
+use crate::{
+    platform::{self, DirFileIds},
+    wire::MAX_NOTE_BYTES,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
@@ -81,6 +84,16 @@ pub fn path_is_reportable(path: &str) -> bool {
 
 /// Walk the vault, or say it can't be read.
 pub fn walk(root: &Path, cancel: &AtomicBool) -> Result<Walked, VaultUnreadable> {
+    walk_with_ids(root, cancel, None)
+}
+
+/// [`walk`], reading each directory's file ids from `dir_ids` where the platform's
+/// metadata has none.
+pub fn walk_with_ids(
+    root: &Path,
+    cancel: &AtomicBool,
+    dir_ids: Option<&DirFileIds>,
+) -> Result<Walked, VaultUnreadable> {
     if !vault_is_readable(root) {
         return Err(VaultUnreadable);
     }
@@ -99,6 +112,7 @@ pub fn walk(root: &Path, cancel: &AtomicBool) -> Result<Walked, VaultUnreadable>
                 continue;
             }
         };
+        let ids = dir_ids.map_or_else(Default::default, |read| read(&dir));
         let mut reachable = true;
         for entry in entries {
             visited += 1;
@@ -147,7 +161,9 @@ pub fn walk(root: &Path, cancel: &AtomicBool) -> Result<Walked, VaultUnreadable>
                 }
                 Ok(metadata) if metadata.len() > MAX_NOTE_BYTES as u64 => {
                     walked.too_large.insert(rel);
-                    walked.too_large_ids.extend(platform::file_id(&metadata));
+                    walked
+                        .too_large_ids
+                        .extend(platform::file_id(&metadata).or_else(|| ids.get(&name).cloned()));
                 }
                 Ok(metadata) => {
                     walked.notes.insert(
@@ -155,7 +171,8 @@ pub fn walk(root: &Path, cancel: &AtomicBool) -> Result<Walked, VaultUnreadable>
                         Note {
                             mtime_ms: platform::mtime_ms(&metadata),
                             size: metadata.len(),
-                            file_id: platform::file_id(&metadata),
+                            file_id: platform::file_id(&metadata)
+                                .or_else(|| ids.get(&name).cloned()),
                         },
                     );
                 }
@@ -172,6 +189,12 @@ pub fn walk(root: &Path, cancel: &AtomicBool) -> Result<Walked, VaultUnreadable>
             }
             walked.unreadable_dirs.push(prefix);
         }
+    }
+    // A drive lost partway through reads as folders that are simply gone: Windows
+    // reports a missing drive or network path as not found. Ask again before
+    // believing anything this walk didn't see.
+    if !vault_is_readable(root) {
+        return Err(VaultUnreadable);
     }
     Ok(walked)
 }
@@ -244,6 +267,26 @@ mod tests {
         let walked = walk(root, &cancel).unwrap();
         let notes: Vec<&str> = walked.notes.keys().map(String::as_str).collect();
         assert_eq!(notes, vec!["note.md", "sub/UPPER.MD", "sub/keep.md"]);
+    }
+
+    #[test]
+    fn a_vault_lost_during_the_walk_reports_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Notes");
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/a.md"), "x").unwrap();
+        let moved = temp.path().join("elsewhere");
+        let (from, to) = (root.clone(), moved);
+        let lose_it: Box<DirFileIds> = Box::new(move |_dir: &Path| {
+            let _ = fs::rename(&from, &to);
+            Default::default()
+        });
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            walk_with_ids(&root, &cancel, Some(lose_it.as_ref())).unwrap_err(),
+            VaultUnreadable
+        );
     }
 
     #[test]

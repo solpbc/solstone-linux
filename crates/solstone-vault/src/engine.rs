@@ -9,7 +9,7 @@ use crate::{
     discover::{self, Refusal},
     outbox::{Delivery, Outbox},
     pending::{Key, Meta, Pending},
-    platform,
+    platform::{self, DirFileIds},
     scan::{self, Note, VaultUnreadable, Walked},
     store,
     table::{FirstSync, Row, Table},
@@ -141,6 +141,7 @@ struct Runtime {
     vault_unreadable: bool,
     part_unreadable: bool,
     storage_fault: bool,
+    file_lost: bool,
     last_scan: Duration,
 }
 
@@ -235,6 +236,7 @@ pub struct Engine {
     retry_step: u32,
     table_saved_ms: i64,
     table_dirty: bool,
+    dir_file_ids: Option<Arc<DirFileIds>>,
 }
 
 impl Engine {
@@ -256,12 +258,20 @@ impl Engine {
             retry_step: 0,
             table_saved_ms: 0,
             table_dirty: false,
+            dir_file_ids: None,
         };
         if engine.source.enabled {
             engine.table = Some(Table::load(&engine.table_path())?);
         }
         engine.outbox.restore_aside()?;
         Ok(engine)
+    }
+
+    /// Read each directory's file ids this way where the platform's file metadata
+    /// carries none, so a rename pairs by file id before content.
+    pub fn with_dir_file_ids(mut self, read: Arc<DirFileIds>) -> Self {
+        self.dir_file_ids = Some(read);
+        self
     }
 
     fn vault_root(&self) -> Option<PathBuf> {
@@ -418,7 +428,7 @@ impl Engine {
         // Only the walk sets the pace: saving what it found waits on the disk,
         // and a stalled write says nothing about the size of the vault.
         let started = Instant::now();
-        let walk_result = scan::walk(&root, cancel);
+        let walk_result = scan::walk_with_ids(&root, cancel, self.dir_file_ids.as_deref());
         let walk_time = started.elapsed();
         let walked = match walk_result {
             Err(VaultUnreadable) => {
@@ -1141,6 +1151,7 @@ impl Engine {
                 self.outbox.remove(delivery)?;
                 self.retry_after_ms = None;
                 self.retry_step = 0;
+                self.runtime.file_lost = false;
                 if delivery.first_sight > 0 {
                     if let Some(sync) = self
                         .table
@@ -1172,6 +1183,31 @@ impl Engine {
         Ok(())
     }
 
+    /// A file waiting in the outbox is gone: something outside the app removed it,
+    /// antivirus for one. Its notes go back to unreported so the next scan sends
+    /// them again, and the source says some couldn't go.
+    pub fn record_file_missing(&mut self, delivery: &Delivery) -> io::Result<()> {
+        self.outbox.remove(delivery)?;
+        self.retry_after_ms = None;
+        self.retry_step = 0;
+        self.runtime.file_lost = true;
+        if let Some(table) = &mut self.table {
+            for row in table.rows.values_mut() {
+                if row.sent_window.as_ref() == Some(&delivery.window) {
+                    row.sent_window = None;
+                    row.mtime_ms = i64::MIN;
+                    row.content_hash.clear();
+                    row.last_reported_ms = None;
+                }
+            }
+            if let Some(sync) = &mut table.first_sync {
+                sync.found = sync.found.saturating_sub(u64::from(delivery.first_sight));
+            }
+        }
+        self.finish_first_sync_if_complete();
+        self.save_table()
+    }
+
     /// Save first-sync progress, at most every so often.
     pub fn flush_progress(&mut self) -> io::Result<()> {
         if self.table_dirty
@@ -1200,7 +1236,7 @@ impl Engine {
             Some(Attention::Storage)
         } else if self.runtime.part_unreadable {
             Some(Attention::PartUnreadable)
-        } else if self.outbox.aside_count() > 0 {
+        } else if self.outbox.aside_count() > 0 || self.runtime.file_lost {
             Some(Attention::FileRefused)
         } else {
             None
