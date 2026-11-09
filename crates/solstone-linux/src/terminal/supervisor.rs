@@ -116,7 +116,7 @@ impl TerminalSupervisor {
                 {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        tracing::error!(%error, "Terminal capture could not start its runtime");
+                        tracing::error!(%error, "Terminal could not start its runtime");
                         return;
                     }
                 };
@@ -185,6 +185,14 @@ impl TerminalSwitches {
 
     pub fn set_paused(&self, paused: bool) {
         let _ = self.control.send(Control::Paused(paused));
+    }
+
+    pub fn set_settings(&self, settings: TerminalSettings) {
+        let _ = self.control.send(Control::Settings(settings));
+    }
+
+    pub fn recheck(&self) {
+        let _ = self.control.send(Control::Recheck);
     }
 }
 
@@ -266,7 +274,7 @@ impl Supervisor {
                         Ok(()) => "the engine stopped by itself".to_owned(),
                         Err(error) => error.to_string(),
                     };
-                    tracing::warn!(error = %detail, tmux = ?tmux_path, "Terminal capture stopped; restarting");
+                    tracing::warn!(error = %detail, tmux = ?tmux_path, "Terminal stopped; restarting");
                     self.fail(detail);
                 }
                 _ = recheck.tick() => self.recheck(&mut engine, &relay).await,
@@ -352,7 +360,7 @@ impl Supervisor {
                 if activity != SyncActivity::Idle {
                     let _ = handle.set_sync_activity(activity).await;
                 }
-                tracing::info!(tmux = %tmux_path.display(), "Terminal capture started");
+                tracing::info!(tmux = %tmux_path.display(), "Terminal started");
                 *engine = Some(RunningEngine {
                     handle,
                     tmux_path,
@@ -366,7 +374,7 @@ impl Supervisor {
                 };
             }
             Err(error) => {
-                tracing::warn!(%error, "Terminal capture did not start");
+                tracing::warn!(%error, "Terminal did not start");
                 self.fail(error.to_string());
             }
         }
@@ -409,7 +417,7 @@ impl Supervisor {
         if found == running.tmux_path {
             return;
         }
-        tracing::info!(tmux = %found.display(), "Terminal capture moves to another tmux");
+        tracing::info!(tmux = %found.display(), "Terminal moves to another tmux");
         stop(engine).await;
         self.start(engine, relay, found).await;
     }
@@ -441,7 +449,7 @@ impl Supervisor {
             settings: self.config.settings.capture.clone(),
             closed_segments: Arc::new(move |_| wake()),
             diagnostics: Arc::new(|diagnostic: Diagnostic| {
-                tracing::warn!(diagnostic = %diagnostic.message(), "terminal capture");
+                tracing::warn!(diagnostic = %diagnostic.message(), "terminal");
             }),
             health: Arc::new(move |state: TmuxHealth| {
                 health
@@ -473,7 +481,7 @@ async fn stop(engine: &mut Option<RunningEngine>) {
     if let Some(running) = engine.take()
         && let Err(error) = running.handle.stop().await
     {
-        tracing::warn!(%error, "Terminal capture ended with an error");
+        tracing::warn!(%error, "Terminal ended with an error");
     }
 }
 

@@ -17,6 +17,10 @@ pub mod legacy_find;
 pub mod settings;
 pub mod state;
 pub mod supervisor;
+pub mod takeover;
+pub mod takeover_continuity;
+pub mod takeover_runner;
+pub mod takeover_state;
 pub mod tmux_path;
 
 use std::path::{Path, PathBuf};

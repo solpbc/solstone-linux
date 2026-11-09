@@ -229,11 +229,11 @@ fn desktop_session_result(target: &crate::desktop_session::CaptureTarget) -> Che
         },
         SessionPresence::NotActive => CheckResult::warn(
             NAME,
-            "your desktop session isn't the one in front of the screen; nothing is taken in until it is",
+            "your desktop session isn't the one in front of the screen; screen and audio wait until it is",
         ),
         SessionPresence::NoDesktop => CheckResult::warn(
             NAME,
-            "no desktop session of yours on this computer; nothing is taken in until you log in here (a session you log in to remotely is never taken in)",
+            "no desktop session of yours on this computer; screen and audio wait until you log in here (a session you log in to remotely doesn't count)",
         ),
         SessionPresence::Unreachable => CheckResult::fail(
             NAME,
@@ -602,7 +602,7 @@ impl DoctorChecks for RealDoctor<'_> {
 
     fn desktop_not_applicable(&mut self) -> Option<&'static str> {
         if !self.config().desktop_capture {
-            return Some("desktop capture is off");
+            return Some("screen, audio and desktop activity are off");
         }
         let presence = crate::desktop_session::doctor_resolver()
             .ok()?

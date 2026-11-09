@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -20,16 +21,21 @@ use crate::private_link::{CaptureRootLock, PrivateStateLock};
 use crate::session_env::Runner;
 use crate::tray::TrayCommand;
 
-use super::legacy_find::{self, LegacyRootSources};
+use super::legacy_find::{self, LegacyFindings, LegacyRootSources};
 use super::state::{EngineState, TerminalState};
 use super::supervisor::{LegacyProbe, TerminalSwitches};
+use super::takeover::{self, StepError, TakeoverHost};
+use super::takeover_state::{self, Continuity, Phase, Stored, TakeoverState};
 
 /// Exit code for a refused `terminal on`.
 pub const REFUSED: i32 = 2;
 /// Exit code for a request that could not be answered in time; safe to retry.
 pub const TEMPORARY: i32 = 75;
+/// The move needs the owner's agreement and it was not given.
+pub const NEEDS_CONSENT: i32 = 3;
 
-const LEGACY_REFUSAL: &str = "the solstone tmux app is still installed on this computer, so terminal capture stays off for now";
+const LEGACY_REFUSAL: &str =
+    "solstone for tmux is still installed on this computer, so terminal stays off for now";
 
 fn running(config: &Config) -> bool {
     CaptureRootLock::is_held(&config.base_dir)
@@ -137,30 +143,303 @@ fn set_owner_switch(
 pub fn set_terminal(
     paths: ConfigPaths,
     enabled: bool,
+    consent: &mut Consent<'_>,
     runner: &dyn Runner,
     output: &mut dyn Write,
     errors: &mut dyn Write,
 ) -> i32 {
     let sources = LegacyRootSources::current(runner);
-    set_terminal_with_sources(paths, enabled, &sources, runner, output, errors)
+    set_terminal_with_sources(paths, enabled, consent, &sources, runner, output, errors)
 }
 
-fn set_terminal_with_sources(
+/// How the owner agrees to moving an old install in.
+pub struct Consent<'a> {
+    pub yes: bool,
+    pub tty: bool,
+    pub read_answer: &'a mut dyn FnMut() -> Option<String>,
+}
+
+impl Consent<'_> {
+    fn granted(&mut self, output: &mut dyn Write) -> bool {
+        if self.yes {
+            return true;
+        }
+        if !self.tty {
+            return false;
+        }
+        let _ = write!(output, "{CONSENT_QUESTION} ");
+        let _ = output.flush();
+        (self.read_answer)()
+            .is_some_and(|answer| matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+    }
+}
+
+const CONSENT_QUESTION: &str = "this moves solstone for tmux into this app, and it stops for good. what it still has waiting goes into your journal through this app, and anything that can't go stays on this computer. if this app isn't paired yet, it pairs with the journal solstone for tmux uses. move it now? [y/N]";
+const CONSENT_NEEDED: &str = "moving solstone for tmux needs your ok. run this in a terminal, or add --yes to `terminal adopt-tmux`.";
+
+/// `terminal adopt-tmux`: moves an old install in, or hands that to the daemon.
+pub fn adopt_tmux(
     paths: ConfigPaths,
-    enabled: bool,
+    consent: &mut Consent<'_>,
+    runner: &dyn Runner,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> i32 {
+    let sources = LegacyRootSources::current(runner);
+    adopt_tmux_with(
+        paths,
+        consent,
+        false,
+        &sources,
+        runner,
+        control_request::LONGEST_BOUND,
+        output,
+        errors,
+    )
+}
+
+fn unusable_record_line(path: &std::path::Path) -> String {
+    format!(
+        "the record of moving solstone for tmux can't be read: {}. please contact support, and don't delete it.",
+        path.display()
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adopt_tmux_with(
+    paths: ConfigPaths,
+    consent: &mut Consent<'_>,
+    terminal_on: bool,
+    sources: &LegacyRootSources,
+    runner: &dyn Runner,
+    bound: Duration,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> i32 {
+    let config = resolve_config_paths(&paths);
+    let state_dir = config.state_dir();
+    match takeover_state::load(&state_dir) {
+        Stored::Unusable(path) => {
+            let _ = writeln!(errors, "{}", unusable_record_line(&path));
+            return 1;
+        }
+        Stored::Present(state) if state.is_done() => {
+            let _ = writeln!(output, "solstone for tmux has already moved in.");
+            return 0;
+        }
+        Stored::Present(_) => {}
+        Stored::Absent => {
+            if !legacy_find::find(sources).found() {
+                let _ = writeln!(output, "no solstone for tmux to move in.");
+                return 0;
+            }
+            if !consent.granted(output) {
+                let _ = writeln!(errors, "{CONSENT_NEEDED}");
+                return NEEDS_CONSENT;
+            }
+        }
+    }
+    if running(&config) {
+        adopt_through_daemon(&state_dir, terminal_on, bound, output, errors)
+    } else {
+        adopt_with_no_daemon(&paths, terminal_on, sources, runner, output, errors)
+    }
+}
+
+const WAIT_POLL: Duration = Duration::from_millis(100);
+
+fn adopt_through_daemon(
+    state_dir: &std::path::Path,
+    terminal_on: bool,
+    bound: Duration,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> i32 {
+    let deadline = std::time::Instant::now() + bound;
+    let command = Command::AdoptTmux { terminal_on };
+    let temporary = |errors: &mut dyn Write| {
+        let _ = writeln!(
+            errors,
+            "the solstone app is still moving solstone for tmux in; it finishes on its own."
+        );
+        TEMPORARY
+    };
+    loop {
+        match control_request::daemon_advertises(state_dir, &command) {
+            control_request::Advertised::Supported => break,
+            control_request::Advertised::Unsupported => {
+                let _ = writeln!(
+                    errors,
+                    "the solstone app needs restarting before it can move solstone for tmux in."
+                );
+                return TEMPORARY;
+            }
+            control_request::Advertised::NotYet => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = writeln!(
+                errors,
+                "the solstone app did not answer, so nothing changed; try again in a moment."
+            );
+            return TEMPORARY;
+        }
+        std::thread::sleep(WAIT_POLL);
+    }
+    let accepted = match control_request::submit(state_dir, &command) {
+        Ok(id) => control_request::wait(
+            state_dir,
+            &id,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            WAIT_POLL,
+        ),
+        Err(error) => {
+            let _ = writeln!(errors, "could not reach the solstone app: {error}");
+            return 1;
+        }
+    };
+    match accepted {
+        WaitResult::Answered(outcome) if outcome.code != 0 => {
+            return report(outcome, output, errors);
+        }
+        WaitResult::Answered(_) => {}
+        WaitResult::TimedOut { withdrawn: true } => {
+            let _ = writeln!(
+                errors,
+                "the solstone app did not answer, so nothing changed; try again in a moment."
+            );
+            return TEMPORARY;
+        }
+        WaitResult::TimedOut { withdrawn: false } => return temporary(errors),
+    }
+    loop {
+        if let Stored::Present(state) = takeover_state::load(state_dir)
+            && state.phase >= Phase::Recovered
+            && state.settings_applied
+            && state.terminal_settled
+        {
+            let _ = writeln!(output, "solstone for tmux has moved in.");
+            return 0;
+        }
+        if std::time::Instant::now() >= deadline {
+            return temporary(errors);
+        }
+        std::thread::sleep(WAIT_POLL);
+    }
+}
+
+fn adopt_with_no_daemon(
+    paths: &ConfigPaths,
+    terminal_on: bool,
     sources: &LegacyRootSources,
     runner: &dyn Runner,
     output: &mut dyn Write,
     errors: &mut dyn Write,
 ) -> i32 {
-    if enabled && legacy_find::find(sources).found() {
-        let _ = writeln!(errors, "{LEGACY_REFUSAL}");
-        return REFUSED;
+    let config = resolve_config_paths(&daemon_paths(paths, runner));
+    let failed = |errors: &mut dyn Write, error: String| {
+        let _ = writeln!(errors, "could not move solstone for tmux in: {error}");
+        1
+    };
+    let capture = match CaptureRootLock::try_acquire(&config.base_dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            let _ = writeln!(
+                errors,
+                "the solstone app is starting; try again in a moment."
+            );
+            return TEMPORARY;
+        }
+        Err(error) => return failed(errors, error.to_string()),
+    };
+    let mut lock = match PrivateStateLock::acquire(&config.config_dir) {
+        Ok(lock) => lock,
+        Err(error) => return failed(errors, error.to_string()),
+    };
+    lock.adopt_capture_root(capture);
+    let state_dir = config.state_dir();
+    let host = TakeoverHost::new(runner, sources.clone());
+    let step = |result: Result<(), StepError>, errors: &mut dyn Write| match result {
+        Ok(()) => None,
+        Err(StepError::Temporary(text)) => {
+            let _ = writeln!(errors, "{text}");
+            Some(TEMPORARY)
+        }
+        Err(StepError::Refused(text)) => {
+            let _ = writeln!(errors, "{text}");
+            Some(1)
+        }
+    };
+    let mut state = match takeover_state::load(&state_dir) {
+        Stored::Present(state) => *state,
+        Stored::Unusable(path) => {
+            let _ = writeln!(errors, "{}", unusable_record_line(&path));
+            return 1;
+        }
+        Stored::Absent => match takeover::prepare(&host) {
+            Ok(state) => state,
+            Err(error) => return step(Err(error), errors).unwrap_or(1),
+        },
+    };
+    state.owner_turned_on |= terminal_on;
+    if let Err(error) = takeover_state::save(&state_dir, &state) {
+        return failed(errors, error.to_string());
+    }
+    if state.phase == Phase::Consented {
+        if let Some(code) = step(takeover::stop_for_good(&host, &mut state), errors) {
+            return code;
+        }
+        if let Err(error) = takeover_state::save(&state_dir, &state) {
+            let _ = writeln!(errors, "could not record the move yet: {error}");
+            return TEMPORARY;
+        }
+    }
+    if let Some(code) = step(takeover::recover_roots(&mut state), errors) {
+        return code;
+    }
+    if let Err(error) = takeover_state::save(&state_dir, &state) {
+        let _ = writeln!(errors, "could not record the move yet: {error}");
+        return TEMPORARY;
+    }
+    let _ = writeln!(
+        output,
+        "solstone for tmux has moved in. the solstone app finishes the rest when it starts."
+    );
+    0
+}
+
+fn set_terminal_with_sources(
+    paths: ConfigPaths,
+    enabled: bool,
+    consent: &mut Consent<'_>,
+    sources: &LegacyRootSources,
+    runner: &dyn Runner,
+    output: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> i32 {
+    if enabled {
+        let state_dir = resolve_config_paths(&paths).state_dir();
+        let stored = takeover_state::load(&state_dir);
+        // A move that has not reached the app yet is finished first.
+        let unfinished = stored
+            .present()
+            .is_some_and(|state| state.phase < Phase::Recovered);
+        if unfinished || (stored == Stored::Absent && legacy_find::find(sources).found()) {
+            return adopt_tmux_with(
+                paths,
+                consent,
+                true,
+                sources,
+                runner,
+                control_request::LONGEST_BOUND,
+                output,
+                errors,
+            );
+        }
     }
     let (command, confirmation) = if enabled {
-        (Command::TerminalOn, "terminal capture is on.")
+        (Command::TerminalOn, "terminal is on.")
     } else {
-        (Command::TerminalOff, "terminal capture is off.")
+        (Command::TerminalOff, "terminal is off.")
     };
     set_owner_switch(
         paths,
@@ -184,9 +463,15 @@ pub fn set_desktop_capture(
     errors: &mut dyn Write,
 ) -> i32 {
     let (command, confirmation) = if enabled {
-        (Command::DesktopCaptureOn, "desktop capture is on.")
+        (
+            Command::DesktopCaptureOn,
+            "screen, audio and desktop activity are on.",
+        )
     } else {
-        (Command::DesktopCaptureOff, "desktop capture is off.")
+        (
+            Command::DesktopCaptureOff,
+            "screen, audio and desktop activity are off.",
+        )
     };
     set_owner_switch(
         paths,
@@ -220,6 +505,69 @@ pub fn control_without_bus(
     send(&config.state_dir(), &command, output, errors)
 }
 
+fn takeover_lines(config: &Config) -> Vec<String> {
+    let state = match takeover_state::load(&config.state_dir()) {
+        Stored::Absent => return Vec::new(),
+        Stored::Unusable(path) => return vec![format!("  {}", unusable_record_line(&path))],
+        Stored::Present(state) => state,
+    };
+    let mut lines = Vec::new();
+    let phase = match state.phase {
+        Phase::Consented => Some("stopping the old app"),
+        Phase::Stopped => Some("bringing over what's waiting"),
+        Phase::Recovered => Some("finishing"),
+        Phase::Done => None,
+    };
+    if let Some(phase) = phase {
+        lines.push(format!("  moving solstone for tmux in: {phase}"));
+    }
+    match &state.continuity {
+        Some(Continuity::Adopted) => {
+            lines.push("  terminal history: continued, under the old pairing".to_owned());
+        }
+        Some(Continuity::Continued) => {
+            lines.push("  terminal history: continued".to_owned());
+        }
+        Some(Continuity::NewStream {
+            reason,
+            needs_attention,
+        }) => {
+            lines.push(format!("  terminal history: starts fresh ({reason})"));
+            if *needs_attention {
+                lines.push("  this needs attention: please contact support".to_owned());
+            }
+        }
+        None => {}
+    }
+    if !state.service_was_on && !state.owner_turned_on && state.terminal_settled {
+        lines.push("  solstone for tmux had been stopped, so terminal stays off".to_owned());
+    }
+    if let Some(answer) = &state.last_answer {
+        lines.push(format!("  waiting: {answer}"));
+    }
+    for path in &state.conflicting_credentials {
+        lines.push(format!("  more than one old pairing: {}", path.display()));
+    }
+    for (root, record) in &state.roots {
+        if let Some(problem) = &record.problem {
+            lines.push(format!("  couldn't use {}: {problem}", root.display()));
+        }
+        if record.waiting != 0 {
+            lines.push(format!(
+                "  {} segment(s) from solstone for tmux waiting to upload",
+                record.waiting
+            ));
+        }
+        if record.held != 0 {
+            lines.push(format!("  {} old segment(s) held back", record.held));
+        }
+        for path in &record.problem_paths {
+            lines.push(format!("  problem: {}", path.display()));
+        }
+    }
+    lines
+}
+
 /// The terminal lines of `status` and `terminal status`.
 pub fn status_lines(config: &Config, say_if_stopped: bool) -> Vec<String> {
     let daemon = running(config);
@@ -237,6 +585,7 @@ pub fn status_lines(config: &Config, say_if_stopped: bool) -> Vec<String> {
         config.terminal
     };
     let mut lines = vec![format!("terminal: {}", if on { "on" } else { "off" })];
+    lines.extend(takeover_lines(config));
     match (daemon, &state) {
         (false, _) => {
             if say_if_stopped {
@@ -259,7 +608,7 @@ pub fn status_lines(config: &Config, say_if_stopped: bool) -> Vec<String> {
     }
     if counts.awaiting_recovery != 0 {
         lines.push(format!(
-            "  {} unfinished segment(s) waiting for terminal capture to run again",
+            "  {} unfinished segment(s) waiting for terminal to run again",
             counts.awaiting_recovery
         ));
     }
@@ -307,7 +656,7 @@ pub fn session_bus_line(config: &Config) -> Option<String> {
 
 /// Said by `status` and `doctor` when the daemon started without a session bus.
 pub const NO_BUS_LINE: &str =
-    "screen capture: restart the app once this computer has a session bus";
+    "screen and audio: restart the app after you log in to your desktop here";
 
 pub fn terminal_status(paths: ConfigPaths, output: &mut dyn Write) -> i32 {
     let config = load_config(paths).config;
@@ -341,6 +690,17 @@ impl crate::window_control::LiveSettings for DaemonLiveSettings {
         self.terminal.set_enabled(enabled);
     }
 
+    fn terminal_settings(&self, settings: Value) {
+        self.terminal
+            .set_settings(super::settings::TerminalSettings::from_saved(Some(
+                &settings,
+            )));
+    }
+
+    fn recheck_terminal(&self) {
+        self.terminal.recheck();
+    }
+
     fn desktop_capture(&self, enabled: bool) {
         self.send(TrayCommand::SetDesktopCapture(enabled));
     }
@@ -360,14 +720,52 @@ impl crate::window_control::LiveSettings for DaemonLiveSettings {
     }
 }
 
+/// Reads what an old install is, without changing anything.
+pub type TakeoverPrepare = Arc<dyn Fn() -> Result<TakeoverState, StepError> + Send + Sync>;
+
 /// Applies requests inside the running daemon.
 pub struct DaemonApplier {
     pub paths: ConfigPaths,
     pub live: Arc<dyn crate::window_control::LiveSettings>,
     pub legacy: LegacyProbe,
+    pub state_dir: PathBuf,
+    pub prepare: TakeoverPrepare,
+    pub wake_takeover: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl DaemonApplier {
+    /// Records the owner's agreement; the takeover's own thread does the work.
+    fn adopt(&self, terminal_on: bool) -> Outcome {
+        match takeover_state::load(&self.state_dir) {
+            Stored::Unusable(path) => Outcome::failed(1, unusable_record_line(&path)),
+            Stored::Present(_) => {
+                if terminal_on {
+                    let _ = takeover_state::update(&self.state_dir, |state| {
+                        state.owner_turned_on = true;
+                    });
+                }
+                (self.wake_takeover)();
+                Outcome::ok("moving solstone for tmux in.")
+            }
+            Stored::Absent => {
+                if !(self.legacy)().found() {
+                    return Outcome::failed(1, "no solstone for tmux to move in.");
+                }
+                let mut state = match (self.prepare)() {
+                    Ok(state) => state,
+                    Err(StepError::Refused(text)) => return Outcome::failed(1, text),
+                    Err(StepError::Temporary(text)) => return Outcome::failed(TEMPORARY, text),
+                };
+                state.owner_turned_on = terminal_on;
+                if let Err(error) = takeover_state::save_if_absent(&self.state_dir, &state) {
+                    return Outcome::failed(1, format!("could not save that: {error}"));
+                }
+                (self.wake_takeover)();
+                Outcome::ok("moving solstone for tmux in.")
+            }
+        }
+    }
+
     fn save(&self, field: &str, value: bool) -> Result<(), Outcome> {
         set_guided_field(&self.paths, field, Value::Bool(value))
             .map(|_| ())
@@ -384,20 +782,20 @@ impl Applier for DaemonApplier {
                 }
                 self.save("terminal", true).map(|()| {
                     self.live.terminal(true);
-                    "terminal capture is on."
+                    "terminal is on."
                 })
             }
             Command::TerminalOff => self.save("terminal", false).map(|()| {
                 self.live.terminal(false);
-                "terminal capture is off."
+                "terminal is off."
             }),
             Command::DesktopCaptureOn => self.save("desktop_capture", true).map(|()| {
                 self.live.desktop_capture(true);
-                "desktop capture is on."
+                "screen, audio and desktop activity are on."
             }),
             Command::DesktopCaptureOff => self.save("desktop_capture", false).map(|()| {
                 self.live.desktop_capture(false);
-                "desktop capture is off."
+                "screen, audio and desktop activity are off."
             }),
             Command::Pause { minutes } => {
                 self.live.pause(*minutes);
@@ -407,6 +805,7 @@ impl Applier for DaemonApplier {
                 self.live.resume();
                 Ok("resumed.")
             }
+            Command::AdoptTmux { terminal_on } => return self.adopt(*terminal_on),
         };
         match result {
             Ok(line) => Outcome::ok(line),
@@ -415,9 +814,66 @@ impl Applier for DaemonApplier {
     }
 }
 
+/// What holds the engine back. Once the old spool is recovered the move no longer
+/// does; with an unreadable record, only a service that may still be running does.
+pub fn engine_hold(state_dir: &std::path::Path, sources: &LegacyRootSources) -> LegacyFindings {
+    match takeover_state::load(state_dir) {
+        Stored::Present(state) if state.phase >= Phase::Recovered && state.settings_applied => {
+            LegacyFindings::default()
+        }
+        Stored::Unusable(_) => LegacyFindings {
+            units: legacy_find::find(sources).units,
+            ..LegacyFindings::default()
+        },
+        Stored::Present(_) | Stored::Absent => legacy_find::find(sources),
+    }
+}
+
 /// The real legacy find, for the daemon.
-pub fn production_legacy_probe() -> LegacyProbe {
-    Arc::new(|| legacy_find::find(&LegacyRootSources::current(&crate::cli::SystemRunner)))
+pub fn production_legacy_probe(state_dir: PathBuf) -> LegacyProbe {
+    Arc::new(move || {
+        engine_hold(
+            &state_dir,
+            &LegacyRootSources::current(&crate::cli::SystemRunner),
+        )
+    })
+}
+
+/// Whether turning terminal on from the window must first ask to move an old
+/// install in.
+pub fn window_move_needed() -> bool {
+    let config = resolve_config_paths(&ConfigPaths::default());
+    takeover_state::load(&config.state_dir()) == Stored::Absent
+        && legacy_find::find(&LegacyRootSources::current(&crate::cli::SystemRunner)).found()
+}
+
+/// The window's agreement, through the same request a shell would send. Returns
+/// the line to show when it could not be handed over.
+pub fn window_request_move() -> Option<String> {
+    let config = resolve_config_paths(&ConfigPaths::default());
+    if !running(&config) {
+        return Some("the solstone app isn't running; start it and try again.".to_owned());
+    }
+    match control_request::request(
+        &config.state_dir(),
+        &Command::AdoptTmux { terminal_on: true },
+    ) {
+        Ok(WaitResult::Answered(outcome)) if outcome.code == 0 => None,
+        Ok(WaitResult::Answered(outcome)) => Some(outcome.line),
+        Ok(WaitResult::TimedOut { .. }) => {
+            Some("the solstone app did not answer in time; try again in a moment.".to_owned())
+        }
+        Err(error) => Some(format!("could not reach the solstone app: {error}")),
+    }
+}
+
+/// The real read of an old install, for the daemon.
+pub fn production_takeover_prepare() -> TakeoverPrepare {
+    Arc::new(|| {
+        let runner = crate::cli::SystemRunner;
+        let sources = LegacyRootSources::current(&runner);
+        takeover::prepare(&TakeoverHost::new(&runner, sources))
+    })
 }
 
 #[cfg(test)]
@@ -464,8 +920,21 @@ mod tests {
     fn turn_on(root: &Path, sources: &LegacyRootSources) -> (i32, String) {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code =
-            set_terminal_with_sources(paths(root), true, sources, &NoSystemctl, &mut out, &mut err);
+        let mut no_answer = || None;
+        let mut consent = Consent {
+            yes: false,
+            tty: false,
+            read_answer: &mut no_answer,
+        };
+        let code = set_terminal_with_sources(
+            paths(root),
+            true,
+            &mut consent,
+            sources,
+            &NoSystemctl,
+            &mut out,
+            &mut err,
+        );
         (code, String::from_utf8(err).unwrap())
     }
 
@@ -517,9 +986,16 @@ mod tests {
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
+        let mut no_answer = || None;
+        let mut consent = Consent {
+            yes: false,
+            tty: false,
+            read_answer: &mut no_answer,
+        };
         let code = set_terminal_with_sources(
             shell_paths,
             true,
+            &mut consent,
             &sources(&temp.path().join("home"), Vec::new()),
             &NoSystemctl,
             &mut out,
@@ -562,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_refuses_for_each_sign_of_an_old_install_and_changes_nothing() {
+    fn turn_on_asks_first_for_each_sign_of_an_old_install_and_changes_nothing() {
         // The user unit alone.
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -571,7 +1047,7 @@ mod tests {
         fs::write(&unit, "[Unit]\n").unwrap();
         let before = snapshot_config(temp.path());
         let (code, _) = turn_on(temp.path(), &sources(&home, Vec::new()));
-        assert_eq!(code, REFUSED);
+        assert_eq!(code, NEEDS_CONSENT);
         assert_eq!(snapshot_config(temp.path()), before);
         fs::remove_file(&unit).unwrap();
 
@@ -579,7 +1055,10 @@ mod tests {
         let credentials = home.join(".config/solstone-tmux/credentials.json");
         fs::create_dir_all(credentials.parent().unwrap()).unwrap();
         fs::write(&credentials, "{}").unwrap();
-        assert_eq!(turn_on(temp.path(), &sources(&home, Vec::new())).0, REFUSED);
+        assert_eq!(
+            turn_on(temp.path(), &sources(&home, Vec::new())).0,
+            NEEDS_CONSENT
+        );
         fs::remove_file(&credentials).unwrap();
 
         // Captures under an XDG_DATA_HOME only the user manager knows.
@@ -591,7 +1070,7 @@ mod tests {
         )]);
         assert_eq!(
             turn_on(temp.path(), &sources(&home, vec![manager])).0,
-            REFUSED
+            NEEDS_CONSENT
         );
         assert_eq!(snapshot_config(temp.path()), before);
     }
@@ -659,6 +1138,9 @@ mod tests {
                 }
                 findings
             }),
+            state_dir: root.join("takeover-state"),
+            prepare: Arc::new(|| Ok(TakeoverState::default())),
+            wake_takeover: Arc::new(|| {}),
         }
     }
 
@@ -679,6 +1161,175 @@ mod tests {
             *live.calls.lock().unwrap(),
             ["terminal true", "desktop false", "pause Some(5)", "resume"]
         );
+    }
+
+    fn adopt(root: &Path, sources: &LegacyRootSources, yes: bool) -> (i32, String, String) {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut no_answer = || None;
+        let mut consent = Consent {
+            yes,
+            tty: false,
+            read_answer: &mut no_answer,
+        };
+        let code = adopt_tmux_with(
+            paths(root),
+            &mut consent,
+            false,
+            sources,
+            &NoSystemctl,
+            Duration::from_secs(5),
+            &mut out,
+            &mut err,
+        );
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    fn old_install(home: &Path) -> PathBuf {
+        let credentials = home.join(".config/solstone-tmux/credentials.json");
+        fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+        fs::write(&credentials, "{}").unwrap();
+        fs::create_dir_all(home.join(".local/share/solstone-tmux/captures")).unwrap();
+        credentials
+    }
+
+    #[test]
+    fn with_no_agreement_nothing_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let credentials = old_install(&home);
+        let (code, _, _) = adopt(temp.path(), &sources(&home, Vec::new()), false);
+        assert_eq!(code, NEEDS_CONSENT);
+        assert!(credentials.exists());
+        let state_dir = resolve_config_paths(&paths(temp.path())).state_dir();
+        assert_eq!(takeover_state::load(&state_dir), Stored::Absent);
+    }
+
+    #[test]
+    fn nothing_to_move_is_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        assert_eq!(adopt(temp.path(), &sources(&home, Vec::new()), true).0, 0);
+    }
+
+    #[test]
+    fn with_no_daemon_it_records_and_recovers_and_leaves_the_rest_for_the_daemon() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        old_install(&home);
+        let (code, _, err) = adopt(temp.path(), &sources(&home, Vec::new()), true);
+        assert_eq!(code, 0, "{err}");
+        let state_dir = resolve_config_paths(&paths(temp.path())).state_dir();
+        let Stored::Present(state) = takeover_state::load(&state_dir) else {
+            panic!("no record");
+        };
+        assert_eq!(state.phase, Phase::Recovered);
+        assert!(!state.settings_applied);
+        assert!(!state.terminal_settled);
+        assert!(!load_config(paths(temp.path())).config.terminal);
+    }
+
+    #[test]
+    fn a_running_daemon_is_handed_the_move() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        old_install(&home);
+        let config = resolve_config_paths(&paths(temp.path()));
+        fs::create_dir_all(&config.base_dir).unwrap();
+        let _lock = CaptureRootLock::try_acquire(&config.base_dir)
+            .unwrap()
+            .unwrap();
+        let state_dir = config.state_dir();
+        struct Finishing(PathBuf);
+        impl control_request::Applier for Finishing {
+            fn apply(&self, command: &Command) -> Outcome {
+                assert!(matches!(command, Command::AdoptTmux { .. }));
+                let state = TakeoverState {
+                    phase: Phase::Recovered,
+                    settings_applied: true,
+                    terminal_settled: true,
+                    ..TakeoverState::default()
+                };
+                takeover_state::save(&self.0, &state).unwrap();
+                Outcome::ok("moving")
+            }
+        }
+        let server = control_request::RequestServer::spawn(
+            &state_dir,
+            Arc::new(Finishing(state_dir.clone())),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        let (code, _, err) = adopt(temp.path(), &sources(&home, Vec::new()), true);
+        server.stop();
+        assert_eq!(code, 0, "{err}");
+    }
+
+    #[test]
+    fn the_daemon_records_consent_and_answers_at_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = Arc::new(Recording::default());
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut applier = applier(temp.path(), live, true);
+        let flag = woken.clone();
+        applier.wake_takeover = Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert_eq!(
+            applier
+                .apply(&Command::AdoptTmux { terminal_on: true })
+                .code,
+            0
+        );
+        assert!(woken.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(
+            takeover_state::load(&applier.state_dir),
+            Stored::Present(_)
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_record_holds_the_engine_only_while_the_service_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        old_install(&home);
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(takeover_state::state_path(&state_dir), b"{").unwrap();
+        let sources = sources(&home, Vec::new());
+        assert!(!engine_hold(&state_dir, &sources).found());
+        let unit = home.join(".config/systemd/user/solstone-tmux.service");
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        fs::write(&unit, "[Unit]\n").unwrap();
+        assert!(engine_hold(&state_dir, &sources).found());
+    }
+
+    #[test]
+    fn once_recovered_the_old_install_no_longer_holds_the_engine() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        old_install(&home);
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let sources = sources(&home, Vec::new());
+        assert!(engine_hold(&state_dir, &sources).found());
+        let mut state = TakeoverState {
+            phase: Phase::Recovered,
+            ..TakeoverState::default()
+        };
+        takeover_state::save(&state_dir, &state).unwrap();
+        assert!(
+            engine_hold(&state_dir, &sources).found(),
+            "the engine waits for the carried settings"
+        );
+        state.settings_applied = true;
+        takeover_state::save(&state_dir, &state).unwrap();
+        assert!(!engine_hold(&state_dir, &sources).found());
     }
 
     #[test]

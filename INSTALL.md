@@ -212,7 +212,7 @@ exactly the preview you read. Saving does not send it anywhere.
 The window requires GTK 4.6 or newer. Debian and RPM recommend it, and the
 portable archive needs it installed separately. The intake process has no GTK
 dependency and keeps running when the window closes or cannot start. A computer
-with no desktop can run the app without GTK, for terminal capture.
+with no desktop can run the app without GTK, for terminal.
 
 ### Pair from a terminal
 
@@ -294,16 +294,22 @@ On Wayland, the first time the solstone app starts, your desktop asks which scre
 
 Activity detection uses screen-lock and power-save signals to notice when you step away. GNOME provides both signals; KDE Wayland provides screen lock; X11 can also provide DPMS power save. Where neither signal is available, the solstone app on linux still takes in what you share and that material goes into your journal, but activity-based segment boundaries do not trigger.
 
-### Terminal capture
+### Your tmux sessions
 
-The app can take in your tmux sessions. It's off until you turn it on, in the window's
+The app can take in your tmux sessions, and all of it goes into your journal. It's off until you turn it on, in the window's
 settings or with `solstone-linux terminal on`, and it needs tmux on this computer. It uses
-this app's connection to your journal. Terminal capture follows your account rather than
-the desktop in front of the screen, so it works over SSH and on a computer with no desktop.
-Pausing the app pauses it too. `solstone-linux terminal status` shows what it's doing.
+this app's connection to your journal. Terminal follows your account rather than the desktop
+in front of the screen, so it works over SSH and on a computer with no desktop. Pausing the
+app pauses it too. `solstone-linux terminal status` shows what it's doing.
 
-`solstone-linux desktop-capture off` keeps screen, audio and desktop activity closed, and
-the window has the same switch.
+If solstone for tmux is on this computer, turning terminal on asks first, then moves it in:
+what it still has waiting goes into your journal through this app, anything that can't go
+stays on this computer, and solstone for tmux stops for good.
+`solstone-linux terminal adopt-tmux` makes the same move from a shell, and turns terminal on
+only if solstone for tmux was on.
+
+`solstone-linux desktop-capture off` turns off screen, audio and desktop activity, and the
+window has the same switch.
 
 ### Which desktop session it takes in
 

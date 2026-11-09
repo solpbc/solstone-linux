@@ -202,10 +202,14 @@ pub const SETTINGS_ACTIVITY_THROUGH_PAUSE_HELP: &str =
 pub const SETTINGS_ACTIVITY_TITLES: &str = "window titles";
 pub const SETTINGS_ACTIVITY_URLS: &str = "web addresses (turns on desktop accessibility)";
 pub const SETTINGS_TERMINAL: &str = "terminal";
-pub const SETTINGS_TERMINAL_HELP: &str = "takes in your tmux sessions. needs tmux on this computer, and works over ssh and with no desktop.";
+pub const SETTINGS_TERMINAL_HELP: &str = "takes in your tmux sessions, and all of it goes into your journal. needs tmux on this computer, and works over SSH and with no desktop.";
+pub const SETTINGS_MOVE_TMUX_TITLE: &str = "move solstone for tmux in?";
+pub const SETTINGS_MOVE_TMUX_BODY: &str = "this moves solstone for tmux into this app, and it stops for good. what it still has waiting goes into your journal through this app, and anything that can't go stays on this computer. if this app isn't paired yet, it pairs with the journal solstone for tmux uses.";
+pub const SETTINGS_MOVE_TMUX_CONFIRM: &str = "move it";
+pub const SETTINGS_MOVE_TMUX_CANCEL: &str = "not now";
 pub const SETTINGS_DESKTOP_CAPTURE: &str = "screen, audio and desktop activity";
 pub const SETTINGS_DESKTOP_CAPTURE_HELP: &str =
-    "off keeps all three closed, whatever your desktop is doing.";
+    "off means none of the three goes into your journal, whatever your desktop is doing.";
 pub const SETTINGS_ACTIVITY_ONLY: &str = "activity only";
 pub const SETTINGS_ACTIVITY_ONLY_HELP: &str =
     "desktop activity only, with screen and audio intake off.";
@@ -441,6 +445,10 @@ pub enum CopyKey {
     SettingsActivityUrls,
     SettingsTerminal,
     SettingsTerminalHelp,
+    SettingsMoveTmuxTitle,
+    SettingsMoveTmuxBody,
+    SettingsMoveTmuxConfirm,
+    SettingsMoveTmuxCancel,
     SettingsDesktopCapture,
     SettingsDesktopCaptureHelp,
     SettingsActivityOnly,
@@ -631,6 +639,10 @@ impl CopyKey {
             Self::SettingsActivityUrls => SETTINGS_ACTIVITY_URLS,
             Self::SettingsTerminal => SETTINGS_TERMINAL,
             Self::SettingsTerminalHelp => SETTINGS_TERMINAL_HELP,
+            Self::SettingsMoveTmuxTitle => SETTINGS_MOVE_TMUX_TITLE,
+            Self::SettingsMoveTmuxBody => SETTINGS_MOVE_TMUX_BODY,
+            Self::SettingsMoveTmuxConfirm => SETTINGS_MOVE_TMUX_CONFIRM,
+            Self::SettingsMoveTmuxCancel => SETTINGS_MOVE_TMUX_CANCEL,
             Self::SettingsDesktopCapture => SETTINGS_DESKTOP_CAPTURE,
             Self::SettingsDesktopCaptureHelp => SETTINGS_DESKTOP_CAPTURE_HELP,
             Self::SettingsActivityOnly => SETTINGS_ACTIVITY_ONLY,

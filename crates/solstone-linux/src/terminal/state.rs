@@ -68,12 +68,12 @@ impl TerminalState {
     /// One owner-readable line for the engine's state.
     pub fn engine_line(&self) -> String {
         match self.state {
-            EngineState::Off => "terminal capture is off".to_owned(),
+            EngineState::Off => "terminal is off".to_owned(),
             EngineState::Paused => "paused".to_owned(),
             EngineState::Running => "running".to_owned(),
             EngineState::TmuxNotFound => "tmux not found".to_owned(),
             EngineState::WaitingForTmuxApp => {
-                "waiting: the solstone tmux app is still installed and has to be moved over first"
+                "waiting: solstone for tmux is still installed. turn terminal on in the app, or run `solstone-linux terminal on`, to move it over"
                     .to_owned()
             }
             EngineState::Restarting => match &self.error {

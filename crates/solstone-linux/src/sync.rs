@@ -19,6 +19,8 @@ use std::{
 };
 use tokio::{sync::Notify, task::JoinHandle};
 
+mod takeover_pass;
+
 use crate::{
     config::Config,
     observer::Clock,
@@ -693,6 +695,10 @@ struct SyncWorker {
     last_contact_flush: f64,
     draining_shutdown: bool,
     retry_floors: HashMap<PathBuf, f64>,
+    /// When a refused segment of the old terminal spool may be sent again.
+    legacy_retry: HashMap<PathBuf, f64>,
+    migration_next_at: f64,
+    migration_backoff: f64,
     #[cfg(test)]
     fail_next_pass: bool,
 }
@@ -753,6 +759,9 @@ impl SyncWorker {
             last_contact_flush: 0.0,
             draining_shutdown: false,
             retry_floors: HashMap::new(),
+            legacy_retry: HashMap::new(),
+            migration_next_at: f64::NEG_INFINITY,
+            migration_backoff: 5.0,
             #[cfg(test)]
             fail_next_pass: false,
         }
@@ -932,6 +941,7 @@ impl SyncWorker {
             return Err("injected pass failure");
         }
         self.sync_pass().await;
+        self.takeover_drain().await;
         Ok(())
     }
 
@@ -1081,9 +1091,20 @@ impl SyncWorker {
         self.finish_confirmed_locally();
         let now = self.clock.wall_seconds();
         ensure_cutover(&self.config.state_dir(), &self.config.captures_dir());
+        self.takeover_settle().await;
+        if !self.association_is_current() {
+            return;
+        }
         let (current_identity, current_pairing) = self.current_identity_and_pairing();
         let cutover_segments = load_cutover_segments(&self.config.state_dir());
-        let segments_by_day = collect_segments(&self.config.captures_dir());
+        let mut segments_by_day = collect_segments(&self.config.captures_dir());
+        // Terminal uploads wait until the old install's history has a home.
+        if crate::terminal::takeover_state::load(&self.config.state_dir()).uploads_gated() {
+            for segments in segments_by_day.values_mut() {
+                segments.retain(|segment| !crate::terminal::is_terminal_segment(segment));
+            }
+            segments_by_day.retain(|_, segments| !segments.is_empty());
+        }
         let mut days: Vec<String> = segments_by_day.keys().cloned().collect();
         days.sort_by(|a, b| b.cmp(a));
 
@@ -3068,6 +3089,13 @@ mod tests {
             None,
         );
         (server, worker)
+    }
+
+    pub(super) async fn test_worker_for_takeover(
+        temp: &tempfile::TempDir,
+        responses: Vec<(u16, Value)>,
+    ) -> (LinkedMockServer, SyncWorker) {
+        test_worker(temp, responses).await
     }
 
     trait RequestLog {

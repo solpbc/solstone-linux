@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 
 use solstone_terminal::{TmuxHealth, check_tmux_health};
 
+pub(super) fn is_executable_file(path: &Path) -> bool {
+    usable(path)
+}
+
 fn usable(path: &Path) -> bool {
     path.is_absolute() && check_tmux_health(path) == TmuxHealth::Found
 }

@@ -258,6 +258,10 @@ fn default_true() -> bool {
 /// Applies a saved owner switch to the running app, without a restart.
 pub trait LiveSettings: Send + Sync {
     fn terminal(&self, enabled: bool);
+    /// New terminal settings, applied at the next engine start.
+    fn terminal_settings(&self, _settings: serde_json::Value) {}
+    /// Looks again now for anything that holds terminal capture back.
+    fn recheck_terminal(&self) {}
     fn desktop_capture(&self, enabled: bool);
     fn pause(&self, minutes: Option<u64>);
     fn resume(&self);

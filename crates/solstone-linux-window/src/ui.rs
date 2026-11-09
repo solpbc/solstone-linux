@@ -1662,12 +1662,17 @@ fn create_settings_page(
     {
         let ctrl = Rc::clone(&controller);
         let rendering = Rc::clone(&rendering);
-        terminal_switch.connect_state_set(move |_, state| {
+        terminal_switch.connect_state_set(move |switch, state| {
             if !rendering.get() {
-                let mut c = ctrl.borrow_mut();
-                c.settings_draft.terminal = Some(state);
-                c.settings_draft.terminal_dirty =
-                    !c.document.saved_available || state != c.document.settings.terminal;
+                {
+                    let mut c = ctrl.borrow_mut();
+                    c.settings_draft.terminal = Some(state);
+                    c.settings_draft.terminal_dirty =
+                        !c.document.saved_available || state != c.document.settings.terminal;
+                }
+                if state {
+                    offer_tmux_move(switch.clone(), Rc::clone(&ctrl), Rc::clone(&rendering));
+                }
             }
             glib::Propagation::Proceed
         });
@@ -2708,6 +2713,65 @@ fn create_help_page(
     }
 
     scrolled
+}
+
+/// A solstone tmux app on this computer moves in only with the owner's agreement,
+/// so the switch goes back until the app has finished moving it.
+fn offer_tmux_move(switch: gtk::Switch, ctrl: Rc<RefCell<Controller>>, rendering: Rc<Cell<bool>>) {
+    glib::spawn_future_local(async move {
+        let needed = gio::spawn_blocking(solstone_linux::terminal::control::window_move_needed)
+            .await
+            .unwrap_or(false);
+        if !needed {
+            return;
+        }
+        {
+            let mut c = ctrl.borrow_mut();
+            c.settings_draft.terminal = None;
+            c.settings_draft.terminal_dirty = false;
+        }
+        rendering.set(true);
+        switch.set_active(false);
+        rendering.set(false);
+        let parent = switch.root().and_downcast::<gtk::Window>();
+        let dialog = gtk::MessageDialog::builder()
+            .modal(true)
+            .message_type(gtk::MessageType::Question)
+            .text(CopyKey::SettingsMoveTmuxTitle.as_str())
+            .secondary_text(CopyKey::SettingsMoveTmuxBody.as_str())
+            .build();
+        dialog.set_transient_for(parent.as_ref());
+        dialog.add_button(
+            CopyKey::SettingsMoveTmuxCancel.as_str(),
+            gtk::ResponseType::Cancel,
+        );
+        dialog.add_button(
+            CopyKey::SettingsMoveTmuxConfirm.as_str(),
+            gtk::ResponseType::Accept,
+        );
+        dialog.connect_response(move |dialog, response| {
+            dialog.close();
+            if response == gtk::ResponseType::Accept {
+                glib::spawn_future_local(async {
+                    let refused =
+                        gio::spawn_blocking(solstone_linux::terminal::control::window_request_move)
+                            .await
+                            .unwrap_or(None);
+                    if let Some(line) = refused {
+                        let notice = gtk::MessageDialog::builder()
+                            .modal(true)
+                            .message_type(gtk::MessageType::Warning)
+                            .buttons(gtk::ButtonsType::Close)
+                            .text(line)
+                            .build();
+                        notice.connect_response(|notice, _| notice.close());
+                        notice.present();
+                    }
+                });
+            }
+        });
+        dialog.present();
+    });
 }
 
 #[cfg(test)]

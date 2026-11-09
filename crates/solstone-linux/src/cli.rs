@@ -99,7 +99,7 @@ enum Commands {
     },
     #[command(about = "resume intake")]
     Resume,
-    #[command(about = "terminal capture: on, off or status", subcommand)]
+    #[command(about = "terminal: on, off or status", subcommand)]
     Terminal(TerminalAction),
     #[command(
         name = "desktop-capture",
@@ -119,12 +119,20 @@ enum Commands {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 enum TerminalAction {
-    #[command(about = "show whether terminal capture is on and what it is doing")]
+    #[command(about = "show whether terminal is on and what it is doing")]
     Status,
-    #[command(about = "turn terminal capture on")]
+    #[command(about = "turn terminal on")]
     On,
-    #[command(about = "turn terminal capture off")]
+    #[command(about = "turn terminal off")]
     Off,
+    #[command(
+        name = "adopt-tmux",
+        about = "move an existing solstone for tmux into this app"
+    )]
+    AdoptTmux {
+        #[arg(long, help = "agree without being asked")]
+        yes: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
@@ -511,11 +519,21 @@ pub fn run() -> i32 {
         Commands::Terminal(action) => {
             let paths = ConfigPaths::default();
             let (output, errors) = (&mut io::stdout(), &mut io::stderr());
+            let mut read_answer = || {
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer).ok().map(|_| answer)
+            };
+            let mut consent = crate::terminal::control::Consent {
+                yes: matches!(action, TerminalAction::AdoptTmux { yes: true }),
+                tty: io::stdin().is_terminal(),
+                read_answer: &mut read_answer,
+            };
             match action {
                 TerminalAction::Status => crate::terminal::control::terminal_status(paths, output),
                 TerminalAction::On => crate::terminal::control::set_terminal(
                     paths,
                     true,
+                    &mut consent,
                     &SystemRunner,
                     output,
                     errors,
@@ -523,6 +541,14 @@ pub fn run() -> i32 {
                 TerminalAction::Off => crate::terminal::control::set_terminal(
                     paths,
                     false,
+                    &mut consent,
+                    &SystemRunner,
+                    output,
+                    errors,
+                ),
+                TerminalAction::AdoptTmux { .. } => crate::terminal::control::adopt_tmux(
+                    paths,
+                    &mut consent,
                     &SystemRunner,
                     output,
                     errors,
@@ -1513,9 +1539,7 @@ pub(crate) fn prepare_run_config_waiting(
         &mut || {
             if !told_waiting {
                 told_waiting = true;
-                tracing::info!(
-                    "waiting for another solstone-linux process to release the capture folder"
-                );
+                tracing::info!("waiting for another solstone-linux process to release its folder");
             }
             let _ = sd_notify::notify(&[sd_notify::NotifyState::ExtendTimeoutUsec(
                 CAPTURE_ROOT_EXTEND_USEC,

@@ -1126,6 +1126,13 @@ pub(crate) fn credential_present(config_root: &Path) -> bool {
     config_root.join(CREDENTIALS_FILENAME).exists()
 }
 
+/// The journal's answer to a migration decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MigrationReply {
+    Answered { status: u16, reason: Option<String> },
+    Unreachable,
+}
+
 pub(crate) fn load_credential(config_root: &Path) -> Result<Option<Credential>, PrivateStateError> {
     let Some(bytes) = read_private_file(
         &config_root.join(CREDENTIALS_FILENAME),
@@ -2139,6 +2146,46 @@ impl PrivateLinkCapability {
             timeout,
         )
         .await
+    }
+
+    /// Sends a migration decision. The journal's refusal reason matters here, so
+    /// unlike the other optional calls this keeps it.
+    pub(crate) async fn clients_self_migration_put(
+        &self,
+        body: String,
+        timeout: Duration,
+    ) -> MigrationReply {
+        let Ok(url) = confine_path(
+            &self.inner.optional_origin,
+            "/app/network/api/clients/self/migration",
+        ) else {
+            return MigrationReply::Unreachable;
+        };
+        let sent = self
+            .inner
+            .optional_client
+            .put(url)
+            .header("content-type", "application/json")
+            .body(body)
+            .timeout(timeout)
+            .send()
+            .await;
+        let Ok(response) = sent else {
+            return MigrationReply::Unreachable;
+        };
+        let status = response.status().as_u16();
+        let too_large = response.content_length().is_some_and(|len| len > 65536);
+        let reason = if too_large {
+            None
+        } else {
+            response
+                .bytes()
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value.get("reason_code")?.as_str().map(str::to_owned))
+        };
+        MigrationReply::Answered { status, reason }
     }
 
     pub(crate) async fn relay_access_get(&self, timeout: Duration) -> LinkOutcome {

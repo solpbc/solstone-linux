@@ -56,13 +56,22 @@ pub enum Command {
         minutes: Option<u64>,
     },
     Resume,
+    /// The owner agreed to move an old solstone-tmux install into this app.
+    AdoptTmux {
+        /// They got here by turning terminal on, so it ends up on.
+        #[serde(default)]
+        terminal_on: bool,
+    },
 }
 
 impl Command {
     /// How long the CLI waits for the result, and how long an unclaimed request
     /// stays valid.
     pub fn bound(&self) -> Duration {
-        SETTING_BOUND
+        match self {
+            Self::AdoptTmux { .. } => LONGEST_BOUND,
+            _ => SETTING_BOUND,
+        }
     }
 
     pub fn name(&self) -> &'static str {
@@ -73,6 +82,7 @@ impl Command {
             Self::DesktopCaptureOff => "desktop-capture-off",
             Self::Pause { .. } => "pause",
             Self::Resume => "resume",
+            Self::AdoptTmux { .. } => "adopt-tmux",
         }
     }
 
@@ -85,6 +95,7 @@ impl Command {
             Self::DesktopCaptureOff.name(),
             Self::Pause { minutes: None }.name(),
             Self::Resume.name(),
+            Self::AdoptTmux { terminal_on: false }.name(),
         ]
     }
 }
@@ -295,9 +306,41 @@ fn advertise(dir: &Path) -> io::Result<()> {
     write_atomic(&dir.join(DAEMON_FILENAME), &bytes)
 }
 
+/// What the daemon now running on this state directory says it accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Advertised {
+    Supported,
+    Unsupported,
+    /// Nothing written yet, or it was written by a process that has gone.
+    NotYet,
+}
+
+pub fn daemon_advertises(state_dir: &Path, command: &Command) -> Advertised {
+    let Ok(bytes) = fs::read(requests_dir(state_dir).join(DAEMON_FILENAME)) else {
+        return Advertised::NotYet;
+    };
+    let Ok(document) = serde_json::from_slice::<DaemonDocument>(&bytes) else {
+        return Advertised::NotYet;
+    };
+    if start_time_of(&format!("/proc/{}/stat", document.pid)) != document.start_time
+        || document.start_time.is_none()
+    {
+        return Advertised::NotYet;
+    }
+    if document.commands.iter().any(|name| name == command.name()) {
+        Advertised::Supported
+    } else {
+        Advertised::Unsupported
+    }
+}
+
 /// This process's start time in clock ticks since boot, from `/proc/self/stat`.
 fn process_start_time() -> Option<u64> {
-    let stat = fs::read_to_string("/proc/self/stat").ok()?;
+    start_time_of("/proc/self/stat")
+}
+
+fn start_time_of(path: &str) -> Option<u64> {
+    let stat = fs::read_to_string(path).ok()?;
     let after_name = stat.rsplit_once(')')?.1;
     after_name.split_whitespace().nth(19)?.parse().ok()
 }

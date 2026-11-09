@@ -1013,6 +1013,15 @@ fn write_config_merge(
                     })?;
                     Value::Bool(b)
                 }
+                "terminal_settings" => {
+                    if !value.is_object() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "invalid terminal_settings",
+                        ));
+                    }
+                    value
+                }
                 "activity_exclude_apps" => {
                     let arr = value.as_array().ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid activity_exclude_apps")

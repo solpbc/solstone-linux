@@ -379,7 +379,7 @@ fn run_capture(
     );
     let (command_sender, command_receiver) = std::sync::mpsc::channel();
     let commands = CommandSender::new(command_sender.clone());
-    let legacy_probe = crate::terminal::control::production_legacy_probe();
+    let legacy_probe = crate::terminal::control::production_legacy_probe(config.state_dir());
     let terminal = {
         let wake = sync_trigger.clone();
         let mut terminal_config = crate::terminal::supervisor::SupervisorConfig::new(
@@ -395,7 +395,7 @@ fn run_capture(
             config.terminal_settings.as_ref(),
         );
         crate::terminal::supervisor::TerminalSupervisor::spawn(terminal_config)
-            .map_err(|error| ObserverError::Io(format!("terminal capture thread: {error}")))?
+            .map_err(|error| ObserverError::Io(format!("terminal thread: {error}")))?
     };
     let terminal_switches = terminal.switches();
     runtime.spawn(forward_pause_to_terminal(
@@ -408,15 +408,35 @@ fn run_capture(
             terminal_sync: terminal_sync.clone(),
             commands: Mutex::new(commands.tray_sender()),
         });
+    let config_paths = crate::config::ConfigPaths {
+        base_dir: Some(config.base_dir.clone()),
+        config_dir: Some(config.config_dir.clone()),
+    };
+    let takeover = {
+        let wake = sync_trigger.clone();
+        crate::terminal::takeover_runner::TakeoverRunner::spawn(
+            crate::terminal::takeover_runner::RunnerParts {
+                state_dir: config.state_dir(),
+                paths: config_paths.clone(),
+                live: Arc::clone(&live_settings),
+                runner: Arc::new(crate::cli::SystemRunner),
+                sources: Arc::new(crate::terminal::legacy_find::LegacyRootSources::current),
+                wake_sync: Arc::new(move || wake.trigger()),
+                stop_timeout: crate::terminal::takeover::STOP_TIMEOUT,
+                retry_interval: crate::terminal::takeover_runner::RETRY_INTERVAL,
+            },
+        )
+        .map_err(|error| ObserverError::Io(format!("terminal move thread: {error}")))?
+    };
     let requests = crate::control_request::RequestServer::spawn(
         &config.state_dir(),
         Arc::new(crate::terminal::control::DaemonApplier {
-            paths: crate::config::ConfigPaths {
-                base_dir: Some(config.base_dir.clone()),
-                config_dir: Some(config.config_dir.clone()),
-            },
+            paths: config_paths,
             live: Arc::clone(&live_settings),
             legacy: legacy_probe,
+            state_dir: config.state_dir(),
+            prepare: crate::terminal::control::production_takeover_prepare(),
+            wake_takeover: Arc::new(takeover.wake()),
         }),
         crate::control_request::POLL_INTERVAL,
     )
@@ -616,6 +636,7 @@ fn run_capture(
         tracing::warn!(%error, "Failed to notify systemd stopping state");
     }
     requests.stop();
+    takeover.stop();
     // The engine finalizes its open segment and restores the owner's tmux options
     // here, before sync takes its last pass.
     terminal.shutdown();
