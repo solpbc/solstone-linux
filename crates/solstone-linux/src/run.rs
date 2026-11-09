@@ -338,6 +338,7 @@ fn run_capture(
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
     sync.trigger();
+
     runtime.spawn(crate::network_watch::watch(sync.new_episode_handle()));
     // Read before anything subscribes to state: the browser host and the panel
     // must see a held pause from the first snapshot, not after initialization.
@@ -361,6 +362,12 @@ fn run_capture(
     };
     let snapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
     let (states, tray_receiver) = WatchStateSink::channel(initial_snapshot);
+    let (obsidian, obsidian_task) = crate::obsidian::start(
+        runtime,
+        config.base_dir.join("obsidian"),
+        Arc::clone(&upload),
+        tray_receiver.clone(),
+    );
     let (initial_health, initial_progress) = sync_sampler.sample();
     let health = Arc::new(Mutex::new(initial_health));
     let progress = Arc::new(Mutex::new(initial_progress));
@@ -500,6 +507,7 @@ fn run_capture(
             commands,
             open_journal: open_journal.clone(),
             window_control,
+            obsidian: obsidian.clone(),
         },
     );
     if initialized && run_result.is_ok() {
@@ -554,6 +562,9 @@ fn run_capture(
     }
     if let Some(browser) = browser {
         runtime.block_on(browser.shutdown());
+    }
+    if let Some(task) = obsidian_task {
+        runtime.block_on(obsidian.shutdown(task));
     }
     let linked_start = async move {
         linked_shutdown_notify.notify_one();

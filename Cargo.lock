@@ -3735,6 +3735,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "solstone-vault",
  "spl-core",
  "spl-transport",
  "syn 2.0.119",
@@ -3761,6 +3762,7 @@ dependencies = [
  "resvg",
  "serde_json",
  "solstone-linux",
+ "solstone-vault",
  "tokio",
 ]
 
@@ -3776,6 +3778,18 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "solstone-vault"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

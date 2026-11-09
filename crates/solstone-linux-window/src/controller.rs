@@ -242,6 +242,10 @@ pub struct Controller {
     pub service_diagnostic: Option<String>,
     pub restart: Option<InFlight<()>>,
     pub restart_error: Option<String>,
+    pub obsidian: Option<solstone_linux::obsidian::ObsidianDocument>,
+    pub obsidian_found: Vec<solstone_linux::obsidian::FoundVault>,
+    pub obsidian_refusal: Option<solstone_linux::obsidian::Refusal>,
+    pub obsidian_busy: bool,
 }
 
 impl Default for Controller {
@@ -286,6 +290,10 @@ impl Controller {
             service_diagnostic: None,
             restart: None,
             restart_error: None,
+            obsidian: None,
+            obsidian_found: Vec::new(),
+            obsidian_refusal: None,
+            obsidian_busy: false,
         }
     }
 

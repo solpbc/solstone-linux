@@ -14,6 +14,7 @@ This is **not** part of the solstone monorepo. It is a standalone Rust package w
 crates/solstone-linux/src/  Shipping Rust observer, CLI, service, sync, and capture code
 crates/solstone-linux-window/src/ Separate GTK4 desktop window
 crates/solstone-terminal/src/  Terminal-capture engine and solstone-terminal helper
+crates/solstone-vault/src/  Obsidian vault source engine, shared with the Windows app
 crates/rust-release-manifest/src/transparency.rs  Retired v1 release-transparency publisher
 transparency-head-log.jsonl Tracked transparency head witness
 packaging/                  Native package Containerfile and install notes
@@ -134,6 +135,8 @@ Shipping system packages:
   periods and durable replay receipts); finished browser periods are segments
   under the `_browser` stream folder
 - Browser endpoint: `$XDG_RUNTIME_DIR/solstone-linux/browser-host.sock`
+- Obsidian custody: `~/.local/share/solstone-linux/obsidian/` (the table of notes,
+  pending changes and finished window files; nothing here names a journal)
 
 ## Browser host
 

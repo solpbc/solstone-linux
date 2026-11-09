@@ -128,7 +128,7 @@ brand-sync:
 	@echo "brand: synced from $(BRAND_DIR)"
 
 test: rust-preflight
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal -p solstone-vault
 
 check-observer-contract: rust-preflight
 	@echo "Client-ingest contract bundle: 14.0.0"
@@ -192,7 +192,7 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check
 	$(CARGO) clippy $(CARGO_LOCKED) --all-targets -- -D warnings
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal -p solstone-vault
 	$(MAKE) shellcheck
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 

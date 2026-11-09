@@ -31,6 +31,7 @@ pub struct Observer1<C: Clock, O: ObserverCommands> {
     pub clock: C,
     pub commands: O,
     pub window_control: crate::window_control::WindowControlHandler,
+    pub obsidian: crate::obsidian::ObsidianHandle,
 }
 impl<C: Clock, O: ObserverCommands> Observer1<C, O> {
     fn with_snapshot<R>(&self, f: impl FnOnce(&StateSnapshot) -> R) -> R {
@@ -145,6 +146,21 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     }
     async fn open_journal(&self) -> String {
         self.window_control.open_journal().await
+    }
+    fn obsidian_state(&self) -> String {
+        self.obsidian.state_json()
+    }
+    async fn obsidian_turn_on(&self, path: String) -> String {
+        self.obsidian.turn_on(path).await
+    }
+    async fn obsidian_turn_off(&self) -> String {
+        self.obsidian.turn_off().await
+    }
+    async fn obsidian_continue(&self) -> String {
+        self.obsidian.continue_warning().await
+    }
+    async fn obsidian_cancel(&self) -> String {
+        self.obsidian.cancel_warning().await
     }
     #[zbus(signal)]
     pub(crate) async fn status_changed(
@@ -290,6 +306,7 @@ mod tests {
                 clock: TestClock(clock.clone()),
                 commands: commands.clone(),
                 window_control: crate::window_control::WindowControlHandler::default(),
+                obsidian: crate::obsidian::ObsidianHandle::default(),
             },
             commands,
             clock,
@@ -377,6 +394,7 @@ mod tests {
             clock: TestClock(Arc::new(std::sync::atomic::AtomicU64::new(0))),
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
+            obsidian: crate::obsidian::ObsidianHandle::default(),
         };
         let mut xml = String::new();
         service.introspect_to_writer(&mut xml, 0);
@@ -413,6 +431,7 @@ mod tests {
             clock: TestClock(now.clone()),
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
+            obsidian: crate::obsidian::ObsidianHandle::default(),
         };
         let first = service.segment_timer();
         now.store(101, std::sync::atomic::Ordering::Release);

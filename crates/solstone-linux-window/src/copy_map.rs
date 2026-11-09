@@ -7,6 +7,49 @@ use solstone_linux::window_control::{
     ControlModel, MarkRenderDocument, SettingsModel, adapt_graphical_link,
 };
 
+/// The state line and its detail for the Obsidian section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObsidianLines {
+    pub state: Option<&'static str>,
+    pub detail: Option<&'static str>,
+}
+
+pub fn map_obsidian(status: &solstone_linux::obsidian::Status) -> ObsidianLines {
+    use solstone_linux::copy::{
+        OBSIDIAN_ATTENTION_FILE, OBSIDIAN_ATTENTION_PART, OBSIDIAN_ATTENTION_STORAGE,
+        OBSIDIAN_ATTENTION_VAULT, OBSIDIAN_DETAIL_UPDATE, OBSIDIAN_STATE_CHECKING,
+        OBSIDIAN_STATE_UPDATE, STATUS_ATTENTION, STATUS_ON, STATUS_PAUSED,
+    };
+    use solstone_vault::{Attention, State};
+    let detail_for_attention = match status.attention {
+        Some(Attention::VaultUnreadable) => Some(OBSIDIAN_ATTENTION_VAULT),
+        Some(Attention::PartUnreadable) => Some(OBSIDIAN_ATTENTION_PART),
+        Some(Attention::FileRefused) => Some(OBSIDIAN_ATTENTION_FILE),
+        Some(Attention::Storage) => Some(OBSIDIAN_ATTENTION_STORAGE),
+        None => None,
+    };
+    let (state, detail) = match status.state {
+        State::Off | State::Confirm => (None, None),
+        State::Checking => (Some(OBSIDIAN_STATE_CHECKING), None),
+        State::On => (Some(STATUS_ON), None),
+        State::Paused => (Some(STATUS_PAUSED), None),
+        State::WaitingForJournalUpdate => {
+            (Some(OBSIDIAN_STATE_UPDATE), Some(OBSIDIAN_DETAIL_UPDATE))
+        }
+        State::NeedsAttention => (Some(STATUS_ATTENTION), detail_for_attention),
+    };
+    ObsidianLines { state, detail }
+}
+
+/// The owner-facing line for a chosen folder that was refused.
+pub fn map_obsidian_refusal(refusal: solstone_linux::obsidian::Refusal) -> &'static str {
+    use solstone_linux::copy::{OBSIDIAN_REFUSED_NAME, OBSIDIAN_REFUSED_NOT_A_VAULT};
+    match refusal {
+        solstone_linux::obsidian::Refusal::NotAVault => OBSIDIAN_REFUSED_NOT_A_VAULT,
+        solstone_linux::obsidian::Refusal::UnusableName => OBSIDIAN_REFUSED_NAME,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IntakeKeys {
     pub headline: Option<CopyKey>,
@@ -672,6 +715,123 @@ pub fn map_settings_state(
         restart_detail,
         restart_action,
         restart_failed,
+    }
+}
+
+#[cfg(test)]
+mod obsidian_copy_tests {
+    use super::*;
+    use solstone_linux::obsidian::{Refusal, State, Status};
+    use solstone_vault::Attention;
+
+    fn status(state: State, attention: Option<Attention>) -> Status {
+        Status {
+            state,
+            vault: Some("Notes".into()),
+            warning: None,
+            last_checked_ms: None,
+            waiting: 0,
+            first_sync: None,
+            not_on_device: 0,
+            too_large: 0,
+            attention,
+        }
+    }
+
+    #[test]
+    fn every_state_has_its_lines() {
+        use solstone_linux::copy::*;
+        assert_eq!(
+            map_obsidian(&status(State::On, None)).state,
+            Some(STATUS_ON)
+        );
+        assert_eq!(
+            map_obsidian(&status(State::Paused, None)).state,
+            Some(STATUS_PAUSED)
+        );
+        let waiting = map_obsidian(&status(State::WaitingForJournalUpdate, None));
+        assert_eq!(waiting.state, Some(OBSIDIAN_STATE_UPDATE));
+        assert_eq!(waiting.detail, Some(OBSIDIAN_DETAIL_UPDATE));
+        let attention = map_obsidian(&status(
+            State::NeedsAttention,
+            Some(Attention::VaultUnreadable),
+        ));
+        assert_eq!(attention.state, Some(STATUS_ATTENTION));
+        assert_eq!(attention.detail, Some(OBSIDIAN_ATTENTION_VAULT));
+        assert_eq!(
+            map_obsidian(&status(State::Checking, None)).state,
+            Some(OBSIDIAN_STATE_CHECKING)
+        );
+    }
+
+    #[test]
+    fn the_warning_drops_what_it_does_not_know() {
+        use solstone_linux::copy::obsidian_warning_detail;
+        assert_eq!(
+            obsidian_warning_detail("Notes", Some("studio"), Some("today")),
+            "your journal already has a vault named Notes from studio, last updated today. if you continue, changes from both devices go into your journal."
+        );
+        assert_eq!(
+            obsidian_warning_detail("Notes", None, None),
+            "your journal already has a vault named Notes from another device. if you continue, changes from both devices go into your journal."
+        );
+    }
+
+    #[test]
+    fn refusals_are_plain_lines() {
+        use solstone_linux::copy::*;
+        assert_eq!(
+            map_obsidian_refusal(Refusal::NotAVault),
+            OBSIDIAN_REFUSED_NOT_A_VAULT
+        );
+        assert_eq!(
+            map_obsidian_refusal(Refusal::UnusableName),
+            OBSIDIAN_REFUSED_NAME
+        );
+    }
+
+    #[test]
+    fn no_new_owner_copy_uses_a_retired_word() {
+        use solstone_linux::copy::*;
+        for line in [
+            OBSIDIAN_HEADING,
+            OBSIDIAN_EXPLAIN,
+            OBSIDIAN_FOUND_LABEL,
+            OBSIDIAN_NONE_FOUND,
+            OBSIDIAN_USE_THIS,
+            OBSIDIAN_CHOOSE_FOLDER,
+            OBSIDIAN_CHOOSER_TITLE,
+            OBSIDIAN_CHOOSER_ACCEPT,
+            OBSIDIAN_CANCEL,
+            OBSIDIAN_REFUSED_NOT_A_VAULT,
+            OBSIDIAN_REFUSED_NAME,
+            OBSIDIAN_WARNING_HEADING,
+            OBSIDIAN_CONTINUE,
+            OBSIDIAN_STATE_CHECKING,
+            OBSIDIAN_STATE_UPDATE,
+            OBSIDIAN_DETAIL_UPDATE,
+            OBSIDIAN_VAULT_LABEL,
+            OBSIDIAN_LAST_CHECKED,
+            OBSIDIAN_NOT_ON_DEVICE,
+            OBSIDIAN_TOO_LARGE,
+            OBSIDIAN_ATTENTION_VAULT,
+            OBSIDIAN_ATTENTION_PART,
+            OBSIDIAN_ATTENTION_FILE,
+            OBSIDIAN_ATTENTION_STORAGE,
+            OBSIDIAN_TURN_OFF,
+            OBSIDIAN_TURN_OFF_NOTE,
+            &obsidian_warning_detail("Notes", Some("studio"), Some("today")),
+            &obsidian_warning_detail("Notes", None, None),
+            &obsidian_progress("3", "9"),
+            &obsidian_waiting("3"),
+        ] {
+            for word in [
+                "capture", "record", "watch", "monitor", "track", "collect", "server", "service",
+                "observer",
+            ] {
+                assert!(!line.contains(word), "{line:?} uses {word:?}");
+            }
+        }
     }
 }
 

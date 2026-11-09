@@ -25,6 +25,13 @@ pub fn format_timestamp(epoch_secs: f64) -> String {
     format_integer(epoch_secs as i64)
 }
 
+/// An RFC 3339 time as a date alone in local time, such as `Oct 20, 2026`.
+pub fn format_date(rfc3339: &str) -> Option<String> {
+    let moment = glib::DateTime::from_iso8601(rfc3339, None).ok()?;
+    let local = moment.to_local().ok()?;
+    local.format("%b %-d, %Y").ok().map(|date| date.to_string())
+}
+
 pub fn parse_integer(text: &str) -> Option<i64> {
     let text = text.trim();
     if let Ok(value) = text.parse() {
@@ -51,6 +58,15 @@ mod tests {
         assert_eq!(s2, "0");
         let s3 = format_integer(-42);
         assert!(s3.contains("42"));
+    }
+
+    #[test]
+    fn a_date_is_only_a_date() {
+        let date = format_date("2026-10-20T12:00:00-07:00").unwrap();
+        assert!(date.ends_with(", 2026"), "{date}");
+        assert!(!date.contains(':'), "{date}");
+        assert_eq!(format_date("not a time"), None);
+        assert_eq!(format_date(""), None);
     }
 
     #[test]

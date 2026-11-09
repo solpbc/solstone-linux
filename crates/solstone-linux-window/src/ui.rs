@@ -16,11 +16,11 @@ use crate::controller::{
     Controller, IntakeCommand, PairingCommand, SettingsDraft, SettingsWriteOutcome,
 };
 use crate::copy_map::{
-    ServicePresenceKind, map_fault, map_intake, map_journal_health, map_open_journal_outcome,
-    map_pairing, map_service_start, map_settings_state, validate_pairing_link,
-    validate_settings_changes,
+    ServicePresenceKind, map_fault, map_intake, map_journal_health, map_obsidian,
+    map_obsidian_refusal, map_open_journal_outcome, map_pairing, map_service_start,
+    map_settings_state, validate_pairing_link, validate_settings_changes,
 };
-use crate::format::{format_integer, format_timestamp, parse_integer};
+use crate::format::{format_date, format_integer, format_timestamp, parse_integer};
 use crate::logs::{collect_recent_logs, save_frozen_log};
 
 type Changed = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
@@ -184,6 +184,7 @@ async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
                 let pid = client.get_connection_unix_process_id(&owner).await.ok();
                 let client = client.expect_owner(owner.clone());
                 let reply = client.get_control_state().await;
+                let obsidian = client.obsidian_state().await.ok();
                 // An older running app doesn't know this call, which reads as no offer.
                 let offer = match reply
                     .as_deref()
@@ -197,15 +198,30 @@ async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
                         .and_then(solstone_linux::local_journal::decode_offer),
                     _ => None,
                 };
-                Some((owner, pid, reply, offer))
+                Some((owner, pid, reply, offer, obsidian))
             }
             Err(_) => None,
         },
         Err(_) => None,
     };
+    let obsidian_doc = result.as_ref().and_then(|(_, _, _, _, obsidian)| {
+        obsidian
+            .as_deref()
+            .and_then(solstone_linux::obsidian::decode_document)
+    });
+    let found_vaults = match &obsidian_doc {
+        Some(doc) if doc.status.state == solstone_linux::obsidian::State::Off => {
+            gio::spawn_blocking(solstone_linux::obsidian::found_vaults)
+                .await
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
     let mut c = controller.borrow_mut();
     c.service_presence = presence;
-    if let Some((owner, pid, reply, offer)) = result {
+    c.obsidian = obsidian_doc;
+    c.obsidian_found = found_vaults;
+    if let Some((owner, pid, reply, offer, _)) = result {
         c.local_journal_offer = offer;
         c.observe_service_reply(id, &owner, pid, service_pid, reply);
     } else {
@@ -1512,6 +1528,9 @@ fn create_settings_page(
     container.append(&restart_detail_label);
     container.append(&restart_button);
     container.append(&save_error_label);
+    let (obsidian_section, update_obsidian) =
+        create_obsidian_section(Rc::clone(&controller), Rc::clone(&changed));
+    container.append(&obsidian_section);
     scrolled.set_child(Some(&container));
 
     {
@@ -1901,6 +1920,7 @@ fn create_settings_page(
                 save_error_label.set_visible(false);
             }
             rendering.set(false);
+            update_obsidian();
         })
     };
 
@@ -2009,6 +2029,358 @@ fn create_settings_page(
     }
 
     (scrolled, update)
+}
+
+/// Ask the running app to change the Obsidian source, and take its answer.
+#[derive(Clone)]
+enum ObsidianOp {
+    TurnOn(String),
+    TurnOff,
+    Continue,
+    Cancel,
+}
+
+async fn obsidian_request(op: ObsidianOp) -> Option<String> {
+    let client = ControlClient::session().await.ok()?;
+    let result = match op {
+        ObsidianOp::TurnOn(path) => client.obsidian_turn_on(&path).await,
+        ObsidianOp::TurnOff => client.obsidian_turn_off().await,
+        ObsidianOp::Continue => client.obsidian_continue().await,
+        ObsidianOp::Cancel => client.obsidian_cancel().await,
+    };
+    result.ok()
+}
+
+fn run_obsidian_op(controller: Rc<RefCell<Controller>>, changed: Changed, op: ObsidianOp) {
+    {
+        let mut c = controller.borrow_mut();
+        if c.obsidian_busy {
+            return;
+        }
+        c.obsidian_busy = true;
+        c.obsidian_refusal = None;
+    }
+    notify(&changed);
+    glib::MainContext::default().spawn_local(async move {
+        let answer = obsidian_request(op).await;
+        {
+            let mut c = controller.borrow_mut();
+            c.obsidian_busy = false;
+            if let Some(doc) = answer
+                .as_deref()
+                .and_then(solstone_linux::obsidian::decode_document)
+            {
+                c.obsidian_refusal = doc.refusal;
+                c.obsidian = Some(doc);
+            }
+        }
+        notify(&changed);
+    });
+}
+
+fn format_note_count(count: u64) -> String {
+    format_integer(count.min(i64::MAX as u64) as i64)
+}
+
+/// Picks and shows the Obsidian source: found vaults or a chosen folder, the refusal
+/// line, the warning before the first send, progress, status and turning it off.
+fn create_obsidian_section(
+    controller: Rc<RefCell<Controller>>,
+    changed: Changed,
+) -> (gtk::Box, Rc<dyn Fn()>) {
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    section.set_margin_top(12);
+    section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let heading = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_HEADING));
+    heading.set_halign(gtk::Align::Start);
+    heading.add_css_class("heading");
+    section.append(&heading);
+    let explain = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_EXPLAIN));
+    explain.set_halign(gtk::Align::Start);
+    explain.set_wrap(true);
+    section.append(&explain);
+
+    // Turning it on.
+    let off_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let found_label = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_FOUND_LABEL));
+    found_label.set_halign(gtk::Align::Start);
+    off_box.append(&found_label);
+    let found_list = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    off_box.append(&found_list);
+    let none_found = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_NONE_FOUND));
+    none_found.set_halign(gtk::Align::Start);
+    none_found.set_wrap(true);
+    off_box.append(&none_found);
+    let choose_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CHOOSE_FOLDER);
+    choose_button.set_halign(gtk::Align::Start);
+    off_box.append(&choose_button);
+    let refusal_label = gtk::Label::new(None);
+    refusal_label.set_halign(gtk::Align::Start);
+    refusal_label.set_wrap(true);
+    refusal_label.set_visible(false);
+    off_box.append(&refusal_label);
+    section.append(&off_box);
+
+    // The warning before the first send.
+    let warning_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let warning_heading = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_WARNING_HEADING));
+    warning_heading.set_halign(gtk::Align::Start);
+    warning_box.append(&warning_heading);
+    let warning_detail = gtk::Label::new(None);
+    warning_detail.set_halign(gtk::Align::Start);
+    warning_detail.set_wrap(true);
+    warning_box.append(&warning_detail);
+    let warning_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let continue_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CONTINUE);
+    let cancel_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CANCEL);
+    warning_actions.append(&continue_button);
+    warning_actions.append(&cancel_button);
+    warning_box.append(&warning_actions);
+    section.append(&warning_box);
+
+    // While it's on.
+    let on_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let vault_label = gtk::Label::new(None);
+    vault_label.set_halign(gtk::Align::Start);
+    on_box.append(&vault_label);
+    let state_label = gtk::Label::new(None);
+    state_label.set_halign(gtk::Align::Start);
+    on_box.append(&state_label);
+    let detail_label = gtk::Label::new(None);
+    detail_label.set_halign(gtk::Align::Start);
+    detail_label.set_wrap(true);
+    on_box.append(&detail_label);
+    let progress_label = gtk::Label::new(None);
+    progress_label.set_halign(gtk::Align::Start);
+    on_box.append(&progress_label);
+    let last_checked_label = gtk::Label::new(None);
+    last_checked_label.set_halign(gtk::Align::Start);
+    on_box.append(&last_checked_label);
+    let waiting_label = gtk::Label::new(None);
+    waiting_label.set_halign(gtk::Align::Start);
+    on_box.append(&waiting_label);
+    let not_on_device_label = gtk::Label::new(None);
+    not_on_device_label.set_halign(gtk::Align::Start);
+    on_box.append(&not_on_device_label);
+    let too_large_label = gtk::Label::new(None);
+    too_large_label.set_halign(gtk::Align::Start);
+    on_box.append(&too_large_label);
+    let turn_off_note = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_TURN_OFF_NOTE));
+    turn_off_note.set_halign(gtk::Align::Start);
+    turn_off_note.set_wrap(true);
+    on_box.append(&turn_off_note);
+    let turn_off_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_TURN_OFF);
+    turn_off_button.set_halign(gtk::Align::Start);
+    on_box.append(&turn_off_button);
+    section.append(&on_box);
+
+    // The native chooser has to outlive this function, or it closes at once.
+    let chooser: Rc<RefCell<Option<gtk::FileChooserNative>>> = Rc::new(RefCell::new(None));
+
+    {
+        let controller = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
+        let chooser = Rc::clone(&chooser);
+        choose_button.connect_clicked(move |button| {
+            let dialog = gtk::FileChooserNative::new(
+                Some(solstone_linux::copy::OBSIDIAN_CHOOSER_TITLE),
+                button.root().and_downcast::<gtk::Window>().as_ref(),
+                gtk::FileChooserAction::SelectFolder,
+                Some(solstone_linux::copy::OBSIDIAN_CHOOSER_ACCEPT),
+                Some(solstone_linux::copy::OBSIDIAN_CANCEL),
+            );
+            let controller = Rc::clone(&controller);
+            let changed = Rc::clone(&changed);
+            let chooser_for_close = Rc::clone(&chooser);
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept
+                    && let Some(path) = dialog.file().and_then(|file| file.path())
+                {
+                    if let Some(path) = path.to_str() {
+                        run_obsidian_op(
+                            Rc::clone(&controller),
+                            Rc::clone(&changed),
+                            ObsidianOp::TurnOn(path.to_owned()),
+                        );
+                    } else {
+                        controller.borrow_mut().obsidian_refusal =
+                            Some(solstone_linux::obsidian::Refusal::UnusableName);
+                        notify(&changed);
+                    }
+                }
+                dialog.destroy();
+                chooser_for_close.borrow_mut().take();
+            });
+            dialog.show();
+            *chooser.borrow_mut() = Some(dialog);
+        });
+    }
+    {
+        let controller = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
+        continue_button.connect_clicked(move |_| {
+            run_obsidian_op(
+                Rc::clone(&controller),
+                Rc::clone(&changed),
+                ObsidianOp::Continue,
+            );
+        });
+    }
+    {
+        let controller = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
+        cancel_button.connect_clicked(move |_| {
+            run_obsidian_op(
+                Rc::clone(&controller),
+                Rc::clone(&changed),
+                ObsidianOp::Cancel,
+            );
+        });
+    }
+    {
+        let controller = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
+        turn_off_button.connect_clicked(move |_| {
+            run_obsidian_op(
+                Rc::clone(&controller),
+                Rc::clone(&changed),
+                ObsidianOp::TurnOff,
+            );
+        });
+    }
+
+    let shown_vaults: Rc<RefCell<Vec<solstone_linux::obsidian::FoundVault>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let section_ref = section.clone();
+    let update = {
+        let controller = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
+        let found_list = found_list.clone();
+        Rc::new(move || {
+            let (doc, found, busy, refusal) = {
+                let c = controller.borrow();
+                (
+                    c.obsidian.clone(),
+                    c.obsidian_found.clone(),
+                    c.obsidian_busy,
+                    c.obsidian_refusal,
+                )
+            };
+            let Some(doc) = doc else {
+                section_ref.set_visible(false);
+                return;
+            };
+            section_ref.set_visible(true);
+            let status = doc.status;
+            use solstone_linux::obsidian::State;
+
+            if *shown_vaults.borrow() != found {
+                while let Some(child) = found_list.first_child() {
+                    found_list.remove(&child);
+                }
+                for vault in &found {
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    let name = gtk::Label::new(Some(&vault.name));
+                    name.set_halign(gtk::Align::Start);
+                    name.set_hexpand(true);
+                    let use_button =
+                        gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_USE_THIS);
+                    let controller = Rc::clone(&controller);
+                    let changed = Rc::clone(&changed);
+                    let path = vault.path.clone();
+                    use_button.connect_clicked(move |_| {
+                        run_obsidian_op(
+                            Rc::clone(&controller),
+                            Rc::clone(&changed),
+                            ObsidianOp::TurnOn(path.clone()),
+                        );
+                    });
+                    row.append(&name);
+                    row.append(&use_button);
+                    found_list.append(&row);
+                }
+                *shown_vaults.borrow_mut() = found.clone();
+            }
+
+            off_box.set_visible(status.state == State::Off);
+            found_label.set_visible(!found.is_empty());
+            found_list.set_visible(!found.is_empty());
+            none_found.set_visible(found.is_empty());
+            choose_button.set_sensitive(!busy);
+            found_list.set_sensitive(!busy);
+            match refusal {
+                Some(refusal) => {
+                    refusal_label.set_text(map_obsidian_refusal(refusal));
+                    refusal_label.set_visible(true);
+                }
+                None => refusal_label.set_visible(false),
+            }
+
+            warning_box.set_visible(status.state == State::Confirm);
+            if let Some(warning) = &status.warning {
+                let date = warning.last_synced_at.as_deref().and_then(format_date);
+                warning_detail.set_text(&solstone_linux::copy::obsidian_warning_detail(
+                    &warning.vault,
+                    warning.device.as_deref(),
+                    date.as_deref(),
+                ));
+            }
+            continue_button.set_sensitive(!busy);
+            cancel_button.set_sensitive(!busy);
+
+            on_box.set_visible(status.state != State::Off && status.state != State::Confirm);
+            let lines = map_obsidian(&status);
+            state_label.set_text(lines.state.unwrap_or_default());
+            state_label.set_visible(lines.state.is_some());
+            detail_label.set_text(lines.detail.unwrap_or_default());
+            detail_label.set_visible(lines.detail.is_some());
+            if let Some(vault) = &status.vault {
+                vault_label.set_text(&format!(
+                    "{} {vault}",
+                    solstone_linux::copy::OBSIDIAN_VAULT_LABEL
+                ));
+            }
+            match status.first_sync {
+                Some(sync) => {
+                    progress_label.set_text(&solstone_linux::copy::obsidian_progress(
+                        &format_note_count(sync.sent),
+                        &format_note_count(sync.found),
+                    ));
+                    progress_label.set_visible(true);
+                }
+                None => progress_label.set_visible(false),
+            }
+            match status.last_checked_ms {
+                Some(ms) => {
+                    last_checked_label.set_text(&format!(
+                        "{}: {}",
+                        solstone_linux::copy::OBSIDIAN_LAST_CHECKED,
+                        format_timestamp(ms as f64 / 1000.0)
+                    ));
+                    last_checked_label.set_visible(true);
+                }
+                None => last_checked_label.set_visible(false),
+            }
+            waiting_label.set_text(&solstone_linux::copy::obsidian_waiting(&format_note_count(
+                status.waiting,
+            )));
+            not_on_device_label.set_text(&format!(
+                "{}: {}",
+                solstone_linux::copy::OBSIDIAN_NOT_ON_DEVICE,
+                format_note_count(status.not_on_device)
+            ));
+            not_on_device_label.set_visible(status.not_on_device > 0);
+            too_large_label.set_text(&format!(
+                "{}: {}",
+                solstone_linux::copy::OBSIDIAN_TOO_LARGE,
+                format_note_count(status.too_large)
+            ));
+            too_large_label.set_visible(status.too_large > 0);
+            turn_off_button.set_sensitive(!busy);
+        }) as Rc<dyn Fn()>
+    };
+
+    (section, update)
 }
 
 fn create_help_page(

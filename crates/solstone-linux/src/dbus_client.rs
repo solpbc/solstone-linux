@@ -250,6 +250,31 @@ impl ControlClient {
         self.call_method("OpenJournal", &(), DEFAULT_TIMEOUT).await
     }
 
+    pub async fn obsidian_state(&self) -> Result<String, ControlClientError> {
+        self.call_method("ObsidianState", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn obsidian_turn_on(&self, path: &str) -> Result<String, ControlClientError> {
+        self.call_method("ObsidianTurnOn", &(path.to_string(),), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn obsidian_turn_off(&self) -> Result<String, ControlClientError> {
+        self.call_method("ObsidianTurnOff", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn obsidian_continue(&self) -> Result<String, ControlClientError> {
+        self.call_method("ObsidianContinue", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn obsidian_cancel(&self) -> Result<String, ControlClientError> {
+        self.call_method("ObsidianCancel", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
     pub async fn pause(&self, duration_seconds: i32) -> Result<String, ControlClientError> {
         self.call_method("Pause", &(duration_seconds,), DEFAULT_TIMEOUT)
             .await

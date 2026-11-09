@@ -146,6 +146,7 @@ pub(crate) struct ShellInputs {
     pub commands: CommandSender,
     pub open_journal: crate::private_link::OpenJournalAccess,
     pub window_control: crate::window_control::WindowControlHandler,
+    pub obsidian: crate::obsidian::ObsidianHandle,
 }
 
 pub(crate) struct DesktopShell {
@@ -170,6 +171,7 @@ struct TrayHealth {
     cell: Arc<Mutex<SyncHealth>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bind_consumers<C: Clock, O: ObserverCommands>(
     snapshot: Arc<Mutex<StateSnapshot>>,
     health: Arc<Mutex<SyncHealth>>,
@@ -178,6 +180,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
     clock: C,
     commands: O,
     window_control: crate::window_control::WindowControlHandler,
+    obsidian: crate::obsidian::ObsidianHandle,
 ) -> (Observer1<C, O>, TrayHealth) {
     let tray_health = TrayHealth {
         cell: Arc::clone(&health),
@@ -191,6 +194,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
             clock,
             commands,
             window_control,
+            obsidian,
         },
         tray_health,
     )
@@ -224,6 +228,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         inputs.clock.clone(),
         inputs.commands.clone(),
         inputs.window_control,
+        inputs.obsidian,
     );
     let signal_sink = with_connection(inputs.connection.as_ref(), |connection| {
         // Setup owns the name before recovery. Observer1 can only be served after recovery and
@@ -767,6 +772,7 @@ mod tests {
             TestClock(Arc::new(AtomicU64::new(0))),
             CommandSender::new(command_sender),
             crate::window_control::WindowControlHandler::default(),
+            crate::obsidian::ObsidianHandle::default(),
         );
         assert!(Arc::ptr_eq(&interface.health, &tray_health.cell));
         assert!(Arc::ptr_eq(&interface.progress, &progress));

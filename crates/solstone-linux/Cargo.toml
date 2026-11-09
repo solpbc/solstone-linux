@@ -40,6 +40,7 @@ open = "5.4.0"
 notify-rust = { version = "=4.18.0", default-features = false, features = ["z-with-tokio"] }
 zbus = { version = "=5.17.0", features = ["tokio"] }
 sd-notify = "0.5.0"
+solstone-vault = { version = "0.1.0", path = "../solstone-vault" }
 native-browser-frame = { version = "1.0.0", path = "../../vendor/crates/native-browser-frame" }
 url = "=2.5.8"
 

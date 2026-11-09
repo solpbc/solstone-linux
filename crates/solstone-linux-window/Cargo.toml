@@ -15,4 +15,5 @@ num-format = { version = "0.4.4", features = ["with-system-locale"] }
 resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 serde_json = "1"
 solstone-linux = { version = "2.0.22", path = "../solstone-linux" }
+solstone-vault = { version = "0.1.0", path = "../solstone-vault" }
 tokio.workspace = true

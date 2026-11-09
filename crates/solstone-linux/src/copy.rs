@@ -1,6 +1,54 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+pub const OBSIDIAN_HEADING: &str = "Obsidian";
+pub const OBSIDIAN_EXPLAIN: &str = "the solstone app takes in the notes in one vault on this computer. all of them go into your journal, then each one as it changes. your vault stays as it is.";
+pub const OBSIDIAN_FOUND_LABEL: &str = "vaults on this computer";
+pub const OBSIDIAN_NONE_FOUND: &str =
+    "the solstone app didn't find a vault on this computer. choose its folder instead.";
+pub const OBSIDIAN_USE_THIS: &str = "use this vault";
+pub const OBSIDIAN_CHOOSE_FOLDER: &str = "choose a folder";
+pub const OBSIDIAN_CHOOSER_TITLE: &str = "choose your Obsidian vault";
+pub const OBSIDIAN_CHOOSER_ACCEPT: &str = "choose";
+pub const OBSIDIAN_CANCEL: &str = "cancel";
+pub const OBSIDIAN_REFUSED_NOT_A_VAULT: &str = "that folder isn't an Obsidian vault, so the solstone app didn't add it. choose the vault's own folder.";
+pub const OBSIDIAN_REFUSED_NAME: &str =
+    "that folder's name can't be a vault's name in your journal. rename the folder and try again.";
+pub const OBSIDIAN_WARNING_HEADING: &str = "a vault with this name is already in your journal";
+pub const OBSIDIAN_CONTINUE: &str = "continue";
+pub const OBSIDIAN_STATE_CHECKING: &str = "waiting to reach your journal";
+pub const OBSIDIAN_STATE_UPDATE: &str = "waiting for a journal update";
+pub const OBSIDIAN_DETAIL_UPDATE: &str = "your journal needs an update before it can take these notes. they're waiting on this computer.";
+pub const OBSIDIAN_VAULT_LABEL: &str = "vault";
+pub const OBSIDIAN_LAST_CHECKED: &str = "last checked";
+pub const OBSIDIAN_NOT_ON_DEVICE: &str = "not on this device";
+pub const OBSIDIAN_TOO_LARGE: &str = "too large to bring in";
+pub const OBSIDIAN_ATTENTION_VAULT: &str = "the solstone app can't read this vault. check that its folder is there and that the drive it's on is connected. nothing changes in your journal while it's out of reach.";
+pub const OBSIDIAN_ATTENTION_PART: &str = "part of this vault can't be read. check the permissions on the folders inside it. the rest of the vault keeps going into your journal.";
+pub const OBSIDIAN_ATTENTION_FILE: &str = "some notes couldn't go into your journal. the solstone app tries them again the next time it starts.";
+pub const OBSIDIAN_ATTENTION_STORAGE: &str = "the solstone app couldn't save its place for this vault. check that this computer has free space.";
+pub const OBSIDIAN_TURN_OFF: &str = "turn off";
+pub const OBSIDIAN_TURN_OFF_NOTE: &str = "turning this off stops bringing in changes. what's already in your journal stays there, and what's waiting stays on this computer until you turn it on again.";
+
+/// Shown before the first send when the journal already has this vault's name.
+pub fn obsidian_warning_detail(vault: &str, device: Option<&str>, date: Option<&str>) -> String {
+    let from = device.map_or_else(|| "from another device".to_owned(), |d| format!("from {d}"));
+    let updated = date.map_or_else(String::new, |d| format!(", last updated {d}"));
+    format!(
+        "your journal already has a vault named {vault} {from}{updated}. if you continue, changes from both devices go into your journal."
+    )
+}
+
+/// How much is waiting on this computer.
+pub fn obsidian_waiting(count: &str) -> String {
+    format!("{count} waiting to sync")
+}
+
+/// First-sync progress.
+pub fn obsidian_progress(sent: &str, found: &str) -> String {
+    format!("{sent} of {found} notes in your journal")
+}
+
 pub const WINDOW_TITLE: &str = "solstone";
 pub const NAV_STATUS: &str = "status";
 pub const NAV_JOURNAL: &str = "journal";

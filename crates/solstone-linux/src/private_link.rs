@@ -2195,7 +2195,15 @@ impl PrivateLinkCapability {
                     return LinkOutcome::Forbidden;
                 }
                 if status == StatusCode::BAD_REQUEST {
-                    return LinkOutcome::LocalRejected { status };
+                    // A note file the journal refuses is a fault the app must keep
+                    // aside, so its reason has to survive this answer.
+                    return match response.bytes().await {
+                        Ok(body) if is_invalid_note_refusal(&body) => LinkOutcome::Success {
+                            status,
+                            body: body.to_vec(),
+                        },
+                        _ => LinkOutcome::LocalRejected { status },
+                    };
                 }
                 match response.bytes().await {
                     Ok(body) => {
@@ -2262,6 +2270,52 @@ impl PrivateLinkCapability {
         if let Some(source) = source {
             url.query_pairs_mut().append_pair("source", source);
         }
+        self.send(
+            self.inner
+                .client
+                .get(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS),
+            LISTING_TIMEOUT,
+        )
+        .await
+    }
+
+    /// What the journal says it accepts. An older journal lists none.
+    pub(crate) async fn system_capabilities(&self) -> Result<Vec<String>, LinkOutcome> {
+        let Ok(url) = confine_path(&self.inner.origin, SYSTEM_STATUS_PATH) else {
+            return Err(LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            });
+        };
+        let outcome = self
+            .send(
+                self.inner
+                    .client
+                    .get(url)
+                    .header(reqwest::header::CACHE_CONTROL, "no-cache"),
+                SYSTEM_STATUS_TIMEOUT,
+            )
+            .await;
+        match outcome {
+            LinkOutcome::Success { status, body } if status == StatusCode::OK => {
+                let json: serde_json::Value =
+                    serde_json::from_slice(&body).map_err(|_| LinkOutcome::Success {
+                        status,
+                        body: Vec::new(),
+                    })?;
+                Ok(capabilities_from_status(&json))
+            }
+            other => Err(other),
+        }
+    }
+
+    /// The vaults this journal has from other devices.
+    pub(crate) async fn obsidian_vaults(&self) -> LinkOutcome {
+        let Ok(url) = self.ingest_v3_url("/obsidian/vaults") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
         self.send(
             self.inner
                 .client
@@ -2350,6 +2404,33 @@ impl PrivateLinkCapability {
             other => Err(other),
         }
     }
+}
+
+/// Whether an ingest refusal names a note file as invalid.
+fn is_invalid_note_refusal(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("reason_code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(crate::obsidian::INVALID_REASON)
+}
+
+pub(crate) fn capabilities_from_status(status: &serde_json::Value) -> Vec<String> {
+    status
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn sanitize_journal_version(raw: &str) -> Option<String> {
