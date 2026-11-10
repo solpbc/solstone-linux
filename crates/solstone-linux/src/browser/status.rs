@@ -25,8 +25,8 @@ pub const STORE_LINKS: &[(&str, &str)] = &[
         "https://addons.mozilla.org/firefox/addon/solstone/",
     ),
 ];
-/// The running app rewrites its status every five seconds.
-const RUNNING_STALE_MS: i64 = 30_000;
+/// The running app rewrites its status every five seconds. Older than this, the host is down.
+pub const RUNNING_STALE_MS: i64 = 30_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Running {

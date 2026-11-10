@@ -51,6 +51,7 @@ pub mod segment;
 pub mod service;
 pub mod session_env;
 mod shell;
+pub mod shell_model;
 pub mod source_intake;
 pub mod sources;
 pub mod streams;
