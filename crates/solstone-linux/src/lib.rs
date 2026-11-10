@@ -55,6 +55,7 @@ pub mod source_intake;
 pub mod sources;
 pub mod streams;
 pub mod subscription;
+pub mod sun_arc;
 pub mod support;
 pub mod sync;
 pub mod sync_health;
