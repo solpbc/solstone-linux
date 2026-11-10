@@ -8,7 +8,7 @@
 //! nothing here asks for a location or opens a network connection. The zone table
 //! is the bundled copy of tzdb `zone.tab`.
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, Timelike};
 
 /// Published ratios. φ truncated as the pattern's token, and φ² the same way.
 const DIAMETER_RATIO: f64 = 1.618_033_988_7;
@@ -131,23 +131,95 @@ pub fn zone_point(zone_id: &str) -> Option<(f64, f64)> {
         return None;
     }
     for block in ZONE_TABLE.split('|') {
-        let cut = block.find('/')?;
+        let Some(cut) = block.find('/') else {
+            continue;
+        };
         let region = &block[..cut];
         for entry in block[cut + 1..].split(',') {
             let mut parts = entry.split(':');
-            let city = parts.next()?;
-            let lat: f64 = parts.next()?.parse().ok()?;
-            let lon: f64 = parts.next()?.parse().ok()?;
-            if parts.next().is_some() {
+            let (Some(city), Some(lat_s), Some(lon_s)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if parts.next().is_some() || city.is_empty() {
                 continue;
             }
-            let id = format!("{region}/{city}");
-            if id == zone_id {
+            let (Ok(lat), Ok(lon)) = (lat_s.parse::<f64>(), lon_s.parse::<f64>()) else {
+                continue;
+            };
+            if format!("{region}/{city}") == zone_id {
                 return Some((lat / 100.0, lon / 100.0));
             }
         }
     }
     None
+}
+
+/// The zone identifier at the end of a zoneinfo path. `None` when the path has
+/// no `zoneinfo/` segment.
+#[must_use]
+pub fn zone_id_from_zoneinfo_path(path: &str) -> Option<&str> {
+    const MARK: &str = "zoneinfo/";
+    let id = path.rfind(MARK).map(|index| &path[index + MARK.len()..])?;
+    if id.is_empty() || id.contains('\0') {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// The system zone identifier. `TZ` wins when it names a zone, otherwise the
+/// `/etc/localtime` link. Empty when neither does. This does not ask for a location.
+#[must_use]
+pub fn system_zone_id() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        let tz = tz.strip_prefix(':').unwrap_or(&tz);
+        if let Some(id) = zone_id_from_zoneinfo_path(tz) {
+            return id.to_string();
+        }
+        if tz.contains('/') && !tz.starts_with('/') {
+            return tz.to_string();
+        }
+    }
+    std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|path| {
+            zone_id_from_zoneinfo_path(path.to_string_lossy().as_ref()).map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+/// The local minute and today's sunrise and sunset. The pair is rung 2 from
+/// [`system_zone_id`], and rung 3 when that identifier is not in the table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalSun {
+    pub zone_id: String,
+    pub date: NaiveDate,
+    pub offset_minutes: f64,
+    pub minutes: f64,
+    pub times: SunTimes,
+}
+
+#[must_use]
+pub fn local_sun() -> LocalSun {
+    let now = chrono::Local::now();
+    let date = now.date_naive();
+    let minutes = f64::from(now.hour() * 60 + now.minute());
+    let offset_minutes = f64::from(now.offset().local_minus_utc()) / 60.0;
+    let zone_id = system_zone_id();
+    let times = zone_point(&zone_id)
+        .and_then(|(lat, lon)| solar_pair(lat, lon, date, offset_minutes))
+        .unwrap_or(SunTimes {
+            rise: FALLBACK_RISE_MINUTES,
+            set: FALLBACK_SET_MINUTES,
+        });
+    LocalSun {
+        zone_id,
+        date,
+        offset_minutes,
+        minutes,
+        times,
+    }
 }
 
 #[must_use]
@@ -589,7 +661,7 @@ mod tests {
     use super::{
         Appearance, FALLBACK_RISE_MINUTES, FALLBACK_SET_MINUTES, GROUND_DARK_DAY, GROUND_DARK_DEEP,
         GROUND_DARK_NIGHT, GROUND_LIGHT_DAY, GROUND_LIGHT_DEEP, GROUND_LIGHT_NIGHT, SampleKey,
-        frame, near, sample_due, solar_pair, zone_count, zone_point,
+        frame, near, sample_due, solar_pair, zone_count, zone_id_from_zoneinfo_path, zone_point,
     };
     use chrono::NaiveDate;
 
@@ -717,5 +789,15 @@ mod tests {
                 ..key
             }
         ));
+    }
+
+    #[test]
+    fn zoneinfo_path_yields_the_identifier_after_the_marker() {
+        assert_eq!(
+            zone_id_from_zoneinfo_path("/usr/share/zoneinfo/America/Denver"),
+            Some("America/Denver")
+        );
+        assert_eq!(zone_id_from_zoneinfo_path("America/Denver"), None);
+        assert_eq!(zone_id_from_zoneinfo_path("/usr/share/zoneinfo/"), None);
     }
 }

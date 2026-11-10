@@ -6,6 +6,7 @@ mod copy_map;
 mod format;
 mod logs;
 mod mark_card;
+mod sun_bg;
 mod ui;
 
 use gtk::gio::prelude::*;
@@ -19,6 +20,15 @@ fn main() {
 
     if gtk::major_version() < 4 || (gtk::major_version() == 4 && gtk::minor_version() < 6) {
         std::process::exit(78);
+    }
+
+    if let Ok(path) = std::env::var("SOLSTONE_FRAME_PNG")
+        && !path.is_empty()
+    {
+        match std::fs::write(format!("{path}.txt"), "main\n") {
+            Ok(()) => eprintln!("frame-file armed"),
+            Err(error) => eprintln!("frame-file note: {error}"),
+        }
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
