@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.38] - 2026-11-09
+
 ### Fixed
 
 - if something other than the app removes the copy of a note that's waiting to go into your journal, the app takes that note in again from your vault and it goes into your journal, instead of holding up the notes behind it until the app restarts.
