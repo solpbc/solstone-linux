@@ -309,7 +309,7 @@ pub(crate) fn start(
     let task = runtime.spawn(async move {
         match tokio::task::spawn_blocking(move || {
             Engine::open(root, Arc::new(SystemClock)).map(|mut engine| {
-                engine.set_note_intake(crate::source_intake::vault_hook(state_dir));
+                crate::source_intake::attach_vault(&mut engine, state_dir);
                 engine
             })
         })

@@ -72,8 +72,22 @@ pub(crate) fn note_browser_batch(state_dir: &Path, batch: &Value, accepted: bool
     note_browser_batch_at(state_dir, batch, accepted, &ClockStamp::now());
 }
 
-pub(crate) fn vault_hook(state_dir: PathBuf) -> solstone_vault::NoteIntakeHook {
-    Arc::new(move |event| note_vault_at(&state_dir, event, &ClockStamp::now()))
+pub(crate) fn attach_vault(engine: &mut solstone_vault::Engine, state_dir: PathBuf) {
+    let paths = engine.known_note_paths();
+    let intakes = engine.intakes();
+    if keep_notes(
+        &state_dir,
+        Some(paths.as_slice()),
+        &intakes,
+        &ClockStamp::now(),
+    ) {
+        let through = intakes.iter().map(|intake| intake.id).max().unwrap_or(0);
+        let _ = engine.ack_intakes(through);
+    }
+    let hooked = state_dir;
+    engine.set_intake_hook(Arc::new(move |intakes| {
+        keep_notes(&hooked, None, intakes, &ClockStamp::now())
+    }));
 }
 
 /// Add each solstone-tmux data root's terminal total once. A missing or
@@ -154,41 +168,126 @@ fn note_browser_batch_at(state_dir: &Path, batch: &Value, accepted: bool, stamp:
     });
 }
 
-fn note_vault_at(state_dir: &Path, event: &solstone_vault::IntakeEvent, stamp: &ClockStamp) {
-    let _ = update(state_dir, stamp, |file| match event {
-        solstone_vault::IntakeEvent::OpeningScanFinished => {
-            let already = file["obsidian"]["baselined"].as_bool() == Some(true);
-            file["obsidian"]["baselined"] = json!(true);
-            !already
-        }
-        solstone_vault::IntakeEvent::Note(note) => note_vault_path(file, note, stamp),
-    });
-}
-
-fn note_vault_path(
-    file: &mut Value,
-    note: &solstone_vault::NoteIntake,
+fn keep_notes(
+    state_dir: &Path,
+    known_paths: Option<&[String]>,
+    intakes: &[solstone_vault::Intake],
     stamp: &ClockStamp,
 ) -> bool {
-    let digest = path_digest(&note.path);
-    if let Some(previous) = note.previous_path.as_deref() {
-        let old = path_digest(previous);
+    match update(state_dir, stamp, |file| {
+        apply_notes(file, known_paths, intakes, stamp)
+    }) {
+        Ok(Keep::Saved | Keep::Already) => true,
+        Ok(Keep::Refused) | Err(_) => false,
+    }
+}
+
+fn apply_notes(
+    file: &mut Value,
+    known_paths: Option<&[String]>,
+    intakes: &[solstone_vault::Intake],
+    stamp: &ClockStamp,
+) -> bool {
+    let mut changed = false;
+    if let Some(known_paths) = known_paths
+        && file["obsidian"]["baselined"].as_bool() != Some(true)
+    {
+        let fresh: BTreeSet<&str> = intakes
+            .iter()
+            .filter(|intake| is_fresh_place(intake))
+            .map(|intake| intake.path.as_str())
+            .collect();
         let mut paths = path_set(file);
-        let had_old = paths.remove(&old);
-        let inserted = paths.insert(digest);
+        for path in known_paths {
+            if !fresh.contains(path.as_str()) && paths.insert(path_digest(path)) {
+                changed = true;
+            }
+        }
+        if changed {
+            set_path_set(file, &paths);
+        }
+        file["obsidian"]["baselined"] = json!(true);
+        changed = true;
+    }
+    let mut ordered: Vec<&solstone_vault::Intake> = intakes.iter().collect();
+    ordered.sort_by_key(|intake| intake.id);
+    for intake in ordered {
+        if apply_intake(file, intake, stamp) {
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn is_fresh_place(intake: &solstone_vault::Intake) -> bool {
+    intake.first_sight
+        && !intake.inventory
+        && !intake.removed
+        && intake.previous_path.is_none()
+        && intake.replaced.is_empty()
+}
+
+/// `id` of 0 was assigned before ids started at 1. Apply it once, by the path
+/// set, and do not store 0 as the cursor: the cursor's 0 means nothing applied.
+fn apply_intake(file: &mut Value, intake: &solstone_vault::Intake, stamp: &ClockStamp) -> bool {
+    if intake.id != 0 {
+        let cursor = file["obsidian"]
+            .get("intake")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if intake.id <= cursor {
+            return false;
+        }
+        file["obsidian"]["intake"] = json!(intake.id);
+    }
+    let effects = apply_effects(file, intake, stamp);
+    intake.id != 0 || effects
+}
+
+fn apply_effects(file: &mut Value, intake: &solstone_vault::Intake, stamp: &ClockStamp) -> bool {
+    let digest = path_digest(&intake.path);
+    if intake.removed {
+        let mut paths = path_set(file);
+        if !paths.remove(&digest) {
+            return false;
+        }
         set_path_set(file, &paths);
-        return had_old || inserted;
+        return true;
+    }
+    if intake.inventory {
+        let mut paths = path_set(file);
+        if !paths.insert(digest) {
+            return false;
+        }
+        set_path_set(file, &paths);
+        return true;
     }
     let mut paths = path_set(file);
+    let mut moved = false;
+    if let Some(previous) = intake.previous_path.as_deref()
+        && paths.remove(&path_digest(previous))
+    {
+        moved = true;
+    }
+    for replaced in &intake.replaced {
+        if paths.remove(&path_digest(replaced)) {
+            moved = true;
+        }
+    }
+    if moved || !intake.first_sight {
+        let inserted = paths.insert(digest);
+        if moved || inserted {
+            set_path_set(file, &paths);
+            return true;
+        }
+        return false;
+    }
     if !paths.insert(digest) {
         return false;
     }
     set_path_set(file, &paths);
-    if note.baseline {
-        return true;
-    }
     let Some(total) = total_of(file, "obsidian") else {
-        return false;
+        return true;
     };
     file["obsidian"]["notes"] = json!(total.saturating_add(1));
     file["obsidian"]["last"] = json!(stamp.at.clone());
@@ -464,6 +563,13 @@ fn root_key(root: &Path) -> String {
         .to_string()
 }
 
+enum Keep {
+    Saved,
+    Already,
+    /// The file is not version 1. It was not rewritten.
+    Refused,
+}
+
 /// Load the whole file, apply `change`, and write it back. `change` returns
 /// whether anything that must be saved happened. A file that cannot be read as
 /// version 1 is left as it was, and `change` is not called.
@@ -471,7 +577,7 @@ fn update(
     state_dir: &Path,
     stamp: &ClockStamp,
     change: impl FnOnce(&mut Value) -> bool,
-) -> io::Result<()> {
+) -> io::Result<Keep> {
     let Some(_lock) = lock_state(state_dir) else {
         return Err(io::Error::other("could not lock source intake"));
     };
@@ -485,17 +591,18 @@ fn update(
         None => fresh_file(stamp),
         Some(ref bytes) => match parse_file(bytes) {
             Some(file) => file,
-            None => return Ok(()),
+            None => return Ok(Keep::Refused),
         },
     };
     ensure_sources(&mut file, stamp);
     let changed = change(&mut file);
     let creating = existing.is_none();
     if !changed && !creating {
-        return Ok(());
+        return Ok(Keep::Already);
     }
     let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
-    atomic_write_bytes(&file_path, &bytes).map_err(|error| io::Error::other(error.to_string()))
+    atomic_write_bytes(&file_path, &bytes).map_err(|error| io::Error::other(error.to_string()))?;
+    Ok(Keep::Saved)
 }
 
 fn lock_state(state_dir: &Path) -> Option<File> {
@@ -539,6 +646,11 @@ fn parse_file(bytes: &[u8]) -> Option<Value> {
     }
     if let Some(baselined) = value["obsidian"].get("baselined")
         && !baselined.is_boolean()
+    {
+        return None;
+    }
+    if let Some(intake) = value["obsidian"].get("intake")
+        && !(intake.as_u64().is_some() && intake.is_u64())
     {
         return None;
     }
@@ -629,6 +741,13 @@ fn ensure_sources(file: &mut Value, stamp: &ClockStamp) {
     if !file["obsidian"]["baselined"].is_boolean() {
         file["obsidian"]["baselined"] = json!(false);
     }
+    if file["obsidian"]
+        .get("intake")
+        .and_then(Value::as_u64)
+        .is_none()
+    {
+        file["obsidian"]["intake"] = json!(0);
+    }
     if !file.get("carried").is_some_and(Value::is_array) {
         file["carried"] = json!([]);
     }
@@ -694,6 +813,7 @@ fn notes_object(stamp: &ClockStamp) -> Value {
         "last": Value::Null,
         "paths": [],
         "baselined": false,
+        "intake": 0,
     })
 }
 
@@ -740,6 +860,7 @@ impl ClockStamp {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
 
     fn stamp_afternoon() -> ClockStamp {
         ClockStamp::fixed(-6 * 3600, 2020, 1, 1, 15, 0, 0)
@@ -1003,7 +1124,7 @@ mod tests {
         fs::write(vault.join("two.md"), "two").unwrap();
         let mut engine =
             solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
-        engine.set_note_intake(vault_hook(state.clone()));
+        attach_vault(&mut engine, state.clone());
         engine.turn_on(&vault).unwrap();
         engine.apply_vault_list(&[]).unwrap();
         engine
@@ -1034,7 +1155,7 @@ mod tests {
         fs::create_dir_all(vault.join(".obsidian")).unwrap();
         let mut engine =
             solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
-        engine.set_note_intake(vault_hook(state.clone()));
+        attach_vault(&mut engine, state.clone());
         engine.turn_on(&vault).unwrap();
         engine.apply_vault_list(&[]).unwrap();
         engine
@@ -1056,7 +1177,7 @@ mod tests {
         fs::write(vault.join("old.md"), "same").unwrap();
         let mut engine =
             solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
-        engine.set_note_intake(vault_hook(state.clone()));
+        attach_vault(&mut engine, state.clone());
         engine.turn_on(&vault).unwrap();
         engine.apply_vault_list(&[]).unwrap();
         engine
@@ -1073,6 +1194,457 @@ mod tests {
         let paths = file["obsidian"]["paths"].as_array().unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], path_digest("new.md"));
+    }
+
+    fn started_engine(temp: &Path) -> (PathBuf, PathBuf, PathBuf, solstone_vault::Engine) {
+        let state = temp.join("state");
+        let root = temp.join("engine");
+        let vault = temp.join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        (state, root, vault, engine)
+    }
+
+    #[test]
+    fn an_edit_to_a_recorded_note_adds_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, vault, mut engine) = started_engine(temp.path());
+        fs::write(vault.join("one.md"), "one").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let before = read_file(&state);
+        assert_eq!(before["obsidian"]["notes"], 0);
+        assert!(before["obsidian"]["last"].is_null());
+        fs::write(vault.join("one.md"), "one changed").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let after = read_file(&state);
+        assert_eq!(after["obsidian"]["notes"], 0);
+        assert!(after["obsidian"]["last"].is_null());
+        assert_eq!(after["audio"]["seconds"], before["audio"]["seconds"]);
+    }
+
+    #[test]
+    fn a_note_whose_save_never_landed_is_counted_once_on_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, root, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let mut file = read_file(&state);
+        file["audio"]["seconds"] = json!(99);
+        fs::write(path(&state), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        let before = fs::read(path(&state)).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(vault.join("new.md"), "new").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let during = fs::read(path(&state)).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(during, before);
+        assert_eq!(engine.intakes().len(), 1);
+        drop(engine);
+
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        attach_vault(&mut engine, state.clone());
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["audio"]["seconds"], 99);
+        assert!(engine.intakes().is_empty());
+        drop(engine);
+
+        let mut engine =
+            solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+        attach_vault(&mut engine, state.clone());
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_landed_save_whose_acknowledgement_did_not_stays_at_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, root, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let blocked = {
+            let json = fs::read_dir(root.join("tables"))
+                .unwrap()
+                .find_map(|entry| {
+                    let path = entry.unwrap().path();
+                    (path.extension().is_some_and(|ext| ext == "json")).then_some(path)
+                })
+                .unwrap();
+            json.with_file_name(format!(
+                ".{}.tmp",
+                json.file_name().unwrap().to_string_lossy()
+            ))
+        };
+        let hooked = state.clone();
+        let block_in_hook = blocked.clone();
+        engine.set_intake_hook(Arc::new(move |intakes| {
+            let kept = keep_notes(&hooked, None, intakes, &ClockStamp::now());
+            let _ = fs::create_dir(&block_in_hook);
+            kept
+        }));
+        fs::write(vault.join("new.md"), "new").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(engine.intakes().len(), 1);
+        let _ = fs::remove_dir_all(&blocked);
+        drop(engine);
+
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        attach_vault(&mut engine, state.clone());
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        drop(engine);
+        let mut engine =
+            solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+        attach_vault(&mut engine, state.clone());
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+    }
+
+    #[test]
+    fn removing_a_note_adds_nothing_and_a_later_note_at_that_path_can_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, vault, mut engine) = started_engine(temp.path());
+        fs::write(vault.join("old.md"), "old").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::remove_file(vault.join("old.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        assert!(read_file(&state)["obsidian"]["last"].is_null());
+        fs::write(vault.join("old.md"), "old again").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+    }
+
+    #[test]
+    fn a_counted_note_removed_inside_the_window_lets_the_same_path_count_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        fs::write(vault.join("counted.md"), "counted").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        let last = read_file(&state)["obsidian"]["last"].clone();
+        fs::remove_file(vault.join("counted.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let held = read_file(&state);
+        assert_eq!(held["obsidian"]["notes"], 1);
+        assert_eq!(held["obsidian"]["last"], last);
+        fs::write(vault.join("counted.md"), "counted again").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 2);
+    }
+
+    #[test]
+    fn a_stopped_first_walk_records_every_note_and_counts_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            fs::write(vault.join(format!("n{index:04}.md")), "n").unwrap();
+        }
+        let mut engine =
+            solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let partial = read_file(&state)["obsidian"]["paths"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert!((256..300).contains(&partial), "{partial}");
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        assert_eq!(
+            read_file(&state)["obsidian"]["paths"]
+                .as_array()
+                .unwrap()
+                .len(),
+            300
+        );
+        fs::write(vault.join("after.md"), "after").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+    }
+
+    #[test]
+    fn a_note_written_while_the_first_walk_is_open_counts_and_an_edit_does_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            fs::write(vault.join(format!("n{index:04}.md")), "n").unwrap();
+        }
+        let mut engine =
+            solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::write(vault.join("during.md"), "during").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert_eq!(counted["obsidian"]["paths"].as_array().unwrap().len(), 301);
+        let last = counted["obsidian"]["last"].clone();
+        assert!(last.is_string());
+        fs::write(vault.join("during.md"), "during changed").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 1);
+        assert_eq!(edited["obsidian"]["last"], last);
+    }
+
+    #[test]
+    fn a_version_one_file_with_no_cursor_counts_once_and_keeps_audio() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let body = br#"{"version":1,"audio":{"seconds":99,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null},"screen":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null},"terminal":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"seen":[]},"browsers":{"pages":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"tabs":{}},"obsidian":{"notes":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"paths":[],"baselined":true},"carried":[]}"#;
+        fs::write(path(&state), body).unwrap();
+        fs::write(vault.join("one.md"), "one").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let file = read_file(&state);
+        assert_eq!(file["obsidian"]["notes"], 1);
+        assert!(file["obsidian"]["intake"].is_u64());
+        assert_eq!(file["audio"]["seconds"], 99);
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_version_one_file_with_a_bad_cursor_is_left_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, vault, mut engine) = started_engine(temp.path());
+        fs::create_dir_all(&state).unwrap();
+        let body = br#"{"version":1,"audio":{"seconds":99,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null},"screen":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null},"terminal":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"seen":[]},"browsers":{"pages":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"tabs":{}},"obsidian":{"notes":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"paths":[],"baselined":false,"intake":"no"},"carried":[]}"#;
+        fs::write(path(&state), body).unwrap();
+        fs::write(vault.join("one.md"), "one").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(fs::read(path(&state)).unwrap(), body);
+        assert_eq!(engine.intakes().len(), 1);
+        assert_eq!(read_file(&state)["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_id_of_zero_counts_once_and_does_not_move_the_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let stamp = stamp_afternoon();
+        let intake = solstone_vault::Intake {
+            id: 0,
+            path: "a.md".to_owned(),
+            previous_path: None,
+            replaced: Vec::new(),
+            first_sight: true,
+            removed: false,
+            inventory: false,
+            at_ms: 0,
+        };
+        assert!(keep_notes(&state, Some(&[]), &[], &stamp));
+        assert!(keep_notes(
+            &state,
+            None,
+            std::slice::from_ref(&intake),
+            &stamp
+        ));
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["obsidian"]["intake"], 0);
+        assert!(keep_notes(&state, None, &[intake], &stamp));
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["obsidian"]["intake"], 0);
+    }
+
+    fn intake_of(
+        id: u64,
+        path: &str,
+        replaced: Vec<String>,
+        first_sight: bool,
+        removed: bool,
+        inventory: bool,
+    ) -> solstone_vault::Intake {
+        solstone_vault::Intake {
+            id,
+            path: path.to_owned(),
+            previous_path: None,
+            replaced,
+            first_sight,
+            removed,
+            inventory,
+            at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn an_id_of_zero_that_is_inventory_records_the_path_and_does_not_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let stamp = stamp_afternoon();
+        assert!(keep_notes(&state, Some(&[]), &[], &stamp));
+        pin_audio(&state);
+        let recorded = intake_of(0, "a.md", Vec::new(), true, false, true);
+        assert!(keep_notes(
+            &state,
+            None,
+            std::slice::from_ref(&recorded),
+            &stamp
+        ));
+        let file = read_file(&state);
+        assert_eq!(file["obsidian"]["notes"], 0);
+        assert_eq!(file["obsidian"]["intake"], 0);
+        assert!(file["obsidian"]["last"].is_null());
+        assert!(path_set(&file).contains(&path_digest("a.md")));
+        assert_eq!(file["audio"]["seconds"], 99);
+        assert!(keep_notes(&state, None, &[recorded], &stamp));
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let again = intake_of(1, "a.md", Vec::new(), true, false, false);
+        assert!(keep_notes(&state, None, &[again], &stamp));
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let next = intake_of(2, "b.md", Vec::new(), true, false, false);
+        assert!(keep_notes(&state, None, &[next], &stamp));
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert_eq!(counted["obsidian"]["intake"], 2);
+        assert_eq!(counted["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_id_of_zero_that_is_a_removal_drops_the_hash_and_does_not_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let stamp = stamp_afternoon();
+        assert!(keep_notes(&state, Some(&[]), &[], &stamp));
+        pin_audio(&state);
+        let recorded = intake_of(0, "a.md", Vec::new(), true, false, true);
+        assert!(keep_notes(&state, None, &[recorded], &stamp));
+        let removal = intake_of(0, "a.md", Vec::new(), false, true, false);
+        assert!(keep_notes(
+            &state,
+            None,
+            std::slice::from_ref(&removal),
+            &stamp
+        ));
+        let dropped = read_file(&state);
+        assert_eq!(dropped["obsidian"]["notes"], 0);
+        assert_eq!(dropped["obsidian"]["intake"], 0);
+        assert!(dropped["obsidian"]["last"].is_null());
+        assert!(!path_set(&dropped).contains(&path_digest("a.md")));
+        assert_eq!(dropped["audio"]["seconds"], 99);
+        assert!(keep_notes(&state, None, &[removal], &stamp));
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let again = intake_of(1, "a.md", Vec::new(), true, false, false);
+        assert!(keep_notes(&state, None, &[again], &stamp));
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert_eq!(counted["obsidian"]["intake"], 1);
+        assert_eq!(counted["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_place_and_a_removal_in_one_batch_keep_the_count_and_drop_the_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let stamp = stamp_afternoon();
+        assert!(keep_notes(&state, Some(&[]), &[], &stamp));
+        pin_audio(&state);
+        let place = intake_of(1, "a.md", Vec::new(), true, false, false);
+        let removal = intake_of(2, "a.md", Vec::new(), false, true, false);
+        assert!(keep_notes(&state, None, &[place, removal], &stamp));
+        let held = read_file(&state);
+        assert_eq!(held["obsidian"]["notes"], 1);
+        assert!(held["obsidian"]["last"].is_string());
+        assert!(!path_set(&held).contains(&path_digest("a.md")));
+        assert_eq!(held["audio"]["seconds"], 99);
+        let later = intake_of(3, "a.md", Vec::new(), true, false, false);
+        assert!(keep_notes(&state, None, &[later], &stamp));
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 2);
+        assert_eq!(counted["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_collapsed_first_sight_moves_the_replaced_hash_and_does_not_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let stamp = stamp_afternoon();
+        assert!(keep_notes(&state, Some(&[]), &[], &stamp));
+        pin_audio(&state);
+        let recorded = intake_of(0, "a.md", Vec::new(), true, false, true);
+        assert!(keep_notes(&state, None, &[recorded], &stamp));
+        let collapsed = intake_of(1, "d.md", vec!["a.md".to_owned()], true, false, false);
+        assert!(keep_notes(&state, None, &[collapsed], &stamp));
+        let moved = read_file(&state);
+        assert_eq!(moved["obsidian"]["notes"], 0);
+        assert!(moved["obsidian"]["last"].is_null());
+        assert_eq!(moved["audio"]["seconds"], 99);
+        let paths = path_set(&moved);
+        assert!(!paths.contains(&path_digest("a.md")));
+        assert!(paths.contains(&path_digest("d.md")));
     }
 
     #[test]
@@ -1103,5 +1675,992 @@ mod tests {
         assert!(!url.contains("seconds="));
         let rendered = format!("{about:?}");
         assert!(!rendered.contains("source-intake"));
+    }
+
+    fn table_value(root: &Path) -> Value {
+        let path = fs::read_dir(root.join("tables"))
+            .unwrap()
+            .find_map(|entry| {
+                let path = entry.unwrap().path();
+                path.extension()
+                    .is_some_and(|ext| ext == "json")
+                    .then_some(path)
+            })
+            .unwrap();
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    fn pin_audio(state: &Path) {
+        let mut file = read_file(state);
+        file["audio"]["seconds"] = json!(99);
+        fs::write(path(state), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_counted_note_renamed_inside_the_window_does_not_count_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        fs::write(vault.join("a.md"), "a").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        let last = counted["obsidian"]["last"].clone();
+        fs::rename(vault.join("a.md"), vault.join("b.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let renamed = read_file(&state);
+        assert_eq!(renamed["obsidian"]["notes"], 1);
+        assert_eq!(renamed["obsidian"]["last"], last);
+        assert_eq!(renamed["audio"]["seconds"], 99);
+        let paths = renamed["obsidian"]["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], path_digest("b.md"));
+    }
+
+    #[test]
+    fn a_renamed_note_removed_while_its_old_path_is_occupied_keeps_both_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, root, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        fs::write(vault.join("live.md"), "live").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        fs::rename(vault.join("live.md"), vault.join("moved.md")).unwrap();
+        fs::write(vault.join("live.md"), "fresh").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let both = read_file(&state);
+        assert_eq!(both["obsidian"]["notes"], 2);
+        let last = both["obsidian"]["last"].clone();
+        fs::remove_file(vault.join("moved.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let held = read_file(&state);
+        assert_eq!(held["obsidian"]["notes"], 2);
+        assert_eq!(held["obsidian"]["last"], last);
+        assert_eq!(held["audio"]["seconds"], 99);
+        let held_paths = held["obsidian"]["paths"].as_array().unwrap();
+        let live = json!(path_digest("live.md"));
+        let moved = json!(path_digest("moved.md"));
+        assert!(held_paths.iter().any(|path| path == &live));
+        assert!(!held_paths.iter().any(|path| path == &moved));
+        let log = fs::read_to_string(root.join("pending.log")).unwrap_or_default();
+        assert!(
+            !log.lines().any(|line| {
+                line.contains("\"path\":\"live.md\"") && line.contains("\"change\":\"removed\"")
+            }),
+            "{log}"
+        );
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 2);
+        fs::write(vault.join("moved.md"), "again").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let added = read_file(&state);
+        assert_eq!(added["obsidian"]["notes"], 3);
+        assert_ne!(added["obsidian"]["last"], last);
+        assert_eq!(added["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_missing_path_leaves_the_open_listing_and_a_later_note_there_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..520 {
+            fs::write(
+                vault.join(format!("n{index:04}.md")),
+                format!("n{index:04}"),
+            )
+            .unwrap();
+        }
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        engine.scan(&cancel).unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        pin_audio(&state);
+        fs::remove_file(vault.join("n0000.md")).unwrap();
+        engine.scan(&cancel).unwrap();
+        let open = table_value(&root);
+        assert_eq!(open["first_list_open"], true);
+        let listed = open["listing_paths"].as_array().unwrap();
+        assert!(!listed.iter().any(|path| path == "n0000.md"));
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        // The delete is held once this scan reaches it, and the next one
+        // confirms it. The note the listing recorded still adds nothing.
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::write(vault.join("n0000.md"), "new").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        let last = counted["obsidian"]["last"].clone();
+        assert!(last.is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+        fs::write(vault.join("n0000.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 1);
+        assert_eq!(edited["obsidian"]["last"], last);
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_unread_directory_is_recorded_when_a_later_walk_can_see_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::write(vault.join("seen.md"), "seen").unwrap();
+        let locked = vault.join("locked");
+        fs::create_dir(&locked).unwrap();
+        for index in 0..300 {
+            fs::write(locked.join(format!("n{index:04}.md")), "n").unwrap();
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        let first = engine.scan(&std::sync::atomic::AtomicBool::new(false));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        first.unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let partial = table_value(&root);
+        assert_eq!(partial["first_list_open"], true);
+        assert!(partial["listing_paths"].is_null());
+        drop(engine);
+
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        attach_vault(&mut engine, state.clone());
+        let reloaded = table_value(&root);
+        assert!(reloaded["listing_paths"].is_null());
+        assert_eq!(reloaded["first_list_open"], true);
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        let snapped = table_value(&root);
+        assert_eq!(snapped["first_list_open"], true);
+        let listed = snapped["listing_paths"].as_array().unwrap();
+        assert_eq!(listed.len(), 301);
+        assert!(listed.iter().any(|path| path == "locked/n0000.md"));
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::write(vault.join("during.md"), "during").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert_eq!(counted["audio"]["seconds"], 99);
+        assert_eq!(counted["obsidian"]["paths"].as_array().unwrap().len(), 302);
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_too_large_note_is_recorded_when_it_becomes_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::write(vault.join("small.md"), "small").unwrap();
+        fs::write(
+            vault.join("big.md"),
+            vec![b'x'; solstone_vault::MAX_NOTE_BYTES + 1],
+        )
+        .unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let listed = table_value(&root);
+        assert_eq!(listed["first_list_open"], false);
+        let paths = listed["listing_paths"].as_array().unwrap();
+        assert!(paths.iter().any(|path| path == "big.md"));
+        assert!(!paths.iter().any(|path| path == "small.md"));
+        fs::write(vault.join("big.md"), "hello").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let readable = read_file(&state);
+        assert_eq!(readable["obsidian"]["notes"], 0);
+        assert!(readable["obsidian"]["last"].is_null());
+        assert_eq!(readable["audio"]["seconds"], 99);
+        fs::write(vault.join("big.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 0);
+        assert!(edited["obsidian"]["last"].is_null());
+        assert_eq!(edited["audio"]["seconds"], 99);
+        fs::remove_file(vault.join("big.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::write(vault.join("big.md"), "fresh").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_too_large_note_that_disappears_does_not_block_a_new_note() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::write(
+            vault.join("big.md"),
+            vec![b'x'; solstone_vault::MAX_NOTE_BYTES + 1],
+        )
+        .unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::remove_file(vault.join("big.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let held = table_value(&root);
+        assert!(
+            held["listing_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "big.md")
+        );
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert!(table_value(&root)["listing_paths"].is_null());
+        fs::write(vault.join("big.md"), "fresh").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert_eq!(counted["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_too_large_note_missing_for_one_walk_does_not_count_when_it_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::write(
+            vault.join("big.md"),
+            vec![b'x'; solstone_vault::MAX_NOTE_BYTES + 1],
+        )
+        .unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        fs::remove_file(vault.join("big.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        fs::write(vault.join("big.md"), "back").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let back = read_file(&state);
+        assert_eq!(back["obsidian"]["notes"], 0);
+        assert!(back["obsidian"]["last"].is_null());
+        assert_eq!(back["audio"]["seconds"], 99);
+        fs::write(vault.join("big.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 0);
+        assert!(edited["obsidian"]["last"].is_null());
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_unreadable_note_is_recorded_when_it_can_be_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::write(vault.join("plain.md"), "plain").unwrap();
+        let secret = vault.join("secret.md");
+        fs::write(&secret, "secret").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        let first = engine.scan(&std::sync::atomic::AtomicBool::new(false));
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
+        first.unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let listed = table_value(&root);
+        assert_eq!(listed["first_list_open"], false);
+        assert!(
+            listed["listing_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "secret.md")
+        );
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let readable = read_file(&state);
+        assert_eq!(readable["obsidian"]["notes"], 0);
+        assert!(readable["obsidian"]["last"].is_null());
+        assert_eq!(readable["audio"]["seconds"], 99);
+        fs::write(&secret, "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 0);
+        assert!(edited["obsidian"]["last"].is_null());
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_unread_directory_after_the_set_is_stored_does_not_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            fs::write(
+                vault.join(format!("a{index:04}.md")),
+                format!("a{index:04}"),
+            )
+            .unwrap();
+        }
+        let kept = vault.join("kept");
+        fs::create_dir(&kept).unwrap();
+        fs::write(kept.join("secret.md"), "secret").unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        pin_audio(&state);
+        let open = table_value(&root);
+        assert_eq!(open["first_list_open"], true);
+        assert!(
+            open["listing_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "kept/secret.md")
+        );
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o000)).unwrap();
+        let locked = engine.scan(&std::sync::atomic::AtomicBool::new(false));
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o755)).unwrap();
+        locked.unwrap();
+        let still = table_value(&root);
+        assert_eq!(still["first_list_open"], true);
+        assert!(
+            still["listing_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "kept/secret.md")
+        );
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let recorded = read_file(&state);
+        assert_eq!(recorded["obsidian"]["notes"], 0);
+        assert!(recorded["obsidian"]["last"].is_null());
+        assert_eq!(recorded["audio"]["seconds"], 99);
+        fs::write(kept.join("secret.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 0);
+        assert!(edited["obsidian"]["last"].is_null());
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_finished_listing_reloads_and_a_later_note_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::write(vault.join("one.md"), "one").unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let finished = table_value(&root);
+        assert_eq!(finished["first_sync_started"], true);
+        assert_eq!(finished["first_list_open"], false);
+        assert!(finished["listing_paths"].is_null());
+        drop(engine);
+
+        let mut engine =
+            solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+        attach_vault(&mut engine, state.clone());
+        let reloaded = table_value(&temp.path().join("engine"));
+        assert_eq!(reloaded["first_sync_started"], true);
+        assert_eq!(reloaded["first_list_open"], false);
+        fs::write(vault.join("two.md"), "two").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+        fs::write(vault.join("one.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 1);
+        assert_eq!(edited["obsidian"]["last"], counted["obsidian"]["last"]);
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_unread_directory_after_the_listing_finished_does_not_reopen_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::write(vault.join("one.md"), "one").unwrap();
+        let kept = vault.join("kept");
+        fs::create_dir(&kept).unwrap();
+        fs::write(kept.join("old.md"), "old").unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::write(vault.join("two.md"), "two").unwrap();
+        let locked = engine.scan(&std::sync::atomic::AtomicBool::new(false));
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o755)).unwrap();
+        locked.unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+        assert_eq!(table_value(&root)["first_list_open"], false);
+    }
+
+    #[test]
+    fn a_not_yet_read_note_renamed_before_resume_does_not_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            fs::write(
+                vault.join(format!("n{index:04}.md")),
+                format!("n{index:04}"),
+            )
+            .unwrap();
+        }
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        fs::rename(vault.join("n0299.md"), vault.join("moved.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let renamed = read_file(&state);
+        assert_eq!(renamed["obsidian"]["notes"], 0);
+        assert!(renamed["obsidian"]["last"].is_null());
+        assert_eq!(renamed["audio"]["seconds"], 99);
+        fs::write(vault.join("moved.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 0);
+        assert!(edited["obsidian"]["last"].is_null());
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_empty_vault_records_nothing_and_a_later_note_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, root, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        assert!(read_file(&state)["obsidian"]["last"].is_null());
+        let finished = table_value(&root);
+        assert_eq!(finished["first_sync_started"], true);
+        assert_eq!(finished["first_list_open"], false);
+        assert!(finished["listing_paths"].is_null());
+        fs::write(vault.join("one.md"), "one").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+        fs::write(vault.join("one.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 1);
+        assert_eq!(edited["obsidian"]["last"], counted["obsidian"]["last"]);
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_existing_notes_total_survives_an_edit_a_new_note_and_a_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, vault, mut engine) = started_engine(temp.path());
+        fs::write(vault.join("one.md"), "one").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let mut file = read_file(&state);
+        file["obsidian"]["notes"] = json!(4);
+        file["obsidian"]["last"] = Value::Null;
+        file["obsidian"]["started"] = json!("2019-05-05");
+        file["audio"]["seconds"] = json!(99);
+        file["audio"]["started"] = json!("2019-05-05");
+        file["browsers"]["tabs"] = json!({"inst": {"c1": "https://example/"}});
+        file["carried"] = json!(["root-a"]);
+        file["obsidian"].as_object_mut().unwrap().remove("intake");
+        fs::write(path(&state), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        fs::write(vault.join("one.md"), "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 4);
+        assert!(edited["obsidian"]["last"].is_null());
+        assert_eq!(edited["obsidian"]["started"], "2019-05-05");
+        assert_eq!(edited["audio"]["seconds"], 99);
+        assert_eq!(edited["audio"]["started"], "2019-05-05");
+        assert_eq!(edited["browsers"]["tabs"]["inst"]["c1"], "https://example/");
+        assert_eq!(edited["carried"], json!(["root-a"]));
+        fs::write(vault.join("two.md"), "two").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 5);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+        assert_eq!(counted["audio"]["started"], "2019-05-05");
+        assert_eq!(counted["carried"], json!(["root-a"]));
+        let last = counted["obsidian"]["last"].clone();
+        fs::rename(vault.join("one.md"), vault.join("moved.md")).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let renamed = read_file(&state);
+        assert_eq!(renamed["obsidian"]["notes"], 5);
+        assert_eq!(renamed["obsidian"]["last"], last);
+        assert_eq!(renamed["audio"]["seconds"], 99);
+        assert_eq!(renamed["audio"]["started"], "2019-05-05");
+        assert_eq!(
+            renamed["browsers"]["tabs"]["inst"]["c1"],
+            "https://example/"
+        );
+        assert_eq!(renamed["carried"], json!(["root-a"]));
+        let paths = path_set(&renamed);
+        assert!(!paths.contains(&path_digest("one.md")));
+        assert!(paths.contains(&path_digest("moved.md")));
+    }
+
+    #[test]
+    fn an_unacked_id_of_zero_counts_and_the_next_note_counts_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, root, vault, mut engine) = started_engine(temp.path());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        pin_audio(&state);
+        drop(engine);
+        let table_path = fs::read_dir(root.join("tables"))
+            .unwrap()
+            .find_map(|entry| {
+                let path = entry.unwrap().path();
+                path.extension()
+                    .is_some_and(|ext| ext == "json")
+                    .then_some(path)
+            })
+            .unwrap();
+        let mut table = table_value(&root);
+        table["next_intake_id"] = json!(1);
+        table["intakes"] = json!([{
+            "id": 0,
+            "path": "zero.md",
+            "previous_path": null,
+            "replaced": [],
+            "first_sight": true,
+            "removed": false,
+            "inventory": false,
+            "at_ms": 0
+        }]);
+        fs::write(&table_path, serde_json::to_vec(&table).unwrap()).unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        attach_vault(&mut engine, state.clone());
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["obsidian"]["intake"], 0);
+        assert!(engine.intakes().is_empty());
+        fs::write(vault.join("one.md"), "one").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 2);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+        assert!(engine.intakes().is_empty());
+        drop(engine);
+        let mut engine =
+            solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+        attach_vault(&mut engine, state.clone());
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 2);
+        assert_eq!(read_file(&state)["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_listed_note_missing_for_one_walk_does_not_count_when_it_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            fs::write(
+                vault.join(format!("n{index:04}.md")),
+                format!("n{index:04}"),
+            )
+            .unwrap();
+        }
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        pin_audio(&state);
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        let note = vault.join("n0000.md");
+        fs::remove_file(&note).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        fs::write(&note, "n0000").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let back = read_file(&state);
+        assert_eq!(back["obsidian"]["notes"], 0);
+        assert!(back["obsidian"]["last"].is_null());
+        assert_eq!(back["audio"]["seconds"], 99);
+        fs::write(&note, "edited").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let edited = read_file(&state);
+        assert_eq!(edited["obsidian"]["notes"], 0);
+        assert!(edited["obsidian"]["last"].is_null());
+        assert_eq!(edited["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_failed_save_while_closing_the_listing_keeps_it_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            fs::write(
+                vault.join(format!("n{index:04}.md")),
+                format!("n{index:04}"),
+            )
+            .unwrap();
+        }
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        pin_audio(&state);
+        let open = table_value(&root);
+        assert_eq!(open["first_list_open"], true);
+        let table_path = fs::read_dir(root.join("tables"))
+            .unwrap()
+            .find_map(|entry| {
+                let path = entry.unwrap().path();
+                path.extension()
+                    .is_some_and(|ext| ext == "json")
+                    .then_some(path)
+            })
+            .unwrap();
+        let blocked = table_path.with_file_name(format!(
+            ".{}.tmp",
+            table_path.file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir(&blocked).unwrap();
+        let failed = engine.scan(&std::sync::atomic::AtomicBool::new(false));
+        let _ = fs::remove_dir_all(&blocked);
+        assert!(failed.is_err());
+        let still = table_value(&root);
+        assert_eq!(still["first_list_open"], true);
+        assert!(still["listing_paths"].is_array());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let recorded = read_file(&state);
+        assert_eq!(recorded["obsidian"]["notes"], 0);
+        assert!(recorded["obsidian"]["last"].is_null());
+        assert_eq!(recorded["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn a_refused_counter_file_stays_byte_for_byte_across_a_reopen() {
+        for body in [
+            br#"{"version":2,"audio":{"seconds":99}}"#.as_slice(),
+            br#"{"version":1,"audio":{"seconds":99,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null},"screen":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null},"terminal":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"seen":[]},"browsers":{"pages":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"tabs":{}},"obsidian":{"notes":1.5,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"paths":[],"baselined":true},"carried":[]}"#.as_slice(),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (state, root, vault, mut engine) = started_engine(temp.path());
+            fs::write(vault.join("one.md"), "one").unwrap();
+            engine
+                .scan(&std::sync::atomic::AtomicBool::new(false))
+                .unwrap();
+            fs::write(path(&state), body).unwrap();
+            fs::write(vault.join("two.md"), "two").unwrap();
+            engine
+                .scan(&std::sync::atomic::AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(fs::read(path(&state)).unwrap(), body);
+            assert!(!engine.intakes().is_empty());
+            drop(engine);
+            let mut engine =
+                solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+            attach_vault(&mut engine, state.clone());
+            assert_eq!(fs::read(path(&state)).unwrap(), body);
+            assert!(!engine.intakes().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_refused_file_counts_the_waiting_note_once_it_is_valid_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, root, vault, mut engine) = started_engine(temp.path());
+        fs::write(vault.join("one.md"), "one").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let refused = br#"{"version":2,"audio":{"seconds":99}}"#;
+        fs::write(path(&state), refused).unwrap();
+        fs::write(vault.join("two.md"), "two").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(fs::read(path(&state)).unwrap(), refused);
+        assert!(!engine.intakes().is_empty());
+        drop(engine);
+        let valid = br#"{"version":1,"audio":{"seconds":99,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null},"screen":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null},"terminal":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"seen":[]},"browsers":{"pages":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"tabs":{}},"obsidian":{"notes":0,"started":"2020-01-01","started_at":"2020-01-01T15:00:00-06:00","last":null,"paths":[],"baselined":true},"carried":[]}"#;
+        fs::write(path(&state), valid).unwrap();
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        attach_vault(&mut engine, state.clone());
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 1);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["audio"]["seconds"], 99);
+        assert!(engine.intakes().is_empty());
+        drop(engine);
+        let mut engine =
+            solstone_vault::Engine::open(root, Arc::new(solstone_vault::SystemClock)).unwrap();
+        attach_vault(&mut engine, state.clone());
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 1);
+        assert_eq!(read_file(&state)["audio"]["seconds"], 99);
+    }
+
+    #[test]
+    fn an_existing_total_stays_while_the_first_listing_is_still_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = temp.path().join("engine");
+        let vault = temp.path().join("Notes");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            fs::write(
+                vault.join(format!("n{index:04}.md")),
+                format!("n{index:04}"),
+            )
+            .unwrap();
+        }
+        let mut engine =
+            solstone_vault::Engine::open(root.clone(), Arc::new(solstone_vault::SystemClock))
+                .unwrap();
+        engine.turn_on(&vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        attach_vault(&mut engine, state.clone());
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(true))
+            .unwrap();
+        assert_eq!(read_file(&state)["obsidian"]["notes"], 0);
+        assert_eq!(table_value(&root)["first_list_open"], true);
+        let mut file = read_file(&state);
+        file["obsidian"]["notes"] = json!(4);
+        file["obsidian"]["last"] = Value::Null;
+        file["obsidian"]["started"] = json!("2019-05-05");
+        file["audio"]["seconds"] = json!(99);
+        fs::write(path(&state), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let finished = read_file(&state);
+        assert_eq!(finished["obsidian"]["notes"], 4);
+        assert!(finished["obsidian"]["last"].is_null());
+        assert_eq!(finished["obsidian"]["started"], "2019-05-05");
+        assert_eq!(finished["audio"]["seconds"], 99);
+        assert_eq!(table_value(&root)["first_list_open"], false);
+        fs::write(vault.join("after.md"), "after").unwrap();
+        engine
+            .scan(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let counted = read_file(&state);
+        assert_eq!(counted["obsidian"]["notes"], 5);
+        assert!(counted["obsidian"]["last"].is_string());
+        assert_eq!(counted["obsidian"]["started"], "2019-05-05");
+        assert_eq!(counted["audio"]["seconds"], 99);
     }
 }

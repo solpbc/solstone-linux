@@ -33,6 +33,10 @@ pub struct Walked {
     pub too_large: BTreeSet<String>,
     /// The file ids of those, so a note that grew and moved isn't taken for deleted.
     pub too_large_ids: BTreeSet<String>,
+    /// Path to file id for a too-large note, when the platform has one.
+    pub too_large_id_by_path: BTreeMap<String, String>,
+    /// Path to file id for a placeholder, when the platform has one.
+    pub placeholder_id_by_path: BTreeMap<String, String>,
     /// Directories that could not be fully listed or examined, as `prefix/`:
     /// nothing under one counts as missing.
     pub unreadable_dirs: Vec<String>,
@@ -157,13 +161,21 @@ pub fn walk_with_ids(
             }
             match entry.metadata() {
                 Ok(metadata) if platform::is_placeholder(&metadata) => {
+                    if let Some(id) =
+                        platform::file_id(&metadata).or_else(|| ids.get(&name).cloned())
+                    {
+                        walked.placeholder_id_by_path.insert(rel.clone(), id);
+                    }
                     walked.placeholders.insert(rel, metadata.len());
                 }
                 Ok(metadata) if metadata.len() > MAX_NOTE_BYTES as u64 => {
+                    if let Some(id) =
+                        platform::file_id(&metadata).or_else(|| ids.get(&name).cloned())
+                    {
+                        walked.too_large_ids.insert(id.clone());
+                        walked.too_large_id_by_path.insert(rel.clone(), id);
+                    }
                     walked.too_large.insert(rel);
-                    walked
-                        .too_large_ids
-                        .extend(platform::file_id(&metadata).or_else(|| ids.get(&name).cloned()));
                 }
                 Ok(metadata) => {
                     walked.notes.insert(

@@ -12,7 +12,7 @@ use crate::{
     platform::{self, DirFileIds},
     scan::{self, Note, VaultUnreadable, Walked},
     store,
-    table::{FirstSync, Row, Table},
+    table::{FirstSync, Intake, Row, Table},
     wire::{self, Answer, Change, Line, MAX_FILE_BYTES, MAX_NOTE_BYTES},
 };
 use serde::{Deserialize, Serialize};
@@ -223,26 +223,9 @@ impl EarliestChange {
     }
 }
 
-/// A note the scan has just taken in, at the moment both names are still known.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NoteIntake {
-    pub path: String,
-    pub previous_path: Option<String>,
-    /// The note was already in the vault on the scan that started the first sync.
-    pub baseline: bool,
-}
-
-/// What the scan tells the caller about notes. The caller counts; a missing hook
-/// changes nothing, and the hook cannot fail the scan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IntakeEvent {
-    Note(NoteIntake),
-    /// The scan that started the first sync has finished, even when it found nothing.
-    OpeningScanFinished,
-}
-
-/// Called when a note is taken in. It must not panic, and it cannot fail the scan.
-pub type NoteIntakeHook = Arc<dyn Fn(&IntakeEvent) + Send + Sync>;
+/// Told when placed notes have been saved with the table. Returning true means
+/// the caller kept them, and the engine then drops those rows.
+pub type IntakeHook = Arc<dyn Fn(&[Intake]) -> bool + Send + Sync>;
 
 /// The source's whole held state, under one private directory.
 pub struct Engine {
@@ -258,15 +241,15 @@ pub struct Engine {
     table_saved_ms: i64,
     table_dirty: bool,
     dir_file_ids: Option<Arc<DirFileIds>>,
-    note_intake: Option<NoteIntakeHook>,
+    inventory_walk: bool,
+    /// Paths already on disk when the open listing began. `None` while that
+    /// listing could not see the whole vault.
+    listing_paths: Option<BTreeSet<String>>,
+    intake_buf: Vec<Intake>,
+    intake_hook: Option<IntakeHook>,
 }
 
 impl Engine {
-    /// Called when a note is taken in. Optional, and it must not panic.
-    pub fn set_note_intake(&mut self, hook: NoteIntakeHook) {
-        self.note_intake = Some(hook);
-    }
-
     pub fn open(root: PathBuf, clock: Arc<dyn Clock>) -> io::Result<Self> {
         store::ensure_dir(&root)?;
         store::ensure_dir(&root.join("tables"))?;
@@ -286,7 +269,10 @@ impl Engine {
             table_saved_ms: 0,
             table_dirty: false,
             dir_file_ids: None,
-            note_intake: None,
+            inventory_walk: false,
+            listing_paths: None,
+            intake_buf: Vec::new(),
+            intake_hook: None,
         };
         if engine.source.enabled {
             engine.table = Some(Table::load(&engine.table_path())?);
@@ -300,6 +286,39 @@ impl Engine {
     pub fn with_dir_file_ids(mut self, read: Arc<DirFileIds>) -> Self {
         self.dir_file_ids = Some(read);
         self
+    }
+
+    pub fn set_intake_hook(&mut self, hook: IntakeHook) {
+        self.intake_hook = Some(hook);
+    }
+
+    pub fn known_note_paths(&self) -> Vec<String> {
+        self.table
+            .as_ref()
+            .map(|table| table.rows.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn intakes(&self) -> Vec<Intake> {
+        self.table
+            .as_ref()
+            .map(|table| table.intakes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Drop intakes that have already been counted. A failed save puts them back.
+    pub fn ack_intakes(&mut self, through: u64) -> io::Result<()> {
+        let path = self.table_path();
+        let Some(table) = self.table.as_mut() else {
+            return Ok(());
+        };
+        let previous = table.intakes.clone();
+        table.intakes.retain(|intake| intake.id > through);
+        if let Err(error) = table.save(&path) {
+            table.intakes = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn vault_root(&self) -> Option<PathBuf> {
@@ -507,12 +526,40 @@ impl Engine {
         cancel: &AtomicBool,
     ) -> io::Result<bool> {
         let mut changed = false;
-        let opening = !table.first_sync_started;
-        if opening {
+        // The first listing stays open across checkpoints. `first_sync_started`
+        // is saved on the first one, and that alone must not make the rest count.
+        if !table.first_sync_started {
             table.first_sync_started = true;
             table.first_sync = Some(FirstSync { found: 0, sent: 0 });
+            table.first_list_open = true;
             changed = true;
         }
+        // Store the set once, on the first directory walk that could see every
+        // directory. A later scan must not replace it. An unread directory
+        // leaves the set missing, which is not the same as an empty vault.
+        if table.first_list_open
+            && table.listing_paths.is_none()
+            && walked.unreadable_dirs.is_empty()
+        {
+            let mut paths: BTreeSet<String> = walked.notes.keys().cloned().collect();
+            paths.extend(walked.placeholders.keys().cloned());
+            paths.extend(walked.too_large.iter().cloned());
+            table.listing_paths = Some(paths);
+            for (path, note) in &walked.notes {
+                if let Some(id) = &note.file_id {
+                    table.listing_ids.insert(path.clone(), id.clone());
+                }
+            }
+            table
+                .listing_ids
+                .extend(walked.too_large_id_by_path.clone());
+            table
+                .listing_ids
+                .extend(walked.placeholder_id_by_path.clone());
+            changed = true;
+        }
+        self.inventory_walk = table.first_list_open;
+        self.listing_paths.clone_from(&table.listing_paths);
         let mut too_large = walked.too_large.len() as u64;
         let mut new_paths = Vec::new();
         let mut modified = Vec::new();
@@ -541,6 +588,29 @@ impl Engine {
             })
             .map(|(path, _)| path.clone())
             .collect();
+        // A rename of a listed path that has no row yet: the file id moved, so
+        // the new path is the same note. Do this before deciding a path is gone.
+        self.pair_unseen_listing(table, walked);
+        // A path the walk could have seen, and did not, is not the note the
+        // listing recorded. A row leaves the set now; the removal still waits
+        // for the next scan. A path with no row waits one scan too, and is
+        // forgotten on the second, with no hash written. A directory this walk
+        // could not read keeps its paths.
+        if let Some(paths) = self.listing_paths.clone() {
+            for path in paths {
+                if walked.saw(&path) || walked.under_unreadable_dir(&path) {
+                    table.listing_absent.remove(&path);
+                    continue;
+                }
+                if table.rows.contains_key(&path) || table.listing_absent.contains(&path) {
+                    self.release_listed(&path);
+                    table.listing_absent.remove(&path);
+                    table.listing_ids.remove(&path);
+                } else {
+                    table.listing_absent.insert(path);
+                }
+            }
+        }
         let held_before = table.held.len();
         table
             .held
@@ -723,11 +793,6 @@ impl Engine {
                 Emitted::Placed(at) => {
                     changed = true;
                     earliest.note(note.mtime_ms, observed.ms);
-                    self.notify(&IntakeEvent::Note(NoteIntake {
-                        path: (*path).to_owned(),
-                        previous_path: None,
-                        baseline: opening,
-                    }));
                     if let Some(first_sync) = &mut table.first_sync {
                         first_sync.found += 1;
                     }
@@ -863,13 +928,110 @@ impl Engine {
         }
 
         self.runtime.too_large = too_large;
-        if changed || self.table_dirty {
-            self.checkpoint(table)?;
+        if table.first_list_open && table.listing_paths != self.listing_paths {
+            table.listing_paths.clone_from(&self.listing_paths);
+            changed = true;
         }
-        if opening {
-            self.notify(&IntakeEvent::OpeningScanFinished);
+        // Close only after a complete walk has been stored and this walk could
+        // see every directory. An unread directory keeps an open listing open.
+        // Paths that still have no row stay in the set after the flag clears:
+        // a placeholder, a too-large note, or a note whose bytes could not be
+        // read. They are recorded when they become readable. A path with no
+        // row is held for one miss and forgotten on the second, with no hash
+        // written, so a new note there can count.
+        let close_list = table.first_list_open
+            && table.listing_paths.is_some()
+            && walked.unreadable_dirs.is_empty();
+        let saved_open = table.first_list_open;
+        let saved_paths = table.listing_paths.clone();
+        let saved_absent = table.listing_absent.clone();
+        let saved_ids = table.listing_ids.clone();
+        if close_list {
+            table.first_list_open = false;
+            changed = true;
+        }
+        if !table.first_list_open {
+            if let Some(paths) = &mut self.listing_paths {
+                paths.retain(|path| !table.rows.contains_key(path));
+            }
+            if self
+                .listing_paths
+                .as_ref()
+                .is_some_and(|paths| paths.is_empty())
+            {
+                self.listing_paths = None;
+            }
+            if table.listing_paths != self.listing_paths {
+                table.listing_paths.clone_from(&self.listing_paths);
+                changed = true;
+            }
+        }
+        match &self.listing_paths {
+            Some(paths) => {
+                table.listing_ids.retain(|path, _| paths.contains(path));
+                table.listing_absent.retain(|path| paths.contains(path));
+            }
+            None => {
+                table.listing_ids.clear();
+                table.listing_absent.clear();
+            }
+        }
+        if table.listing_absent != saved_absent || table.listing_ids != saved_ids {
+            changed = true;
+        }
+        if (changed || self.table_dirty)
+            && let Err(error) = self.checkpoint(table)
+        {
+            table.first_list_open = saved_open;
+            table.listing_paths = saved_paths;
+            table.listing_absent = saved_absent;
+            table.listing_ids = saved_ids;
+            self.listing_paths.clone_from(&table.listing_paths);
+            return Err(error);
         }
         Ok(false)
+    }
+
+    /// A listed file the walk did not see, found at a new path by its file id.
+    fn pair_unseen_listing(&mut self, table: &mut Table, walked: &Walked) {
+        if self.listing_paths.is_none() {
+            return;
+        }
+        let ids = table.listing_ids.clone();
+        for (old, id) in ids {
+            if walked.saw(&old) || walked.under_unreadable_dir(&old) {
+                continue;
+            }
+            let Some(new_path) = path_with_file_id(walked, &id, &old, &table.rows) else {
+                continue;
+            };
+            self.release_listed(&old);
+            if let Some(paths) = &mut self.listing_paths {
+                paths.insert(new_path.clone());
+            }
+            table.listing_ids.remove(&old);
+            table.listing_ids.insert(new_path, id);
+            table.listing_absent.remove(&old);
+        }
+    }
+
+    /// The note the listing recorded at this path is gone.
+    fn release_listed(&mut self, path: &str) {
+        if let Some(paths) = &mut self.listing_paths {
+            paths.remove(path);
+        }
+    }
+
+    /// A path still in the stored set is recorded, not counted. While the listing
+    /// is open and no set has been stored, the walk has not seen the whole vault,
+    /// so nothing counts yet. After the listing closes, a missing set means every
+    /// listed path has a row or has since gone.
+    fn opening_inventory(&self, path: &str) -> bool {
+        match &self.listing_paths {
+            Some(paths) if paths.contains(path) => true,
+            None if self.inventory_walk => true,
+            _ => false,
+        }
     }
 
     /// Put a rename in pending and move the note's row to its new path.
@@ -894,11 +1056,6 @@ impl Engine {
             rows: &table.rows,
         })?;
         if let Emitted::Placed(at) = emitted {
-            self.notify(&IntakeEvent::Note(NoteIntake {
-                path: rename.path.to_owned(),
-                previous_path: Some(rename.old.to_owned()),
-                baseline: false,
-            }));
             table.rows.remove(rename.old);
             table.held.remove(rename.old);
             table.rows.insert(
@@ -925,8 +1082,41 @@ impl Engine {
     /// The pending log first, then the table: a change is never recorded as known
     /// before the change itself is durable.
     fn checkpoint(&mut self, table: &mut Table) -> io::Result<()> {
+        if table.first_list_open {
+            table.listing_paths.clone_from(&self.listing_paths);
+        }
         self.pending.sync()?;
-        table.save(&self.table_path())?;
+        if !self.intake_buf.is_empty() {
+            // Zero means none assigned. The counter treats zero as "none applied".
+            if table.next_intake_id == 0 {
+                table.next_intake_id = 1;
+            }
+            for mut intake in self.intake_buf.drain(..) {
+                intake.id = table.next_intake_id;
+                table.next_intake_id = table.next_intake_id.saturating_add(1);
+                table.intakes.push(intake);
+            }
+        }
+        let path = self.table_path();
+        table.save(&path)?;
+        if let Some(hook) = self.intake_hook.clone()
+            && !table.intakes.is_empty()
+            && hook(&table.intakes)
+        {
+            let through = table
+                .intakes
+                .iter()
+                .map(|intake| intake.id)
+                .max()
+                .unwrap_or(0);
+            let previous = table.intakes.clone();
+            table.intakes.retain(|intake| intake.id > through);
+            // The note and these rows are already on disk. Failing this second
+            // save must not stop the scan; the rows stay until a later save.
+            if table.save(&path).is_err() {
+                table.intakes = previous;
+            }
+        }
         self.table_saved_ms = self.clock.now_ms();
         self.table_dirty = false;
         Ok(())
@@ -940,6 +1130,20 @@ impl Engine {
         } else {
             self.clock.stamp_at(mtime_ms)
         }
+    }
+
+    /// The journal change was netted away. The counter still has to drop the path.
+    fn remember_removal(&mut self, path: &str) {
+        self.intake_buf.push(Intake {
+            id: 0,
+            path: path.to_owned(),
+            previous_path: None,
+            replaced: Vec::new(),
+            first_sight: false,
+            removed: true,
+            inventory: false,
+            at_ms: self.clock.now_ms(),
+        });
     }
 
     /// Put one change into pending, netting it against what the same window holds
@@ -978,6 +1182,9 @@ impl Engine {
             return Ok(Emitted::TooLarge);
         }
         let window = changed_at.window();
+        // Set when the journal line collapses a rename but the counter still
+        // has to move the hash off the old path.
+        let mut counter_previous: Option<String> = None;
         let mut meta = Meta {
             change: change.change,
             vault: change.vault.to_owned(),
@@ -1020,9 +1227,11 @@ impl Engine {
                         Change::Changed if existing.first_sight => {
                             // The journal has never heard of this note under its old
                             // name either: to it, this is first sight at the new one.
+                            // The counter still follows the file.
                             meta.change = Change::Changed;
                             meta.previous_path = None;
                             meta.first_sight = true;
+                            counter_previous = change.previous_path.map(str::to_owned);
                         }
                         Change::Renamed
                             if existing.previous_path.as_deref() == Some(change.path) =>
@@ -1042,6 +1251,8 @@ impl Engine {
                     match existing.change {
                         Change::Changed if existing.first_sight => {
                             self.pending.put(&replace, None)?;
+                            // The journal never saw it. The counter may already have the path.
+                            self.remember_removal(change.path);
                             return Ok(Emitted::Dropped);
                         }
                         Change::Renamed => {
@@ -1050,6 +1261,7 @@ impl Engine {
                             let origin = existing.previous_path.clone().unwrap_or_default();
                             if change.rows.contains_key(&origin) {
                                 self.pending.put(&replace, None)?;
+                                self.remember_removal(change.path);
                                 return Ok(Emitted::Netted);
                             }
                             replace.push((window.clone(), change.vault.to_owned(), origin.clone()));
@@ -1062,13 +1274,17 @@ impl Engine {
         }
         self.pending
             .put(&replace, Some((&window, &meta, change.text)))?;
+        self.intake_buf.push(Intake {
+            id: 0,
+            path: meta.path.clone(),
+            previous_path: counter_previous.or_else(|| meta.previous_path.clone()),
+            replaced: replace.iter().map(|(_, _, path)| path.clone()).collect(),
+            first_sight: meta.first_sight,
+            removed: meta.change == Change::Removed,
+            inventory: self.opening_inventory(&meta.path),
+            at_ms: meta.observed_at.ms,
+        });
         Ok(Emitted::Placed(changed_at))
-    }
-
-    fn notify(&self, event: &IntakeEvent) {
-        if let Some(hook) = &self.note_intake {
-            hook(event);
-        }
     }
 
     fn finish_first_sync_if_complete(&mut self) {
@@ -1333,6 +1549,32 @@ impl Engine {
     }
 }
 
+/// Where a listed file went, when the walk saw its file id at another path.
+fn path_with_file_id(
+    walked: &Walked,
+    id: &str,
+    except: &str,
+    rows: &BTreeMap<String, Row>,
+) -> Option<String> {
+    let free = |path: &str| path != except && !rows.contains_key(path);
+    for (path, note) in &walked.notes {
+        if free(path) && note.file_id.as_deref() == Some(id) {
+            return Some(path.clone());
+        }
+    }
+    for (path, stored) in &walked.too_large_id_by_path {
+        if free(path) && stored == id {
+            return Some(path.clone());
+        }
+    }
+    for (path, stored) in &walked.placeholder_id_by_path {
+        if free(path) && stored == id {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
 /// Whether a directory this scan couldn't reach is one the table knows nothing
 /// about, so a missing note may have moved into it.
 fn unreachable_folder_is_unknown(walked: &Walked, rows: &BTreeMap<String, Row>) -> bool {
@@ -1412,5 +1654,165 @@ mod tests {
         assert!(!unreachable_folder_is_unknown(&walked, &rows), "has a row");
         walked.unreadable_dirs.push("new/".to_owned());
         assert!(unreachable_folder_is_unknown(&walked, &rows));
+    }
+
+    fn ready(root: &Path, vault: &Path) -> Engine {
+        std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        let mut engine = Engine::open(root.to_path_buf(), Arc::new(crate::SystemClock)).unwrap();
+        engine.turn_on(vault).unwrap();
+        engine.apply_vault_list(&[]).unwrap();
+        engine
+    }
+
+    fn table_file(root: &Path) -> PathBuf {
+        std::fs::read_dir(root.join("tables"))
+            .unwrap()
+            .find_map(|entry| {
+                let path = entry.unwrap().path();
+                (path.extension().is_some_and(|ext| ext == "json")).then_some(path)
+            })
+            .unwrap()
+    }
+
+    fn table_value(root: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(table_file(root)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_false_hook_leaves_the_row_and_the_scan_succeeds() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("Notes");
+        let mut engine = ready(temp.path(), &vault);
+        std::fs::write(vault.join("one.md"), "one").unwrap();
+        engine.set_intake_hook(Arc::new(|_| false));
+        assert!(matches!(
+            engine.scan(&AtomicBool::new(false)).unwrap(),
+            ScanOutcome::Done
+        ));
+        assert_eq!(engine.intakes().len(), 1);
+        assert_eq!(engine.intakes()[0].id, 1);
+    }
+
+    #[test]
+    fn the_first_two_ids_are_one_and_two_and_a_stored_four_stays_four() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("Notes");
+        let root = temp.path().join("engine");
+        let mut engine = ready(&root, &vault);
+        std::fs::write(vault.join("a.md"), "a").unwrap();
+        std::fs::write(vault.join("b.md"), "b").unwrap();
+        engine.set_intake_hook(Arc::new(|_| false));
+        engine.scan(&AtomicBool::new(false)).unwrap();
+        let mut ids: Vec<u64> = engine.intakes().iter().map(|intake| intake.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+
+        let stored = table_file(&root);
+        let mut value = table_value(&root);
+        value["intakes"] = serde_json::json!([]);
+        value["next_intake_id"] = serde_json::json!(4);
+        std::fs::write(&stored, serde_json::to_vec(&value).unwrap()).unwrap();
+        drop(engine);
+        let mut engine = Engine::open(root, Arc::new(crate::SystemClock)).unwrap();
+        std::fs::write(vault.join("c.md"), "c").unwrap();
+        engine.set_intake_hook(Arc::new(|_| false));
+        engine.scan(&AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            engine
+                .intakes()
+                .iter()
+                .map(|intake| intake.id)
+                .collect::<Vec<_>>(),
+            vec![4]
+        );
+    }
+
+    #[test]
+    fn a_failed_acknowledgement_leaves_the_row_and_the_scan_succeeds() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("Notes");
+        let root = temp.path().join("engine");
+        let mut engine = ready(&root, &vault);
+        let blocked = {
+            let json = table_file(&root);
+            json.with_file_name(format!(
+                ".{}.tmp",
+                json.file_name().unwrap().to_string_lossy()
+            ))
+        };
+        engine.set_intake_hook(Arc::new(move |_| {
+            let _ = std::fs::create_dir(&blocked);
+            true
+        }));
+        std::fs::write(vault.join("one.md"), "one").unwrap();
+        assert!(matches!(
+            engine.scan(&AtomicBool::new(false)).unwrap(),
+            ScanOutcome::Done
+        ));
+        assert_eq!(engine.intakes().len(), 1);
+        let on_disk = table_value(&root);
+        assert_eq!(on_disk["intakes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_stopped_first_walk_still_records_the_rest() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("Notes");
+        std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        for index in 0..300 {
+            std::fs::write(vault.join(format!("n{index:04}.md")), "n").unwrap();
+        }
+        let root = temp.path().join("engine");
+        let mut engine = ready(&root, &vault);
+        engine.set_intake_hook(Arc::new(|_| false));
+        assert!(matches!(
+            engine.scan(&AtomicBool::new(true)).unwrap(),
+            ScanOutcome::Cancelled
+        ));
+        let partial = table_value(&root);
+        assert_eq!(partial["first_list_open"], true);
+        assert_eq!(partial["listing_paths"].as_array().unwrap().len(), 300);
+        let partial_rows = partial["rows"].as_object().unwrap().len();
+        assert!(partial_rows < 300, "{partial_rows}");
+        assert!(partial_rows >= 256, "{partial_rows}");
+        assert!(
+            partial["intakes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|intake| intake["inventory"] == true)
+        );
+
+        std::fs::write(vault.join("during.md"), "during").unwrap();
+        assert!(matches!(
+            engine.scan(&AtomicBool::new(false)).unwrap(),
+            ScanOutcome::Done
+        ));
+        let finished = table_value(&root);
+        assert_eq!(finished["first_list_open"], false);
+        assert!(finished["listing_paths"].is_null());
+        assert_eq!(finished["rows"].as_object().unwrap().len(), 301);
+        let intakes = finished["intakes"].as_array().unwrap();
+        assert!(
+            intakes
+                .iter()
+                .any(|intake| { intake["path"] == "n0000.md" && intake["inventory"] == true })
+        );
+        let during = intakes
+            .iter()
+            .find(|intake| intake["path"] == "during.md")
+            .unwrap();
+        assert_eq!(during["inventory"], false);
+        assert_eq!(during["first_sight"], true);
+
+        std::fs::write(vault.join("after.md"), "after").unwrap();
+        engine.scan(&AtomicBool::new(false)).unwrap();
+        let intakes = engine.intakes();
+        let added = intakes
+            .iter()
+            .find(|intake| intake.path == "after.md")
+            .unwrap();
+        assert!(!added.inventory);
+        assert!(added.first_sight);
     }
 }
