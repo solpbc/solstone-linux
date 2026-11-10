@@ -42,6 +42,8 @@ def save_state(s):
         os.replace(tmp, state_path)
 
 args = sys.argv[1:]
+if args[:1] == ["-u"]:
+    args = args[1:]
 if not args:
     sys.exit(0)
 

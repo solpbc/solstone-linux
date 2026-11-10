@@ -120,6 +120,13 @@ impl CommandRunner for TokioCommandRunner {
     ) -> Pin<Box<dyn Future<Output = Result<CommandOutput, CommandError>> + Send + 'a>> {
         Box::pin(async move {
             let mut command = tokio::process::Command::new(&invocation.executable);
+            // tmux prints `_` for every non-ASCII character in names and options
+            // to a client it thinks can't show UTF-8, which is any client started
+            // without a UTF-8 locale, such as an app opened from the Dock. `-u`
+            // says this one can, so what is read back is what was written.
+            match &invocation.operation {
+                CommandOperation::Tmux(_) => command.arg("-u"),
+            };
             command
                 .args(&invocation.args)
                 .kill_on_drop(true)

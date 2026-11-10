@@ -234,9 +234,8 @@ impl LengthOwnership {
 
 impl<I: IndicatorIo> IndicatorOwnership<I> {
     pub async fn install_default(io: I) -> Result<Self, IndicatorError> {
-        let current_status_left = io.read(STATUS_LEFT).await?;
-        let original_status_left = normalize_status_left(current_status_left.clone());
-        let already_widened = original_status_left != current_status_left;
+        let (original_status_left, already_widened) =
+            normalize_status_left(io.read(STATUS_LEFT).await?);
         let length =
             LengthOwnership::from_current(&io.read(STATUS_LEFT_LENGTH).await?, already_widened);
         let original_solstone = normalize_solstone(io.read(SOLSTONE_OPTION).await?);
@@ -480,17 +479,36 @@ impl<I: IndicatorIo + Clone> ServerIndicator<I> {
     }
 }
 
-fn normalize_status_left(original: OptionValue) -> OptionValue {
-    match original {
-        OptionValue::Present(value) => {
-            let mut base = value.as_str();
-            while let Some(stripped) = base.strip_prefix(INDICATOR_PREFIX) {
-                base = stripped;
-            }
-            OptionValue::Present(base.to_owned())
+/// The owner's own `status-left`, with every indicator earlier runs left at
+/// its front taken off, and whether a run that did not exit cleanly left its
+/// `status-left-length` widening in place.
+///
+/// An indicator with `_` for its ☼ was left by a run that read tmux's options
+/// without UTF-8, so it could not recognise its own indicator and stacked one
+/// more on every start. Its stop still put the length back, so a leftover
+/// that includes one is not counted as widened.
+fn normalize_status_left(current: OptionValue) -> (OptionValue, bool) {
+    let OptionValue::Present(value) = current else {
+        return (OptionValue::Absent, false);
+    };
+    let unreadable = INDICATOR_PREFIX.replace('☼', "_");
+    let mut base = value.as_str();
+    let (mut left_running, mut left_unreadable) = (false, false);
+    loop {
+        if let Some(stripped) = base.strip_prefix(INDICATOR_PREFIX) {
+            base = stripped;
+            left_running = true;
+        } else if let Some(stripped) = base.strip_prefix(unreadable.as_str()) {
+            base = stripped;
+            left_unreadable = true;
+        } else {
+            break;
         }
-        OptionValue::Absent => OptionValue::Absent,
     }
+    (
+        OptionValue::Present(base.to_owned()),
+        left_running && !left_unreadable,
+    )
 }
 
 fn normalize_solstone(original: OptionValue) -> OptionValue {

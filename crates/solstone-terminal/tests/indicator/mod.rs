@@ -13,8 +13,9 @@ use std::time::Duration;
 use crate::support::{ExpectedInvocation, FixtureRunner, command_output};
 use solstone_terminal::command::{CommandInvocation, CommandOperation, TmuxOperation};
 use solstone_terminal::indicator::{
-    CommandIndicatorIo, IndicatorError, IndicatorIo, IndicatorOwnership, OBSERVING_VALUE,
-    OptionValue, SOLSTONE_OPTION, STATUS_LEFT, STATUS_LEFT_LENGTH, SYNCING_VALUE, ServerIndicator,
+    CommandIndicatorIo, INDICATOR_PREFIX, IndicatorError, IndicatorIo, IndicatorOwnership,
+    OBSERVING_VALUE, OptionValue, SOLSTONE_OPTION, STATUS_LEFT, STATUS_LEFT_LENGTH, SYNCING_VALUE,
+    ServerIndicator,
 };
 use solstone_terminal::observer::{NoopShutdownIndicator, ShutdownIndicator, SyncActivity};
 use solstone_terminal::tmux::TMUX_TIMEOUT;
@@ -136,6 +137,36 @@ async fn repeated_unclean_starts_widen_status_left_length_once() {
     assert_eq!(io.value(STATUS_LEFT_LENGTH), present("11"));
 
     third.restore().await.expect("restore third install");
+    assert_eq!(io.value(STATUS_LEFT_LENGTH), present("10"));
+}
+
+#[tokio::test]
+async fn indicators_stacked_by_runs_that_read_them_back_as_underscores_are_cleared() {
+    // Runs that read tmux's options without UTF-8 saw their ☼ as `_`, so each
+    // start stacked another indicator and each stop left them all. Their stops
+    // still put status-left-length back.
+    let unreadable = INDICATOR_PREFIX.replace('☼', "_");
+    let stacked = format!(
+        "{INDICATOR_PREFIX}{}[#{{session_name}}] ",
+        unreadable.repeat(5)
+    );
+    let io = MemoryIndicator::with([
+        (STATUS_LEFT, present(&stacked)),
+        (STATUS_LEFT_LENGTH, present("10")),
+        (SOLSTONE_OPTION, OptionValue::Absent),
+    ]);
+
+    let mut ownership = IndicatorOwnership::install_default(io.clone())
+        .await
+        .expect("install production indicator");
+    assert_eq!(
+        io.value(STATUS_LEFT),
+        present(&format!("{INDICATOR_PREFIX}[#{{session_name}}] "))
+    );
+    assert_eq!(io.value(STATUS_LEFT_LENGTH), present("11"));
+
+    ownership.restore().await.expect("restore");
+    assert_eq!(io.value(STATUS_LEFT), present("[#{session_name}] "));
     assert_eq!(io.value(STATUS_LEFT_LENGTH), present("10"));
 }
 

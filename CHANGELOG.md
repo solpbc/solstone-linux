@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- terminal no longer adds another `_` after the ☼ in tmux's status bar each time it starts when the app runs without a UTF-8 language setting, and tmux session and window names with accented letters or symbols come into your journal as they are, instead of with `_` in their place. the next start clears any `_` already there.
+
 ## [2.0.38] - 2026-11-09
 
 ### Fixed
