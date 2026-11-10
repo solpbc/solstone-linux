@@ -281,6 +281,12 @@ pub struct ObserverState {
     /// Screen and audio are paused while desktop activity keeps going on its own,
     /// because the owner chose to keep activity on through the pause.
     pub activity_alone: bool,
+    /// Kept audio for the open segment, counted once the segment finishes.
+    pub pending_audio_seconds: u64,
+    /// Screen time for the open segment. One span, however many displays.
+    pub pending_screen_seconds: u64,
+    /// When the screen stream opened, on the monotonic clock.
+    pub screen_open_mono: Option<f64>,
 }
 
 pub struct Observer<V, A, P, M, W, E, C, Q, N> {
@@ -365,6 +371,9 @@ where
                 video_start_failures: 0,
                 activity_held: starting.paused,
                 activity_alone: false,
+                pending_audio_seconds: 0,
+                pending_screen_seconds: 0,
+                screen_open_mono: None,
             },
         }
     }
@@ -666,6 +675,7 @@ where
     pub fn shutdown(&mut self) -> Result<(), ObserverError> {
         self.stop_activity_intake();
         if self.state.mode == Mode::Screencast && !self.config.activity_only {
+            self.close_screen_span();
             let _ = self
                 .backends
                 .video
@@ -782,6 +792,12 @@ where
                     directory,
                 )
                 .map_err(ObserverError::AudioWrite)?;
+            let seconds = crate::source_intake::audio_seconds(
+                self.state.frames.len(),
+                crate::chunking::SAMPLE_RATE,
+            );
+            self.state.pending_audio_seconds =
+                self.state.pending_audio_seconds.saturating_add(seconds);
         }
         Ok(())
     }
@@ -803,6 +819,7 @@ where
             self.state.current_streams = streams;
             self.state.video_started = true;
             self.state.video_start_failures = 0;
+            self.state.screen_open_mono = Some(self.backends.clock.monotonic_seconds());
         }
         Ok(())
     }
@@ -859,6 +876,9 @@ where
         self.state.segment_start_mono = mono;
         self.state.segment_dir = Some(dir.clone());
         self.state.video_started = false;
+        self.state.screen_open_mono = None;
+        self.state.pending_audio_seconds = 0;
+        self.state.pending_screen_seconds = 0;
         Ok(dir)
     }
     fn choose_stem(&self, reading: &ZoneReading) -> (String, String) {
@@ -931,6 +951,9 @@ where
         if let Some(activity) = self.activity.as_mut() {
             activity.writer = None;
         }
+        self.close_screen_span();
+        let audio_seconds = std::mem::take(&mut self.state.pending_audio_seconds);
+        let screen_seconds = std::mem::take(&mut self.state.pending_screen_seconds);
         let Some(dir) = self.state.segment_dir.take() else {
             return Ok(());
         };
@@ -963,9 +986,26 @@ where
         self.backends
             .events
             .segment_completed(SegmentCompletedEvent { key });
+        if !self.config.activity_only {
+            crate::source_intake::add_audio_seconds(&self.config.state_dir(), audio_seconds);
+            crate::source_intake::add_screen_seconds(&self.config.state_dir(), screen_seconds);
+        }
         Ok(())
     }
+
+    fn close_screen_span(&mut self) {
+        let Some(opened) = self.state.screen_open_mono.take() else {
+            return;
+        };
+        let elapsed = self.backends.clock.monotonic_seconds() - opened;
+        self.state.pending_screen_seconds = self
+            .state
+            .pending_screen_seconds
+            .saturating_add(crate::source_intake::nearest_second(elapsed));
+    }
+
     fn stop_video(&mut self) -> Result<(), ObserverError> {
+        self.close_screen_span();
         let _ = self
             .backends
             .video
@@ -1429,6 +1469,7 @@ pub(crate) mod tests {
         empty_start: bool,
         fail_stop: bool,
         stopped: Vec<StoppedStream>,
+        streams: usize,
     }
     impl VideoCapture for FakeVideo {
         fn start(&mut self, d: &Path, _: bool) -> Result<Vec<VideoStream>, String> {
@@ -1440,11 +1481,14 @@ pub(crate) mod tests {
                 return Ok(vec![]);
             }
             fs::write(d.join("screen.webm"), b"video").unwrap();
-            Ok(vec![VideoStream {
-                connector: "HDMI-1".into(),
-                position: "left".into(),
-                file_path: "screen.webm".into(),
-            }])
+            let count = self.streams.max(1);
+            Ok((0..count)
+                .map(|index| VideoStream {
+                    connector: format!("HDMI-{index}"),
+                    position: "left".into(),
+                    file_path: "screen.webm".into(),
+                })
+                .collect())
         }
         fn stop(&mut self) -> Result<Vec<StoppedStream>, String> {
             if self.fail_stop {
@@ -1683,6 +1727,7 @@ pub(crate) mod tests {
                 empty_start: false,
                 fail_stop: false,
                 stopped: vec![],
+                streams: 1,
             },
             audio: FakeAudio {
                 chunks: VecDeque::new(),
@@ -1788,6 +1833,76 @@ pub(crate) mod tests {
             b"first hour"
         );
         assert!(f.events.completed.borrow().is_empty());
+    }
+
+    fn loud_gate(observer: &mut TestObserver) {
+        let loud = chunk(0.5);
+        for _ in 0..crate::chunking::MIN_HITS_FOR_SAVE {
+            observer.state.hit_gate.observe(&loud);
+        }
+    }
+
+    fn intake(f: &Fixture) -> Value {
+        let bytes = fs::read(crate::source_intake::path(&f.observer.config.state_dir())).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn kept_audio_counts_the_stereo_buffer_once() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        let per_channel = (1.6 * f64::from(crate::chunking::SAMPLE_RATE)) as usize;
+        f.observer.state.frames = vec![0.2; per_channel * 2];
+        loud_gate(&mut f.observer);
+        f.observer.state.segment_is_muted = true;
+        f.observer.shutdown().unwrap();
+        let file = intake(&f);
+        assert_eq!(file["audio"]["seconds"], 2);
+        assert!(file["audio"]["last"].is_string());
+        assert_eq!(file["screen"]["seconds"], 0);
+        assert!(file["screen"]["last"].is_null());
+        assert_eq!(f.writes.0.borrow().len(), 1);
+        assert_eq!(f.writes.0.borrow()[0].files.len(), 2);
+    }
+
+    #[test]
+    fn short_audio_and_a_discarded_gate_do_not_move_last() {
+        let mut f = fixture(false);
+        initialize(&mut f);
+        let per_channel = (0.4 * f64::from(crate::chunking::SAMPLE_RATE)) as usize;
+        f.observer.state.frames = vec![0.2; per_channel * 2];
+        loud_gate(&mut f.observer);
+        f.observer.shutdown().unwrap();
+        let file = intake(&f);
+        assert_eq!(file["audio"]["seconds"], 0);
+        assert!(file["audio"]["last"].is_null());
+
+        let mut f = fixture(false);
+        initialize(&mut f);
+        f.observer.state.frames =
+            vec![0.2; (1.6 * f64::from(crate::chunking::SAMPLE_RATE) * 2.0) as usize];
+        f.observer.shutdown().unwrap();
+        let file = intake(&f);
+        assert_eq!(file["audio"]["seconds"], 0);
+        assert!(file["audio"]["last"].is_null());
+    }
+
+    #[test]
+    fn screen_time_stops_when_the_stream_stops_and_is_not_per_display() {
+        let mut f = fixture(false);
+        f.observer.backends.video.streams = 2;
+        initialize(&mut f);
+        assert_eq!(f.observer.state.current_streams.len(), 2);
+        f.mono.set(10.0);
+        f.observer.backends.video.healthy = false;
+        f.observer.tick().unwrap();
+        f.mono.set(40.0);
+        f.observer.shutdown().unwrap();
+        let file = intake(&f);
+        assert_eq!(file["screen"]["seconds"], 10);
+        assert!(file["screen"]["last"].is_string());
+        assert_eq!(file["audio"]["seconds"], 0);
+        assert!(file["audio"]["last"].is_null());
     }
 
     pub(crate) fn drive_real_observer_ticks() {

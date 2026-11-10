@@ -371,11 +371,13 @@ fn run_capture(
     };
     let snapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
     let (states, tray_receiver) = WatchStateSink::channel(initial_snapshot);
+    crate::source_intake::ensure(&config.state_dir());
     let (obsidian, obsidian_task) = crate::obsidian::start(
         runtime,
         config.base_dir.join("obsidian"),
         Arc::clone(&upload),
         tray_receiver.clone(),
+        config.state_dir(),
     );
     let (command_sender, command_receiver) = std::sync::mpsc::channel();
     let commands = CommandSender::new(command_sender.clone());

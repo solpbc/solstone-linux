@@ -393,6 +393,7 @@ fn adopt_with_no_daemon(
             return TEMPORARY;
         }
     }
+    crate::source_intake::carry_tmux_roots(&state_dir, &state.data_roots);
     if let Some(code) = step(takeover::recover_roots(&mut state), errors) {
         return code;
     }

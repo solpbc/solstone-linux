@@ -159,6 +159,7 @@ fn stop(parts: &RunnerParts, host: &TakeoverHost<'_>, working: &mut TakeoverStat
 }
 
 fn recover(parts: &RunnerParts, working: &mut TakeoverState) -> bool {
+    crate::source_intake::carry_tmux_roots(&parts.state_dir, &working.data_roots);
     let unfinished = working.data_roots.iter().any(|root| {
         !working
             .roots

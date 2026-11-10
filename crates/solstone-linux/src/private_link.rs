@@ -942,7 +942,7 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                         .map_err(config_persist_error)?;
                 }
                 persist_credential(state_lock.root(), &credential)?;
-                let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
+                crate::sync_health::forget_paired_journal(state_dir);
 
                 let write_res = match confirmed_write_fault {
                     Some(fault) => crate::journal_mark::write_pairing_answer_with_fault(
@@ -999,7 +999,7 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                     .map_err(config_persist_error)?;
             }
             persist_credential(state_lock.root(), &credential)?;
-            let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
+            crate::sync_health::forget_paired_journal(state_dir);
 
             let write_res = match confirmed_write_fault {
                 Some(fault) => crate::journal_mark::write_pairing_answer_with_fault(
@@ -1047,7 +1047,7 @@ pub(crate) async fn setup_with_pairer_and_stream_with_fault<R: Read>(
                         .map_err(config_persist_error)?;
                 }
                 persist_credential(state_lock.root(), &credential)?;
-                let _ = std::fs::remove_file(crate::sync_health::paired_journal_path(state_dir));
+                crate::sync_health::forget_paired_journal(state_dir);
                 Ok(SetupOutcome::WalkedAwayHeld)
             }
         }

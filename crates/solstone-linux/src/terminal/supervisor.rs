@@ -11,8 +11,8 @@
 //! different usable path starts or restarts the engine, the same path changes
 //! nothing. The legacy find runs before every start and on every re-check.
 //!
-//! The engine's sinks only wake: a finished segment wakes sync, which scans the
-//! layout; health and diagnostics are recorded and logged. Sync activity reaches
+//! A finished segment is counted, then wakes sync, which scans the layout.
+//! Health and diagnostics are recorded and logged. Sync activity reaches
 //! the engine through a latest-value relay, re-sent after every start because a
 //! new engine starts idle.
 
@@ -441,13 +441,22 @@ impl Supervisor {
     fn engine_config(&self, tmux_path: PathBuf) -> EngineConfig {
         let wake = Arc::clone(&self.config.on_closed_segment);
         let health = Arc::clone(&self.health);
+        let state_dir = self.config.state_dir.clone();
         EngineConfig {
             root: self.config.captures_dir.clone(),
             layout: super::engine_layout(self.config.captures_dir.clone()),
             lock_path: super::engine_lock_path(&self.config.state_dir),
             tmux_path,
             settings: self.config.settings.capture.clone(),
-            closed_segments: Arc::new(move |_| wake()),
+            closed_segments: Arc::new(move |closed| {
+                crate::source_intake::record_terminal_segment(
+                    &state_dir,
+                    &closed.day,
+                    &closed.segment,
+                    &closed.dir,
+                );
+                wake();
+            }),
             diagnostics: Arc::new(|diagnostic: Diagnostic| {
                 tracing::warn!(diagnostic = %diagnostic.message(), "terminal");
             }),
@@ -498,6 +507,53 @@ async fn sleep_until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod intake {
+    use super::*;
+    use crate::terminal::legacy_find::LegacyFindings;
+    use solstone_terminal::ClosedSegment;
+    use std::fs;
+
+    #[test]
+    fn the_engine_sink_counts_a_finished_segment_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let (sender, receiver) = watch::channel(SyncActivity::Idle);
+        drop(sender);
+        let supervisor = Supervisor::new(SupervisorConfig::new(
+            temp.path().join("captures"),
+            state.clone(),
+            Arc::new(LegacyFindings::default),
+            Arc::new(|| {}),
+            receiver,
+        ));
+        let config = supervisor.engine_config(PathBuf::from("/usr/bin/tmux"));
+        let dir = temp.path().join("segment");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tmux_s1_screen.jsonl"), b"frame").unwrap();
+        let closed = ClosedSegment {
+            day: "20990101".into(),
+            segment: "120000_005".into(),
+            dir: dir.clone(),
+        };
+        (config.closed_segments)(closed.clone());
+        (config.closed_segments)(closed);
+        let earlier = temp.path().join("earlier");
+        fs::create_dir_all(&earlier).unwrap();
+        fs::write(earlier.join("tmux_s1_screen.jsonl"), b"frame").unwrap();
+        (config.closed_segments)(ClosedSegment {
+            day: "20000101".into(),
+            segment: "120000_005".into(),
+            dir: earlier,
+        });
+        let file: serde_json::Value =
+            serde_json::from_slice(&fs::read(crate::source_intake::path(&state)).unwrap()).unwrap();
+        assert_eq!(file["terminal"]["seconds"], 5);
+        assert_eq!(file["terminal"]["seen"].as_array().unwrap().len(), 1);
+        assert!(file["terminal"]["last"].is_string());
     }
 }
 

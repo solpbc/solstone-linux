@@ -975,6 +975,12 @@ pub fn paired_journal_path(state_dir: &Path) -> PathBuf {
     state_dir.join(PAIRED_JOURNAL_FILENAME)
 }
 
+/// Drop the remembered journal version. Pairing again must not remove the rest
+/// of the state directory: the intake counter lives there too.
+pub(crate) fn forget_paired_journal(state_dir: &Path) {
+    let _ = fs::remove_file(paired_journal_path(state_dir));
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PairedJournalVersion {
     pub identity_key: String,

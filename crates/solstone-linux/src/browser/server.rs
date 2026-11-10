@@ -67,6 +67,7 @@ struct Shared {
     uid: u32,
     on_period_finished: Arc<dyn Fn() + Send + Sync>,
     about: Arc<dyn Fn(&Facts) -> crate::about::NativeAbout + Send + Sync>,
+    state_dir: PathBuf,
 }
 
 impl Shared {
@@ -215,6 +216,7 @@ pub fn start(config: ServerConfig) -> io::Result<ServerHandle> {
         uid,
         on_period_finished: config.on_period_finished,
         about: config.about,
+        state_dir: config.base_dir.join("state"),
     });
     shared.write_status();
     let tasks = vec![
@@ -584,14 +586,27 @@ async fn run_session(
                             "inst": batch["inst"],
                             "batch_id": batch["batch_id"],
                         });
+                        let page = snapshot_page(&batch);
                         let (outcome, rotated) = custody.accept(&batch, Local::now());
-                        Some((ids, outcome, rotated))
+                        Some((ids, outcome, rotated, page))
                     })
                     .await?;
                 // Anything but a valid batch from this browser ends the session.
-                let Some((batch, outcome, rotated)) = handled else {
+                let Some((batch, outcome, rotated, page)) = handled else {
                     return Ok(());
                 };
+                if matches!(outcome, Outcome::Accepted { .. })
+                    && let Some((inst, ctx, url)) = page
+                {
+                    crate::source_intake::note_browser_batch(
+                        &shared.state_dir,
+                        &json!({
+                            "inst": inst,
+                            "records": [{"t": "segment_start", "ctx": ctx, "url": url}],
+                        }),
+                        true,
+                    );
+                }
                 if let Some(period_id) = rotated
                     && let Some(generation) = &generation
                 {
@@ -631,6 +646,27 @@ async fn run_session(
             },
         }
     }
+}
+
+fn snapshot_page(batch: &Value) -> Option<(String, String, String)> {
+    let records = batch.get("records")?.as_array()?;
+    let first = records.first()?;
+    if first.get("t").and_then(Value::as_str) != Some("segment_start") {
+        return None;
+    }
+    let url = first
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.is_empty())?;
+    let inst = batch
+        .get("inst")
+        .and_then(Value::as_str)
+        .filter(|inst| !inst.is_empty())?;
+    let ctx = first
+        .get("ctx")
+        .and_then(Value::as_str)
+        .filter(|ctx| !ctx.is_empty())?;
+    Some((inst.to_owned(), ctx.to_owned(), url.to_owned()))
 }
 
 fn reply(ids: &Value, outcome: Outcome, generation: &str) -> io::Result<Value> {

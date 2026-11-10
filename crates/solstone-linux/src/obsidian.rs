@@ -297,6 +297,7 @@ pub(crate) fn start(
     root: PathBuf,
     client: Arc<UploadClient>,
     paused: watch::Receiver<crate::observer::StateSnapshot>,
+    state_dir: PathBuf,
 ) -> (ObsidianHandle, Option<tokio::task::JoinHandle<()>>) {
     let transport = LinkTransport {
         client,
@@ -306,7 +307,14 @@ pub(crate) fn start(
     // The first read of what's held can be long, so it happens with the source's
     // own work, never in the way of the app starting or of the window.
     let task = runtime.spawn(async move {
-        match tokio::task::spawn_blocking(move || Engine::open(root, Arc::new(SystemClock))).await {
+        match tokio::task::spawn_blocking(move || {
+            Engine::open(root, Arc::new(SystemClock)).map(|mut engine| {
+                engine.set_note_intake(crate::source_intake::vault_hook(state_dir));
+                engine
+            })
+        })
+        .await
+        {
             Ok(Ok(engine)) => {
                 worker.engine = Some(engine);
                 worker.publish();

@@ -223,6 +223,27 @@ impl EarliestChange {
     }
 }
 
+/// A note the scan has just taken in, at the moment both names are still known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoteIntake {
+    pub path: String,
+    pub previous_path: Option<String>,
+    /// The note was already in the vault on the scan that started the first sync.
+    pub baseline: bool,
+}
+
+/// What the scan tells the caller about notes. The caller counts; a missing hook
+/// changes nothing, and the hook cannot fail the scan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntakeEvent {
+    Note(NoteIntake),
+    /// The scan that started the first sync has finished, even when it found nothing.
+    OpeningScanFinished,
+}
+
+/// Called when a note is taken in. It must not panic, and it cannot fail the scan.
+pub type NoteIntakeHook = Arc<dyn Fn(&IntakeEvent) + Send + Sync>;
+
 /// The source's whole held state, under one private directory.
 pub struct Engine {
     root: PathBuf,
@@ -237,9 +258,15 @@ pub struct Engine {
     table_saved_ms: i64,
     table_dirty: bool,
     dir_file_ids: Option<Arc<DirFileIds>>,
+    note_intake: Option<NoteIntakeHook>,
 }
 
 impl Engine {
+    /// Called when a note is taken in. Optional, and it must not panic.
+    pub fn set_note_intake(&mut self, hook: NoteIntakeHook) {
+        self.note_intake = Some(hook);
+    }
+
     pub fn open(root: PathBuf, clock: Arc<dyn Clock>) -> io::Result<Self> {
         store::ensure_dir(&root)?;
         store::ensure_dir(&root.join("tables"))?;
@@ -259,6 +286,7 @@ impl Engine {
             table_saved_ms: 0,
             table_dirty: false,
             dir_file_ids: None,
+            note_intake: None,
         };
         if engine.source.enabled {
             engine.table = Some(Table::load(&engine.table_path())?);
@@ -479,7 +507,8 @@ impl Engine {
         cancel: &AtomicBool,
     ) -> io::Result<bool> {
         let mut changed = false;
-        if !table.first_sync_started {
+        let opening = !table.first_sync_started;
+        if opening {
             table.first_sync_started = true;
             table.first_sync = Some(FirstSync { found: 0, sent: 0 });
             changed = true;
@@ -694,6 +723,11 @@ impl Engine {
                 Emitted::Placed(at) => {
                     changed = true;
                     earliest.note(note.mtime_ms, observed.ms);
+                    self.notify(&IntakeEvent::Note(NoteIntake {
+                        path: (*path).to_owned(),
+                        previous_path: None,
+                        baseline: opening,
+                    }));
                     if let Some(first_sync) = &mut table.first_sync {
                         first_sync.found += 1;
                     }
@@ -832,6 +866,9 @@ impl Engine {
         if changed || self.table_dirty {
             self.checkpoint(table)?;
         }
+        if opening {
+            self.notify(&IntakeEvent::OpeningScanFinished);
+        }
         Ok(false)
     }
 
@@ -857,6 +894,11 @@ impl Engine {
             rows: &table.rows,
         })?;
         if let Emitted::Placed(at) = emitted {
+            self.notify(&IntakeEvent::Note(NoteIntake {
+                path: rename.path.to_owned(),
+                previous_path: Some(rename.old.to_owned()),
+                baseline: false,
+            }));
             table.rows.remove(rename.old);
             table.held.remove(rename.old);
             table.rows.insert(
@@ -1021,6 +1063,12 @@ impl Engine {
         self.pending
             .put(&replace, Some((&window, &meta, change.text)))?;
         Ok(Emitted::Placed(changed_at))
+    }
+
+    fn notify(&self, event: &IntakeEvent) {
+        if let Some(hook) = &self.note_intake {
+            hook(event);
+        }
     }
 
     fn finish_first_sync_if_complete(&mut self) {
