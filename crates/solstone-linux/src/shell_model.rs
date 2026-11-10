@@ -208,6 +208,135 @@ pub fn header_shows_pause(menu_up: bool, probe_error: bool) -> bool {
     probe_error || !menu_up
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuId {
+    Attention(TileId),
+    Status,
+    Pause,
+    Resume,
+    OpenSettings,
+    OpenJournal,
+    About,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuRow {
+    pub id: MenuId,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuInput {
+    pub words: [StateWord; 4],
+    pub paused: bool,
+    pub journal_paired: bool,
+    pub journal_reachable: bool,
+}
+
+/// What activating a row does. The status row does nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuTarget {
+    Page(TileId),
+    Deck,
+    Resume,
+    Journal,
+    Help,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PauseFor {
+    Seconds(u32),
+    UntilResume,
+}
+
+#[must_use]
+pub fn tile_name(tile: TileId) -> &'static str {
+    match tile {
+        TileId::Screen => "screen",
+        TileId::Terminal => "terminal",
+        TileId::Browsers => "browsers",
+        TileId::Obsidian => "Obsidian",
+    }
+}
+
+#[must_use]
+pub fn attention_label(tile: TileId) -> String {
+    format!("{} needs attention", tile_name(tile))
+}
+
+/// The panel menu. One attention row, pause or resume, and `open journal` only while paired.
+/// There is no source row and no switch row.
+#[must_use]
+pub fn menu_rows(input: MenuInput) -> Vec<MenuRow> {
+    let mut rows = Vec::new();
+    if let Some(tile) = attention_tile(&input.words) {
+        rows.push(MenuRow {
+            id: MenuId::Attention(tile),
+            enabled: true,
+        });
+    }
+    rows.push(MenuRow {
+        id: MenuId::Status,
+        enabled: false,
+    });
+    rows.push(if input.paused {
+        MenuRow {
+            id: MenuId::Resume,
+            enabled: true,
+        }
+    } else {
+        MenuRow {
+            id: MenuId::Pause,
+            enabled: true,
+        }
+    });
+    rows.push(MenuRow {
+        id: MenuId::OpenSettings,
+        enabled: true,
+    });
+    if input.journal_paired {
+        rows.push(MenuRow {
+            id: MenuId::OpenJournal,
+            enabled: input.journal_reachable,
+        });
+    }
+    rows.push(MenuRow {
+        id: MenuId::About,
+        enabled: true,
+    });
+    rows.push(MenuRow {
+        id: MenuId::Quit,
+        enabled: true,
+    });
+    rows
+}
+
+#[must_use]
+pub fn menu_target(id: MenuId) -> Option<MenuTarget> {
+    match id {
+        MenuId::Attention(tile) => Some(MenuTarget::Page(tile)),
+        MenuId::Status | MenuId::Pause => None,
+        MenuId::Resume => Some(MenuTarget::Resume),
+        MenuId::OpenSettings => Some(MenuTarget::Deck),
+        MenuId::OpenJournal => Some(MenuTarget::Journal),
+        MenuId::About => Some(MenuTarget::Help),
+        MenuId::Quit => Some(MenuTarget::Quit),
+    }
+}
+
+/// Today's pause commands: 15 minutes, 30 minutes, 1 hour, until I resume.
+#[must_use]
+pub fn pause_menu() -> [(&'static str, PauseFor); 4] {
+    [
+        ("15 minutes", PauseFor::Seconds(900)),
+        ("30 minutes", PauseFor::Seconds(1800)),
+        ("1 hour", PauseFor::Seconds(3600)),
+        ("until I resume", PauseFor::UntilResume),
+    ]
+}
+
 /// Device-local hour. The bands are morning 5–11, afternoon 12–16, evening otherwise.
 #[must_use]
 pub fn greeting(hour: u32) -> &'static str {
@@ -842,6 +971,88 @@ mod tests {
         assert_eq!(
             pause_line(PauseLeft::UntilResume),
             "paused until you resume"
+        );
+    }
+
+    #[test]
+    fn two_attention_tiles_make_one_row_and_pause_excludes_resume() {
+        let rows = menu_rows(MenuInput {
+            words: [
+                StateWord::NeedsAttention,
+                StateWord::NeedsAttention,
+                StateWord::Off,
+                StateWord::Off,
+            ],
+            paused: false,
+            journal_paired: false,
+            journal_reachable: true,
+        });
+        let attention: Vec<_> = rows
+            .iter()
+            .filter(|row| matches!(row.id, MenuId::Attention(_)))
+            .collect();
+        assert_eq!(attention.len(), 1);
+        assert_eq!(attention[0].id, MenuId::Attention(TileId::Screen));
+        assert_eq!(
+            menu_target(attention[0].id),
+            Some(MenuTarget::Page(TileId::Screen))
+        );
+        assert_eq!(attention_label(TileId::Screen), "screen needs attention");
+        assert!(rows.iter().any(|row| row.id == MenuId::Pause));
+        assert!(rows.iter().all(|row| row.id != MenuId::Resume));
+        assert!(rows.iter().all(|row| row.id != MenuId::OpenJournal));
+        assert!(
+            rows.iter()
+                .any(|row| row.id == MenuId::Status && !row.enabled)
+        );
+
+        let later = menu_rows(MenuInput {
+            words: [
+                StateWord::On,
+                StateWord::NeedsAttention,
+                StateWord::NeedsAttention,
+                StateWord::Off,
+            ],
+            paused: true,
+            journal_paired: true,
+            journal_reachable: false,
+        });
+        assert_eq!(
+            later
+                .iter()
+                .find(|row| matches!(row.id, MenuId::Attention(_)))
+                .map(|row| row.id),
+            Some(MenuId::Attention(TileId::Terminal))
+        );
+        assert!(later.iter().any(|row| row.id == MenuId::Resume));
+        assert!(later.iter().all(|row| row.id != MenuId::Pause));
+        let journal = later
+            .iter()
+            .find(|row| row.id == MenuId::OpenJournal)
+            .unwrap();
+        assert!(!journal.enabled);
+        let open = menu_rows(MenuInput {
+            words: [
+                StateWord::Off,
+                StateWord::Off,
+                StateWord::Off,
+                StateWord::Off,
+            ],
+            paused: false,
+            journal_paired: true,
+            journal_reachable: true,
+        });
+        assert!(
+            open.iter()
+                .any(|row| row.id == MenuId::OpenJournal && row.enabled)
+        );
+        assert!(
+            open.iter()
+                .all(|row| !matches!(row.id, MenuId::Attention(_)))
+        );
+        assert_eq!(
+            pause_menu().map(|(label, _)| label),
+            ["15 minutes", "30 minutes", "1 hour", "until I resume"]
         );
     }
 
