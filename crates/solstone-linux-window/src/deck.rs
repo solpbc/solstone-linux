@@ -2301,14 +2301,12 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let activity_running = if snap.ready {
         shell_model::activity_running(
             snap.activity_source,
-            config.activity_only,
             app_paused,
             snap.activity_through_pause,
         )
     } else {
         shell_model::activity_running(
             config.activity_source,
-            config.activity_only,
             app_paused,
             config.activity_through_pause,
         )

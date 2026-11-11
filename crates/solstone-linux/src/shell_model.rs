@@ -71,16 +71,12 @@ pub fn screen_switch_write(turn_on: bool) -> ScreenSwitchWrite {
     }
 }
 
-/// Whether desktop activity is running now. A pause holds it unless the owner chose
-/// to keep it on through the pause.
+/// Whether desktop activity is running now. It runs with or without screen and
+/// sound (`activity only` keeps it running alone). A pause holds it unless the
+/// owner chose to keep it on through the pause.
 #[must_use]
-pub fn activity_running(
-    activity_source: bool,
-    activity_only: bool,
-    paused: bool,
-    through_pause: bool,
-) -> bool {
-    activity_source && !activity_only && (!paused || through_pause)
+pub fn activity_running(activity_source: bool, paused: bool, through_pause: bool) -> bool {
+    activity_source && (!paused || through_pause)
 }
 
 #[must_use]
@@ -962,15 +958,15 @@ mod tests {
 
     #[test]
     fn a_pause_holds_activity_unless_it_is_kept_on() {
-        assert!(activity_running(true, false, false, false));
-        assert!(!activity_running(true, false, true, false));
-        assert!(activity_running(true, false, true, true));
-        assert!(!activity_running(false, false, true, true));
+        assert!(activity_running(true, false, false));
+        assert!(!activity_running(true, true, false));
+        assert!(activity_running(true, true, true));
+        assert!(!activity_running(false, true, true));
         // Kept off through the pause, the paused screen tile does not say activity is on.
         let held = screen_tile(
             true,
             false,
-            activity_running(true, false, true, false),
+            activity_running(true, true, false),
             TrayStatus::Paused,
         );
         assert_eq!(held.word, StateWord::Paused);
@@ -978,7 +974,7 @@ mod tests {
         let kept = screen_tile(
             true,
             false,
-            activity_running(true, false, true, true),
+            activity_running(true, true, true),
             TrayStatus::Paused,
         );
         assert_eq!(kept.sub, ScreenSub::ActivityStillOn);
@@ -1032,11 +1028,16 @@ mod tests {
             TrayStatus::Waiting(SessionPresence::Unreachable),
         );
         assert_eq!(held.word, StateWord::Off);
-        let activity = screen_tile(true, true, true, TrayStatus::Idle);
+        // `activity only`: screen and sound are off while activity keeps running, so
+        // the tile reads off and says activity is still on.
+        let activity = screen_tile(true, true, activity_running(true, false, false), TrayStatus::Idle);
         assert_eq!(activity.word, StateWord::Off);
         assert!(activity.switch_on);
         assert_eq!(activity.sub, ScreenSub::ActivityStillOn);
         assert_ne!(activity.sub, ScreenSub::WithAudioAndActivity);
+        // With activity itself off, `activity only` leaves nothing running.
+        let none = screen_tile(true, true, activity_running(false, false, false), TrayStatus::Idle);
+        assert_eq!(none.sub, ScreenSub::WithAudio);
     }
 
     #[test]
