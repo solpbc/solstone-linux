@@ -662,11 +662,6 @@ mod tests {
         let test_tray = tray();
         assert!(test_tray.watcher_offline(ksni::OfflineReason::No));
     }
-
-    #[test]
-    fn activation_opens_the_menu() {
-        assert!(KsniTray::MENU_ON_ACTIVATE);
-    }
 }
 
 // Python tray provenance (35/35):

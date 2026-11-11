@@ -132,22 +132,14 @@ fn build_deferred_pages(window: &gtk::ApplicationWindow) {
         Some(&gtk::Label::new(Some(CopyKey::NavStatus.as_str()))),
     );
 
-    // Page 2: Journal
+    // The journal page sits under the shelf's "your journal" row.
     let (journal_page, update_journal, link_entry) =
         create_journal_page(Rc::clone(&controller), Rc::clone(&changed));
-    notebook.append_page(
-        &journal_page,
-        Some(&gtk::Label::new(Some(CopyKey::NavJournal.as_str()))),
-    );
 
-    {
-        let notebook = notebook.clone();
-        let journal_page = journal_page.clone();
-        SHOW_CLICKED_LINK.set(Some(Rc::new(move |link: &str| {
-            link_entry.set_text(link);
-            notebook.set_current_page(notebook.page_num(&journal_page));
-        })));
-    }
+    SHOW_CLICKED_LINK.set(Some(Rc::new(move |link: &str| {
+        link_entry.set_text(link);
+        crate::deck::show_journal();
+    })));
 
     // Page 3: Settings
     let (settings_page, update_settings) =
@@ -158,15 +150,12 @@ fn build_deferred_pages(window: &gtk::ApplicationWindow) {
         Some(&gtk::Label::new(Some(CopyKey::NavSettings.as_str()))),
     );
 
-    // Page 4: Help
+    // The help page sits under the shelf's "help" row.
     let help_page = create_help_page(Rc::clone(&controller), window);
-    notebook.append_page(
-        &help_page,
-        Some(&gtk::Label::new(Some(CopyKey::NavHelp.as_str()))),
-    );
+    crate::deck::adopt_pages(&journal_page, &help_page);
 
-    // The notebook stays built so its pages can move onto the deck. It is not the
-    // child, so the window shows the shell.
+    // The status and settings pages stay built for their state. They are not
+    // shown: the deck carries status, and the screen page carries its settings.
     let update_all: Rc<dyn Fn()> = {
         let update_status = update_status.clone();
         let update_journal = update_journal.clone();

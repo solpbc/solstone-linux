@@ -212,7 +212,18 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     other.add_css_class("sol-ink");
     other.set_halign(gtk::Align::Start);
     other.set_valign(gtk::Align::Start);
-    other.set_visible(false);
+    // The journal and help pages are built later, with the rest of the window,
+    // and land in these slots under the row's name.
+    let journal_slot = page_slot();
+    let help_slot = page_slot();
+    let other_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    other_box.set_hexpand(true);
+    other_box.set_vexpand(true);
+    other_box.append(&other);
+    other_box.append(&journal_slot);
+    other_box.append(&help_slot);
+    other_box.set_visible(false);
+    SLOTS.with(|slot| *slot.borrow_mut() = Some((journal_slot.clone(), help_slot.clone())));
 
     let shelf_button = gtk::Button::new();
     shelf_button.add_css_class("sol-glyph");
@@ -223,7 +234,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     let (computer, cursor_switch, paused_switch, segment_value) = computer_page();
 
     chrome.body.append(&column);
-    chrome.body.append(&other);
+    chrome.body.append(&other_box);
     chrome.body.append(&computer);
     // The shelf glyph sits on the window, not in this slot.
     chrome.header_extra.set_visible(false);
@@ -237,6 +248,9 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         body: chrome.body.clone(),
         grid: grid.clone(),
         other: other.clone(),
+        other_box,
+        journal_slot,
+        help_slot,
         computer: computer.clone(),
         cursor: cursor_switch,
         start_paused: paused_switch,
@@ -276,15 +290,30 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         let row = Rc::clone(&row);
         let shelf_open = Rc::clone(&shelf_open);
         let view = Rc::clone(&view);
-        let click = gtk::GestureClick::new();
-        click.connect_released(move |_, _, _, _| {
+        let open: Rc<dyn Fn()> = Rc::new(move || {
             row.set(ShelfRow::Home);
             selected.set(Some(id));
             page_open.set(true);
             ui.page.show_tile(id, &view.borrow());
             apply_layout(&ui, &selected, &row, &shelf_open, &page_open);
         });
+        let click = gtk::GestureClick::new();
+        let open_click = Rc::clone(&open);
+        click.connect_released(move |_, _, _, _| open_click());
         tile.root.add_controller(click);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if matches!(
+                key,
+                gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::space
+            ) {
+                open();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        tile.root.add_controller(keys);
     }
 
     {
@@ -312,15 +341,13 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         SHOW_HOME.with(|slot| *slot.borrow_mut() = Some(back));
     }
 
-    for shelf in &ui.shelf_rows {
-        let button = shelf.button.clone();
-        let which = shelf.which;
+    let show_row: Rc<dyn Fn(ShelfRow)> = {
         let ui = Rc::clone(&ui);
         let row = Rc::clone(&row);
         let selected = Rc::clone(&selected);
         let page_open = Rc::clone(&page_open);
         let shelf_open = Rc::clone(&shelf_open);
-        button.connect_clicked(move |_| {
+        Rc::new(move |which| {
             row.set(which);
             if which == ShelfRow::Home {
                 selected.set(None);
@@ -331,8 +358,21 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
                 shelf_open.set(false);
             }
             apply_layout(&ui, &selected, &row, &shelf_open, &page_open);
-        });
+        })
+    };
+    for shelf in &ui.shelf_rows {
+        let which = shelf.which;
+        let show_row = Rc::clone(&show_row);
+        shelf.button.connect_clicked(move |_| show_row(which));
     }
+    {
+        let show_row = Rc::clone(&show_row);
+        ui.connect
+            .connect_clicked(move |_| show_row(ShelfRow::Journal));
+    }
+    SHOW_JOURNAL.with(|slot| {
+        *slot.borrow_mut() = Some(Rc::new(move || show_row(ShelfRow::Journal)));
+    });
 
     {
         let ui = Rc::clone(&ui);
@@ -365,6 +405,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         Rc::clone(&selected),
     );
     wire_pause(&ui, &view, &seen_report, &daemon_up, &selected);
+    wire_activity_save(&ui, &view, &seen_report, &daemon_up, &selected);
 
     apply_view(&ui, &view.borrow());
     apply_shot_hooks(&ui, &view, &selected, &row, &shelf_open, &page_open);
@@ -413,6 +454,38 @@ thread_local! {
 
 thread_local! {
     static SHOW_HOME: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+    static SHOW_JOURNAL: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+    static SLOTS: RefCell<Option<(gtk::Box, gtk::Box)>> = const { RefCell::new(None) };
+}
+
+/// Open the journal row, where pairing lives.
+pub fn show_journal() {
+    SHOW_JOURNAL.with(|slot| {
+        if let Some(show) = slot.borrow().as_ref() {
+            show();
+        }
+    });
+}
+
+/// Put the journal and help pages under their shelf rows.
+pub fn adopt_pages(journal: &impl IsA<gtk::Widget>, help: &impl IsA<gtk::Widget>) {
+    SLOTS.with(|slot| {
+        if let Some((journal_slot, help_slot)) = slot.borrow().as_ref() {
+            journal.set_vexpand(true);
+            help.set_vexpand(true);
+            journal_slot.append(journal);
+            help_slot.append(help);
+        }
+    });
+}
+
+fn page_slot() -> gtk::Box {
+    let slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    slot.add_css_class("sol-ink");
+    slot.set_hexpand(true);
+    slot.set_vexpand(true);
+    slot.set_visible(false);
+    slot
 }
 
 pub fn show_home() {
@@ -429,6 +502,9 @@ struct Ui {
     body: gtk::Box,
     grid: gtk::Grid,
     other: gtk::Label,
+    other_box: gtk::Box,
+    journal_slot: gtk::Box,
+    help_slot: gtk::Box,
     computer: gtk::Box,
     cursor: gtk::Switch,
     start_paused: gtk::Switch,
@@ -495,6 +571,10 @@ struct Page {
     activity_only: gtk::Switch,
     exclude_apps: gtk::Label,
     exclude_titles: gtk::Label,
+    save: gtk::Button,
+    save_note: gtk::Label,
+    /// The owner changed a "goes along with it" switch that is not saved yet.
+    edited: Rc<Cell<bool>>,
     close: gtk::Button,
     painting: Rc<Cell<bool>>,
 }
@@ -567,13 +647,16 @@ impl Page {
             self.switch.set_active(on);
             self.painting.set(false);
         }
-        self.painting.set(true);
-        self.activity.set_active(view.activity_source);
-        self.titles.set_active(view.activity_titles);
-        self.urls.set_active(view.activity_urls);
-        self.through_pause.set_active(view.activity_through_pause);
-        self.activity_only.set_active(view.activity_only);
-        self.painting.set(false);
+        // An unsaved change stays as the owner set it until they save.
+        if !self.edited.get() {
+            self.painting.set(true);
+            self.activity.set_active(view.activity_source);
+            self.titles.set_active(view.activity_titles);
+            self.urls.set_active(view.activity_urls);
+            self.through_pause.set_active(view.activity_through_pause);
+            self.activity_only.set_active(view.activity_only);
+            self.painting.set(false);
+        }
         self.exclude_apps.set_text(&count_label(view.exclude_apps));
         self.exclude_titles
             .set_text(&count_label(view.exclude_titles));
@@ -614,7 +697,18 @@ fn make_tile(
     gtk::DrawingArea,
     Option<gtk::Switch>,
 ) {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let root = if dashed {
+        gtk::Box::new(gtk::Orientation::Vertical, 6)
+    } else {
+        // A source tile opens its page, so keyboard and assistive tech reach it
+        // as a button.
+        gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .accessible_role(gtk::AccessibleRole::Button)
+            .focusable(true)
+            .build()
+    };
     root.add_css_class("sol-tile");
     if dashed {
         root.add_css_class("sol-dash");
@@ -896,6 +990,8 @@ fn make_source_page(status: gtk::Box) -> Page {
         activity_only,
         exclude_apps,
         exclude_titles,
+        save,
+        save_note,
     ) = screen_settings();
     let terminal_extra = terminal_settings();
     let (browsers_extra, browsers_names) = browsers_settings();
@@ -944,6 +1040,9 @@ fn make_source_page(status: gtk::Box) -> Page {
         activity_only,
         exclude_apps,
         exclude_titles,
+        save,
+        save_note,
+        edited: Rc::new(Cell::new(false)),
         close,
         painting: Rc::new(Cell::new(false)),
     }
@@ -957,6 +1056,8 @@ fn screen_settings() -> (
     gtk::Switch,
     gtk::Switch,
     gtk::Label,
+    gtk::Label,
+    gtk::Button,
     gtk::Label,
 ) {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -983,6 +1084,12 @@ fn screen_settings() -> (
     box_.append(&note_label(Some(
         solstone_linux::copy::SETTINGS_RESTART_HELP,
     )));
+    let save = gtk::Button::with_label(solstone_linux::copy::SETTINGS_SAVE);
+    save.add_css_class("sol-action");
+    save.set_halign(gtk::Align::Start);
+    box_.append(&save);
+    let save_note = note_label(None);
+    box_.append(&save_note);
     let left = section_label("left out");
     left.add_css_class("sol-rule");
     box_.append(&left);
@@ -1003,6 +1110,8 @@ fn screen_settings() -> (
         activity_only,
         exclude_apps,
         exclude_titles,
+        save,
+        save_note,
     )
 }
 
@@ -1401,6 +1510,119 @@ fn wire_page_switch(
     });
 }
 
+/// The screen page's activity switches are a draft until "save settings", which
+/// sends the changed ones to the running app the way the settings form did.
+fn wire_activity_save(
+    ui: &Rc<Ui>,
+    view: &Rc<RefCell<View>>,
+    seen: &Rc<Cell<bool>>,
+    daemon: &Rc<Cell<Option<bool>>>,
+    selected: &Rc<Cell<Option<TileId>>>,
+) {
+    let page = &ui.page;
+    for switch in [
+        &page.activity,
+        &page.titles,
+        &page.urls,
+        &page.through_pause,
+        &page.activity_only,
+    ] {
+        let painting = Rc::clone(&page.painting);
+        let edited = Rc::clone(&page.edited);
+        let note = page.save_note.clone();
+        switch.connect_state_set(move |_, _| {
+            if !painting.get() {
+                edited.set(true);
+                note.set_visible(false);
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    let ui = Rc::clone(ui);
+    let view = Rc::clone(view);
+    let seen = Rc::clone(seen);
+    let daemon = Rc::clone(daemon);
+    let selected = Rc::clone(selected);
+    page.save.clone().connect_clicked(move |button| {
+        let page = &ui.page;
+        let saved = view.borrow();
+        let mut policy = serde_json::Map::new();
+        for (key, switch, was) in [
+            ("activity_source", &page.activity, saved.activity_source),
+            ("activity_titles", &page.titles, saved.activity_titles),
+            ("activity_urls", &page.urls, saved.activity_urls),
+            (
+                "activity_through_pause",
+                &page.through_pause,
+                saved.activity_through_pause,
+            ),
+        ] {
+            if switch.is_active() != was {
+                policy.insert(key.into(), switch.is_active().into());
+            }
+        }
+        let mut writes = Vec::new();
+        if !policy.is_empty() {
+            writes.push((
+                "activity_policy",
+                serde_json::Value::Object(policy).to_string(),
+            ));
+        }
+        if page.activity_only.is_active() != saved.activity_only {
+            writes.push(("activity_only", page.activity_only.is_active().to_string()));
+        }
+        drop(saved);
+        if writes.is_empty() {
+            page.edited.set(false);
+            return;
+        }
+        button.set_sensitive(false);
+        button.set_label(solstone_linux::copy::SETTINGS_SAVING);
+        let button = button.clone();
+        let ui = Rc::clone(&ui);
+        let view = Rc::clone(&view);
+        let seen = Rc::clone(&seen);
+        let daemon = Rc::clone(&daemon);
+        let selected = Rc::clone(&selected);
+        glib::MainContext::default().spawn_local(async move {
+            let done = write_settings(&writes).await;
+            button.set_label(solstone_linux::copy::SETTINGS_SAVE);
+            button.set_sensitive(true);
+            let note = &ui.page.save_note;
+            if done {
+                ui.page.edited.set(false);
+                note.set_text(solstone_linux::copy::SETTINGS_SAVED);
+            } else {
+                note.set_text(solstone_linux::copy::SETTINGS_SAVE_UNAVAILABLE);
+            }
+            note.set_visible(true);
+            refresh(&ui, &view, &seen, &daemon, &selected);
+        });
+    });
+}
+
+/// True only when the app took every write without refusing it.
+async fn write_settings(writes: &[(&str, String)]) -> bool {
+    let Ok(client) = solstone_linux::dbus_client::ControlClient::session().await else {
+        return false;
+    };
+    for (field, value) in writes {
+        let Ok(reply) = client.write_setting(field, value).await else {
+            return false;
+        };
+        match solstone_linux::window_control::decode_control_str(&reply) {
+            Ok(model)
+                if model.saved_available
+                    && !matches!(
+                        model.fault.as_deref(),
+                        Some("invalid-setting" | "invalid-config")
+                    ) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.add_css_class("sol-pane");
@@ -1692,7 +1914,9 @@ fn apply_layout(
     if let Some(column) = deck_column(&ui.grid) {
         column.set_visible(home);
     }
-    ui.other.set_visible(!home && !computer);
+    ui.other_box.set_visible(!home && !computer);
+    ui.journal_slot.set_visible(row.get() == ShelfRow::Journal);
+    ui.help_slot.set_visible(row.get() == ShelfRow::Help);
     ui.computer.set_visible(computer);
     if !home {
         ui.other.set_text(shelf_label(row.get()));
