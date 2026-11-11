@@ -95,6 +95,16 @@ fn systemctl(runner: &dyn Runner, args: &[&str]) -> io::Result<Output> {
     runner.run(&program, args, SYSTEMCTL_TIMEOUT, &HashMap::new())
 }
 
+/// Quit from the window. Stops the user service and does not disable it.
+pub fn stop_for_window(runner: &dyn Runner) -> io::Result<()> {
+    let result = systemctl(runner, &["--user", "stop", "solstone-linux.service"])?;
+    if result.success {
+        Ok(())
+    } else {
+        Err(io::Error::other("systemctl stop failed"))
+    }
+}
+
 fn systemctl_nonfatal(
     runner: &dyn Runner,
     args: &[&str],
@@ -709,6 +719,40 @@ mod tests {
             assert!(value.contains(expected));
         }
     }
+    #[test]
+    fn stop_for_window_stops_and_does_not_disable() {
+        let runner = FakeRunner::ok();
+        stop_for_window(&runner).unwrap();
+        let calls = runner.calls.borrow().clone();
+        assert_eq!(
+            calls,
+            vec![vec![
+                "--user".to_string(),
+                "stop".to_string(),
+                "solstone-linux.service".to_string()
+            ]]
+        );
+    }
+
+    #[test]
+    fn stop_for_window_reports_a_runner_error_and_does_not_disable() {
+        let mut runner = FakeRunner::ok();
+        runner.error = true;
+        assert!(stop_for_window(&runner).is_err());
+        let calls = runner.calls.borrow().clone();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].iter().all(|arg| arg != "disable"));
+    }
+
+    #[test]
+    fn stop_for_window_reports_a_failed_stop_and_does_not_disable() {
+        let mut runner = FakeRunner::ok();
+        runner.success = false;
+        assert!(stop_for_window(&runner).is_err());
+        assert_eq!(runner.calls.borrow().len(), 1);
+        assert!(runner.calls.borrow()[0].iter().all(|arg| arg != "disable"));
+    }
+
     // missing systemctl is non-fatal after files are written.
     #[test]
     fn systemctl_missing_is_nonfatal() {

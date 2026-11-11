@@ -33,22 +33,13 @@ fn notify(changed: &Changed) {
 
 const SETTINGS_PAGE_NAME: &str = "settings";
 
-/// Brings the open window to its settings tab.
+/// Opens the window on the deck, with status showing.
 pub fn show_settings(app: &gtk::Application) {
     let Some(window) = app.windows().into_iter().next() else {
         return;
     };
-    let Some(notebook) = window.child().and_downcast::<gtk::Notebook>() else {
-        return;
-    };
-    let settings = (0..notebook.n_pages()).find(|&index| {
-        notebook
-            .nth_page(Some(index))
-            .is_some_and(|page| page.widget_name() == SETTINGS_PAGE_NAME)
-    });
-    if let Some(index) = settings {
-        notebook.set_current_page(Some(index));
-    }
+    window.present();
+    crate::deck::show_home();
 }
 
 /// Puts a clicked pairing link on the journal tab. It never pairs: that waits for the press.
@@ -71,6 +62,12 @@ fn show_any_clicked_link() {
 }
 
 pub fn build_ui(app: &gtk::Application) {
+    if std::env::var("SOLSTONE_FRAME_PNG")
+        .ok()
+        .is_some_and(|path| !path.is_empty())
+    {
+        eprintln!("frame-file build");
+    }
     if let Some(window) = app
         .active_window()
         .or_else(|| app.windows().into_iter().next())
@@ -83,12 +80,45 @@ pub fn build_ui(app: &gtk::Application) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title(CopyKey::WindowTitle.as_str())
-        .default_width(600)
-        .default_height(620)
+        .default_width(1180)
+        .default_height(760)
         .build();
 
-    window.set_size_request(460, 520);
+    window.set_size_request(400, 480);
 
+    // The shell is shown before the notebook pages are built, so the window can
+    // paint before that work touches the session bus.
+    let chrome = crate::sun_bg::attach(&window);
+    window.set_child(Some(&chrome.root));
+    crate::deck::mount(&window, &chrome);
+    window.present();
+    schedule_pages(window);
+}
+
+/// Page setup waits until a requested frame file is written, so that work cannot
+/// block the paint. A normal launch builds the pages on idle.
+fn schedule_pages(window: gtk::ApplicationWindow) {
+    if std::env::var("SOLSTONE_FRAME_PNG")
+        .ok()
+        .is_none_or(|path| path.is_empty())
+    {
+        let _ = glib::idle_add_local_once(move || build_deferred_pages(&window));
+        return;
+    }
+    let tries = Rc::new(Cell::new(0u8));
+    let _ = glib::timeout_add_local(Duration::from_millis(250), move || {
+        let attempt = tries.get().saturating_add(1);
+        tries.set(attempt);
+        if crate::sun_bg::try_frame_file(&window) || attempt >= 16 {
+            build_deferred_pages(&window);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn build_deferred_pages(window: &gtk::ApplicationWindow) {
     let notebook = gtk::Notebook::new();
 
     let controller = Rc::new(RefCell::new(Controller::new()));
@@ -129,15 +159,14 @@ pub fn build_ui(app: &gtk::Application) {
     );
 
     // Page 4: Help
-    let help_page = create_help_page(Rc::clone(&controller), &window);
+    let help_page = create_help_page(Rc::clone(&controller), window);
     notebook.append_page(
         &help_page,
         Some(&gtk::Label::new(Some(CopyKey::NavHelp.as_str()))),
     );
 
-    window.set_child(Some(&notebook));
-    window.present();
-
+    // The notebook stays built so its pages can move onto the deck. It is not the
+    // child, so the window shows the shell.
     let update_all: Rc<dyn Fn()> = {
         let update_status = update_status.clone();
         let update_journal = update_journal.clone();

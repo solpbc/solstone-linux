@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 use crate::private_file::atomic_write_bytes;
 
-pub(crate) const FILENAME: &str = "source-intake.json";
+pub const FILENAME: &str = "source-intake.json";
 const LOCK_NAME: &str = "source-intake.lock";
 
 pub(crate) fn path(state_dir: &Path) -> PathBuf {
@@ -815,6 +815,73 @@ fn notes_object(stamp: &ClockStamp) -> Value {
         "baselined": false,
         "intake": 0,
     })
+}
+
+/// One source's total, as stored. `last` is absent when the field is null or missing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Counter {
+    pub total: u64,
+    pub started: Option<String>,
+    pub last: Option<String>,
+}
+
+/// The five counters, read and not written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntakeRows {
+    pub audio: Counter,
+    pub screen: Counter,
+    pub terminal: Counter,
+    pub browsers: Counter,
+    pub obsidian: Counter,
+}
+
+/// A read of `source-intake.json`. Missing stays missing. A refused file is not zeros.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntakeFile {
+    Missing,
+    Refused,
+    Rows(Box<IntakeRows>),
+}
+
+/// Parse `path` and do not create it, lock it, or rewrite it.
+#[must_use]
+pub fn read_rows(path: &Path) -> IntakeFile {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return IntakeFile::Missing,
+        Err(_) => return IntakeFile::Refused,
+    };
+    let Some(value) = parse_file(&bytes) else {
+        return IntakeFile::Refused;
+    };
+    IntakeFile::Rows(Box::new(IntakeRows {
+        audio: counter_of(&value, "audio", "seconds"),
+        screen: counter_of(&value, "screen", "seconds"),
+        terminal: counter_of(&value, "terminal", "seconds"),
+        browsers: counter_of(&value, "browsers", "pages"),
+        obsidian: counter_of(&value, "obsidian", "notes"),
+    }))
+}
+
+fn counter_of(value: &Value, source: &str, field: &str) -> Counter {
+    let Some(source) = value.get(source) else {
+        return Counter {
+            total: 0,
+            started: None,
+            last: None,
+        };
+    };
+    Counter {
+        total: source.get(field).and_then(Value::as_u64).unwrap_or(0),
+        started: source
+            .get("started")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        last: source
+            .get("last")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
 }
 
 struct ClockStamp {
@@ -2662,5 +2729,51 @@ mod tests {
         assert!(counted["obsidian"]["last"].is_string());
         assert_eq!(counted["obsidian"]["started"], "2019-05-05");
         assert_eq!(counted["audio"]["seconds"], 99);
+    }
+}
+
+#[cfg(test)]
+mod read_rows_tests {
+    use super::{IntakeFile, read_rows};
+    use std::fs;
+
+    fn sample(screen: u64, audio: u64, last: &str) -> String {
+        format!(
+            r#"{{"version":1,"audio":{{"seconds":{audio},"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null}},"screen":{{"seconds":{screen},"started":"2025-03-03","started_at":"2025-03-03T00:00:00Z","last":{last}}},"terminal":{{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"seen":[]}},"browsers":{{"pages":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"tabs":{{}}}},"obsidian":{{"notes":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"paths":[],"baselined":false}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_missing_file_stays_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source-intake.json");
+        assert_eq!(read_rows(&path), IntakeFile::Missing);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_refused_file_is_not_zeros_and_is_not_rewritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source-intake.json");
+        let body = br#"{"version":1,"screen":{"seconds":1.5,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null}}"#;
+        fs::write(&path, body).unwrap();
+        assert_eq!(read_rows(&path), IntakeFile::Refused);
+        assert_eq!(fs::read(&path).unwrap(), body);
+    }
+
+    #[test]
+    fn screen_and_audio_are_separate_and_a_null_last_stays_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source-intake.json");
+        let body = sample(3600, 0, "null");
+        fs::write(&path, &body).unwrap();
+        let IntakeFile::Rows(rows) = read_rows(&path) else {
+            panic!("the file is readable");
+        };
+        assert_eq!(rows.screen.total, 3600);
+        assert_eq!(rows.audio.total, 0);
+        assert_eq!(rows.screen.started.as_deref(), Some("2025-03-03"));
+        assert_eq!(rows.screen.last, None);
+        assert_eq!(fs::read(&path).unwrap(), body.as_bytes());
     }
 }

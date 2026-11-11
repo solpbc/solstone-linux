@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use crate::shell_model::{self, PauseLeft};
+use crate::sync_health::HealthState;
 use crate::tray_model::TrayModel;
 use ksni::menu::{MenuItem, StandardItem, SubMenu};
 use ksni::{Category, Icon, Status, ToolTip, Tray};
@@ -23,6 +25,7 @@ pub enum TrayCommand {
     CopyInstructions,
     /// The owner's desktop-capture switch, already saved.
     SetDesktopCapture(bool),
+    Quit,
 }
 
 pub struct KsniTray {
@@ -37,6 +40,34 @@ fn item<T: Tray>(label: impl Into<String>, enabled: bool) -> MenuItem<T> {
     }
     .into()
 }
+fn journal_paired(state: HealthState) -> bool {
+    !matches!(
+        state,
+        HealthState::PairingRequired | HealthState::NotReported
+    )
+}
+
+/// The disabled status row. A timed pause uses the time-left line. Offline is never
+/// blank: the word alone, or the count when one is known.
+fn menu_status_line(model: &TrayModel) -> String {
+    if model.resume_visible {
+        return if model.pause_seconds > 0 {
+            shell_model::pause_line(PauseLeft::Seconds(model.pause_seconds as u32))
+        } else {
+            shell_model::pause_line(PauseLeft::UntilResume)
+        };
+    }
+    match model.health_state {
+        HealthState::PairingRequired | HealthState::NotReported => "not paired".to_string(),
+        HealthState::Connected => "connected · all caught up".to_string(),
+        HealthState::Offline => match model.waiting_count {
+            Some(count) if count > 0 => format!("offline · {count} waiting"),
+            _ => "offline".to_string(),
+        },
+        _ => String::new(),
+    }
+}
+
 fn action(label: &str, command: TrayCommand) -> StandardItem<KsniTray> {
     StandardItem {
         label: label.into(),
@@ -48,6 +79,9 @@ fn action(label: &str, command: TrayCommand) -> StandardItem<KsniTray> {
 }
 
 impl Tray for KsniTray {
+    /// A click opens this menu. The item does not handle activation itself.
+    const MENU_ON_ACTIVATE: bool = true;
+
     fn id(&self) -> String {
         "solstone-observer".into()
     }
@@ -88,130 +122,91 @@ impl Tray for KsniTray {
         }
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let pause = SubMenu {
-            label: "pause".into(),
-            visible: self.model.pause_visible,
-            submenu: vec![
-                action("15 minutes", TrayCommand::Pause(900)).into(),
-                action("30 minutes", TrayCommand::Pause(1800)).into(),
-                action("1 hour", TrayCommand::Pause(3600)).into(),
-                action("until I resume", TrayCommand::PauseIndefinite).into(),
-            ],
-            ..Default::default()
-        };
-        let status = SubMenu {
-            label: "status".into(),
-            submenu: vec![
-                item(self.model.header.clone(), false),
-                item(self.model.sync.clone(), false),
-                MenuItem::Separator,
-                item(self.model.segment.clone(), false),
-                item(self.model.cache.clone(), false),
-                item(self.model.uptime.clone(), false),
-            ],
-            ..Default::default()
-        };
-        vec![
+        let mut rows: Vec<MenuItem<Self>> = Vec::new();
+        if self.model.status.needs_attention() {
+            rows.push(
+                StandardItem {
+                    label: "screen needs attention".into(),
+                    activate: Box::new(|_: &mut KsniTray| {
+                        crate::cli::spawn_window_from_tray();
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        rows.push(item(menu_status_line(&self.model), false));
+        if self.model.pause_visible {
+            rows.push(
+                SubMenu {
+                    label: "pause".into(),
+                    submenu: vec![
+                        action("15 minutes", TrayCommand::Pause(900)).into(),
+                        action("30 minutes", TrayCommand::Pause(1800)).into(),
+                        action("1 hour", TrayCommand::Pause(3600)).into(),
+                        action("until I resume", TrayCommand::PauseIndefinite).into(),
+                    ],
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        if self.model.resume_visible {
+            rows.push(
+                StandardItem {
+                    label: "resume".into(),
+                    activate: Box::new(|tray: &mut KsniTray| {
+                        let _ = tray.commands.send(TrayCommand::Resume);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        rows.push(
             StandardItem {
-                label: "open solstone".into(),
+                label: "open settings".into(),
+                activate: Box::new(|_: &mut KsniTray| {
+                    crate::cli::spawn_settings_window_from_tray();
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+        if journal_paired(self.model.health_state) {
+            rows.push(
+                StandardItem {
+                    label: "open journal".into(),
+                    enabled: self.model.open_journal_enabled,
+                    activate: Box::new(|tray: &mut KsniTray| {
+                        let _ = tray.commands.send(TrayCommand::OpenJournal);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        rows.push(
+            StandardItem {
+                label: "about solstone".into(),
                 activate: Box::new(|_: &mut KsniTray| {
                     crate::cli::spawn_window_from_tray();
                 }),
                 ..Default::default()
             }
             .into(),
-            item(self.model.header.clone(), false),
-            MenuItem::Separator,
-            pause.into(),
+        );
+        rows.push(
             StandardItem {
-                label: self.model.resume.clone(),
-                visible: self.model.resume_visible,
-                activate: Box::new(|t: &mut KsniTray| {
-                    let _ = t.commands.send(TrayCommand::Resume);
-                }),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            status.into(),
-            StandardItem {
-                label: "open journal".into(),
-                enabled: self.model.open_journal_enabled,
+                label: "quit solstone".into(),
                 activate: Box::new(|tray: &mut KsniTray| {
-                    let _ = tray.commands.send(TrayCommand::OpenJournal);
+                    let _ = tray.commands.send(TrayCommand::Quit);
                 }),
                 ..Default::default()
             }
             .into(),
-            SubMenu {
-                label: "settings".into(),
-                submenu: vec![
-                    StandardItem {
-                        label: "open settings".into(),
-                        activate: Box::new(|_: &mut KsniTray| {
-                            crate::cli::spawn_settings_window_from_tray();
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                    // The config file stays reachable from here beside the window.
-                    action("open config.json", TrayCommand::OpenConfig).into(),
-                ],
-                ..Default::default()
-            }
-            .into(),
-            SubMenu {
-                label: "about".into(),
-                submenu: vec![
-                    item(
-                        self.model.about.text.lines().next().unwrap_or_default(),
-                        false,
-                    ),
-                    item(
-                        self.model
-                            .about
-                            .text
-                            .lines()
-                            .nth(1)
-                            .unwrap_or("journal unknown"),
-                        false,
-                    ),
-                    action("copy", TrayCommand::CopyAbout(self.model.about.clone())).into(),
-                    action(
-                        "solstone.app",
-                        TrayCommand::OpenUrl("https://solstone.app/observers"),
-                    )
-                    .into(),
-                    action(
-                        "source code",
-                        TrayCommand::OpenUrl("https://github.com/solpbc/solstone-linux"),
-                    )
-                    .into(),
-                    action(
-                        "privacy policy",
-                        TrayCommand::OpenUrl("https://solpbc.org/privacy"),
-                    )
-                    .into(),
-                    action("get help", TrayCommand::OpenUrl(crate::support::HELP_URL)).into(),
-                    action(
-                        "report a problem",
-                        TrayCommand::ReportProblem(self.model.status, self.model.about.clone()),
-                    )
-                    .into(),
-                    action(
-                        "copy help agent instructions",
-                        TrayCommand::CopyInstructions,
-                    )
-                    .into(),
-                    MenuItem::Separator,
-                    item("© 2026 sol pbc — a public benefit corporation", false),
-                ],
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            item("managed via systemctl", false),
-        ]
+        );
+        rows
     }
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
         tracing::warn!(
@@ -229,6 +224,7 @@ impl Tray for KsniTray {
 mod tests {
     use super::*;
     use crate::{
+        desktop_session::SessionPresence,
         observer::{Mode, StateSnapshot},
         private_link::LinkFactState,
         sync_health::{ErrorType, SyncFacts, SyncHealth, derive_health},
@@ -271,53 +267,40 @@ mod tests {
         assert_ne!(tray.tool_tip().title, "sol");
     }
 
-    #[test]
-    fn menu_contains_reference_top_level_structure() {
-        let mut tray = tray();
-        tray.model.open_journal_enabled = true;
-        let menu = tray.menu();
-        assert_eq!(menu.len(), 12);
-        let labels: Vec<&str> = menu
-            .iter()
+    fn labels(menu: &[MenuItem<KsniTray>]) -> Vec<&str> {
+        menu.iter()
             .map(|item| match item {
-                MenuItem::Standard(v) => v.label.as_str(),
-                MenuItem::SubMenu(v) => v.label.as_str(),
+                MenuItem::Standard(value) => value.label.as_str(),
+                MenuItem::SubMenu(value) => value.label.as_str(),
                 MenuItem::Separator => "<separator>",
                 _ => "<other>",
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn menu_contains_reference_top_level_structure() {
+        let mut tray = tray();
+        tray.model.health_state = crate::sync_health::HealthState::Connected;
+        tray.model.open_journal_enabled = true;
+        let menu = tray.menu();
         assert_eq!(
-            labels,
+            labels(&menu),
             [
-                "open solstone",
-                tray.model.header.as_str(),
-                "<separator>",
+                "connected · all caught up",
                 "pause",
-                "resume",
-                "<separator>",
-                "status",
+                "open settings",
                 "open journal",
-                "settings",
-                "about",
-                "<separator>",
-                "managed via systemctl"
+                "about solstone",
+                "quit solstone",
             ]
         );
-        let status = match &menu[6] {
-            MenuItem::SubMenu(value) => value,
-            _ => panic!("status submenu missing"),
+        let MenuItem::Standard(status) = &menu[0] else {
+            panic!("status row missing");
         };
-        assert_eq!(status.submenu.len(), 6);
-        assert_eq!(
-            match &status.submenu[0] {
-                MenuItem::Standard(value) => value.label.as_str(),
-                _ => "",
-            },
-            tray.model.header
-        );
-        let pause = match &menu[3] {
-            MenuItem::SubMenu(value) => value,
-            _ => panic!("pause submenu missing"),
+        assert!(!status.enabled);
+        let MenuItem::SubMenu(pause) = &menu[1] else {
+            panic!("pause submenu missing");
         };
         assert_eq!(pause.submenu.len(), 4);
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -340,42 +323,33 @@ mod tests {
                 TrayCommand::PauseIndefinite
             ]
         );
-        if let MenuItem::Standard(value) = &menu[7] {
-            assert!(value.enabled);
-            (value.activate)(&mut tray);
-        }
+        let MenuItem::Standard(open_journal) = &menu[3] else {
+            panic!("open journal row missing");
+        };
+        assert!(open_journal.enabled);
+        (open_journal.activate)(&mut tray);
         assert_eq!(receiver.try_recv(), Ok(TrayCommand::OpenJournal));
-        // The settings window sits beside the config file, never in place of it.
-        let settings = match &menu[8] {
-            MenuItem::SubMenu(value) => value,
-            _ => panic!("settings submenu missing"),
+        let MenuItem::Standard(quit) = &menu[5] else {
+            panic!("quit row missing");
         };
-        assert_eq!(settings.submenu.len(), 2);
-        if let MenuItem::Standard(value) = &settings.submenu[1] {
-            (value.activate)(&mut tray);
-        }
-        assert_eq!(receiver.try_recv(), Ok(TrayCommand::OpenConfig));
-        let about = match &menu[9] {
-            MenuItem::SubMenu(value) => value,
-            _ => panic!("about submenu missing"),
-        };
-        let expected = [
-            TrayCommand::OpenUrl("https://solstone.app/observers"),
-            TrayCommand::OpenUrl("https://github.com/solpbc/solstone-linux"),
-            TrayCommand::OpenUrl("https://solpbc.org/privacy"),
-            TrayCommand::OpenUrl(crate::support::HELP_URL),
-            TrayCommand::ReportProblem(tray.model.status, tray.model.about.clone()),
-        ];
-        for (item, expected) in about.submenu[3..8].iter().zip(expected) {
-            if let MenuItem::Standard(value) = item {
-                (value.activate)(&mut tray);
-            }
-            assert_eq!(receiver.try_recv(), Ok(expected));
-        }
+        (quit.activate)(&mut tray);
+        assert_eq!(receiver.try_recv(), Ok(TrayCommand::Quit));
     }
 
     #[test]
-    fn about_actions_keep_the_displayed_snapshot_after_model_refresh() {
+    fn offline_status_line_is_never_blank() {
+        let mut tray = tray();
+        tray.model.health_state = crate::sync_health::HealthState::Offline;
+        tray.model.waiting_count = None;
+        assert_eq!(labels(&tray.menu())[0], "offline");
+        tray.model.waiting_count = Some(12);
+        assert_eq!(labels(&tray.menu())[0], "offline · 12 waiting");
+        tray.model.waiting_count = Some(0);
+        assert_eq!(labels(&tray.menu())[0], "offline");
+    }
+
+    #[test]
+    fn about_row_does_not_carry_the_journal_snapshot() {
         let mut tray = tray();
         let saved = crate::sync_health::PairedJournalVersion {
             identity_key: "PRIVATE_identity".into(),
@@ -385,57 +359,72 @@ mod tests {
             about: None,
             about_observed_at: None,
         };
-        let displayed = crate::about::AboutBlock::from_version(
+        tray.model.about = crate::about::AboutBlock::from_version(
             crate::about::HostFacts::default(),
             Some(&saved),
             false,
             172800,
         );
-        tray.model.about = displayed.clone();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        tray.commands = sender;
         let menu = tray.menu();
-        let MenuItem::SubMenu(about) = &menu[9] else {
-            panic!("about submenu missing");
-        };
-        let lines: Vec<_> = about.submenu[..2]
-            .iter()
-            .map(|item| match item {
-                MenuItem::Standard(value) => value.label.as_str(),
-                _ => panic!("about fact row missing"),
-            })
-            .collect();
-        assert_eq!(lines.join("\n"), displayed.text);
-        tray.model.about = crate::about::AboutBlock::from_version(
-            crate::about::HostFacts::default(),
-            Some(&saved),
-            false,
-            259200,
-        );
-        assert_ne!(tray.model.about.text, displayed.text);
-        for (index, expected) in [
-            (2, TrayCommand::CopyAbout(displayed.clone())),
-            (7, TrayCommand::ReportProblem(tray.model.status, displayed)),
-        ] {
-            let MenuItem::Standard(action) = &about.submenu[index] else {
-                panic!("about action missing");
-            };
-            (action.activate)(&mut tray);
-            assert_eq!(receiver.try_recv(), Ok(expected));
-        }
+        let joined = labels(&menu).join("\n");
+        assert!(joined.contains("about solstone"));
+        assert!(!joined.contains("PRIVATE"));
     }
 
     #[test]
     fn open_journal_menu_enablement_follows_model_epoch() {
         let mut tray = tray();
+        tray.model.health_state = crate::sync_health::HealthState::Connected;
         for expected in [false, true, false] {
             tray.model.open_journal_enabled = expected;
             let menu = tray.menu();
-            let MenuItem::Standard(open_journal) = &menu[7] else {
-                panic!("open journal item missing");
+            let Some(MenuItem::Standard(open_journal)) = menu.iter().find(
+                |item| matches!(item, MenuItem::Standard(value) if value.label == "open journal"),
+            ) else {
+                panic!("open journal row missing");
             };
             assert_eq!(open_journal.enabled, expected);
         }
+    }
+
+    #[test]
+    fn unpaired_menu_names_attention_and_hides_the_journal() {
+        let mut tray = tray();
+        tray.model.status = TrayStatus::Waiting(SessionPresence::Unreachable);
+        tray.model.health_state = crate::sync_health::HealthState::PairingRequired;
+        tray.model.open_journal_enabled = true;
+        assert_eq!(
+            labels(&tray.menu()),
+            [
+                "screen needs attention",
+                "not paired",
+                "pause",
+                "open settings",
+                "about solstone",
+                "quit solstone",
+            ]
+        );
+    }
+
+    #[test]
+    fn paused_menu_uses_the_time_left_line_and_resume() {
+        let mut tray = tray();
+        tray.model.health_state = crate::sync_health::HealthState::Connected;
+        tray.model.status = TrayStatus::Paused;
+        tray.model.pause_visible = false;
+        tray.model.resume_visible = true;
+        tray.model.pause_seconds = 12 * 60;
+        assert_eq!(
+            labels(&tray.menu()),
+            [
+                "paused, 12 min left",
+                "resume",
+                "open settings",
+                "open journal",
+                "about solstone",
+                "quit solstone",
+            ]
+        );
     }
 
     fn pixmap_from_health(health: &SyncHealth, status: TrayStatus) -> Vec<u8> {
@@ -672,6 +661,11 @@ mod tests {
     fn watcher_offline_returns_true_for_service_survival() {
         let test_tray = tray();
         assert!(test_tray.watcher_offline(ksni::OfflineReason::No));
+    }
+
+    #[test]
+    fn activation_opens_the_menu() {
+        assert!(KsniTray::MENU_ON_ACTIVATE);
     }
 }
 

@@ -25,8 +25,8 @@ pub const STORE_LINKS: &[(&str, &str)] = &[
         "https://addons.mozilla.org/firefox/addon/solstone/",
     ),
 ];
-/// The running app rewrites its status every five seconds.
-const RUNNING_STALE_MS: i64 = 30_000;
+/// The running app rewrites its status every five seconds. Older than this, the host is down.
+pub const RUNNING_STALE_MS: i64 = 30_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Running {
@@ -51,6 +51,16 @@ pub fn write_running(layout: &Layout, status: &Running) -> io::Result<()> {
 
 pub fn clear_running(layout: &Layout) {
     let _ = fs::remove_file(layout.root.join(RUNNING_FILE));
+}
+
+pub fn running_path(root: &Path) -> PathBuf {
+    root.join(RUNNING_FILE)
+}
+
+/// The status file as written, including one older than [`RUNNING_STALE_MS`].
+/// Missing or unreadable is `None`.
+pub fn load_running(path: &Path) -> Option<Running> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
 fn read_running(layout: &Layout, now_ms: i64) -> Option<Running> {

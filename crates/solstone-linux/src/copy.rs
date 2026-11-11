@@ -211,8 +211,7 @@ pub const SETTINGS_DESKTOP_CAPTURE: &str = "screen, audio and desktop activity";
 pub const SETTINGS_DESKTOP_CAPTURE_HELP: &str =
     "off means none of the three goes into your journal, whatever your desktop is doing.";
 pub const SETTINGS_ACTIVITY_ONLY: &str = "activity only";
-pub const SETTINGS_ACTIVITY_ONLY_HELP: &str =
-    "desktop activity only, with screen and audio intake off.";
+pub const SETTINGS_ACTIVITY_ONLY_HELP: &str = "desktop activity only, with screen and sound off.";
 pub const SETTINGS_ACTIVITY_PRIVATE_WINDOWS_NOTE: &str = "linux does not classify private windows.";
 pub const SETTINGS_ACTIVITY_EXCLUDE_APPS: &str = "apps left out of desktop activity";
 pub const SETTINGS_ACTIVITY_EXCLUDE_TITLES: &str = "window titles left out of desktop activity";

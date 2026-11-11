@@ -168,6 +168,8 @@ pub struct SyncHealth {
     pub pending_display: String,
     pub last_success_age: Option<f64>,
     pub progress: String,
+    /// Items waiting to go into the journal. Absent when the count is missing or zero.
+    pub waiting_count: Option<u64>,
 }
 
 pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = LazyLock::new(|| {
@@ -553,6 +555,13 @@ pub(crate) fn health_for_state(state: HealthState, facts: &SyncFacts, now: f64) 
         .to_owned(),
         last_success_age: facts.last_successful_sync.map(|value| now - value),
         progress: facts.progress.clone(),
+        waiting_count: facts.pending_confirmed.and_then(|count| {
+            if count > 0 {
+                u64::try_from(count).ok()
+            } else {
+                None
+            }
+        }),
     };
     apply_unknown_journal_overlay(&mut health, &link);
     health
