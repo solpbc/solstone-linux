@@ -2260,11 +2260,8 @@ window.sol-dark .sol-tile.sol-dash {\
   border-color: rgba(58, 46, 36, 0.14);\
   box-shadow: none;\
   padding: 40px 20px 16px;\
-  min-width: 360px;\
 }\
-.sol-pane.sol-flush {\
-  min-width: 0;\
-}\
+/* The 360 width is the widget's size request. A CSS min-width is the content box, so it would add this padding and cover the deck. */\
 window.sol-dark .sol-pane {\
   background-color: #2A221C;\
   border-color: rgba(255, 244, 230, 0.16);\
