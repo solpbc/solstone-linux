@@ -16,6 +16,7 @@ and this project adheres to Semantic Versioning.
 - "updates" was empty. it now shows the app's version, your journal's version once the app knows it, and how to update.
 - "help" now looks like the rest of the window. it shows the app's version, and on a desktop with no panel icon it has "quit solstone", which stops the app and closes the window.
 - while paused, the screen tile no longer says "activity is still on" when desktop activity is paused too.
+- with "activity only" on, the screen tile now says "activity is still on" instead of "with audio", since desktop activity keeps going into your journal.
 - on Obsidian's page, "choose a folder" and "turn off" did nothing. now they work, each vault the app finds on this computer is listed with "use this vault", and "turn off" no longer shows while Obsidian is off. the terminal page no longer says the same thing twice.
 
 ## [2.0.39] - 2026-11-11
