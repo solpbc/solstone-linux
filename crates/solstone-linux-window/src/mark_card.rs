@@ -245,41 +245,83 @@ fn create_card_widget(svg: String, accessible_name: String, width: f32) -> gtk::
     area.set_content_width(width as i32);
     area.set_content_height(CARD_HEIGHT as i32);
 
-    area.set_draw_func(move |widget, cr, _width, _height| {
-        let scale = widget.scale_factor() as f32;
-        if let Some(pixmap) = render_mark_card_svg(&svg, scale) {
-            let width = pixmap.width() as i32;
-            let height = pixmap.height() as i32;
-            let stride = width * 4;
-            let mut cairo_data = pixmap.data().to_vec();
-            for pixel in cairo_data.chunks_exact_mut(4) {
-                let r = pixel[0];
-                let g = pixel[1];
-                let b = pixel[2];
-                let a = pixel[3];
-                pixel[0] = b;
-                pixel[1] = g;
-                pixel[2] = r;
-                pixel[3] = a;
-            }
-            if let Ok(surface) = cairo::ImageSurface::create_for_data(
-                cairo_data,
-                cairo::Format::ARgb32,
-                width,
-                height,
-                stride,
-            ) {
-                cr.save().ok();
-                cr.scale(1.0 / scale as f64, 1.0 / scale as f64);
-                let _ = cr.set_source_surface(&surface, 0.0, 0.0);
-                let _ = cr.paint();
-                cr.restore().ok();
-            }
-        }
-    });
+    area.set_draw_func(move |widget, cr, _width, _height| paint_svg(widget, cr, &svg));
 
     area.set_halign(gtk::Align::Center);
     area.upcast()
+}
+
+const CHIPS_HEIGHT: f32 = 26.0;
+/// The two chips with room for their turn: 48-unit chips, 11 apart, 10 around.
+const CHIPS_VIEW_WIDTH: f32 = 127.0;
+const CHIPS_VIEW_HEIGHT: f32 = 68.0;
+
+/// The mark's two chips alone, small enough to sit in a line of text.
+pub fn build_mark_chips_svg(mark: &MarkRenderDocument) -> String {
+    let width = (CHIPS_HEIGHT * CHIPS_VIEW_WIDTH / CHIPS_VIEW_HEIGHT).ceil();
+    let chip = |icon: &solstone_linux::window_control::MarkIconDocument, x: f32| {
+        let (cx, cy) = (x + 24.0, 34.0);
+        format!(
+            r##"<g transform="rotate({rot}, {cx}, {cy})"><rect x="{x}" y="10" width="48" height="48" rx="12" fill="{hex}" fill-opacity="0.12" stroke="{hex}" stroke-width="3"/><g transform="translate({}, 20)"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="{hex}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">{svg}</svg></g></g>"##,
+            x + 10.0,
+            rot = icon.rot,
+            hex = icon.color.hex,
+            svg = icon.svg,
+        )
+    };
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{CHIPS_HEIGHT}" viewBox="0 0 {CHIPS_VIEW_WIDTH} {CHIPS_VIEW_HEIGHT}">{}{}</svg>"##,
+        chip(&mark.icon1, 10.0),
+        chip(&mark.icon2, 69.0),
+    )
+}
+
+/// A drawing area for the chips; [`show_mark_chips`] gives it a mark.
+pub fn mark_chips_area() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_height(CHIPS_HEIGHT as i32);
+    area.set_content_width((CHIPS_HEIGHT * CHIPS_VIEW_WIDTH / CHIPS_VIEW_HEIGHT).ceil() as i32);
+    area.set_valign(gtk::Align::Center);
+    area.set_can_focus(false);
+    area
+}
+
+pub fn show_mark_chips(area: &gtk::DrawingArea, mark: &MarkRenderDocument) {
+    let svg = build_mark_chips_svg(mark);
+    area.set_draw_func(move |widget, cr, _width, _height| paint_svg(widget, cr, &svg));
+}
+
+fn paint_svg(widget: &gtk::DrawingArea, cr: &cairo::Context, svg: &str) {
+    let scale = widget.scale_factor() as f32;
+    if let Some(pixmap) = render_mark_card_svg(svg, scale) {
+        let width = pixmap.width() as i32;
+        let height = pixmap.height() as i32;
+        let stride = width * 4;
+        let mut cairo_data = pixmap.data().to_vec();
+        for pixel in cairo_data.chunks_exact_mut(4) {
+            let r = pixel[0];
+            let g = pixel[1];
+            let b = pixel[2];
+            let a = pixel[3];
+            pixel[0] = b;
+            pixel[1] = g;
+            pixel[2] = r;
+            pixel[3] = a;
+        }
+        if let Ok(surface) = cairo::ImageSurface::create_for_data(
+            cairo_data,
+            cairo::Format::ARgb32,
+            width,
+            height,
+            stride,
+        ) {
+            cr.save().ok();
+            cr.scale(1.0 / scale as f64, 1.0 / scale as f64);
+            let _ = cr.set_source_surface(&surface, 0.0, 0.0);
+            let _ = cr.paint();
+            cr.restore().ok();
+        }
+    }
 }
 
 #[cfg(test)]

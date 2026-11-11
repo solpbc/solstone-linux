@@ -19,6 +19,7 @@ use solstone_linux::shell_model::{
 use solstone_linux::source_intake::{self, IntakeFile, IntakeRows};
 use solstone_linux::terminal::state::{EngineState, TerminalState};
 use solstone_linux::tray_model::TrayStatus;
+use solstone_linux::window_control::MarkRenderDocument;
 
 use crate::sun_bg::{self, Chrome};
 
@@ -61,6 +62,8 @@ struct View {
     paired: bool,
     /// The frame fixture names a journal. A live reading does not.
     fixture_mark: bool,
+    /// The paired journal's mark, as the running app reports it.
+    mark: Option<MarkRenderDocument>,
     /// Paired, and the service health is offline. A waiting count is separate.
     offline: bool,
     offline_waiting: Option<i64>,
@@ -92,6 +95,9 @@ struct ServiceSnap {
     obsidian: Option<solstone_linux::obsidian::State>,
     obsidian_vault: bool,
     kept: String,
+    /// The running app's own pause: `Some(bounded)` while it is paused.
+    pause_bounded: Option<bool>,
+    mark: Option<MarkRenderDocument>,
 }
 
 impl ServiceSnap {
@@ -108,6 +114,8 @@ impl ServiceSnap {
             obsidian: None,
             obsidian_vault: false,
             kept: "nothing yet".to_owned(),
+            pause_bounded: None,
+            mark: None,
         }
     }
 }
@@ -190,7 +198,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
 
     let built = make_pane();
     place_pane(&chrome.body, &built.root);
-    let (journal, journal_label) = journal_pill();
+    let (journal, journal_label, journal_mark) = journal_pill();
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
     column.add_css_class("sol-deck-column");
@@ -256,6 +264,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         start_paused: paused_switch,
         computer_note,
         computer_painting: Cell::new(false),
+        tile_painting: Cell::new(false),
         segment: segment_value,
         pane: built.root.clone(),
         greet,
@@ -282,6 +291,8 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         shelf_rows,
         journal,
         journal_label,
+        journal_mark,
+        journal_mark_shown: RefCell::new(None),
     });
 
     for tile in &ui.tiles {
@@ -513,6 +524,7 @@ struct Ui {
     start_paused: gtk::Switch,
     computer_note: gtk::Label,
     computer_painting: Cell<bool>,
+    tile_painting: Cell<bool>,
     segment: gtk::Label,
     pane: gtk::Box,
     greet: gtk::Label,
@@ -539,6 +551,9 @@ struct Ui {
     shelf_rows: Vec<ShelfWidgets>,
     journal: gtk::Box,
     journal_label: gtk::Label,
+    journal_mark: gtk::DrawingArea,
+    /// The mark the pill is drawing now, so a repaint redraws only a new one.
+    journal_mark_shown: RefCell<Option<MarkRenderDocument>>,
 }
 
 struct ShelfWidgets {
@@ -1379,7 +1394,7 @@ fn status_pill() -> (gtk::Button, gtk::DrawingArea, gtk::Label) {
     (pill, mark, label)
 }
 
-fn journal_pill() -> (gtk::Box, gtk::Label) {
+fn journal_pill() -> (gtk::Box, gtk::Label, gtk::DrawingArea) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
     row.set_halign(gtk::Align::Center);
     row.add_css_class("sol-journal");
@@ -1394,10 +1409,14 @@ fn journal_pill() -> (gtk::Box, gtk::Label) {
     let label = gtk::Label::new(Some("your · journal"));
     label.add_css_class("sol-display");
     label.add_css_class("sol-ink");
+    // A paired journal shows its own mark in place of the two placeholder chips.
+    let mark = crate::mark_card::mark_chips_area();
+    mark.set_visible(false);
     row.append(&left);
     row.append(&right);
+    row.append(&mark);
     row.append(&label);
-    (row, label)
+    (row, label, mark)
 }
 
 fn wire_pause(
@@ -1507,10 +1526,28 @@ fn wire_page_switch(
             painting.set(false);
             return glib::Propagation::Stop;
         };
-        if config::set_owner_switch(&config::ConfigPaths::default(), which, on).is_err() {
-            return glib::Propagation::Stop;
+        if !switch.is_sensitive() {
+            return glib::Propagation::Proceed;
         }
-        refresh(&refresh_ui, &view, &seen, &daemon, &selected);
+        switch.set_sensitive(false);
+        let switch = switch.clone();
+        let painting = Rc::clone(&painting);
+        let refresh_ui = Rc::clone(&refresh_ui);
+        let view = Rc::clone(&view);
+        let seen = Rc::clone(&seen);
+        let daemon = Rc::clone(&daemon);
+        let selected = Rc::clone(&selected);
+        glib::MainContext::default().spawn_local(async move {
+            let done = save_owner_switch(which, on).await;
+            switch.set_sensitive(true);
+            refresh(&refresh_ui, &view, &seen, &daemon, &selected);
+            if !done {
+                let saved = owner_switch_value(&view.borrow(), which);
+                painting.set(true);
+                switch.set_active(saved);
+                painting.set(false);
+            }
+        });
         glib::Propagation::Proceed
     });
 }
@@ -1669,17 +1706,23 @@ async fn write_settings(writes: &[(&str, String)]) -> bool {
         let Ok(reply) = client.write_setting(field, value).await else {
             return false;
         };
-        match solstone_linux::window_control::decode_control_str(&reply) {
-            Ok(model)
-                if model.saved_available
-                    && !matches!(
-                        model.fault.as_deref(),
-                        Some("invalid-setting" | "invalid-config")
-                    ) => {}
-            _ => return false,
+        if !setting_taken(&reply) {
+            return false;
         }
     }
     true
+}
+
+/// The app saved the write and did not refuse it.
+fn setting_taken(reply: &str) -> bool {
+    matches!(
+        solstone_linux::window_control::decode_control_str(reply),
+        Ok(model) if model.saved_available
+            && !matches!(
+                model.fault.as_deref(),
+                Some("invalid-setting" | "invalid-config")
+            )
+    )
 }
 
 fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label, gtk::Label) {
@@ -1738,26 +1781,71 @@ fn wire_switch(
     let Some(switch) = switch else {
         return;
     };
-    switch.connect_state_set(move |_, on| {
-        let paths = config::ConfigPaths::default();
-        if config::set_owner_switch(&paths, which, on).is_err() {
-            return glib::Propagation::Stop;
+    switch.connect_state_set(move |switch, on| {
+        // A repaint is not an edit, and a switch already saving waits.
+        if ui.tile_painting.get() || !switch.is_sensitive() {
+            return glib::Propagation::Proceed;
         }
-        if which == OwnerSwitch::Terminal && on {
-            daemon.set(None);
-        }
-        refresh(&ui, &view, &seen, &daemon, &selected);
-        if which == OwnerSwitch::Terminal && on {
-            probe_daemon(
-                Rc::clone(&daemon),
-                Rc::clone(&view),
-                Rc::clone(&seen),
-                Rc::clone(&ui),
-                Rc::clone(&selected),
-            );
-        }
+        switch.set_sensitive(false);
+        let switch = switch.clone();
+        let ui = Rc::clone(&ui);
+        let view = Rc::clone(&view);
+        let seen = Rc::clone(&seen);
+        let daemon = Rc::clone(&daemon);
+        let selected = Rc::clone(&selected);
+        glib::MainContext::default().spawn_local(async move {
+            let done = save_owner_switch(which, on).await;
+            switch.set_sensitive(true);
+            let terminal_on = done && which == OwnerSwitch::Terminal && on;
+            if terminal_on {
+                daemon.set(None);
+            }
+            refresh(&ui, &view, &seen, &daemon, &selected);
+            if !done {
+                let saved = owner_switch_value(&view.borrow(), which);
+                ui.tile_painting.set(true);
+                switch.set_active(saved);
+                ui.tile_painting.set(false);
+            }
+            if terminal_on {
+                probe_daemon(
+                    Rc::clone(&daemon),
+                    Rc::clone(&view),
+                    Rc::clone(&seen),
+                    Rc::clone(&ui),
+                    Rc::clone(&selected),
+                );
+            }
+        });
         glib::Propagation::Proceed
     });
+}
+
+/// Screen and terminal go to the running app, which saves the switch and applies it
+/// at once. With no app running there is nothing to apply it to, so the switch is
+/// saved for its next start, the way the command line does it.
+async fn save_owner_switch(which: OwnerSwitch, on: bool) -> bool {
+    let field = match which {
+        OwnerSwitch::Screen => "desktop_capture",
+        OwnerSwitch::Terminal => "terminal",
+    };
+    let save_for_start =
+        || config::set_owner_switch(&config::ConfigPaths::default(), which, on).is_ok();
+    let Ok(client) = solstone_linux::dbus_client::ControlClient::session().await else {
+        return save_for_start();
+    };
+    match client.write_setting(field, &on.to_string()).await {
+        Ok(reply) => setting_taken(&reply),
+        Err(solstone_linux::dbus_client::ControlClientError::NoOwner) => save_for_start(),
+        Err(_) => false,
+    }
+}
+
+fn owner_switch_value(view: &View, which: OwnerSwitch) -> bool {
+    match which {
+        OwnerSwitch::Screen => view.screen_on,
+        OwnerSwitch::Terminal => view.terminal_on,
+    }
 }
 
 fn probe_daemon(
@@ -1839,8 +1927,10 @@ fn apply_view(ui: &Ui, view: &View) {
                 TileId::Terminal => view.terminal_on,
                 TileId::Browsers | TileId::Obsidian => false,
             };
-            if switch.is_active() != on && !switch.has_focus() {
+            if switch.is_active() != on && !switch.has_focus() && switch.is_sensitive() {
+                ui.tile_painting.set(true);
                 switch.set_active(on);
+                ui.tile_painting.set(false);
             }
         }
     }
@@ -2134,9 +2224,9 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let loaded = config::load_config(config::ConfigPaths::default());
     let config = loaded.config;
     let intake = source_intake::read_rows(&config.state_dir().join(source_intake::FILENAME));
-    let paused = pause_left(&config);
-    let app_paused = paused.is_some();
     let snap = current_snap();
+    let paused = pause_left(&config, &snap);
+    let app_paused = paused.is_some();
     let activity_running = if snap.ready {
         snap.activity_source && !config.activity_only
     } else {
@@ -2177,6 +2267,7 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
         pause: paused,
         paired,
         fixture_mark,
+        mark: snap.mark.clone(),
         offline,
         offline_waiting,
         connection,
@@ -2424,13 +2515,24 @@ fn browsers_word(
     )
 }
 
-fn pause_left(config: &solstone_linux::config::Config) -> Option<PauseLeft> {
+/// A running app's own word decides whether it is paused. `start paused` only says
+/// how the app starts, so with no app answering, this is the pause it would start in.
+fn pause_left(config: &solstone_linux::config::Config, snap: &ServiceSnap) -> Option<PauseLeft> {
     let wall = unix_secs();
-    let starting = pause_hold::StartingPause::read(config, wall, wall);
-    if !starting.paused {
-        return None;
-    }
-    match starting.until_wall {
+    let until_wall = if snap.ready {
+        snap.pause_bounded?;
+        match pause_hold::load(&config.state_dir()) {
+            Some(HeldPause::Until(deadline)) if deadline > wall => Some(deadline),
+            _ => None,
+        }
+    } else {
+        let starting = pause_hold::StartingPause::read(config, wall, wall);
+        if !starting.paused {
+            return None;
+        }
+        starting.until_wall
+    };
+    match until_wall {
         Some(deadline) => {
             let left = (deadline - wall).ceil().max(0.0);
             Some(PauseLeft::Seconds(left as u32))
@@ -3016,6 +3118,33 @@ fn paint_journal_facts(ui: &Ui, view: &View) {
 }
 
 fn paint_journal_name(ui: &Ui, view: &View) {
+    let mark = view
+        .mark
+        .as_ref()
+        .filter(|_| view.paired && !view.fixture_mark);
+    ui.journal_mark.set_visible(mark.is_some());
+    let mut chip = ui.journal.first_child();
+    while let Some(widget) = chip {
+        if widget.has_css_class("sol-chip") {
+            widget.set_visible(mark.is_none());
+        }
+        chip = widget.next_sibling();
+    }
+    if let Some(mark) = mark {
+        if ui.journal_mark_shown.borrow().as_ref() != Some(mark) {
+            crate::mark_card::show_mark_chips(&ui.journal_mark, mark);
+            ui.journal_mark.queue_draw();
+            *ui.journal_mark_shown.borrow_mut() = Some(mark.clone());
+        }
+        ui.journal.remove_css_class("sol-named");
+        ui.journal.remove_css_class("sol-paired");
+        ui.journal_label.set_text(&format!(
+            "{} · {}",
+            mark.words[0].to_lowercase(),
+            mark.words[1].to_lowercase()
+        ));
+        return;
+    }
     if view.fixture_mark {
         ui.journal.add_css_class("sol-named");
         ui.journal.remove_css_class("sol-paired");
@@ -3164,6 +3293,8 @@ fn apply_document(text: &str, obsidian_text: Option<&str>) -> Option<ServiceSnap
             .as_ref()
             .is_some_and(|document| document.status.vault.is_some()),
         kept: "nothing yet".to_owned(),
+        pause_bounded: doc.pause_bounded,
+        mark: doc.confirmed_mark,
     })
 }
 

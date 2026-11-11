@@ -6,6 +6,14 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- the screen and terminal switches, on the home page and on each one's page, now turn screen or terminal on or off right away. before, the change waited until the app next started, so screen, audio and desktop activity could keep coming in, and going into your journal, while the screen tile said off.
+- with "start paused" on, the home page no longer says "paused until you resume" after you've resumed.
+- once you're paired, the bottom of the home page shows your journal's mark and its two words instead of two orange squares.
+- in Brave, the solstone extension now reaches the solstone app on this computer.
+- the "draw cursor" and "start paused" switches under "this computer" now save when you flip them, instead of going back on their own.
+
 ## [2.0.39] - 2026-11-11
 
 ### Changed

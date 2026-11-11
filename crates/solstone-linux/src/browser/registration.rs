@@ -13,8 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The browsers a registration is written for, and where each one looks. Brave reads
-/// Chrome's directory, and Chromium reads its own; both take the Chromium manifest.
+/// The browsers a registration is written for, and where each one looks. Chromium and
+/// Brave each read their own directory on Linux; both take the Chromium manifest.
 pub const TARGETS: &[(&str, &str, &str)] = &[
     (
         "chrome",
@@ -25,6 +25,11 @@ pub const TARGETS: &[(&str, &str, &str)] = &[
         "chromium",
         "chrome",
         ".config/chromium/NativeMessagingHosts",
+    ),
+    (
+        "brave",
+        "chrome",
+        ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
     ),
     (
         "edge",
@@ -192,7 +197,7 @@ mod tests {
     fn production_builds_write_production_registrations_only() {
         let temp = tempfile::tempdir().unwrap();
         let binary = Path::new("/usr/bin/solstone-linux");
-        assert_eq!(write_all(temp.path(), binary, false).unwrap(), 4);
+        assert_eq!(write_all(temp.path(), binary, false).unwrap(), 5);
         let chrome = temp
             .path()
             .join(".config/google-chrome/NativeMessagingHosts/app.solstone.browser.json");
@@ -225,6 +230,10 @@ mod tests {
                 .join(".config/microsoft-edge/NativeMessagingHosts/app.solstone.browser.json")
                 .is_file()
         );
+        let brave = temp.path().join(
+            ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts/app.solstone.browser.json",
+        );
+        assert_eq!(fs::read(&brave).unwrap(), fs::read(&chrome).unwrap());
         assert!(
             !temp
                 .path()
