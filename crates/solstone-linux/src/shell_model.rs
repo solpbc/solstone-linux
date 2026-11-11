@@ -1030,13 +1030,23 @@ mod tests {
         assert_eq!(held.word, StateWord::Off);
         // `activity only`: screen and sound are off while activity keeps running, so
         // the tile reads off and says activity is still on.
-        let activity = screen_tile(true, true, activity_running(true, false, false), TrayStatus::Idle);
+        let activity = screen_tile(
+            true,
+            true,
+            activity_running(true, false, false),
+            TrayStatus::Idle,
+        );
         assert_eq!(activity.word, StateWord::Off);
         assert!(activity.switch_on);
         assert_eq!(activity.sub, ScreenSub::ActivityStillOn);
         assert_ne!(activity.sub, ScreenSub::WithAudioAndActivity);
         // With activity itself off, `activity only` leaves nothing running.
-        let none = screen_tile(true, true, activity_running(false, false, false), TrayStatus::Idle);
+        let none = screen_tile(
+            true,
+            true,
+            activity_running(false, false, false),
+            TrayStatus::Idle,
+        );
         assert_eq!(none.sub, ScreenSub::WithAudio);
     }
 
