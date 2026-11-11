@@ -93,14 +93,22 @@ pub fn screen_tile(
     } else {
         StateWord::Off
     };
-    let sub = if activity_running && matches!(word, StateWord::Off | StateWord::Paused) {
+    // Needs attention, on, and checking say `with audio and activity` while activity
+    // is running, and `with audio` when it is not. Off or paused keeps
+    // `activity is still on.` while that intake is running. `activity only` never
+    // says `with audio and activity`.
+    let sub = if activity_only {
+        if activity_running {
+            ScreenSub::ActivityStillOn
+        } else {
+            ScreenSub::WithAudio
+        }
+    } else if activity_running && matches!(word, StateWord::Off | StateWord::Paused) {
         ScreenSub::ActivityStillOn
-    } else if word == StateWord::On && activity_running {
-        ScreenSub::WithAudioAndActivity
-    } else if word == StateWord::On {
+    } else if word == StateWord::On && !activity_running {
         ScreenSub::WithAudio
     } else {
-        ScreenSub::None
+        ScreenSub::WithAudioAndActivity
     };
     ScreenTile {
         word,
@@ -471,12 +479,12 @@ pub fn width_class(width: i32) -> WidthClass {
 }
 
 /// Deck columns from the width alone. Opening a page does not change this.
+/// Phone width is two compact columns. The page replaces the deck there.
 #[must_use]
 pub fn deck_columns(width: i32) -> u8 {
     match width_class(width) {
         WidthClass::Full => 3,
-        WidthClass::Narrower => 2,
-        WidthClass::Phone => 1,
+        WidthClass::Narrower | WidthClass::Phone => 2,
     }
 }
 
@@ -572,6 +580,29 @@ pub fn total_text(total: &ShownTotal) -> Option<&str> {
         ShownTotal::NothingYet => Some("nothing yet"),
         ShownTotal::Amount(text) => Some(text),
         ShownTotal::Hidden => None,
+    }
+}
+
+/// The source page's `so far`, dated from today.
+#[must_use]
+pub fn page_total_now(total: &ShownTotal, started: Option<&str>) -> Option<String> {
+    page_total_text(total, started, Local::now().date_naive())
+}
+
+/// The source page's `so far`. A real total names the day it started.
+#[must_use]
+pub fn page_total_text(
+    total: &ShownTotal,
+    started: Option<&str>,
+    today: NaiveDate,
+) -> Option<String> {
+    match total {
+        ShownTotal::Hidden => None,
+        ShownTotal::NothingYet => Some("nothing yet".to_owned()),
+        ShownTotal::Amount(text) => match started.and_then(|day| format_started(day, today)) {
+            Some(day) => Some(format!("{text}, since {day}")),
+            None => Some(text.clone()),
+        },
     }
 }
 
@@ -701,6 +732,24 @@ pub fn format_relative(last: &str, now: DateTime<FixedOffset>) -> String {
     } else {
         format_date(last_day, today)
     }
+}
+
+/// A unix instant, as the same relative words `last taken in` uses. Absent when the
+/// instant is not a real time.
+#[must_use]
+pub fn relative_unix(at: f64, now: DateTime<FixedOffset>) -> Option<String> {
+    if !at.is_finite() {
+        return None;
+    }
+    let whole = at.trunc() as i64;
+    let when = DateTime::from_timestamp(whole, 0)?;
+    let text = format_relative(&when.to_rfc3339(), now);
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[must_use]
+pub fn relative_unix_now(at: f64) -> Option<String> {
+    relative_unix(at, Local::now().fixed_offset())
 }
 
 #[cfg(test)]
@@ -854,6 +903,37 @@ mod tests {
         assert_eq!(phrase(90), "1 min ago");
         assert_eq!(phrase(3600), "1 hour ago");
         assert_eq!(phrase(86_400), "yesterday");
+        let at = now.timestamp() as f64 - 30.0;
+        assert_eq!(relative_unix(at, now).as_deref(), Some("just now"));
+        assert_eq!(relative_unix(f64::NAN, now), None);
+    }
+
+    #[test]
+    fn the_page_total_names_the_day_it_started() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        assert_eq!(
+            page_total_text(
+                &ShownTotal::Amount("212 hours".to_owned()),
+                Some("2026-03-03"),
+                today
+            )
+            .as_deref(),
+            Some("212 hours, since march 3")
+        );
+        assert_eq!(
+            page_total_text(
+                &ShownTotal::Amount("1 hour".to_owned()),
+                Some("2025-03-03"),
+                today
+            )
+            .as_deref(),
+            Some("1 hour, since march 3, 2025")
+        );
+        assert_eq!(
+            page_total_text(&ShownTotal::NothingYet, None, today).as_deref(),
+            Some("nothing yet")
+        );
+        assert!(page_total_text(&ShownTotal::Hidden, None, today).is_none());
     }
 
     #[test]
@@ -887,7 +967,7 @@ mod tests {
         assert_eq!(recording.sub, ScreenSub::WithAudio);
         let paused = screen_tile(true, false, false, TrayStatus::Paused);
         assert_eq!(paused.word, StateWord::Paused);
-        assert_eq!(paused.sub, ScreenSub::None);
+        assert_eq!(paused.sub, ScreenSub::WithAudioAndActivity);
         let paused_activity = screen_tile(true, false, true, TrayStatus::Paused);
         assert_eq!(paused_activity.word, StateWord::Paused);
         assert_eq!(paused_activity.sub, ScreenSub::ActivityStillOn);
@@ -901,6 +981,7 @@ mod tests {
             TrayStatus::Waiting(SessionPresence::Unreachable),
         );
         assert_eq!(fault.word, StateWord::NeedsAttention);
+        assert_eq!(fault.sub, ScreenSub::WithAudioAndActivity);
         let login = screen_tile(
             true,
             false,
@@ -1255,8 +1336,8 @@ mod tests {
         assert_eq!(deck_columns(1100), 3);
         assert_eq!(deck_columns(1099), 2);
         assert_eq!(deck_columns(720), 2);
-        assert_eq!(deck_columns(719), 1);
-        assert_eq!(deck_columns(400), 1);
+        assert_eq!(deck_columns(719), 2);
+        assert_eq!(deck_columns(400), 2);
         assert!(shelf_button(400));
         assert!(!shelf_button(1180));
     }

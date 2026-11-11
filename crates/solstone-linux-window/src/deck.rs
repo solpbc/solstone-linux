@@ -26,6 +26,16 @@ const PANE_WIDTH: i32 = 360;
 /// Space between the deck and the pane's hairline. The shelf inset stays 8 px.
 const PANE_GUTTER: i32 = 24;
 const OFF_SUB: &str = "turn it on any time.";
+const SCREEN_BREATH: &str = "while this is on, the solstone app takes in what's on your screen, the sound from your microphone and what this computer plays, and which apps and windows you're using, and all of it goes into your journal.";
+const SCREEN_COVER: &str =
+    "this one switch covers your screen, the sound, and which apps and windows you're using.";
+const SCREEN_SOUND: &str = "sound covers your microphone and what this computer plays. if there is no microphone, neither comes in.";
+const TERMINAL_BREATH: &str = "the solstone app takes in your tmux sessions, and all of it goes into your journal. needs tmux on this computer, and works in any terminal session, including when you SSH into this computer.";
+const BROWSERS_BREATH: &str = "on the sites you allow, the solstone extension takes in the page's text and rough layout, and all of it goes into your journal.";
+const BROWSERS_GAP: &str =
+    "pages come in from the solstone extension. there is no switch for it here.";
+const GLYPH_SIDE: &str =
+    r#"<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M9 5v14"/>"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ShelfRow {
@@ -53,7 +63,19 @@ struct View {
     /// Paired, and the service health is offline. A waiting count is separate.
     offline: bool,
     offline_waiting: Option<i64>,
+    connection: Option<String>,
+    last_reached: Option<String>,
     kept: String,
+    activity_source: bool,
+    activity_titles: bool,
+    activity_urls: bool,
+    activity_through_pause: bool,
+    activity_only: bool,
+    exclude_apps: usize,
+    exclude_titles: usize,
+    draw_cursor: bool,
+    start_paused: bool,
+    segment_interval: i64,
 }
 
 #[derive(Clone)]
@@ -64,6 +86,7 @@ struct ServiceSnap {
     activity_source: bool,
     durable: String,
     health: String,
+    last_sync: Option<f64>,
     queue: Option<i64>,
     obsidian: Option<solstone_linux::obsidian::State>,
     obsidian_vault: bool,
@@ -79,6 +102,7 @@ impl ServiceSnap {
             activity_source: true,
             durable: String::new(),
             health: String::new(),
+            last_sync: None,
             queue: None,
             obsidian: None,
             obsidian_vault: false,
@@ -168,13 +192,16 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     let (journal, journal_label) = journal_pill();
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    column.add_css_class("sol-deck-column");
     column.set_hexpand(true);
     column.set_vexpand(true);
+    let deck_scroll = gtk::ScrolledWindow::new();
+    deck_scroll.add_css_class("sol-deck-scroll");
+    deck_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    deck_scroll.set_vexpand(true);
+    deck_scroll.set_child(Some(&grid));
     column.append(&greet_row);
-    column.append(&grid);
-    let foot_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    foot_spacer.set_vexpand(true);
-    column.append(&foot_spacer);
+    column.append(&deck_scroll);
     column.append(&journal);
 
     let other = gtk::Label::new(None);
@@ -185,14 +212,22 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     other.set_valign(gtk::Align::Start);
     other.set_visible(false);
 
+    let shelf_button = gtk::Button::new();
+    shelf_button.add_css_class("sol-glyph");
+    shelf_button.set_has_frame(false);
+    shelf_button.set_tooltip_text(Some("sidebar"));
+    shelf_button.set_child(Some(&glyph_widget(GLYPH_SIDE)));
+    shelf_button.set_visible(false);
+    let (computer, cursor_switch, paused_switch, segment_value) = computer_page();
+
     chrome.body.append(&column);
     chrome.body.append(&other);
+    chrome.body.append(&computer);
+    // The shelf glyph sits on the window, not in this slot.
+    chrome.header_extra.set_visible(false);
+    place_shelf_button(&chrome.body, &shelf_button);
 
     let shelf_rows = fill_shelf(&chrome.shelf);
-    let shelf_button = gtk::Button::from_icon_name("sidebar-show-symbolic");
-    shelf_button.set_tooltip_text(Some("sidebar"));
-    shelf_button.set_visible(false);
-    chrome.header_extra.append(&shelf_button);
 
     let ui = Rc::new(Ui {
         window: window.clone(),
@@ -200,6 +235,10 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         body: chrome.body.clone(),
         grid: grid.clone(),
         other: other.clone(),
+        computer: computer.clone(),
+        cursor: cursor_switch,
+        start_paused: paused_switch,
+        segment: segment_value,
         pane: built.root.clone(),
         greet,
         pause_line,
@@ -214,7 +253,12 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         lead: built.lead,
         connect: built.connect,
         soft: built.soft,
+        kept_row: built.kept_row,
         kept: built.kept,
+        connection_row: built.connection_row,
+        connection: built.connection,
+        reached_row: built.reached_row,
+        reached: built.reached,
         unread: built.unread,
         page: built.page,
         shelf_rows,
@@ -243,22 +287,26 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
 
     {
         let ui_back = Rc::clone(&ui);
-        let selected = Rc::clone(&selected);
+        let selected_back = Rc::clone(&selected);
         let page_open = Rc::clone(&page_open);
         let row = Rc::clone(&row);
         let shelf_open = Rc::clone(&shelf_open);
         let back: Rc<dyn Fn()> = Rc::new(move || {
             row.set(ShelfRow::Home);
-            selected.set(None);
+            selected_back.set(None);
             page_open.set(false);
             ui_back.page.show_status();
-            apply_layout(&ui_back, &selected, &row, &shelf_open, &page_open);
+            apply_layout(&ui_back, &selected_back, &row, &shelf_open, &page_open);
         });
         let back_pill = Rc::clone(&back);
         pill.connect_clicked(move |_| back_pill());
         let back_close = Rc::clone(&back);
         let close = ui.page.close.clone();
         close.connect_clicked(move |_| back_close());
+        let back_home = Rc::clone(&back);
+        let home = ui.page.home.clone();
+        home.connect_clicked(move |_| back_home());
+        wire_page_switch(&ui, &view, &seen_report, &daemon_up, &selected);
         SHOW_HOME.with(|slot| *slot.borrow_mut() = Some(back));
     }
 
@@ -317,7 +365,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     wire_pause(&ui, &view, &seen_report, &daemon_up, &selected);
 
     apply_view(&ui, &view.borrow());
-    apply_shot_hooks(&ui, &view, &selected, &shelf_open, &page_open);
+    apply_shot_hooks(&ui, &view, &selected, &row, &shelf_open, &page_open);
     apply_layout(&ui, &selected, &row, &shelf_open, &page_open);
     let focus_window = window.clone();
     focus_window.connect_map(move |window| {
@@ -379,6 +427,10 @@ struct Ui {
     body: gtk::Box,
     grid: gtk::Grid,
     other: gtk::Label,
+    computer: gtk::Box,
+    cursor: gtk::Switch,
+    start_paused: gtk::Switch,
+    segment: gtk::Label,
     pane: gtk::Box,
     greet: gtk::Label,
     pause_line: gtk::Label,
@@ -393,7 +445,12 @@ struct Ui {
     facts: [FactWidgets; 4],
     lead: gtk::Label,
     soft: gtk::Label,
+    kept_row: gtk::Box,
     kept: gtk::Label,
+    connection_row: gtk::Box,
+    connection: gtk::Label,
+    reached_row: gtk::Box,
+    reached: gtk::Label,
     unread: gtk::Label,
     page: Page,
     shelf_rows: Vec<ShelfWidgets>,
@@ -409,13 +466,36 @@ struct ShelfWidgets {
 
 struct Page {
     status: gtk::Box,
-    box_: gtk::Box,
+    box_: gtk::ScrolledWindow,
+    home: gtk::Button,
+    glyphs: [gtk::Widget; 4],
     title: gtk::Label,
+    mark: gtk::DrawingArea,
     word: gtk::Label,
+    switch: gtk::Switch,
     reason: gtk::Label,
-    close: gtk::Button,
+    next: gtk::Label,
+    breath: gtk::Label,
+    cover: gtk::Label,
+    sound: gtk::Label,
+    so_far_row: gtk::Box,
     so_far: gtk::Label,
+    last_row: gtk::Box,
     last: gtk::Label,
+    screen_extra: gtk::Box,
+    terminal_extra: gtk::Box,
+    browsers_extra: gtk::Box,
+    obsidian_extra: gtk::Box,
+    browsers_names: gtk::Label,
+    activity: gtk::Switch,
+    titles: gtk::Switch,
+    urls: gtk::Switch,
+    through_pause: gtk::Switch,
+    activity_only: gtk::Switch,
+    exclude_apps: gtk::Label,
+    exclude_titles: gtk::Label,
+    close: gtk::Button,
+    painting: Rc<Cell<bool>>,
 }
 
 impl Page {
@@ -425,33 +505,78 @@ impl Page {
     }
 
     fn show_tile(&self, id: TileId, view: &View) {
-        let (word, reason, sub) = match id {
-            TileId::Screen => (
-                view.screen,
-                None,
-                shell_model::screen_sub_label(view.screen_sub),
-            ),
-            TileId::Terminal => (view.terminal, view.terminal_reason, None),
-            TileId::Browsers => (
-                view.browsers,
-                view.browsers_reason,
-                view.browsers_sub.as_deref(),
-            ),
-            TileId::Obsidian => (view.obsidian, None, None),
+        let word = match id {
+            TileId::Screen => view.screen,
+            TileId::Terminal => view.terminal,
+            TileId::Browsers => view.browsers,
+            TileId::Obsidian => view.obsidian,
         };
+        let shown = match id {
+            TileId::Screen => 0,
+            TileId::Terminal => 1,
+            TileId::Browsers => 2,
+            TileId::Obsidian => 3,
+        };
+        for (index, glyph) in self.glyphs.iter().enumerate() {
+            glyph.set_visible(index == shown);
+        }
         self.title.set_text(shell_model::tile_name(id));
         self.word.set_text(shell_model::state_label(word));
         paint_word(&self.word, word);
-        match reason.or(sub) {
-            Some(text) => {
-                self.reason.set_text(text);
-                self.reason.set_visible(true);
-            }
-            None => self.reason.set_visible(false),
+        paint_mark(&self.mark, word);
+        let (reason, next) = page_reason(id, word, view);
+        set_fact(&self.reason, reason);
+        set_fact(&self.next, next);
+        self.breath.set_text(page_breath(id));
+        let screen = id == TileId::Screen;
+        self.cover.set_visible(screen);
+        self.sound.set_visible(screen);
+        self.screen_extra.set_visible(screen);
+        self.terminal_extra.set_visible(id == TileId::Terminal);
+        self.browsers_extra.set_visible(id == TileId::Browsers);
+        self.obsidian_extra.set_visible(id == TileId::Obsidian);
+        if let Some(names) = view.browsers_sub.as_deref() {
+            self.browsers_names.set_text(names);
+            self.browsers_names.set_visible(true);
+        } else {
+            self.browsers_names.set_visible(false);
         }
-        let (so_far, last) = facts_for(id, &view.intake);
+        if let Some(row) = self.browsers_names.parent() {
+            row.set_visible(view.browsers_sub.is_some());
+        }
+        let (so_far, last) = page_facts(id, &view.intake);
         set_fact(&self.so_far, so_far.as_deref());
+        self.so_far_row.set_visible(so_far.is_some());
         set_fact(&self.last, last.as_deref());
+        self.last_row.set_visible(last.is_some());
+        let show_switch = id != TileId::Browsers;
+        self.switch.set_visible(show_switch);
+        if show_switch {
+            let on = match id {
+                TileId::Screen => view.screen_on,
+                TileId::Terminal => view.terminal_on,
+                TileId::Obsidian => {
+                    matches!(
+                        word,
+                        StateWord::On | StateWord::Paused | StateWord::NeedsAttention
+                    )
+                }
+                TileId::Browsers => false,
+            };
+            self.painting.set(true);
+            self.switch.set_active(on);
+            self.painting.set(false);
+        }
+        self.painting.set(true);
+        self.activity.set_active(view.activity_source);
+        self.titles.set_active(view.activity_titles);
+        self.urls.set_active(view.activity_urls);
+        self.through_pause.set_active(view.activity_through_pause);
+        self.activity_only.set_active(view.activity_only);
+        self.painting.set(false);
+        self.exclude_apps.set_text(&count_label(view.exclude_apps));
+        self.exclude_titles
+            .set_text(&count_label(view.exclude_titles));
         self.status.set_visible(false);
         self.box_.set_visible(true);
     }
@@ -549,7 +674,12 @@ struct BuiltPane {
     lead: gtk::Label,
     connect: gtk::Button,
     soft: gtk::Label,
+    kept_row: gtk::Box,
     kept: gtk::Label,
+    connection_row: gtk::Box,
+    connection: gtk::Label,
+    reached_row: gtk::Box,
+    reached: gtk::Label,
     unread: gtk::Label,
     page: Page,
 }
@@ -629,6 +759,12 @@ fn make_pane() -> BuiltPane {
     kept_row.append(&kept_name);
     kept_row.append(&kept);
     status.append(&kept_row);
+    let (connection_row, connection) = fact_row("connection");
+    connection_row.set_visible(false);
+    status.append(&connection_row);
+    let (reached_row, reached) = fact_row("last reached");
+    reached_row.set_visible(false);
+    status.append(&reached_row);
 
     let details = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     details.add_css_class("sol-row");
@@ -650,40 +786,8 @@ fn make_pane() -> BuiltPane {
     status.append(&unread);
     pane.append(&status);
 
-    let page_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    page_box.add_css_class("sol-page");
-    page_box.set_visible(false);
-    let page_top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let page_title = gtk::Label::new(None);
-    page_title.add_css_class("sol-name");
-    page_title.add_css_class("sol-display");
-    page_title.add_css_class("sol-ink");
-    page_title.set_halign(gtk::Align::Start);
-    page_title.set_hexpand(true);
-    let close = gtk::Button::with_label("×");
-    close.set_tooltip_text(Some("close"));
-    page_top.append(&page_title);
-    page_top.append(&close);
-    let word = gtk::Label::new(None);
-    word.add_css_class("sol-state");
-    word.set_halign(gtk::Align::Start);
-    let reason = gtk::Label::new(None);
-    reason.add_css_class("sol-faint");
-    reason.set_halign(gtk::Align::Start);
-    reason.set_wrap(true);
-    reason.set_visible(false);
-    let so_far = gtk::Label::new(None);
-    so_far.add_css_class("sol-faint");
-    so_far.set_halign(gtk::Align::Start);
-    let last = gtk::Label::new(None);
-    last.add_css_class("sol-faint");
-    last.set_halign(gtk::Align::Start);
-    page_box.append(&page_top);
-    page_box.append(&word);
-    page_box.append(&reason);
-    page_box.append(&so_far);
-    page_box.append(&last);
-    pane.append(&page_box);
+    let page = make_source_page(status);
+    pane.append(&page.box_);
 
     let facts = [
         facts.remove(0),
@@ -697,19 +801,362 @@ fn make_pane() -> BuiltPane {
         lead,
         connect,
         soft,
+        kept_row,
         kept,
+        connection_row,
+        connection,
+        reached_row,
+        reached,
         unread,
-        page: Page {
-            status,
-            box_: page_box,
-            title: page_title,
-            word,
-            reason,
-            close,
-            so_far,
-            last,
-        },
+        page,
     }
+}
+
+fn make_source_page(status: gtk::Box) -> Page {
+    let page_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    page_box.add_css_class("sol-page");
+    let home = gtk::Button::with_label("‹ home");
+    home.add_css_class("sol-back");
+    home.set_has_frame(false);
+    home.set_halign(gtk::Align::Start);
+    home.set_visible(false);
+    page_box.append(&home);
+
+    let page_top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let glyphs = [
+        glyph_widget(GLYPH_SCREEN),
+        glyph_widget(GLYPH_TERMINAL),
+        glyph_widget(GLYPH_BROWSERS),
+        glyph_widget(GLYPH_OBSIDIAN),
+    ];
+    for glyph in &glyphs {
+        glyph.set_visible(false);
+        page_top.append(glyph);
+    }
+    let title = gtk::Label::new(None);
+    title.add_css_class("sol-name");
+    title.add_css_class("sol-display");
+    title.add_css_class("sol-ink");
+    title.set_halign(gtk::Align::Start);
+    title.set_hexpand(true);
+    title.set_xalign(0.0);
+    let close = gtk::Button::with_label("×");
+    close.add_css_class("sol-glyph");
+    close.set_has_frame(false);
+    close.set_tooltip_text(Some("close"));
+    page_top.append(&title);
+    page_top.append(&close);
+    page_box.append(&page_top);
+
+    let verdict = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let mark = mark_widget();
+    let word = gtk::Label::new(None);
+    word.add_css_class("sol-state");
+    word.set_halign(gtk::Align::Start);
+    let verdict_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    verdict_spacer.set_hexpand(true);
+    let switch = gtk::Switch::new();
+    switch.add_css_class("sol-switch");
+    switch.set_valign(gtk::Align::Center);
+    verdict.append(&mark);
+    verdict.append(&word);
+    verdict.append(&verdict_spacer);
+    verdict.append(&switch);
+    page_box.append(&verdict);
+
+    let reason = note_label(None);
+    let next = note_label(None);
+    let breath = note_label(None);
+    breath.set_visible(true);
+    let cover = note_label(Some(SCREEN_COVER));
+    let sound = note_label(Some(SCREEN_SOUND));
+    page_box.append(&reason);
+    page_box.append(&next);
+    page_box.append(&breath);
+    page_box.append(&cover);
+    page_box.append(&sound);
+
+    let (so_far_row, so_far) = fact_row("so far");
+    let (last_row, last) = fact_row("last taken in");
+    page_box.append(&so_far_row);
+    page_box.append(&last_row);
+
+    let (
+        screen_extra,
+        activity,
+        titles,
+        urls,
+        through_pause,
+        activity_only,
+        exclude_apps,
+        exclude_titles,
+    ) = screen_settings();
+    let terminal_extra = terminal_settings();
+    let (browsers_extra, browsers_names) = browsers_settings();
+    let obsidian_extra = obsidian_settings();
+    page_box.append(&screen_extra);
+    page_box.append(&terminal_extra);
+    page_box.append(&browsers_extra);
+    page_box.append(&obsidian_extra);
+
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.add_css_class("sol-page");
+    scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scrolled.set_vexpand(true);
+    scrolled.set_visible(false);
+    scrolled.set_child(Some(&page_box));
+
+    Page {
+        status,
+        box_: scrolled,
+        home,
+        glyphs,
+        title,
+        mark,
+        word,
+        switch,
+        reason,
+        next,
+        breath,
+        cover,
+        sound,
+        so_far_row,
+        so_far,
+        last_row,
+        last,
+        screen_extra,
+        terminal_extra,
+        browsers_extra,
+        obsidian_extra,
+        browsers_names,
+        activity,
+        titles,
+        urls,
+        through_pause,
+        activity_only,
+        exclude_apps,
+        exclude_titles,
+        close,
+        painting: Rc::new(Cell::new(false)),
+    }
+}
+
+fn screen_settings() -> (
+    gtk::Box,
+    gtk::Switch,
+    gtk::Switch,
+    gtk::Switch,
+    gtk::Switch,
+    gtk::Switch,
+    gtk::Label,
+    gtk::Label,
+) {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let head = section_label("goes along with it");
+    head.add_css_class("sol-rule");
+    box_.append(&head);
+    box_.append(&note_label(Some(
+        solstone_linux::copy::SETTINGS_ACTIVITY_EXPLAIN,
+    )));
+    let (activity_row, activity) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_SOURCE);
+    let (titles_row, titles) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_TITLES);
+    let (urls_row, urls) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_URLS);
+    let (pause_row, through_pause) =
+        setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_THROUGH_PAUSE);
+    let (only_row, activity_only) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_ONLY);
+    box_.append(&activity_row);
+    box_.append(&titles_row);
+    box_.append(&urls_row);
+    box_.append(&pause_row);
+    box_.append(&note_label(Some(
+        solstone_linux::copy::SETTINGS_ACTIVITY_THROUGH_PAUSE_HELP,
+    )));
+    box_.append(&only_row);
+    box_.append(&note_label(Some(
+        solstone_linux::copy::SETTINGS_ACTIVITY_ONLY_HELP,
+    )));
+    box_.append(&note_label(Some(
+        solstone_linux::copy::SETTINGS_RESTART_HELP,
+    )));
+    let left = section_label("left out");
+    left.add_css_class("sol-rule");
+    box_.append(&left);
+    let (apps_row, exclude_apps) = fact_row(solstone_linux::copy::SETTINGS_ACTIVITY_EXCLUDE_APPS);
+    let (titles_left, exclude_titles) =
+        fact_row(solstone_linux::copy::SETTINGS_ACTIVITY_EXCLUDE_TITLES);
+    box_.append(&apps_row);
+    box_.append(&titles_left);
+    box_.append(&note_label(Some(
+        solstone_linux::copy::SETTINGS_ACTIVITY_PRIVATE_WINDOWS_NOTE,
+    )));
+    (
+        box_,
+        activity,
+        titles,
+        urls,
+        through_pause,
+        activity_only,
+        exclude_apps,
+        exclude_titles,
+    )
+}
+
+fn terminal_settings() -> gtk::Box {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let head = section_label("sessions");
+    head.add_css_class("sol-rule");
+    box_.append(&head);
+    box_.append(&note_label(Some(
+        solstone_linux::copy::SETTINGS_TERMINAL_HELP,
+    )));
+    box_.set_visible(false);
+    box_
+}
+
+fn browsers_settings() -> (gtk::Box, gtk::Label) {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let head = section_label("browsers");
+    head.add_css_class("sol-rule");
+    box_.append(&head);
+    box_.append(&note_label(Some(BROWSERS_GAP)));
+    let (row, names) = fact_row("connected");
+    names.set_wrap(true);
+    box_.append(&row);
+    box_.set_visible(false);
+    (box_, names)
+}
+
+fn obsidian_settings() -> gtk::Box {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let head = section_label(solstone_linux::copy::OBSIDIAN_VAULT_LABEL);
+    head.add_css_class("sol-rule");
+    box_.append(&head);
+    box_.append(&note_label(Some(
+        solstone_linux::copy::OBSIDIAN_FOUND_LABEL,
+    )));
+    box_.append(&note_label(Some(solstone_linux::copy::OBSIDIAN_NONE_FOUND)));
+    let choose = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CHOOSE_FOLDER);
+    choose.add_css_class("sol-action");
+    choose.set_halign(gtk::Align::Start);
+    box_.append(&choose);
+    let turn_off = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_TURN_OFF);
+    turn_off.add_css_class("sol-action");
+    turn_off.set_halign(gtk::Align::Start);
+    box_.append(&turn_off);
+    box_.set_visible(false);
+    box_
+}
+
+fn page_breath(id: TileId) -> &'static str {
+    match id {
+        TileId::Screen => SCREEN_BREATH,
+        TileId::Terminal => TERMINAL_BREATH,
+        TileId::Browsers => BROWSERS_BREATH,
+        TileId::Obsidian => solstone_linux::copy::OBSIDIAN_EXPLAIN,
+    }
+}
+
+fn page_reason(
+    id: TileId,
+    word: StateWord,
+    view: &View,
+) -> (Option<&'static str>, Option<&'static str>) {
+    if word != StateWord::NeedsAttention {
+        return (None, None);
+    }
+    match id {
+        TileId::Screen => (
+            Some(solstone_linux::copy::STATUS_SCREEN_WAITING),
+            Some(solstone_linux::copy::STATUS_SCREEN_WAITING_DETAIL),
+        ),
+        TileId::Terminal => (view.terminal_reason, None),
+        TileId::Browsers => (view.browsers_reason, None),
+        TileId::Obsidian => (Some(solstone_linux::copy::OBSIDIAN_ATTENTION_VAULT), None),
+    }
+}
+
+fn page_facts(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>) {
+    let total = match id {
+        TileId::Screen => shell_model::screen_so_far(file),
+        TileId::Terminal => shell_model::terminal_so_far(file),
+        TileId::Browsers => shell_model::browsers_so_far(file),
+        TileId::Obsidian => shell_model::obsidian_so_far(file),
+    };
+    let started = match file {
+        IntakeFile::Rows(rows) => match id {
+            TileId::Screen => rows.screen.started.as_deref(),
+            TileId::Terminal => rows.terminal.started.as_deref(),
+            TileId::Browsers => rows.browsers.started.as_deref(),
+            TileId::Obsidian => rows.obsidian.started.as_deref(),
+        },
+        IntakeFile::Missing | IntakeFile::Refused => None,
+    };
+    let last_raw = match file {
+        IntakeFile::Rows(rows) => counter_last(rows, id),
+        IntakeFile::Missing | IntakeFile::Refused => None,
+    };
+    let last = shell_model::source_last_now(file, last_raw);
+    (
+        shell_model::page_total_now(&total, started),
+        shell_model::last_text(&last).map(str::to_owned),
+    )
+}
+
+fn count_label(count: usize) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        count.to_string()
+    }
+}
+
+fn note_label(text: Option<&str>) -> gtk::Label {
+    let label = gtk::Label::new(text);
+    label.add_css_class("sol-faint");
+    label.set_halign(gtk::Align::Start);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_max_width_chars(36);
+    label.set_visible(text.is_some());
+    label
+}
+
+fn fact_row(name: &str) -> (gtk::Box, gtk::Label) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("sol-row");
+    let label = gtk::Label::new(Some(name));
+    label.add_css_class("sol-ink");
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    let value = gtk::Label::new(None);
+    value.add_css_class("sol-faint");
+    value.set_halign(gtk::Align::End);
+    value.set_xalign(1.0);
+    value.set_wrap(true);
+    row.append(&label);
+    row.append(&value);
+    (row, value)
+}
+
+fn setting_row(name: &str) -> (gtk::Box, gtk::Switch) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("sol-row");
+    let label = gtk::Label::new(Some(name));
+    label.add_css_class("sol-ink");
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    let switch = gtk::Switch::new();
+    switch.add_css_class("sol-switch");
+    switch.set_valign(gtk::Align::Center);
+    switch.set_halign(gtk::Align::End);
+    label.set_mnemonic_widget(Some(&switch));
+    row.append(&label);
+    row.append(&switch);
+    (row, switch)
 }
 
 fn section_label(text: &str) -> gtk::Label {
@@ -913,6 +1360,86 @@ fn tell_service_pause(duration: PauseFor) {
     });
 }
 
+fn wire_page_switch(
+    ui: &Rc<Ui>,
+    view: &Rc<RefCell<View>>,
+    seen: &Rc<Cell<bool>>,
+    daemon: &Rc<Cell<Option<bool>>>,
+    selected: &Rc<Cell<Option<TileId>>>,
+) {
+    let painting = Rc::clone(&ui.page.painting);
+    let view = Rc::clone(view);
+    let seen = Rc::clone(seen);
+    let daemon = Rc::clone(daemon);
+    let refresh_ui = Rc::clone(ui);
+    let selected = Rc::clone(selected);
+    let switch = ui.page.switch.clone();
+    switch.connect_state_set(move |switch, on| {
+        if painting.get() {
+            return glib::Propagation::Proceed;
+        }
+        let which = match selected.get() {
+            Some(TileId::Screen) => Some(OwnerSwitch::Screen),
+            Some(TileId::Terminal) => Some(OwnerSwitch::Terminal),
+            _ => None,
+        };
+        let Some(which) = which else {
+            painting.set(true);
+            switch.set_active(!on);
+            painting.set(false);
+            return glib::Propagation::Stop;
+        };
+        if config::set_owner_switch(&config::ConfigPaths::default(), which, on).is_err() {
+            return glib::Propagation::Stop;
+        }
+        refresh(&refresh_ui, &view, &seen, &daemon, &selected);
+        glib::Propagation::Proceed
+    });
+}
+
+fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label) {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    page.set_visible(false);
+    page.set_hexpand(true);
+    page.set_valign(gtk::Align::Start);
+    page.set_margin_top(8);
+    let title = gtk::Label::new(Some("this computer"));
+    title.add_css_class("sol-name");
+    title.add_css_class("sol-display");
+    title.add_css_class("sol-ink");
+    title.set_halign(gtk::Align::Start);
+    page.append(&title);
+    let (cursor_row, cursor) = setting_row(solstone_linux::copy::SETTINGS_CURSOR);
+    let (paused_row, start_paused) = setting_row(solstone_linux::copy::SETTINGS_START_PAUSED);
+    let (segment_row, segment) = fact_row(solstone_linux::copy::SETTINGS_SEGMENT);
+    page.append(&cursor_row);
+    page.append(&paused_row);
+    page.append(&segment_row);
+    page.append(&note_label(Some(
+        solstone_linux::copy::SETTINGS_SEGMENT_HELP,
+    )));
+    let (file_row, file_value) = fact_row(solstone_linux::copy::SETTINGS_FILE);
+    let loaded = config::load_config(config::ConfigPaths::default());
+    file_value.set_text(&loaded.config.config_path().display().to_string());
+    file_value.set_visible(true);
+    page.append(&file_row);
+    (page, cursor, start_paused, segment)
+}
+
+fn place_shelf_button(body: &gtk::Box, button: &gtk::Button) {
+    let Some(parent) = body.parent() else {
+        return;
+    };
+    let Ok(overlay) = parent.downcast::<gtk::Overlay>() else {
+        return;
+    };
+    button.set_halign(gtk::Align::Start);
+    button.set_valign(gtk::Align::Start);
+    button.set_margin_start(sun_bg::INSET + 4);
+    button.set_margin_top(10);
+    overlay.add_overlay(button);
+}
+
 fn wire_switch(
     switch: Option<&gtk::Switch>,
     which: OwnerSwitch,
@@ -1053,6 +1580,9 @@ fn apply_view(ui: &Ui, view: &View) {
         }
     }
     ui.kept.set_text(&view.kept);
+    ui.cursor.set_active(view.draw_cursor);
+    ui.start_paused.set_active(view.start_paused);
+    ui.segment.set_text(&view.segment_interval.to_string());
     if hidden {
         ui.unread.set_text(shell_model::INTAKE_UNREADABLE);
         ui.unread.set_visible(true);
@@ -1132,14 +1662,9 @@ fn apply_layout(
     if tuck {
         ui.shelf_button.set_visible(true);
         ui.shelf.set_visible(shelf_open.get());
-        // The shelf is an overlay. An open shelf has to reserve its own
-        // width, or it paints over the first column.
-        let start = if shelf_open.get() {
-            sun_bg::INSET + sun_bg::SHELF_WIDTH + sun_bg::INSET
-        } else {
-            sun_bg::INSET
-        };
-        ui.body.set_margin_start(start);
+        // The open shelf floats over the deck. Reserving its width pushes the
+        // second column under the pane.
+        ui.body.set_margin_start(sun_bg::INSET);
     } else {
         ui.shelf_button.set_visible(false);
         ui.shelf.set_visible(true);
@@ -1149,8 +1674,13 @@ fn apply_layout(
     let cols = i32::from(shell_model::deck_columns(width));
     place_tiles(&ui.grid, &ui.tiles, &ui.add_more, cols);
     let home = row.get() == ShelfRow::Home;
+    let computer = row.get() == ShelfRow::Computer;
     ui.grid.set_visible(home);
-    ui.other.set_visible(!home);
+    if let Some(column) = deck_column(&ui.grid) {
+        column.set_visible(home);
+    }
+    ui.other.set_visible(!home && !computer);
+    ui.computer.set_visible(computer);
     if !home {
         ui.other.set_text(shelf_label(row.get()));
     }
@@ -1194,12 +1724,25 @@ fn apply_layout(
     } else {
         ui.body.set_margin_end(sun_bg::INSET);
     }
-    let back = if phone && page_open.get() {
-        "‹ home"
+    let phone_page = phone && page_open.get();
+    ui.page.home.set_visible(phone_page);
+    ui.page.close.set_visible(page_open.get() && !phone_page);
+    if phone && pane_open {
+        ui.pane.add_css_class("sol-flush");
     } else {
-        "×"
-    };
-    ui.page.close.set_label(back);
+        ui.pane.remove_css_class("sol-flush");
+    }
+}
+
+fn deck_column(grid: &gtk::Grid) -> Option<gtk::Widget> {
+    let mut current = grid.parent()?;
+    for _ in 0..6 {
+        if current.has_css_class("sol-deck-column") {
+            return Some(current);
+        }
+        current = current.parent()?;
+    }
+    None
 }
 
 fn place_tiles(grid: &gtk::Grid, tiles: &[TileWidgets], add_more: &gtk::Box, cols: i32) {
@@ -1234,6 +1777,7 @@ fn apply_shot_hooks(
     ui: &Ui,
     view: &Rc<RefCell<View>>,
     selected: &Cell<Option<TileId>>,
+    row: &Cell<ShelfRow>,
     shelf_open: &Cell<bool>,
     page_open: &Cell<bool>,
 ) {
@@ -1243,12 +1787,22 @@ fn apply_shot_hooks(
     {
         ui.window.set_default_width(width);
     }
+    if let Ok(raw) = std::env::var("SOLSTONE_WINDOW_HEIGHT")
+        && let Ok(height) = raw.parse::<i32>()
+        && (480..2000).contains(&height)
+    {
+        ui.window.set_default_height(height);
+    }
     if std::env::var("SOLSTONE_SHELF_OPEN").ok().as_deref() == Some("1") {
         shelf_open.set(true);
     }
     let Ok(which) = std::env::var("SOLSTONE_OPEN_PAGE") else {
         return;
     };
+    if which == "computer" {
+        row.set(ShelfRow::Computer);
+        return;
+    }
     let id = match which.as_str() {
         "screen" => Some(TileId::Screen),
         "terminal" => Some(TileId::Terminal),
@@ -1280,6 +1834,12 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let (browsers, browsers_reason, browsers_sub) = browsers_word(&config, seen_report);
     let obsidian = obsidian_word(&snap);
     let (paired, offline, offline_waiting) = journal_face(&snap);
+    let connection = paired.then(|| connection_words(&snap.health).to_owned());
+    let last_reached = if paired {
+        snap.last_sync.and_then(shell_model::relative_unix_now)
+    } else {
+        None
+    };
     View {
         screen_on: config.desktop_capture,
         terminal_on: config.terminal,
@@ -1296,7 +1856,19 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
         paired,
         offline,
         offline_waiting,
+        connection,
+        last_reached,
         kept: snap.kept,
+        activity_source: config.activity_source,
+        activity_titles: config.activity_titles,
+        activity_urls: config.activity_urls,
+        activity_through_pause: config.activity_through_pause,
+        activity_only: config.activity_only,
+        exclude_apps: config.activity_exclude_apps.len(),
+        exclude_titles: config.activity_exclude_titles.len(),
+        draw_cursor: config.draw_cursor,
+        start_paused: config.start_paused,
+        segment_interval: config.segment_interval,
     }
 }
 
@@ -1334,7 +1906,11 @@ fn screen_now(
         return shell_model::ScreenTile {
             word: StateWord::Checking,
             switch_on: true,
-            sub: ScreenSub::None,
+            sub: if activity_running {
+                ScreenSub::WithAudioAndActivity
+            } else {
+                ScreenSub::WithAudio
+            },
         };
     };
     shell_model::screen_tile(
@@ -1668,13 +2244,14 @@ switch.sol-switch:checked slider {\
   border: none;\
 }\
 .sol-tile:focus, button.sol-pill:focus, .sol-shelf-row:focus, switch.sol-switch:focus,\
-menubutton.sol-pill:focus, menubutton.sol-pill > button:focus, button.sol-action:focus {\
+menubutton.sol-pill:focus, menubutton.sol-pill > button:focus, button.sol-action:focus,\
+button.sol-glyph:focus, button.sol-back:focus {\
   outline: none;\
   box-shadow: none;\
 }\
 .sol-tile:focus-visible, button.sol-pill:focus-visible, .sol-shelf-row:focus-visible,\
 switch.sol-switch:focus-visible, menubutton.sol-pill > button:focus-visible,\
-button.sol-action:focus-visible {\
+button.sol-action:focus-visible, button.sol-glyph:focus-visible, button.sol-back:focus-visible {\
   outline: 2px solid #E8913A;\
   outline-offset: 2px;\
 }\
@@ -1700,6 +2277,37 @@ window.sol-dark .sol-journal {\
   border-style: solid;\
   background-color: #E8913A;\
   border-color: #E8913A;\
+}\
+.sol-pane.sol-flush { border-width: 0; }\
+scrolledwindow.sol-page, scrolledwindow.sol-deck-scroll {\
+  background: none;\
+  background-color: transparent;\
+  border: none;\
+}\
+button.sol-glyph, button.sol-glyph:hover, button.sol-glyph:active, button.sol-glyph:checked {\
+  background: none;\
+  background-image: none;\
+  border: none;\
+  box-shadow: none;\
+  padding: 0;\
+  min-height: 0;\
+  min-width: 0;\
+  color: #3A2E24;\
+}\
+window.sol-dark button.sol-glyph,\
+window.sol-dark button.sol-glyph:hover {\
+  color: #F6EDE3;\
+}\
+button.sol-back, button.sol-back:hover, button.sol-back:active, button.sol-back:checked {\
+  background: none;\
+  background-image: none;\
+  border: none;\
+  box-shadow: none;\
+  padding: 0;\
+  min-height: 0;\
+  min-width: 0;\
+  color: #E8913A;\
+  font-weight: 600;\
 }\
 ";
 
@@ -1928,7 +2536,40 @@ fn widget_dark(widget: &gtk::Widget) -> bool {
         .is_some_and(|window| window.has_css_class("sol-dark"))
 }
 
+fn connection_words(health: &str) -> &'static str {
+    match health {
+        "connected" | "syncing" => solstone_linux::copy::JOURNAL_CONNECTED,
+        "connecting" | "listener-ready" => solstone_linux::copy::LOCAL_JOURNAL_CONNECTING,
+        _ => solstone_linux::copy::JOURNAL_OFFLINE,
+    }
+}
+
+fn paint_journal_facts(ui: &Ui, view: &View) {
+    if !view.paired {
+        ui.kept_row.set_visible(true);
+        ui.connection_row.set_visible(false);
+        ui.reached_row.set_visible(false);
+        return;
+    }
+    ui.kept_row.set_visible(false);
+    if let Some(text) = &view.connection {
+        ui.connection.set_text(text);
+        ui.connection.set_visible(true);
+        ui.connection_row.set_visible(true);
+    } else {
+        ui.connection_row.set_visible(false);
+    }
+    if let Some(text) = &view.last_reached {
+        ui.reached.set_text(text);
+        ui.reached.set_visible(true);
+        ui.reached_row.set_visible(true);
+    } else {
+        ui.reached_row.set_visible(false);
+    }
+}
+
 fn paint_pairing(ui: &Ui, view: &View) {
+    paint_journal_facts(ui, view);
     if !view.paired {
         ui.pill_label.set_text("not paired");
         ui.lead.set_text("not paired");
@@ -2056,6 +2697,7 @@ fn apply_document(text: &str, obsidian_text: Option<&str>) -> Option<ServiceSnap
         activity_source: doc.settings.activity_source,
         durable: doc.durable,
         health: doc.health,
+        last_sync: doc.last_delivery.as_ref().and_then(|item| item.at),
         queue: doc.queue_count,
         obsidian: decoded.as_ref().map(|document| document.status.state),
         obsidian_vault: decoded
