@@ -27,7 +27,7 @@ const PANE_WIDTH: i32 = 360;
 const PANE_GUTTER: i32 = 24;
 const OFF_SUB: &str = "turn it on any time.";
 const SCREEN_WAITING: &str = "waiting to take in the screen.";
-const SCREEN_BREATH: &str = "while this is on, this one switch takes in what's on your screen, the sound, and which apps and windows you're using, and all of it goes into your journal.";
+const SCREEN_BREATH: &str = "while this is on, the solstone app takes in what's on your screen, the sound, and which apps and windows you're using, and all of it goes into your journal.";
 const SCREEN_SOUND: &str = "sound covers your microphone and what this computer plays. if there is no microphone, neither comes in.";
 const TERMINAL_BREATH: &str = "the solstone app takes in your tmux sessions, and all of it goes into your journal. needs tmux on this computer, and works in any terminal session, including when you SSH into this computer.";
 const BROWSERS_BREATH: &str = "on the sites you allow, the solstone extension takes in the page's text and rough layout, and all of it goes into your journal.";
@@ -59,6 +59,8 @@ struct View {
     intake: IntakeFile,
     pause: Option<PauseLeft>,
     paired: bool,
+    /// The frame fixture names a journal. A live reading does not.
+    fixture_mark: bool,
     /// Paired, and the service health is offline. A waiting count is separate.
     offline: bool,
     offline_waiting: Option<i64>,
@@ -699,6 +701,9 @@ fn make_pane() -> BuiltPane {
     lead.add_css_class("sol-lead");
     lead.add_css_class("sol-ink");
     lead.set_halign(gtk::Align::Start);
+    lead.set_wrap(true);
+    lead.set_max_width_chars(24);
+    lead.set_xalign(0.0);
     // Pairing stays on the journal page. This button does not open another flow.
     let connect = gtk::Button::with_label("connect a journal");
     connect.add_css_class("sol-action");
@@ -706,7 +711,9 @@ fn make_pane() -> BuiltPane {
     let soft = gtk::Label::new(None);
     soft.add_css_class("sol-faint");
     soft.set_halign(gtk::Align::Start);
+    soft.set_xalign(0.0);
     soft.set_wrap(true);
+    soft.set_max_width_chars(32);
     soft.set_visible(false);
     status.append(&title);
     status.append(&lead);
@@ -843,6 +850,7 @@ fn make_source_page(status: gtk::Box) -> Page {
     close.add_css_class("sol-glyph");
     close.set_has_frame(false);
     close.set_tooltip_text(Some("close"));
+    close.set_visible(false);
     page_top.append(&title);
     page_top.append(&close);
     page_box.append(&page_top);
@@ -869,10 +877,10 @@ fn make_source_page(status: gtk::Box) -> Page {
     breath.set_visible(true);
     let sound = note_label(Some(SCREEN_SOUND));
     sound.add_css_class("sol-quiet");
-    page_box.append(&sound);
     page_box.append(&reason);
     page_box.append(&next);
     page_box.append(&breath);
+    page_box.append(&sound);
 
     let (so_far_row, so_far) = fact_row("so far");
     let (last_row, last) = fact_row("last taken in");
@@ -1263,9 +1271,11 @@ fn journal_pill() -> (gtk::Box, gtk::Label) {
     row.add_css_class("sol-journal");
     let left = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     left.add_css_class("sol-chip");
+    left.add_css_class("sol-chip-a");
     left.set_size_request(11, 11);
     let right = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     right.add_css_class("sol-chip");
+    right.add_css_class("sol-chip-b");
     right.set_size_request(11, 11);
     let label = gtk::Label::new(Some("your · journal"));
     label.add_css_class("sol-display");
@@ -1728,8 +1738,16 @@ fn apply_layout(
         ui.body.set_margin_end(sun_bg::INSET);
     }
     let phone_page = phone && page_open.get();
-    ui.page.home.set_visible(phone_page);
-    ui.page.close.set_visible(page_open.get() && !phone_page);
+    // The desktop close sits on this corner. The page's way back is a link.
+    ui.page.close.set_visible(false);
+    if page_open.get() {
+        ui.page
+            .home
+            .set_label(if phone_page { "‹ home" } else { "‹ status" });
+        ui.page.home.set_visible(true);
+    } else {
+        ui.page.home.set_visible(false);
+    }
     if phone && pane_open {
         ui.pane.add_css_class("sol-flush");
     } else {
@@ -1838,17 +1856,20 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let obsidian = obsidian_word(&snap);
     let (mut paired, mut offline, mut offline_waiting) = journal_face(&snap);
     let mut connection = paired.then(|| connection_words(&snap.health).to_owned());
+    let mut last_reached = if paired {
+        snap.last_sync.and_then(shell_model::relative_unix_now)
+    } else {
+        None
+    };
+    let mut fixture_mark = false;
     apply_journal_fixture(
         &mut paired,
         &mut offline,
         &mut offline_waiting,
         &mut connection,
+        &mut last_reached,
+        &mut fixture_mark,
     );
-    let last_reached = if paired {
-        snap.last_sync.and_then(shell_model::relative_unix_now)
-    } else {
-        None
-    };
     View {
         screen_on: config.desktop_capture,
         terminal_on: config.terminal,
@@ -1863,6 +1884,7 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
         intake,
         pause: paused,
         paired,
+        fixture_mark,
         offline,
         offline_waiting,
         connection,
@@ -1960,7 +1982,10 @@ fn apply_journal_fixture(
     offline: &mut bool,
     waiting: &mut Option<i64>,
     connection: &mut Option<String>,
+    last_reached: &mut Option<String>,
+    named: &mut bool,
 ) {
+    *named = false;
     let framed = std::env::var("SOLSTONE_FRAME_PNG")
         .ok()
         .is_some_and(|value| !value.is_empty());
@@ -1976,12 +2001,16 @@ fn apply_journal_fixture(
             *offline = false;
             *waiting = None;
             *connection = Some(solstone_linux::copy::JOURNAL_CONNECTED.to_owned());
+            *last_reached = fixture_reached(0);
+            *named = true;
         }
         "offline" => {
             *paired = true;
             *offline = true;
             *waiting = None;
             *connection = Some(solstone_linux::copy::JOURNAL_OFFLINE.to_owned());
+            *last_reached = fixture_reached(40 * 60);
+            *named = true;
         }
         _ => {
             let Some(count) = raw.strip_prefix("offline:") else {
@@ -1997,8 +2026,19 @@ fn apply_journal_fixture(
             *offline = true;
             *waiting = Some(count);
             *connection = Some(solstone_linux::copy::JOURNAL_OFFLINE.to_owned());
+            *last_reached = fixture_reached(40 * 60);
+            *named = true;
         }
     }
+}
+
+/// The fixture's reached line, on the same scale as a real sync. `0` is just now.
+fn fixture_reached(seconds_ago: u32) -> Option<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    shell_model::relative_unix_now(now - f64::from(seconds_ago))
 }
 
 fn journal_face(snap: &ServiceSnap) -> (bool, bool, Option<i64>) {
@@ -2220,6 +2260,10 @@ window.sol-dark .sol-tile.sol-dash {\
   border-color: rgba(58, 46, 36, 0.14);\
   box-shadow: none;\
   padding: 40px 20px 16px;\
+  min-width: 360px;\
+}\
+.sol-pane.sol-flush {\
+  min-width: 0;\
 }\
 window.sol-dark .sol-pane {\
   background-color: #2A221C;\
@@ -2345,6 +2389,22 @@ window.sol-dark .sol-journal {\
   border-style: solid;\
   background-color: #E8913A;\
   border-color: #E8913A;\
+}\
+.sol-journal.sol-named .sol-chip {\
+  border-style: solid;\
+  border-width: 1.5px;\
+  min-width: 18px;\
+  min-height: 18px;\
+  border-radius: 5px;\
+}\
+.sol-journal.sol-named .sol-chip-a {\
+  background-color: #ECE9FB;\
+  border-color: #6D5BD0;\
+}\
+.sol-journal.sol-named .sol-chip-b {\
+  background-color: #DFF5F0;\
+  border-color: #1F9E89;\
+  transform: rotate(45deg) scale(0.82);\
 }\
 .sol-pane.sol-flush { border-width: 0; }\
 scrolledwindow.sol-page, scrolledwindow.sol-deck-scroll {\
@@ -2479,6 +2539,8 @@ fn raster_glyph(paths: &str, dark: bool, px: i32) -> Option<gtk::cairo::ImageSur
 #[derive(Clone, Copy)]
 enum MarkKind {
     Dot,
+    /// The status pill when the journal is caught up. Source tiles stay orange.
+    Good,
     Ring,
     Diamond,
     Bars,
@@ -2511,6 +2573,7 @@ fn paint_mark(area: &gtk::DrawingArea, word: StateWord) {
 fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
     for class in [
         "sol-mark-on",
+        "sol-mark-good",
         "sol-mark-ring",
         "sol-mark-attn",
         "sol-mark-paused",
@@ -2519,6 +2582,7 @@ fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
     }
     let class = match kind {
         MarkKind::Dot => "sol-mark-on",
+        MarkKind::Good => "sol-mark-good",
         MarkKind::Ring => "sol-mark-ring",
         MarkKind::Diamond => "sol-mark-attn",
         MarkKind::Bars => "sol-mark-paused",
@@ -2532,6 +2596,8 @@ fn draw_mark(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, heig
         MarkKind::Diamond
     } else if area.has_css_class("sol-mark-paused") {
         MarkKind::Bars
+    } else if area.has_css_class("sol-mark-good") {
+        MarkKind::Good
     } else if area.has_css_class("sol-mark-on") || area.has_css_class("sol-on") {
         MarkKind::Dot
     } else {
@@ -2548,6 +2614,12 @@ fn draw_mark(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, heig
     match kind {
         MarkKind::Dot => {
             cr.set_source_rgb(ORANGE.0, ORANGE.1, ORANGE.2);
+            cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+        MarkKind::Good => {
+            // tokens.md `--success`
+            cr.set_source_rgb(63.0 / 255.0, 157.0 / 255.0, 106.0 / 255.0);
             cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
             let _ = cr.fill();
         }
@@ -2612,6 +2684,24 @@ fn connection_words(health: &str) -> &'static str {
     }
 }
 
+fn place_fact_value(row: &gtk::Box, value: &gtk::Label, text: &str) {
+    value.set_text(text);
+    value.set_wrap(true);
+    // A long value drops under its label. A short one stays on the row.
+    // Either way the pane stays 360 wide.
+    if text.chars().count() > 22 {
+        row.set_orientation(gtk::Orientation::Vertical);
+        value.set_halign(gtk::Align::Start);
+        value.set_xalign(0.0);
+        value.set_max_width_chars(28);
+    } else {
+        row.set_orientation(gtk::Orientation::Horizontal);
+        value.set_halign(gtk::Align::End);
+        value.set_xalign(1.0);
+        value.set_max_width_chars(22);
+    }
+}
+
 fn paint_journal_facts(ui: &Ui, view: &View) {
     if !view.paired {
         ui.kept_row.set_visible(true);
@@ -2621,14 +2711,14 @@ fn paint_journal_facts(ui: &Ui, view: &View) {
     }
     ui.kept_row.set_visible(false);
     if let Some(text) = &view.connection {
-        ui.connection.set_text(text);
+        place_fact_value(&ui.connection_row, &ui.connection, text);
         ui.connection.set_visible(true);
         ui.connection_row.set_visible(true);
     } else {
         ui.connection_row.set_visible(false);
     }
     if let Some(text) = &view.last_reached {
-        ui.reached.set_text(text);
+        place_fact_value(&ui.reached_row, &ui.reached, text);
         ui.reached.set_visible(true);
         ui.reached_row.set_visible(true);
     } else {
@@ -2636,25 +2726,38 @@ fn paint_journal_facts(ui: &Ui, view: &View) {
     }
 }
 
+fn paint_journal_name(ui: &Ui, view: &View) {
+    if view.fixture_mark {
+        ui.journal.add_css_class("sol-named");
+        ui.journal.remove_css_class("sol-paired");
+        ui.journal_label.set_text("bright · harbor");
+        return;
+    }
+    ui.journal.remove_css_class("sol-named");
+    ui.journal_label.set_text("your · journal");
+    if view.paired {
+        ui.journal.add_css_class("sol-paired");
+    } else {
+        ui.journal.remove_css_class("sol-paired");
+    }
+}
+
 fn paint_pairing(ui: &Ui, view: &View) {
     paint_journal_facts(ui, view);
+    paint_journal_name(ui, view);
     if !view.paired {
         ui.pill_label.set_text("not paired");
         ui.lead.set_text("not paired");
         show_connect(ui, Some("connect a journal"));
         apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
-        ui.journal.remove_css_class("sol-paired");
-        ui.journal_label.set_text("your · journal");
         return;
     }
-    ui.journal.add_css_class("sol-paired");
-    ui.journal_label.set_text("your · journal");
     if view.offline {
         if let Some(count) = view.offline_waiting {
             let line = format!("offline · {count} waiting");
             ui.pill_label.set_text(&line);
             ui.lead.set_text(&line);
-            show_connect(ui, None);
+            show_connect(ui, Some("on this device"));
             apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         } else {
             ui.pill_label.set_text("");
@@ -2666,8 +2769,8 @@ fn paint_pairing(ui: &Ui, view: &View) {
     }
     ui.pill_label.set_text("connected");
     ui.lead.set_text("all caught up");
-    show_connect(ui, Some("on this device"));
-    apply_mark_kind(&ui.pill_mark, MarkKind::Dot);
+    show_connect(ui, Some("everything is in your journal"));
+    apply_mark_kind(&ui.pill_mark, MarkKind::Good);
 }
 
 fn show_connect(ui: &Ui, text: Option<&str>) {
