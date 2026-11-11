@@ -200,11 +200,35 @@ pub struct LocalSun {
     pub times: SunTimes,
 }
 
+/// A local minute in `0..1440`. Empty does not parse. Out of range does not parse.
+#[must_use]
+pub fn parse_sun_minutes(raw: &str) -> Option<f64> {
+    if raw.is_empty() {
+        return None;
+    }
+    let minutes = raw.parse::<f64>().ok()?;
+    if minutes.is_finite() && (0.0..24.0 * 60.0).contains(&minutes) {
+        Some(minutes)
+    } else {
+        None
+    }
+}
+
+/// `SOLSTONE_SUN_MINUTES` pins the arc for a frame. Empty or unset uses `fallback`.
+/// A value that does not parse is ignored, so a bad pin cannot hide the live sun.
+#[must_use]
+pub fn pinned_sun_minutes(fallback: f64) -> f64 {
+    std::env::var("SOLSTONE_SUN_MINUTES")
+        .ok()
+        .and_then(|raw| parse_sun_minutes(&raw))
+        .unwrap_or(fallback)
+}
+
 #[must_use]
 pub fn local_sun() -> LocalSun {
     let now = chrono::Local::now();
     let date = now.date_naive();
-    let minutes = f64::from(now.hour() * 60 + now.minute());
+    let minutes = pinned_sun_minutes(f64::from(now.hour() * 60 + now.minute()));
     let offset_minutes = f64::from(now.offset().local_minus_utc()) / 60.0;
     let zone_id = system_zone_id();
     let times = zone_point(&zone_id)
@@ -661,7 +685,8 @@ mod tests {
     use super::{
         Appearance, FALLBACK_RISE_MINUTES, FALLBACK_SET_MINUTES, GROUND_DARK_DAY, GROUND_DARK_DEEP,
         GROUND_DARK_NIGHT, GROUND_LIGHT_DAY, GROUND_LIGHT_DEEP, GROUND_LIGHT_NIGHT, SampleKey,
-        frame, near, sample_due, solar_pair, zone_count, zone_id_from_zoneinfo_path, zone_point,
+        frame, near, parse_sun_minutes, sample_due, solar_pair, zone_count,
+        zone_id_from_zoneinfo_path, zone_point,
     };
     use chrono::NaiveDate;
 
@@ -670,6 +695,22 @@ mod tests {
 
     fn denver_frame(minutes: f64, appearance: Appearance) -> super::SunFrame {
         frame(393.0, 852.0, minutes, RISE, SET, appearance)
+    }
+
+    #[test]
+    fn a_pinned_minute_parses_and_noon_is_not_night() {
+        assert_eq!(parse_sun_minutes(""), None);
+        assert_eq!(parse_sun_minutes("nope"), None);
+        assert_eq!(parse_sun_minutes("1440"), None);
+        assert_eq!(parse_sun_minutes("-1"), None);
+        assert_eq!(parse_sun_minutes("780"), Some(780.0));
+        let noon = denver_frame(13.0 * 60.0, Appearance::Light);
+        assert!(noon.on);
+        assert!(noon.night < 0.001);
+        assert!(noon.opacity > 0.2);
+        let night = denver_frame(22.0 * 60.0, Appearance::Dark);
+        assert!(night.night > 0.5);
+        assert!(!night.on);
     }
 
     #[test]

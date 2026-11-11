@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-//! The window's ground: a header bar painted the sun-arc ground, the desktop's own
-//! buttons, and the sun-arc frame in the content. The shelf is an inset card. There
-//! is no backdrop blur.
+//! The window's ground: one sun-arc paint to the top edge, the desktop's own
+//! buttons over that paint, and an inset shelf. There is no header band and no
+//! backdrop blur.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,7 +18,17 @@ use solstone_linux::sun_arc::{self, Appearance, Glow, LocalSun, Rgb, SunTimes};
 const MARK_SVG: &str = include_str!("../assets/mark.svg");
 const GLOW_MID_STOP: f64 = 0.38;
 const GLOW_MID_RATIO: f64 = 0.45;
-const SHELF_WIDTH: i32 = 186;
+pub const SHELF_WIDTH: i32 = 186;
+pub const INSET: i32 = 8;
+pub const HEADER_HEIGHT: i32 = 46;
+
+/// The shelf, the deck body, and the slot beside the window buttons.
+pub struct Chrome {
+    pub root: gtk::Widget,
+    pub shelf: gtk::Box,
+    pub body: gtk::Box,
+    pub header_extra: gtk::Box,
+}
 
 struct Paint {
     css: gtk::CssProvider,
@@ -36,18 +46,42 @@ struct Paint {
     toplevel_hooked: Cell<bool>,
 }
 
-/// Header bar, sun-arc content, and the inset shelf. The bar shows no title text.
+/// Sun-arc content, a transparent header, and the inset shelf. No title text.
 /// The window title stays `solstone`, which is the accessible name.
-pub fn attach(window: &gtk::ApplicationWindow) -> gtk::Widget {
+/// The title slot is zero-height so the client-side frame stays and paints no band.
+pub fn attach(window: &gtk::ApplicationWindow) -> Chrome {
     if frame_wanted() {
         eprintln!("frame-file attach");
     }
     window.set_title(Some(solstone_linux::copy::CopyKey::WindowTitle.as_str()));
 
-    let header = gtk::HeaderBar::new();
-    header.set_show_title_buttons(true);
-    header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
-    window.set_titlebar(Some(&header));
+    let slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    slot.add_css_class("sol-title-slot");
+    slot.set_size_request(0, 0);
+    window.set_titlebar(Some(&slot));
+
+    let header = gtk::WindowHandle::new();
+    header.add_css_class("sol-chrome-header");
+    header.set_valign(gtk::Align::Start);
+    header.set_halign(gtk::Align::Fill);
+    header.set_hexpand(true);
+    header.set_size_request(-1, HEADER_HEIGHT);
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    bar.set_hexpand(true);
+    bar.set_margin_start(INSET);
+    bar.set_margin_end(INSET);
+    let controls_start = gtk::WindowControls::new(gtk::PackType::Start);
+    let controls_end = gtk::WindowControls::new(gtk::PackType::End);
+    let header_extra = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    header_extra.set_halign(gtk::Align::End);
+    header_extra.set_valign(gtk::Align::Center);
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    bar.append(&controls_start);
+    bar.append(&spacer);
+    bar.append(&header_extra);
+    bar.append(&controls_end);
+    header.set_child(Some(&bar));
 
     let paint = Rc::new(Paint {
         css: gtk::CssProvider::new(),
@@ -84,16 +118,29 @@ pub fn attach(window: &gtk::ApplicationWindow) -> gtk::Widget {
     canvas.set_can_focus(false);
     root.set_child(Some(&canvas));
 
-    let shelf = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let shelf = gtk::Box::new(gtk::Orientation::Vertical, 4);
     shelf.add_css_class("sol-shelf");
     shelf.set_size_request(SHELF_WIDTH, -1);
     shelf.set_halign(gtk::Align::Start);
     shelf.set_valign(gtk::Align::Fill);
     shelf.set_vexpand(true);
-    shelf.set_margin_start(8);
-    shelf.set_margin_top(8);
-    shelf.set_margin_bottom(8);
+    shelf.set_margin_start(INSET);
+    shelf.set_margin_top(INSET);
+    shelf.set_margin_bottom(INSET);
     shelf.set_can_focus(false);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    body.set_halign(gtk::Align::Fill);
+    body.set_valign(gtk::Align::Fill);
+    body.set_hexpand(true);
+    body.set_vexpand(true);
+    body.set_margin_start(INSET + SHELF_WIDTH + INSET);
+    body.set_margin_end(INSET);
+    body.set_margin_top(HEADER_HEIGHT);
+    body.set_margin_bottom(INSET);
+
+    root.add_overlay(&body);
+    root.add_overlay(&header);
     root.add_overlay(&shelf);
 
     let paint_draw = Rc::clone(&paint);
@@ -136,7 +183,12 @@ pub fn attach(window: &gtk::ApplicationWindow) -> gtk::Widget {
 
     queue_frame_file(window, &paint);
 
-    root.upcast()
+    Chrome {
+        root: root.upcast(),
+        shelf,
+        body,
+        header_extra,
+    }
 }
 
 /// Writes one PNG of this window when `SOLSTONE_FRAME_PNG` is set.
@@ -260,8 +312,10 @@ fn paint_frame(
     let appearance = current_appearance(paint);
     if appearance == Appearance::Dark {
         shelf.add_css_class("sol-shelf-dark");
+        window.add_css_class("sol-dark");
     } else {
         shelf.remove_css_class("sol-shelf-dark");
+        window.remove_css_class("sol-dark");
     }
     let sun = sun_arc::local_sun();
     let times = cached_times(paint, &sun);
@@ -394,22 +448,80 @@ fn render_mark(diameter: i32) -> Option<ImageSurface> {
 fn apply_css(paint: &Paint, ground: &str) {
     let css = format!(
         "\
-headerbar, headerbar:backdrop, .titlebar, window, window.background {{
-  background-color: {ground};
+.sol-title-slot, .titlebar, headerbar, headerbar:backdrop {{
+  background: none;
+  background-color: transparent;
   background-image: none;
   box-shadow: none;
-  border-bottom-width: 0;
+  border: none;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+}}
+window, window.background {{
+  background-color: {ground};
+  background-image: none;
+}}
+.sol-chrome-header {{
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+  border: none;
 }}
 .sol-shelf {{
   background-color: rgba(255, 252, 246, 0.55);
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.70);
   box-shadow: 0 6px 22px rgba(80, 50, 10, 0.14);
+  padding: 8px;
 }}
 .sol-shelf-dark {{
   background-color: rgba(42, 34, 28, 0.62);
   border-color: rgba(255, 244, 230, 0.18);
   box-shadow: 0 6px 22px rgba(0, 0, 0, 0.28);
+}}
+.sol-ink {{ color: #3A2E24; }}
+.sol-faint {{ color: rgba(58, 46, 36, 0.72); }}
+.sol-attn {{ color: #9F2D2D; }}
+window.sol-dark .sol-ink {{ color: #F6EDE3; }}
+window.sol-dark .sol-faint {{ color: rgba(246, 237, 227, 0.72); }}
+window.sol-dark .sol-attn {{ color: #F0B4A8; }}
+.sol-greet {{ font-weight: 700; font-size: 22px; }}
+.sol-name {{ font-weight: 700; font-size: 16px; }}
+.sol-tile {{
+  background-color: rgba(255, 252, 246, 0.48);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  padding: 14px;
+  min-height: 108px;
+}}
+window.sol-dark .sol-tile {{
+  background-color: rgba(42, 34, 28, 0.50);
+  border-color: rgba(255, 244, 230, 0.16);
+}}
+.sol-tile.sol-selected {{
+  border-color: #E8913A;
+  border-width: 2px;
+}}
+.sol-pane, .sol-page {{
+  background-color: rgba(255, 252, 246, 0.78);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.70);
+  padding: 16px;
+}}
+window.sol-dark .sol-pane, window.sol-dark .sol-page {{
+  background-color: rgba(42, 34, 28, 0.72);
+  border-color: rgba(255, 244, 230, 0.16);
+}}
+.sol-shelf-row {{
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 8px 12px;
+  border-radius: 12px;
+}}
+.sol-shelf-row.sol-selected {{
+  background-color: rgba(232, 145, 58, 0.22);
 }}
 "
     );

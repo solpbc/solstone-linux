@@ -1297,6 +1297,21 @@ pub fn set_panel_icon_offer(paths: &ConfigPaths, value: bool) -> io::Result<Conf
     write_config_merge(paths, ConfigOverlay::PanelIconOffer(value), &NoWriteFault)
 }
 
+/// The two owner switches the deck can write. One key, leaving every other key as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerSwitch {
+    Screen,
+    Terminal,
+}
+
+pub fn set_owner_switch(paths: &ConfigPaths, switch: OwnerSwitch, on: bool) -> io::Result<Config> {
+    let key = match switch {
+        OwnerSwitch::Screen => "desktop_capture",
+        OwnerSwitch::Terminal => "terminal",
+    };
+    set_guided_field(paths, key, Value::Bool(on))
+}
+
 pub(crate) fn set_guided_field(paths: &ConfigPaths, key: &str, value: Value) -> io::Result<Config> {
     set_guided_field_with_fault(paths, key, value, &NoWriteFault)
 }
@@ -1633,6 +1648,24 @@ mod tests {
             assert!(set_guided_field(&paths(t.path()), "activity_policy", bad).is_err());
         }
         assert_eq!(saved_map(t.path()), map);
+    }
+
+    #[test]
+    fn an_owner_switch_writes_only_its_key() {
+        let t = tempfile::tempdir().unwrap();
+        sanitize_link_authority(&paths(t.path())).unwrap();
+        let saved = set_owner_switch(&paths(t.path()), OwnerSwitch::Terminal, true).unwrap();
+        assert!(saved.terminal);
+        assert!(saved.desktop_capture);
+        let map = saved_map(t.path());
+        assert_eq!(map["terminal"], json!(true));
+        assert!(map.get("desktop_capture").is_none());
+        let saved = set_owner_switch(&paths(t.path()), OwnerSwitch::Screen, false).unwrap();
+        assert!(!saved.desktop_capture);
+        assert!(saved.terminal);
+        let map = saved_map(t.path());
+        assert_eq!(map["desktop_capture"], json!(false));
+        assert_eq!(map["terminal"], json!(true));
     }
 
     struct FailStage(DurableWriteStage);

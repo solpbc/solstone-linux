@@ -33,22 +33,13 @@ fn notify(changed: &Changed) {
 
 const SETTINGS_PAGE_NAME: &str = "settings";
 
-/// Brings the open window to its settings tab.
+/// Opens the window on the deck, with status showing.
 pub fn show_settings(app: &gtk::Application) {
     let Some(window) = app.windows().into_iter().next() else {
         return;
     };
-    let Some(notebook) = window.child().and_downcast::<gtk::Notebook>() else {
-        return;
-    };
-    let settings = (0..notebook.n_pages()).find(|&index| {
-        notebook
-            .nth_page(Some(index))
-            .is_some_and(|page| page.widget_name() == SETTINGS_PAGE_NAME)
-    });
-    if let Some(index) = settings {
-        notebook.set_current_page(Some(index));
-    }
+    window.present();
+    crate::deck::show_home();
 }
 
 /// Puts a clicked pairing link on the journal tab. It never pairs: that waits for the press.
@@ -97,8 +88,9 @@ pub fn build_ui(app: &gtk::Application) {
 
     // The shell is shown before the notebook pages are built, so the window can
     // paint before that work touches the session bus.
-    let shell = crate::sun_bg::attach(&window);
-    window.set_child(Some(&shell));
+    let chrome = crate::sun_bg::attach(&window);
+    window.set_child(Some(&chrome.root));
+    crate::deck::mount(&window, &chrome);
     window.present();
     schedule_pages(window);
 }

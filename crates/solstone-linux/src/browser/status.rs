@@ -53,6 +53,16 @@ pub fn clear_running(layout: &Layout) {
     let _ = fs::remove_file(layout.root.join(RUNNING_FILE));
 }
 
+pub fn running_path(root: &Path) -> PathBuf {
+    root.join(RUNNING_FILE)
+}
+
+/// The status file as written, including one older than [`RUNNING_STALE_MS`].
+/// Missing or unreadable is `None`.
+pub fn load_running(path: &Path) -> Option<Running> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
 fn read_running(layout: &Layout, now_ms: i64) -> Option<Running> {
     let status: Running =
         serde_json::from_slice(&fs::read(layout.root.join(RUNNING_FILE)).ok()?).ok()?;

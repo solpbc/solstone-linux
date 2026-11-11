@@ -3,6 +3,7 @@
 
 mod controller;
 mod copy_map;
+mod deck;
 mod format;
 mod logs;
 mod mark_card;

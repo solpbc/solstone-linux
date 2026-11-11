@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-//! Tile words, widths, the one attention row, and counter phrases. No toolkit.
+//! Tile words, widths, one attention row per source, and counter phrases. No toolkit.
 //! The window calls [`deck_columns`]. A phrase here is a locked word.
 
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate};
+use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Timelike};
 
 use crate::browser::status::RUNNING_STALE_MS;
 use crate::obsidian::State as VaultState;
@@ -27,7 +27,7 @@ const TILE_ORDER: [TileId; 4] = [
     TileId::Obsidian,
 ];
 
-/// A tile's state word. [`StateWord::Absent`] is the host-down reading: no word is shown.
+/// A tile's state word. Every tile shows one. There is no blank word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateWord {
     Off,
@@ -37,7 +37,6 @@ pub enum StateWord {
     SettingUp,
     ReadyToSetUp,
     Checking,
-    Absent,
 }
 
 /// Which screen sub-line applies. The sentences live in the copy file.
@@ -122,7 +121,7 @@ pub fn terminal_tile(
         return StateWord::Off;
     }
     if !daemon_up {
-        return StateWord::Absent;
+        return StateWord::NeedsAttention;
     }
     let word = match state {
         EngineState::Off => StateWord::Off,
@@ -157,16 +156,76 @@ pub fn browsers_subline(names: &[&str]) -> Option<String> {
     }
 }
 
+/// A browser host reading. `updated_at_ms` is `None` when `status.json` is missing.
+/// `seen_report` stays true after a file has been read, including one that later disappears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrowserHost {
+    pub updated_at_ms: Option<i64>,
+    pub now_ms: i64,
+    pub seen_report: bool,
+    pub room_full: bool,
+    pub capture_paused: bool,
+}
+
+/// Before any report, the word is `checking…`. A missing or stale file after a report
+/// is `needs attention`. A timestamp counts as a report, even when it is older than
+/// [`RUNNING_STALE_MS`].
 #[must_use]
-pub fn browsers_tile(host_up: bool, room_full: bool, capture_paused: bool) -> StateWord {
-    if !host_up {
-        StateWord::Absent
-    } else if room_full {
+pub fn browsers_tile(host: BrowserHost) -> StateWord {
+    let reported = host.seen_report || host.updated_at_ms.is_some();
+    if browser_host_up(host.updated_at_ms, host.now_ms) {
+        if host.room_full {
+            StateWord::NeedsAttention
+        } else if host.capture_paused {
+            StateWord::Paused
+        } else {
+            StateWord::On
+        }
+    } else if reported {
         StateWord::NeedsAttention
-    } else if capture_paused {
-        StateWord::Paused
     } else {
-        StateWord::On
+        StateWord::Checking
+    }
+}
+
+/// The shipped browsers line, only for a host that is down after it has reported.
+#[must_use]
+pub fn browser_host_reason(host: BrowserHost) -> Option<&'static str> {
+    let down = !browser_host_up(host.updated_at_ms, host.now_ms);
+    (down && browsers_tile(host) == StateWord::NeedsAttention)
+        .then_some("browser pages can't start right now.")
+}
+
+/// The terminal line when the switch is on and the daemon is down.
+#[must_use]
+pub fn terminal_daemon_reason(switch_on: bool, daemon_up: bool) -> Option<&'static str> {
+    (switch_on && !daemon_up).then_some("terminal sessions can't start right now.")
+}
+
+/// Shown under technical details when `source-intake.json` is present and will not parse.
+pub const INTAKE_UNREADABLE: &str = "the record of how much has been taken in could not be read.";
+
+/// The locked state word, including the ellipsis on `checking…`.
+#[must_use]
+pub fn state_label(word: StateWord) -> &'static str {
+    match word {
+        StateWord::Off => "off",
+        StateWord::NeedsAttention => "needs attention",
+        StateWord::Paused => "paused",
+        StateWord::On => "on",
+        StateWord::SettingUp => "setting up",
+        StateWord::ReadyToSetUp => "ready to set up",
+        StateWord::Checking => "checking…",
+    }
+}
+
+#[must_use]
+pub fn screen_sub_label(sub: ScreenSub) -> Option<&'static str> {
+    match sub {
+        ScreenSub::None => None,
+        ScreenSub::WithAudioAndActivity => Some("with audio and activity"),
+        ScreenSub::WithAudio => Some("with audio"),
+        ScreenSub::ActivityStillOn => Some("activity is still on."),
     }
 }
 
@@ -191,14 +250,21 @@ pub fn obsidian_tile(facts: ObsidianFacts) -> StateWord {
     }
 }
 
-/// The first tile in deck order whose word is `needs attention`.
+/// Every tile in deck order whose word is `needs attention`.
 #[must_use]
-pub fn attention_tile(words: &[StateWord; 4]) -> Option<TileId> {
+pub fn attention_tiles(words: &[StateWord; 4]) -> Vec<TileId> {
     TILE_ORDER
         .into_iter()
         .zip(words)
-        .find(|(_, word)| **word == StateWord::NeedsAttention)
+        .filter(|(_, word)| **word == StateWord::NeedsAttention)
         .map(|(tile, _)| tile)
+        .collect()
+}
+
+/// The first tile in deck order whose word is `needs attention`.
+#[must_use]
+pub fn attention_tile(words: &[StateWord; 4]) -> Option<TileId> {
+    attention_tiles(words).into_iter().next()
 }
 
 /// The header keeps `pause` until this item's own menu is up. A probe error keeps it.
@@ -266,12 +332,13 @@ pub fn attention_label(tile: TileId) -> String {
     format!("{} needs attention", tile_name(tile))
 }
 
-/// The panel menu. One attention row, pause or resume, and `open journal` only while paired.
+/// The panel menu. One attention row per source that needs it, in deck order.
+/// Pause or resume, and `open journal` only while paired.
 /// There is no source row and no switch row.
 #[must_use]
 pub fn menu_rows(input: MenuInput) -> Vec<MenuRow> {
     let mut rows = Vec::new();
-    if let Some(tile) = attention_tile(&input.words) {
+    for tile in attention_tiles(&input.words) {
         rows.push(MenuRow {
             id: MenuId::Attention(tile),
             enabled: true,
@@ -345,6 +412,23 @@ pub fn greeting(hour: u32) -> &'static str {
         12..=16 => "good afternoon",
         _ => "good evening",
     }
+}
+
+#[must_use]
+pub fn greeting_now() -> &'static str {
+    let now = Local::now();
+    let minutes = crate::sun_arc::pinned_sun_minutes(f64::from(now.hour() * 60 + now.minute()));
+    let hour = minutes.div_euclid(60.0);
+    if (0.0..24.0).contains(&hour) {
+        greeting(hour as u32)
+    } else {
+        greeting(now.hour())
+    }
+}
+
+#[must_use]
+pub fn source_last_now(file: &IntakeFile, last: Option<&str>) -> LastTaken {
+    source_last(file, last, Local::now().fixed_offset())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,13 +546,40 @@ fn so_far(
 
 #[must_use]
 pub fn screen_last(file: &IntakeFile, now: DateTime<FixedOffset>) -> LastTaken {
+    let last = match file {
+        IntakeFile::Rows(rows) => rows.screen.last.as_deref(),
+        IntakeFile::Missing | IntakeFile::Refused => None,
+    };
+    source_last(file, last, now)
+}
+
+/// `last taken in` for one counter. Absent and a refused file have no phrase.
+#[must_use]
+pub fn source_last(file: &IntakeFile, last: Option<&str>, now: DateTime<FixedOffset>) -> LastTaken {
     match file {
         IntakeFile::Missing => LastTaken::Absent,
         IntakeFile::Refused => LastTaken::Hidden,
-        IntakeFile::Rows(rows) => match rows.screen.last.as_deref() {
-            Some(last) => LastTaken::When(format_relative(last, now)),
-            None => LastTaken::Absent,
+        IntakeFile::Rows(_) => match last {
+            Some(last) if !last.is_empty() => LastTaken::When(format_relative(last, now)),
+            _ => LastTaken::Absent,
         },
+    }
+}
+
+#[must_use]
+pub fn total_text(total: &ShownTotal) -> Option<&str> {
+    match total {
+        ShownTotal::NothingYet => Some("nothing yet"),
+        ShownTotal::Amount(text) => Some(text),
+        ShownTotal::Hidden => None,
+    }
+}
+
+#[must_use]
+pub fn last_text(last: &LastTaken) -> Option<&str> {
+    match last {
+        LastTaken::When(text) => Some(text),
+        LastTaken::Absent | LastTaken::Hidden => None,
     }
 }
 
@@ -812,11 +923,17 @@ mod tests {
     }
 
     #[test]
-    fn a_down_daemon_or_a_stale_browser_host_has_no_word() {
+    fn a_down_daemon_needs_attention_and_a_browser_host_starts_at_checking() {
         assert_eq!(
             terminal_tile(true, false, EngineState::Running, false, false),
-            StateWord::Absent
+            StateWord::NeedsAttention
         );
+        assert_eq!(
+            terminal_daemon_reason(true, false),
+            Some("terminal sessions can't start right now.")
+        );
+        assert_eq!(terminal_daemon_reason(false, false), None);
+        assert_eq!(terminal_daemon_reason(true, true), None);
         assert_eq!(
             terminal_tile(false, false, EngineState::Running, false, false),
             StateWord::Off
@@ -862,10 +979,70 @@ mod tests {
             browsers_subline(&["Chrome", "Firefox"]).as_deref(),
             Some("Chrome, Firefox")
         );
-        assert_eq!(browsers_tile(false, false, false), StateWord::Absent);
-        assert_eq!(browsers_tile(true, true, true), StateWord::NeedsAttention);
-        assert_eq!(browsers_tile(true, false, true), StateWord::Paused);
-        assert_eq!(browsers_tile(true, false, false), StateWord::On);
+        let host = |updated_at_ms, seen_report, room_full, capture_paused| BrowserHost {
+            updated_at_ms,
+            now_ms: 1_000 + RUNNING_STALE_MS,
+            seen_report,
+            room_full,
+            capture_paused,
+        };
+        let not_yet = host(None, false, false, false);
+        assert_eq!(browsers_tile(not_yet), StateWord::Checking);
+        assert_eq!(browser_host_reason(not_yet), None);
+        let stale = host(Some(1_000), false, false, false);
+        assert_eq!(browsers_tile(stale), StateWord::NeedsAttention);
+        assert_eq!(
+            browser_host_reason(stale),
+            Some("browser pages can't start right now.")
+        );
+        let gone = host(None, true, false, false);
+        assert_eq!(browsers_tile(gone), StateWord::NeedsAttention);
+        assert_eq!(
+            browser_host_reason(gone),
+            Some("browser pages can't start right now.")
+        );
+        let fresh = BrowserHost {
+            updated_at_ms: Some(1_000 + RUNNING_STALE_MS),
+            now_ms: 1_000 + RUNNING_STALE_MS,
+            seen_report: true,
+            room_full: false,
+            capture_paused: false,
+        };
+        assert_eq!(browsers_tile(fresh), StateWord::On);
+        assert_eq!(browser_host_reason(fresh), None);
+        assert_eq!(
+            browsers_tile(BrowserHost {
+                room_full: true,
+                capture_paused: true,
+                ..fresh
+            }),
+            StateWord::NeedsAttention
+        );
+        assert_eq!(
+            browser_host_reason(BrowserHost {
+                room_full: true,
+                ..fresh
+            }),
+            None
+        );
+        assert_eq!(
+            browsers_tile(BrowserHost {
+                capture_paused: true,
+                ..fresh
+            }),
+            StateWord::Paused
+        );
+        assert_eq!(state_label(StateWord::Checking), "checking…");
+        assert_eq!(state_label(StateWord::NeedsAttention), "needs attention");
+        assert!(
+            state_label(StateWord::Off)
+                .chars()
+                .any(|ch| !ch.is_whitespace())
+        );
+        assert_eq!(
+            screen_sub_label(ScreenSub::WithAudioAndActivity),
+            Some("with audio and activity")
+        );
     }
 
     #[test]
@@ -975,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn two_attention_tiles_make_one_row_and_pause_excludes_resume() {
+    fn each_source_that_needs_attention_gets_its_own_row() {
         let rows = menu_rows(MenuInput {
             words: [
                 StateWord::NeedsAttention,
@@ -991,13 +1168,22 @@ mod tests {
             .iter()
             .filter(|row| matches!(row.id, MenuId::Attention(_)))
             .collect();
-        assert_eq!(attention.len(), 1);
+        assert_eq!(attention.len(), 2);
         assert_eq!(attention[0].id, MenuId::Attention(TileId::Screen));
+        assert_eq!(attention[1].id, MenuId::Attention(TileId::Terminal));
         assert_eq!(
             menu_target(attention[0].id),
             Some(MenuTarget::Page(TileId::Screen))
         );
+        assert_eq!(
+            menu_target(attention[1].id),
+            Some(MenuTarget::Page(TileId::Terminal))
+        );
         assert_eq!(attention_label(TileId::Screen), "screen needs attention");
+        assert_eq!(
+            attention_label(TileId::Terminal),
+            "terminal needs attention"
+        );
         assert!(rows.iter().any(|row| row.id == MenuId::Pause));
         assert!(rows.iter().all(|row| row.id != MenuId::Resume));
         assert!(rows.iter().all(|row| row.id != MenuId::OpenJournal));
@@ -1020,9 +1206,12 @@ mod tests {
         assert_eq!(
             later
                 .iter()
-                .find(|row| matches!(row.id, MenuId::Attention(_)))
-                .map(|row| row.id),
-            Some(MenuId::Attention(TileId::Terminal))
+                .filter_map(|row| match row.id {
+                    MenuId::Attention(tile) => Some(tile),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![TileId::Terminal, TileId::Browsers]
         );
         assert!(later.iter().any(|row| row.id == MenuId::Resume));
         assert!(later.iter().all(|row| row.id != MenuId::Pause));
