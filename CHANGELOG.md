@@ -6,9 +6,15 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.39] - 2026-11-11
+
+### Changed
+
+- the window looks new. it opens on a tile for each source: screen, terminal, browsers and Obsidian. each tile shows whether that source is on, and screen and terminal have their switch right on the tile. beside the tiles, "status" shows how much has come in from each source so far, and when the last of it came in. a tile opens that source's page, and the screen page holds the desktop activity settings and their "save settings". pairing with your journal is under "your journal" on the left, and recent logs are under "help".
+
 ### Fixed
 
-- terminal no longer adds another `_` after the ☼ in tmux's status bar each time it starts when the app runs without a UTF-8 language setting, and tmux session and window names with accented letters or symbols come into your journal as they are, instead of with `_` in their place. the next start clears any `_` already there.
+- terminal no longer adds another `_` after the ☼ in tmux's status bar each time it starts when the app runs without a UTF-8 language setting, and tmux session and window names with accented letters or symbols come into your journal as they are, instead of with `_` in their place. the next start clears the extra `_`s from the status bar.
 
 ## [2.0.38] - 2026-11-09
 
