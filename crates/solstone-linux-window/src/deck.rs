@@ -231,7 +231,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     shelf_button.set_tooltip_text(Some("sidebar"));
     shelf_button.set_child(Some(&glyph_widget(GLYPH_SIDE)));
     shelf_button.set_visible(false);
-    let (computer, cursor_switch, paused_switch, segment_value) = computer_page();
+    let (computer, cursor_switch, paused_switch, segment_value, computer_note) = computer_page();
 
     chrome.body.append(&column);
     chrome.body.append(&other_box);
@@ -254,6 +254,8 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         computer: computer.clone(),
         cursor: cursor_switch,
         start_paused: paused_switch,
+        computer_note,
+        computer_painting: Cell::new(false),
         segment: segment_value,
         pane: built.root.clone(),
         greet,
@@ -406,6 +408,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     );
     wire_pause(&ui, &view, &seen_report, &daemon_up, &selected);
     wire_activity_save(&ui, &view, &seen_report, &daemon_up, &selected);
+    wire_computer(&ui, &view, &seen_report, &daemon_up, &selected);
 
     apply_view(&ui, &view.borrow());
     apply_shot_hooks(&ui, &view, &selected, &row, &shelf_open, &page_open);
@@ -508,6 +511,8 @@ struct Ui {
     computer: gtk::Box,
     cursor: gtk::Switch,
     start_paused: gtk::Switch,
+    computer_note: gtk::Label,
+    computer_painting: Cell<bool>,
     segment: gtk::Label,
     pane: gtk::Box,
     greet: gtk::Label,
@@ -1601,6 +1606,60 @@ fn wire_activity_save(
     });
 }
 
+/// The this-computer switches save as they flip, through the running app the way
+/// the settings form did. A write the app does not take repaints the saved value.
+fn wire_computer(
+    ui: &Rc<Ui>,
+    view: &Rc<RefCell<View>>,
+    seen: &Rc<Cell<bool>>,
+    daemon: &Rc<Cell<Option<bool>>>,
+    selected: &Rc<Cell<Option<TileId>>>,
+) {
+    for (switch, field) in [
+        (&ui.cursor, "draw_cursor"),
+        (&ui.start_paused, "start_paused"),
+    ] {
+        let ui = Rc::clone(ui);
+        let view = Rc::clone(view);
+        let seen = Rc::clone(seen);
+        let daemon = Rc::clone(daemon);
+        let selected = Rc::clone(selected);
+        switch.connect_state_set(move |switch, on| {
+            // A repaint is not an edit, and a switch already saving waits.
+            if ui.computer_painting.get() || !switch.is_sensitive() {
+                return glib::Propagation::Proceed;
+            }
+            ui.computer_note.set_visible(false);
+            switch.set_sensitive(false);
+            let switch = switch.clone();
+            let ui = Rc::clone(&ui);
+            let view = Rc::clone(&view);
+            let seen = Rc::clone(&seen);
+            let daemon = Rc::clone(&daemon);
+            let selected = Rc::clone(&selected);
+            glib::MainContext::default().spawn_local(async move {
+                let done = write_settings(&[(field, on.to_string())]).await;
+                switch.set_sensitive(true);
+                refresh(&ui, &view, &seen, &daemon, &selected);
+                if !done || saved_value(&view.borrow(), field) != on {
+                    ui.computer_note
+                        .set_text(solstone_linux::copy::SETTINGS_SAVE_UNAVAILABLE);
+                    ui.computer_note.set_visible(true);
+                }
+            });
+            glib::Propagation::Proceed
+        });
+    }
+}
+
+fn saved_value(view: &View, field: &str) -> bool {
+    if field == "draw_cursor" {
+        view.draw_cursor
+    } else {
+        view.start_paused
+    }
+}
+
 /// True only when the app took every write without refusing it.
 async fn write_settings(writes: &[(&str, String)]) -> bool {
     let Ok(client) = solstone_linux::dbus_client::ControlClient::session().await else {
@@ -1623,7 +1682,7 @@ async fn write_settings(writes: &[(&str, String)]) -> bool {
     true
 }
 
-fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label) {
+fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label, gtk::Label) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.add_css_class("sol-pane");
     page.add_css_class("sol-flush");
@@ -1642,13 +1701,15 @@ fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label) {
     let (segment_row, segment) = fact_row(solstone_linux::copy::SETTINGS_SEGMENT);
     page.append(&cursor_row);
     page.append(&paused_row);
+    let note = note_label(None);
+    page.append(&note);
     page.append(&segment_row);
     let (file_row, file_value) = fact_row(solstone_linux::copy::SETTINGS_FILE);
     let loaded = config::load_config(config::ConfigPaths::default());
     file_value.set_text(&loaded.config.config_path().display().to_string());
     file_value.set_visible(true);
     page.append(&file_row);
-    (page, cursor, start_paused, segment)
+    (page, cursor, start_paused, segment, note)
 }
 
 fn place_shelf_button(body: &gtk::Box, button: &gtk::Button) {
@@ -1805,8 +1866,15 @@ fn apply_view(ui: &Ui, view: &View) {
         }
     }
     ui.kept.set_text(&view.kept);
-    ui.cursor.set_active(view.draw_cursor);
-    ui.start_paused.set_active(view.start_paused);
+    // A switch waiting on its save keeps the owner's flip until the app answers.
+    ui.computer_painting.set(true);
+    if ui.cursor.is_sensitive() {
+        ui.cursor.set_active(view.draw_cursor);
+    }
+    if ui.start_paused.is_sensitive() {
+        ui.start_paused.set_active(view.start_paused);
+    }
+    ui.computer_painting.set(false);
     ui.segment.set_text(&format!(
         "{} {}",
         view.segment_interval,
