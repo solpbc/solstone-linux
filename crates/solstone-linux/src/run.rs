@@ -891,6 +891,11 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                 tracing::warn!(?error, "Failed to apply the desktop capture switch");
             }
         }
+        ObserverAction::Quit => {
+            if let Err(error) = crate::service::stop_for_window(&crate::cli::SystemRunner) {
+                tracing::warn!(%error, "quit could not stop the user service");
+            }
+        }
         ObserverAction::Desktop(command) => {
             if let Err(error) = crate::desktop_component::DesktopComponent::with_open_journal(
                 observer.config.clone(),
@@ -936,6 +941,7 @@ enum ObserverAction {
     Pause(u64),
     Resume,
     SetDesktopCapture(bool),
+    Quit,
     Desktop(TrayCommand),
 }
 
@@ -945,6 +951,7 @@ fn route_command(command: TrayCommand) -> ObserverAction {
         TrayCommand::PauseIndefinite => ObserverAction::Pause(0),
         TrayCommand::Resume => ObserverAction::Resume,
         TrayCommand::SetDesktopCapture(enabled) => ObserverAction::SetDesktopCapture(enabled),
+        TrayCommand::Quit => ObserverAction::Quit,
         command => ObserverAction::Desktop(command),
     }
 }

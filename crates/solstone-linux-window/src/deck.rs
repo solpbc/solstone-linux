@@ -23,6 +23,8 @@ use solstone_linux::tray_model::TrayStatus;
 use crate::sun_bg::{self, Chrome};
 
 const PANE_WIDTH: i32 = 360;
+/// Space between the deck and the pane's hairline. The shelf inset stays 8 px.
+const PANE_GUTTER: i32 = 24;
 const OFF_SUB: &str = "turn it on any time.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -210,6 +212,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         add_more,
         facts: built.facts,
         lead: built.lead,
+        connect: built.connect,
         soft: built.soft,
         kept: built.kept,
         unread: built.unread,
@@ -314,7 +317,14 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     wire_pause(&ui, &view, &seen_report, &daemon_up, &selected);
 
     apply_view(&ui, &view.borrow());
+    apply_shot_hooks(&ui, &view, &selected, &shelf_open, &page_open);
     apply_layout(&ui, &selected, &row, &shelf_open, &page_open);
+    let focus_window = window.clone();
+    focus_window.connect_map(move |window| {
+        window.set_focus_visible(false);
+        let none: Option<&gtk::Widget> = None;
+        gtk::prelude::GtkWindowExt::set_focus(window, none);
+    });
 
     let view_tick = Rc::clone(&view);
     let seen_tick = Rc::clone(&seen_report);
@@ -376,6 +386,7 @@ struct Ui {
     pill_label: gtk::Label,
     pause_button: gtk::MenuButton,
     resume_button: gtk::Button,
+    connect: gtk::Button,
     shelf_button: gtk::Button,
     tiles: Vec<TileWidgets>,
     add_more: gtk::Box,
@@ -510,6 +521,7 @@ fn make_tile(
     let state = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let mark = mark_widget();
     let word = gtk::Label::new(Some(shell_model::state_label(StateWord::Checking)));
+    word.add_css_class("sol-state");
     word.add_css_class("sol-faint");
     word.set_halign(gtk::Align::Start);
     word.set_xalign(0.0);
@@ -535,6 +547,7 @@ struct BuiltPane {
     root: gtk::Box,
     facts: [FactWidgets; 4],
     lead: gtk::Label,
+    connect: gtk::Button,
     soft: gtk::Label,
     kept: gtk::Label,
     unread: gtk::Label,
@@ -549,27 +562,37 @@ fn make_pane() -> BuiltPane {
     let status = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let title = gtk::Label::new(Some("status"));
     title.add_css_class("sol-display");
+    title.add_css_class("sol-pane-title");
     title.add_css_class("sol-ink");
     title.set_halign(gtk::Align::Start);
     let lead = gtk::Label::new(Some("not paired"));
-    lead.add_css_class("sol-name");
     lead.add_css_class("sol-display");
+    lead.add_css_class("sol-lead");
     lead.add_css_class("sol-ink");
     lead.set_halign(gtk::Align::Start);
-    let soft = gtk::Label::new(Some("connect a journal"));
+    // Pairing stays on the journal page. This button does not open another flow.
+    let connect = gtk::Button::with_label("connect a journal");
+    connect.add_css_class("sol-action");
+    connect.set_halign(gtk::Align::Start);
+    let soft = gtk::Label::new(None);
     soft.add_css_class("sol-faint");
     soft.set_halign(gtk::Align::Start);
     soft.set_wrap(true);
+    soft.set_visible(false);
     status.append(&title);
     status.append(&lead);
+    status.append(&connect);
     status.append(&soft);
 
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let sources = heading("sources");
+    head.add_css_class("sol-rule");
+    let sources = section_label("sources");
     sources.set_hexpand(true);
     let so_far_head = gtk::Label::new(Some("so far"));
+    so_far_head.add_css_class("sol-section");
     so_far_head.add_css_class("sol-faint");
     let last_head = gtk::Label::new(Some("last taken in"));
+    last_head.add_css_class("sol-section");
     last_head.add_css_class("sol-faint");
     last_head.set_width_chars(14);
     last_head.set_xalign(1.0);
@@ -591,9 +614,11 @@ fn make_pane() -> BuiltPane {
         facts.push(FactWidgets { so_far, last });
     }
 
-    let journal_head = heading("your journal");
+    let journal_head = section_label("your journal");
+    journal_head.add_css_class("sol-rule");
     status.append(&journal_head);
     let kept_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    kept_row.add_css_class("sol-row");
     let kept_name = gtk::Label::new(Some("kept on this computer"));
     kept_name.add_css_class("sol-ink");
     kept_name.set_halign(gtk::Align::Start);
@@ -606,6 +631,7 @@ fn make_pane() -> BuiltPane {
     status.append(&kept_row);
 
     let details = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    details.add_css_class("sol-row");
     let details_name = gtk::Label::new(Some("technical details"));
     details_name.add_css_class("sol-ink");
     details_name.set_halign(gtk::Align::Start);
@@ -639,6 +665,7 @@ fn make_pane() -> BuiltPane {
     page_top.append(&page_title);
     page_top.append(&close);
     let word = gtk::Label::new(None);
+    word.add_css_class("sol-state");
     word.set_halign(gtk::Align::Start);
     let reason = gtk::Label::new(None);
     reason.add_css_class("sol-faint");
@@ -668,6 +695,7 @@ fn make_pane() -> BuiltPane {
         root: pane,
         facts,
         lead,
+        connect,
         soft,
         kept,
         unread,
@@ -684,16 +712,18 @@ fn make_pane() -> BuiltPane {
     }
 }
 
-fn heading(text: &str) -> gtk::Label {
+fn section_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
-    label.add_css_class("sol-display");
+    label.add_css_class("sol-section");
     label.add_css_class("sol-faint");
     label.set_halign(gtk::Align::Start);
+    label.set_xalign(0.0);
     label
 }
 
 fn source_row(name: &str, glyph: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("sol-row");
     row.append(&glyph_widget(glyph));
     let title = gtk::Label::new(Some(name));
     title.add_css_class("sol-ink");
@@ -757,7 +787,8 @@ fn fill_shelf(shelf: &gtk::Box) -> Vec<ShelfWidgets> {
 
 fn pause_controls() -> (gtk::MenuButton, gtk::Button) {
     let pause = gtk::MenuButton::new();
-    pause.set_label("pause");
+    pause.set_label("pause ▾");
+    pause.set_always_show_arrow(false);
     pause.add_css_class("sol-pill");
     let popover = gtk::Popover::new();
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -786,7 +817,7 @@ fn status_pill() -> (gtk::Button, gtk::DrawingArea, gtk::Label) {
 }
 
 fn journal_pill() -> (gtk::Box, gtk::Label) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
     row.set_halign(gtk::Align::Center);
     row.add_css_class("sol-journal");
     let left = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -796,7 +827,8 @@ fn journal_pill() -> (gtk::Box, gtk::Label) {
     right.add_css_class("sol-chip");
     right.set_size_request(11, 11);
     let label = gtk::Label::new(Some("your · journal"));
-    label.add_css_class("sol-faint");
+    label.add_css_class("sol-display");
+    label.add_css_class("sol-ink");
     row.append(&left);
     row.append(&right);
     row.append(&label);
@@ -1088,14 +1120,26 @@ fn apply_layout(
     shelf_open: &Cell<bool>,
     page_open: &Cell<bool>,
 ) {
-    let width = ui.window.width().max(ui.window.default_width());
+    let measured = ui.window.width();
+    let width = if measured > 1 {
+        measured
+    } else {
+        ui.window.default_width()
+    };
     let class = shell_model::width_class(width);
     let phone = class == WidthClass::Phone;
     let tuck = shell_model::shelf_button(width);
     if tuck {
         ui.shelf_button.set_visible(true);
         ui.shelf.set_visible(shelf_open.get());
-        ui.body.set_margin_start(sun_bg::INSET);
+        // The shelf is an overlay. An open shelf has to reserve its own
+        // width, or it paints over the first column.
+        let start = if shelf_open.get() {
+            sun_bg::INSET + sun_bg::SHELF_WIDTH + sun_bg::INSET
+        } else {
+            sun_bg::INSET
+        };
+        ui.body.set_margin_start(start);
     } else {
         ui.shelf_button.set_visible(false);
         ui.shelf.set_visible(true);
@@ -1138,7 +1182,7 @@ fn apply_layout(
         ui.pane.set_margin_top(0);
         ui.pane.set_margin_end(0);
         ui.pane.set_margin_bottom(0);
-        ui.body.set_margin_end(PANE_WIDTH);
+        ui.body.set_margin_end(PANE_WIDTH + PANE_GUTTER);
     } else if pane_open && phone {
         ui.pane.set_halign(gtk::Align::Fill);
         ui.pane.set_size_request(-1, -1);
@@ -1150,6 +1194,12 @@ fn apply_layout(
     } else {
         ui.body.set_margin_end(sun_bg::INSET);
     }
+    let back = if phone && page_open.get() {
+        "‹ home"
+    } else {
+        "×"
+    };
+    ui.page.close.set_label(back);
 }
 
 fn place_tiles(grid: &gtk::Grid, tiles: &[TileWidgets], add_more: &gtk::Box, cols: i32) {
@@ -1177,6 +1227,40 @@ fn shelf_label(row: ShelfRow) -> &'static str {
 
 fn shelf_button_mode(width: i32) -> bool {
     shell_model::shelf_button(width.max(1))
+}
+
+/// Frame captures set a width, an open shelf, or a source page. Unset does nothing.
+fn apply_shot_hooks(
+    ui: &Ui,
+    view: &Rc<RefCell<View>>,
+    selected: &Cell<Option<TileId>>,
+    shelf_open: &Cell<bool>,
+    page_open: &Cell<bool>,
+) {
+    if let Ok(raw) = std::env::var("SOLSTONE_WINDOW_WIDTH")
+        && let Ok(width) = raw.parse::<i32>()
+        && (400..4000).contains(&width)
+    {
+        ui.window.set_default_width(width);
+    }
+    if std::env::var("SOLSTONE_SHELF_OPEN").ok().as_deref() == Some("1") {
+        shelf_open.set(true);
+    }
+    let Ok(which) = std::env::var("SOLSTONE_OPEN_PAGE") else {
+        return;
+    };
+    let id = match which.as_str() {
+        "screen" => Some(TileId::Screen),
+        "terminal" => Some(TileId::Terminal),
+        "browsers" => Some(TileId::Browsers),
+        "obsidian" => Some(TileId::Obsidian),
+        _ => None,
+    };
+    if let Some(id) = id {
+        selected.set(Some(id));
+        page_open.set(true);
+        ui.page.show_tile(id, &view.borrow());
+    }
 }
 
 fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
@@ -1434,6 +1518,45 @@ const DECK_CSS: &str = "\
 .sol-display { font-family: \"Comfortaa\", sans-serif; font-weight: 700; }\
 .sol-greet.sol-display { font-size: 22px; }\
 .sol-name.sol-display { font-size: 17px; }\
+.sol-pane-title.sol-display { font-size: 19px; }\
+.sol-lead.sol-display { font-size: 22px; }\
+.sol-journal .sol-display { font-size: 13.5px; }\
+.sol-state { font-size: 13.5px; font-weight: 600; }\
+.sol-section { font-size: 12px; font-weight: 600; }\
+.sol-rule {\
+  border-bottom: 1px solid rgba(58, 46, 36, 0.14);\
+  padding-bottom: 4px;\
+  margin-top: 16px;\
+}\
+window.sol-dark .sol-rule {\
+  border-bottom-color: rgba(255, 244, 230, 0.16);\
+}\
+.sol-row {\
+  border-bottom: 1px solid rgba(58, 46, 36, 0.14);\
+  padding-top: 7px;\
+  padding-bottom: 7px;\
+}\
+window.sol-dark .sol-row {\
+  border-bottom-color: rgba(255, 244, 230, 0.16);\
+}\
+button.sol-action {\
+  background-color: #FEFCF8;\
+  background-image: none;\
+  border: 1px solid rgba(58, 46, 36, 0.16);\
+  border-radius: 999px;\
+  box-shadow: none;\
+  padding: 6px 14px;\
+  font-size: 13.5px;\
+  font-weight: 600;\
+  min-height: 0;\
+  min-width: 0;\
+  color: #3A2E24;\
+}\
+window.sol-dark button.sol-action {\
+  background-color: #2A221C;\
+  color: #F6EDE3;\
+  border-color: rgba(255, 244, 230, 0.22);\
+}\
 .sol-tile {\
   background-color: #FEFCF8;\
   border-radius: 18px;\
@@ -1481,7 +1604,7 @@ window.sol-dark .sol-page {\
   background-color: transparent;\
   border-color: transparent;\
 }\
-button.sol-pill, menubutton.sol-pill {\
+button.sol-pill {\
   background-color: #FEFCF8;\
   background-image: none;\
   border: 1px solid rgba(58, 46, 36, 0.16);\
@@ -1492,15 +1615,45 @@ button.sol-pill, menubutton.sol-pill {\
   min-width: 0;\
   color: #3A2E24;\
 }\
+menubutton.sol-pill {\
+  background: none;\
+  background-image: none;\
+  border: none;\
+  box-shadow: none;\
+  padding: 0;\
+  min-height: 0;\
+  min-width: 0;\
+}\
+menubutton.sol-pill > button {\
+  background-color: #FEFCF8;\
+  background-image: none;\
+  border: 1px solid rgba(58, 46, 36, 0.16);\
+  border-radius: 999px;\
+  box-shadow: none;\
+  padding: 6px 13px;\
+  min-height: 0;\
+  min-width: 0;\
+  color: #3A2E24;\
+}\
+menubutton.sol-pill arrow {\
+  opacity: 0;\
+  min-width: 0;\
+  min-height: 0;\
+  margin: 0;\
+  padding: 0;\
+}\
 button.sol-pill:hover, button.sol-pill:active, button.sol-pill:checked,\
-menubutton.sol-pill:hover, menubutton.sol-pill:active {\
+menubutton.sol-pill > button:hover, menubutton.sol-pill > button:active,\
+menubutton.sol-pill > button:checked {\
   background-color: #FEFCF8;\
   background-image: none;\
   box-shadow: none;\
   color: #3A2E24;\
 }\
-window.sol-dark button.sol-pill, window.sol-dark menubutton.sol-pill,\
-window.sol-dark button.sol-pill:hover, window.sol-dark menubutton.sol-pill:hover {\
+window.sol-dark button.sol-pill,\
+window.sol-dark button.sol-pill:hover,\
+window.sol-dark menubutton.sol-pill > button,\
+window.sol-dark menubutton.sol-pill > button:hover {\
   background-color: #2A221C;\
   color: #F6EDE3;\
   border-color: rgba(255, 244, 230, 0.22);\
@@ -1514,11 +1667,28 @@ switch.sol-switch:checked slider {\
   background-color: #FEFCF8;\
   border: none;\
 }\
-.sol-tile:focus, .sol-pill:focus, .sol-shelf-row:focus, switch.sol-switch:focus {\
+.sol-tile:focus, button.sol-pill:focus, .sol-shelf-row:focus, switch.sol-switch:focus,\
+menubutton.sol-pill:focus, menubutton.sol-pill > button:focus, button.sol-action:focus {\
+  outline: none;\
+  box-shadow: none;\
+}\
+.sol-tile:focus-visible, button.sol-pill:focus-visible, .sol-shelf-row:focus-visible,\
+switch.sol-switch:focus-visible, menubutton.sol-pill > button:focus-visible,\
+button.sol-action:focus-visible {\
   outline: 2px solid #E8913A;\
   outline-offset: 2px;\
 }\
 .sol-shelf-row { padding: 7px 9px; }\
+.sol-journal {\
+  background-color: #FEFCF8;\
+  border: 1px solid rgba(58, 46, 36, 0.16);\
+  border-radius: 999px;\
+  padding: 7px 16px;\
+}\
+window.sol-dark .sol-journal {\
+  background-color: #2A221C;\
+  border-color: rgba(255, 244, 230, 0.22);\
+}\
 .sol-chip {\
   border-radius: 2px;\
   border: 1.5px dashed #A99C86;\
@@ -1762,7 +1932,7 @@ fn paint_pairing(ui: &Ui, view: &View) {
     if !view.paired {
         ui.pill_label.set_text("not paired");
         ui.lead.set_text("not paired");
-        show_line(&ui.soft, Some("connect a journal"));
+        show_connect(ui, Some("connect a journal"));
         apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         ui.journal.remove_css_class("sol-paired");
         ui.journal_label.set_text("your · journal");
@@ -1775,31 +1945,37 @@ fn paint_pairing(ui: &Ui, view: &View) {
             let line = format!("offline · {count} waiting");
             ui.pill_label.set_text(&line);
             ui.lead.set_text(&line);
-            show_line(&ui.soft, None);
+            show_connect(ui, None);
             apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         } else {
             ui.pill_label.set_text("");
             ui.lead.set_text("");
-            show_line(&ui.soft, None);
+            show_connect(ui, None);
             apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         }
         return;
     }
     ui.pill_label.set_text("connected");
     ui.lead.set_text("all caught up");
-    show_line(&ui.soft, Some("on this device"));
+    show_connect(ui, Some("on this device"));
     apply_mark_kind(&ui.pill_mark, MarkKind::Dot);
 }
 
-fn show_line(label: &gtk::Label, text: Option<&str>) {
+fn show_connect(ui: &Ui, text: Option<&str>) {
     match text {
+        Some("connect a journal") => {
+            ui.connect.set_visible(true);
+            ui.soft.set_visible(false);
+        }
         Some(text) => {
-            label.set_text(text);
-            label.set_visible(true);
+            ui.connect.set_visible(false);
+            ui.soft.set_text(text);
+            ui.soft.set_visible(true);
         }
         None => {
-            label.set_text("");
-            label.set_visible(false);
+            ui.connect.set_visible(false);
+            ui.soft.set_text("");
+            ui.soft.set_visible(false);
         }
     }
 }

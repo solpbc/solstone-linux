@@ -44,6 +44,9 @@ pub struct TrayModel {
     pub pause_visible: bool,
     pub resume_visible: bool,
     pub open_journal_enabled: bool,
+    pub health_state: crate::sync_health::HealthState,
+    /// Whole seconds left on a timed pause. Zero is "until I resume" or none.
+    pub pause_seconds: i32,
 }
 
 pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
@@ -187,6 +190,8 @@ pub fn build_with_open_journal(
         pause_visible: status != TrayStatus::Paused,
         resume_visible: status == TrayStatus::Paused,
         open_journal_enabled,
+        health_state: health.state,
+        pause_seconds: pause,
     }
 }
 

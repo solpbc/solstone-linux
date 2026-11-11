@@ -185,7 +185,8 @@ impl DesktopComponent {
             }
             crate::tray::TrayCommand::Pause(_)
             | crate::tray::TrayCommand::PauseIndefinite
-            | crate::tray::TrayCommand::Resume => {
+            | crate::tray::TrayCommand::Resume
+            | crate::tray::TrayCommand::Quit => {
                 Err("observer command must be routed by the run-loop owner".into())
             }
         }
