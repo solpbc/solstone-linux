@@ -1577,9 +1577,10 @@ fn create_settings_page(
     container.append(&restart_detail_label);
     container.append(&restart_button);
     container.append(&save_error_label);
+    // The Obsidian flow lives on the shell's Obsidian page, not on this page.
     let (obsidian_section, update_obsidian) =
         create_obsidian_section(Rc::clone(&controller), Rc::clone(&changed));
-    container.append(&obsidian_section);
+    crate::deck::adopt_obsidian(&obsidian_section);
     scrolled.set_child(Some(&container));
 
     {
@@ -2184,57 +2185,51 @@ fn format_note_count(count: u64) -> String {
     format_integer(count.min(i64::MAX as u64) as i64)
 }
 
+/// A line in the Obsidian section, in the pane's width.
+fn obsidian_line(text: Option<&str>) -> gtk::Label {
+    let label = crate::deck::note_label(text);
+    label.set_visible(true);
+    label
+}
+
 /// Picks and shows the Obsidian source: found vaults or a chosen folder, the refusal
 /// line, the warning before the first send, progress, status and turning it off.
+/// It sits on the shell's Obsidian page, under the page's own name and breath.
 fn create_obsidian_section(
     controller: Rc<RefCell<Controller>>,
     changed: Changed,
 ) -> (gtk::Box, Rc<dyn Fn()>) {
-    let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    section.set_margin_top(12);
-    section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    let heading = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_HEADING));
-    heading.set_halign(gtk::Align::Start);
-    heading.add_css_class("heading");
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let heading = crate::deck::section_label(solstone_linux::copy::OBSIDIAN_VAULT_LABEL);
+    heading.add_css_class("sol-rule");
     section.append(&heading);
-    let explain = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_EXPLAIN));
-    explain.set_halign(gtk::Align::Start);
-    explain.set_wrap(true);
-    section.append(&explain);
 
     // Turning it on.
     let off_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let found_label = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_FOUND_LABEL));
-    found_label.set_halign(gtk::Align::Start);
+    let found_label = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_FOUND_LABEL));
     off_box.append(&found_label);
     let found_list = gtk::Box::new(gtk::Orientation::Vertical, 4);
     off_box.append(&found_list);
-    let none_found = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_NONE_FOUND));
-    none_found.set_halign(gtk::Align::Start);
-    none_found.set_wrap(true);
+    let none_found = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_NONE_FOUND));
     off_box.append(&none_found);
-    let choose_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CHOOSE_FOLDER);
-    choose_button.set_halign(gtk::Align::Start);
+    let choose_button = help_button(solstone_linux::copy::OBSIDIAN_CHOOSE_FOLDER);
     off_box.append(&choose_button);
-    let refusal_label = gtk::Label::new(None);
-    refusal_label.set_halign(gtk::Align::Start);
-    refusal_label.set_wrap(true);
+    let refusal_label = obsidian_line(None);
     refusal_label.set_visible(false);
     off_box.append(&refusal_label);
     section.append(&off_box);
 
     // The warning before the first send.
     let warning_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let warning_heading = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_WARNING_HEADING));
-    warning_heading.set_halign(gtk::Align::Start);
+    let warning_heading = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_WARNING_HEADING));
+    warning_heading.remove_css_class("sol-faint");
+    warning_heading.add_css_class("sol-ink");
     warning_box.append(&warning_heading);
-    let warning_detail = gtk::Label::new(None);
-    warning_detail.set_halign(gtk::Align::Start);
-    warning_detail.set_wrap(true);
+    let warning_detail = obsidian_line(None);
     warning_box.append(&warning_detail);
     let warning_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let continue_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CONTINUE);
-    let cancel_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CANCEL);
+    let continue_button = help_button(solstone_linux::copy::OBSIDIAN_CONTINUE);
+    let cancel_button = help_button(solstone_linux::copy::OBSIDIAN_CANCEL);
     warning_actions.append(&continue_button);
     warning_actions.append(&cancel_button);
     warning_box.append(&warning_actions);
@@ -2242,37 +2237,27 @@ fn create_obsidian_section(
 
     // While it's on.
     let on_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    let vault_label = gtk::Label::new(None);
-    vault_label.set_halign(gtk::Align::Start);
+    let vault_label = obsidian_line(None);
+    vault_label.remove_css_class("sol-faint");
+    vault_label.add_css_class("sol-ink");
     on_box.append(&vault_label);
-    let state_label = gtk::Label::new(None);
-    state_label.set_halign(gtk::Align::Start);
+    let state_label = obsidian_line(None);
     on_box.append(&state_label);
-    let detail_label = gtk::Label::new(None);
-    detail_label.set_halign(gtk::Align::Start);
-    detail_label.set_wrap(true);
+    let detail_label = obsidian_line(None);
     on_box.append(&detail_label);
-    let progress_label = gtk::Label::new(None);
-    progress_label.set_halign(gtk::Align::Start);
+    let progress_label = obsidian_line(None);
     on_box.append(&progress_label);
-    let last_checked_label = gtk::Label::new(None);
-    last_checked_label.set_halign(gtk::Align::Start);
+    let last_checked_label = obsidian_line(None);
     on_box.append(&last_checked_label);
-    let waiting_label = gtk::Label::new(None);
-    waiting_label.set_halign(gtk::Align::Start);
+    let waiting_label = obsidian_line(None);
     on_box.append(&waiting_label);
-    let not_on_device_label = gtk::Label::new(None);
-    not_on_device_label.set_halign(gtk::Align::Start);
+    let not_on_device_label = obsidian_line(None);
     on_box.append(&not_on_device_label);
-    let too_large_label = gtk::Label::new(None);
-    too_large_label.set_halign(gtk::Align::Start);
+    let too_large_label = obsidian_line(None);
     on_box.append(&too_large_label);
-    let turn_off_note = gtk::Label::new(Some(solstone_linux::copy::OBSIDIAN_TURN_OFF_NOTE));
-    turn_off_note.set_halign(gtk::Align::Start);
-    turn_off_note.set_wrap(true);
+    let turn_off_note = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_TURN_OFF_NOTE));
     on_box.append(&turn_off_note);
-    let turn_off_button = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_TURN_OFF);
-    turn_off_button.set_halign(gtk::Align::Start);
+    let turn_off_button = help_button(solstone_linux::copy::OBSIDIAN_TURN_OFF);
     on_box.append(&turn_off_button);
     section.append(&on_box);
 
@@ -2382,11 +2367,15 @@ fn create_obsidian_section(
                 }
                 for vault in &found {
                     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    row.add_css_class("sol-row");
                     let name = gtk::Label::new(Some(&vault.name));
+                    name.add_css_class("sol-ink");
                     name.set_halign(gtk::Align::Start);
+                    name.set_xalign(0.0);
                     name.set_hexpand(true);
-                    let use_button =
-                        gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_USE_THIS);
+                    name.set_wrap(true);
+                    let use_button = help_button(solstone_linux::copy::OBSIDIAN_USE_THIS);
+                    use_button.set_valign(gtk::Align::Center);
                     let controller = Rc::clone(&controller);
                     let changed = Rc::clone(&changed);
                     let path = vault.path.clone();
@@ -2436,11 +2425,9 @@ fn create_obsidian_section(
             state_label.set_visible(lines.state.is_some());
             detail_label.set_text(lines.detail.unwrap_or_default());
             detail_label.set_visible(lines.detail.is_some());
+            // The section's heading already says `vault`.
             if let Some(vault) = &status.vault {
-                vault_label.set_text(&format!(
-                    "{} {vault}",
-                    solstone_linux::copy::OBSIDIAN_VAULT_LABEL
-                ));
+                vault_label.set_text(vault);
             }
             match status.first_sync {
                 Some(sync) => {

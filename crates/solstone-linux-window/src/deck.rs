@@ -244,6 +244,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     other_box.append(&journal_slot);
     other_box.set_visible(false);
     SLOTS.with(|slot| *slot.borrow_mut() = Some((journal_slot.clone(), help_slot.clone())));
+    OBSIDIAN_SLOT.with(|slot| *slot.borrow_mut() = Some(built.page.obsidian_extra.clone()));
 
     let shelf_button = gtk::Button::new();
     shelf_button.add_css_class("sol-glyph");
@@ -488,6 +489,8 @@ thread_local! {
     static SHOW_HOME: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
     static SHOW_JOURNAL: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
     static SLOTS: RefCell<Option<(gtk::Box, gtk::Box)>> = const { RefCell::new(None) };
+    /// The Obsidian page's vault section, where the working flow lands.
+    static OBSIDIAN_SLOT: RefCell<Option<gtk::Box>> = const { RefCell::new(None) };
     /// `quit solstone` on help, shown while no panel menu carries it.
     static QUIT_ROW: RefCell<Option<gtk::Widget>> = const { RefCell::new(None) };
 }
@@ -518,6 +521,16 @@ pub fn adopt_pages(
     });
     quit.set_visible(quit_on_help());
     QUIT_ROW.with(|slot| *slot.borrow_mut() = Some(quit.as_ref().clone().upcast()));
+}
+
+/// Put the Obsidian flow (vaults found, choose a folder, the warning before the
+/// first send, turn off) on the Obsidian page.
+pub fn adopt_obsidian(section: &impl IsA<gtk::Widget>) {
+    OBSIDIAN_SLOT.with(|slot| {
+        if let Some(slot) = slot.borrow().as_ref() {
+            slot.append(section);
+        }
+    });
 }
 
 /// The window carries quit while the panel menu is not up, the rule the header's
@@ -619,7 +632,6 @@ struct Page {
     screen_extra: gtk::Box,
     browsers_extra: gtk::Box,
     obsidian_extra: gtk::Box,
-    obsidian_turn_off: gtk::Button,
     browsers_names: gtk::Label,
     activity: gtk::Switch,
     titles: gtk::Switch,
@@ -671,10 +683,6 @@ impl Page {
         self.screen_extra.set_visible(screen);
         self.browsers_extra.set_visible(id == TileId::Browsers);
         self.obsidian_extra.set_visible(id == TileId::Obsidian);
-        self.obsidian_turn_off.set_visible(matches!(
-            view.obsidian,
-            StateWord::On | StateWord::Paused | StateWord::NeedsAttention
-        ));
         if let Some(names) = view.browsers_sub.as_deref() {
             self.browsers_names.set_text(names);
             self.browsers_names.set_visible(true);
@@ -689,19 +697,15 @@ impl Page {
         self.so_far_row.set_visible(so_far.is_some());
         set_fact(&self.last, last.as_deref());
         self.last_row.set_visible(last.is_some());
-        let show_switch = id != TileId::Browsers;
+        // Browsers has no switch here, and Obsidian is turned on by choosing a vault
+        // below, so neither shows one.
+        let show_switch = matches!(id, TileId::Screen | TileId::Terminal);
         self.switch.set_visible(show_switch);
         if show_switch {
             let on = match id {
                 TileId::Screen => view.screen_on,
                 TileId::Terminal => view.terminal_on,
-                TileId::Obsidian => {
-                    matches!(
-                        word,
-                        StateWord::On | StateWord::Paused | StateWord::NeedsAttention
-                    )
-                }
-                TileId::Browsers => false,
+                TileId::Browsers | TileId::Obsidian => false,
             };
             self.painting.set(true);
             self.switch.set_active(on);
@@ -1054,7 +1058,7 @@ fn make_source_page(status: gtk::Box) -> Page {
         save_note,
     ) = screen_settings();
     let (browsers_extra, browsers_names) = browsers_settings();
-    let (obsidian_extra, obsidian_turn_off) = obsidian_settings();
+    let obsidian_extra = obsidian_settings();
     page_box.append(&screen_extra);
     page_box.append(&browsers_extra);
     page_box.append(&obsidian_extra);
@@ -1089,7 +1093,6 @@ fn make_source_page(status: gtk::Box) -> Page {
         screen_extra,
         browsers_extra,
         obsidian_extra,
-        obsidian_turn_off,
         browsers_names,
         activity,
         titles,
@@ -1186,25 +1189,12 @@ fn browsers_settings() -> (gtk::Box, gtk::Label) {
     (box_, names)
 }
 
-fn obsidian_settings() -> (gtk::Box, gtk::Button) {
+/// The Obsidian page's vault section. It holds the working flow from the window's
+/// pages, adopted here once they are built, which carries its own heading.
+fn obsidian_settings() -> gtk::Box {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let head = section_label(solstone_linux::copy::OBSIDIAN_VAULT_LABEL);
-    head.add_css_class("sol-rule");
-    box_.append(&head);
-    box_.append(&note_label(Some(
-        solstone_linux::copy::OBSIDIAN_FOUND_LABEL,
-    )));
-    box_.append(&note_label(Some(solstone_linux::copy::OBSIDIAN_NONE_FOUND)));
-    let choose = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_CHOOSE_FOLDER);
-    choose.add_css_class("sol-action");
-    choose.set_halign(gtk::Align::Start);
-    box_.append(&choose);
-    let turn_off = gtk::Button::with_label(solstone_linux::copy::OBSIDIAN_TURN_OFF);
-    turn_off.add_css_class("sol-action");
-    turn_off.set_halign(gtk::Align::Start);
-    box_.append(&turn_off);
     box_.set_visible(false);
-    (box_, turn_off)
+    box_
 }
 
 fn page_breath(id: TileId) -> &'static str {
@@ -3359,12 +3349,24 @@ fn watch_service(
     selected: Rc<Cell<Option<TileId>>>,
 ) {
     let frame = std::env::var("SOLSTONE_FRAME_PNG").is_ok_and(|path| !path.is_empty());
-    let released = Rc::new(Cell::new(false));
+    // A frame of a page built after the first paint (the Obsidian flow, help) can
+    // ask to be taken at a set time instead of at the service's first answer.
+    let frame_after = std::env::var("SOLSTONE_FRAME_AFTER_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| (1..=60_000).contains(ms));
+    let released = Rc::new(Cell::new(frame_after.is_some()));
     if frame {
         sun_bg::set_frame_hold(true);
         let released = Rc::clone(&released);
         let window = ui.window.clone();
-        glib::timeout_add_local_once(Duration::from_secs(8), move || {
+        let wait = frame_after.map_or(Duration::from_secs(8), Duration::from_millis);
+        glib::timeout_add_local_once(wait, move || {
+            if frame_after.is_some() {
+                sun_bg::set_frame_hold(false);
+                sun_bg::try_frame_file(&window);
+                return;
+            }
             if released.get() {
                 return;
             }
