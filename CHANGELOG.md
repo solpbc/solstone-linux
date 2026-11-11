@@ -13,6 +13,10 @@ and this project adheres to Semantic Versioning.
 - once you're paired, the bottom of the home page shows your journal's mark and its two words instead of two orange squares.
 - in Brave, the solstone extension now reaches the solstone app on this computer.
 - the "draw cursor" and "start paused" switches under "this computer" now save when you flip them, instead of going back on their own.
+- "updates" was empty. it now shows the app's version, your journal's version once the app knows it, and how to update.
+- "help" now looks like the rest of the window. it shows the app's version, and on a desktop with no panel icon it has "quit solstone", which stops the app and closes the window.
+- while paused, the screen tile no longer says "activity is still on" when desktop activity is paused too.
+- Obsidian's page no longer shows "turn off" while Obsidian is off, and the terminal page no longer says the same thing twice.
 
 ## [2.0.39] - 2026-11-11
 

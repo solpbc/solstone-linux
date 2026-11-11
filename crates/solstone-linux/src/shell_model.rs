@@ -71,6 +71,18 @@ pub fn screen_switch_write(turn_on: bool) -> ScreenSwitchWrite {
     }
 }
 
+/// Whether desktop activity is running now. A pause holds it unless the owner chose
+/// to keep it on through the pause.
+#[must_use]
+pub fn activity_running(
+    activity_source: bool,
+    activity_only: bool,
+    paused: bool,
+    through_pause: bool,
+) -> bool {
+    activity_source && !activity_only && (!paused || through_pause)
+}
+
 #[must_use]
 pub fn screen_tile(
     desktop_capture: bool,
@@ -946,6 +958,30 @@ mod tests {
             }
         );
         assert!(!screen_switch_write(false).desktop_capture);
+    }
+
+    #[test]
+    fn a_pause_holds_activity_unless_it_is_kept_on() {
+        assert!(activity_running(true, false, false, false));
+        assert!(!activity_running(true, false, true, false));
+        assert!(activity_running(true, false, true, true));
+        assert!(!activity_running(false, false, true, true));
+        // Kept off through the pause, the paused screen tile does not say activity is on.
+        let held = screen_tile(
+            true,
+            false,
+            activity_running(true, false, true, false),
+            TrayStatus::Paused,
+        );
+        assert_eq!(held.word, StateWord::Paused);
+        assert_ne!(held.sub, ScreenSub::ActivityStillOn);
+        let kept = screen_tile(
+            true,
+            false,
+            activity_running(true, false, true, true),
+            TrayStatus::Paused,
+        );
+        assert_eq!(kept.sub, ScreenSub::ActivityStillOn);
     }
 
     #[test]

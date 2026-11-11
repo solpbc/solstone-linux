@@ -149,6 +149,8 @@ pub struct AboutBlock {
     pub text: String,
     pub host: HostFacts,
     pub journal_line: String,
+    /// The paired journal's version, without a leading `v`, when it is known.
+    pub journal_version: Option<String>,
     pub journal_current: bool,
     pub journal_seen_at: Option<u64>,
 }
@@ -164,7 +166,7 @@ impl AboutBlock {
         current: bool,
         now: u64,
     ) -> Self {
-        let (journal_line, journal_current, journal_seen_at) = match saved {
+        let (journal_line, journal_version, journal_current, journal_seen_at) = match saved {
             Some(saved)
                 if crate::private_link::sanitize_journal_version(&saved.version).is_some() =>
             {
@@ -180,9 +182,10 @@ impl AboutBlock {
                     && saved.observed_at >= 0.0
                     && saved.observed_at < u64::MAX as f64)
                     .then_some(saved.observed_at as u64);
-                (line, current, seen)
+                let version = saved.version.trim_start_matches('v').to_owned();
+                (line, Some(version), current, seen)
             }
-            _ => ("journal unknown".into(), false, None),
+            _ => ("journal unknown".into(), None, false, None),
         };
         let mut displayed = journal_line.clone();
         if !journal_current && let Some(seen) = journal_seen_at {
@@ -202,6 +205,7 @@ impl AboutBlock {
             text: format!("{own}\n{displayed}"),
             host,
             journal_line,
+            journal_version,
             journal_current,
             journal_seen_at,
         }

@@ -238,6 +238,13 @@ pub const LOGS_SAVING: &str = "saving copy…";
 pub const LOGS_SAVED: &str = "copy saved.";
 pub const LOGS_SAVE_FAILED: &str = "couldn't save the copy. try saving to another folder.";
 pub const LOGS_FILENAME: &str = "solstone-logs.txt";
+pub const ABOUT_HEADING: &str = "about solstone";
+pub const ABOUT_MADE_BY: &str = "made by sol pbc.";
+pub const QUIT: &str = "quit solstone";
+pub const QUIT_FAILED: &str = "couldn't stop the solstone app. try again.";
+pub const UPDATES_JOURNAL_VERSION: &str = "journal version";
+pub const UPDATES_HOW: &str =
+    "the app doesn't update itself. to update, run the solstone installer again with --upgrade.";
 pub const ACTION_START: &str = "start the solstone app";
 pub const ACTION_STARTING: &str = "starting…";
 pub const STATUS_START_DISCLOSURE: &str = "this starts the solstone app now and at sign-in. opening this window alone doesn't start intake.";

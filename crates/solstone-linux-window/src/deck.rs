@@ -88,6 +88,7 @@ struct ServiceSnap {
     capture: String,
     capture_attention: bool,
     activity_source: bool,
+    activity_through_pause: bool,
     durable: String,
     health: String,
     last_sync: Option<f64>,
@@ -107,6 +108,7 @@ impl ServiceSnap {
             capture: String::new(),
             capture_attention: false,
             activity_source: true,
+            activity_through_pause: false,
             durable: String::new(),
             health: String::new(),
             last_sync: None,
@@ -168,6 +170,14 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     greet_spacer.set_hexpand(true);
     greet_row.append(&greet_spacer);
     let (pause_button, resume_button) = pause_controls();
+    // The paused greeting is two lines. The pills keep their own height beside it.
+    for widget in [
+        pause_button.upcast_ref::<gtk::Widget>(),
+        resume_button.upcast_ref(),
+        pill.upcast_ref(),
+    ] {
+        widget.set_valign(gtk::Align::Center);
+    }
     greet_row.append(&pause_button);
     greet_row.append(&resume_button);
     greet_row.append(&pill);
@@ -220,16 +230,18 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     other.add_css_class("sol-ink");
     other.set_halign(gtk::Align::Start);
     other.set_valign(gtk::Align::Start);
-    // The journal and help pages are built later, with the rest of the window,
-    // and land in these slots under the row's name.
+    // The journal and help pages are built later, with the rest of the window.
+    // The journal lands under the row's name. Help lands on its own card, which
+    // carries its title.
     let journal_slot = page_slot();
     let help_slot = page_slot();
+    help_slot.add_css_class("sol-pane");
+    help_slot.add_css_class("sol-flush");
     let other_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     other_box.set_hexpand(true);
     other_box.set_vexpand(true);
     other_box.append(&other);
     other_box.append(&journal_slot);
-    other_box.append(&help_slot);
     other_box.set_visible(false);
     SLOTS.with(|slot| *slot.borrow_mut() = Some((journal_slot.clone(), help_slot.clone())));
 
@@ -240,10 +252,13 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     shelf_button.set_child(Some(&glyph_widget(GLYPH_SIDE)));
     shelf_button.set_visible(false);
     let (computer, cursor_switch, paused_switch, segment_value, computer_note) = computer_page();
+    let (updates, updates_journal_row, updates_journal) = updates_page();
 
     chrome.body.append(&column);
     chrome.body.append(&other_box);
     chrome.body.append(&computer);
+    chrome.body.append(&updates);
+    chrome.body.append(&help_slot);
     // The shelf glyph sits on the window, not in this slot.
     chrome.header_extra.set_visible(false);
     place_shelf_button(&chrome.body, &shelf_button);
@@ -260,6 +275,9 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         journal_slot,
         help_slot,
         computer: computer.clone(),
+        updates,
+        updates_journal_row,
+        updates_journal,
         cursor: cursor_switch,
         start_paused: paused_switch,
         computer_note,
@@ -470,6 +488,8 @@ thread_local! {
     static SHOW_HOME: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
     static SHOW_JOURNAL: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
     static SLOTS: RefCell<Option<(gtk::Box, gtk::Box)>> = const { RefCell::new(None) };
+    /// `quit solstone` on help, shown while no panel menu carries it.
+    static QUIT_ROW: RefCell<Option<gtk::Widget>> = const { RefCell::new(None) };
 }
 
 /// Open the journal row, where pairing lives.
@@ -481,8 +501,13 @@ pub fn show_journal() {
     });
 }
 
-/// Put the journal and help pages under their shelf rows.
-pub fn adopt_pages(journal: &impl IsA<gtk::Widget>, help: &impl IsA<gtk::Widget>) {
+/// Put the journal and help pages under their shelf rows. `quit` is help's quit
+/// row: it shows only while no panel menu carries `quit solstone`.
+pub fn adopt_pages(
+    journal: &impl IsA<gtk::Widget>,
+    help: &impl IsA<gtk::Widget>,
+    quit: &impl IsA<gtk::Widget>,
+) {
     SLOTS.with(|slot| {
         if let Some((journal_slot, help_slot)) = slot.borrow().as_ref() {
             journal.set_vexpand(true);
@@ -491,6 +516,15 @@ pub fn adopt_pages(journal: &impl IsA<gtk::Widget>, help: &impl IsA<gtk::Widget>
             help_slot.append(help);
         }
     });
+    quit.set_visible(quit_on_help());
+    QUIT_ROW.with(|slot| *slot.borrow_mut() = Some(quit.as_ref().clone().upcast()));
+}
+
+/// The window carries quit while the panel menu is not up, the rule the header's
+/// `pause` follows.
+fn quit_on_help() -> bool {
+    let host = HOST_UP.with(|cell| cell.get());
+    shell_model::header_shows_pause(host == Some(true), host.is_none())
 }
 
 fn page_slot() -> gtk::Box {
@@ -520,6 +554,9 @@ struct Ui {
     journal_slot: gtk::Box,
     help_slot: gtk::Box,
     computer: gtk::Box,
+    updates: gtk::Box,
+    updates_journal_row: gtk::Box,
+    updates_journal: gtk::Label,
     cursor: gtk::Switch,
     start_paused: gtk::Switch,
     computer_note: gtk::Label,
@@ -580,9 +617,9 @@ struct Page {
     last_row: gtk::Box,
     last: gtk::Label,
     screen_extra: gtk::Box,
-    terminal_extra: gtk::Box,
     browsers_extra: gtk::Box,
     obsidian_extra: gtk::Box,
+    obsidian_turn_off: gtk::Button,
     browsers_names: gtk::Label,
     activity: gtk::Switch,
     titles: gtk::Switch,
@@ -632,9 +669,12 @@ impl Page {
         let screen = id == TileId::Screen;
         self.sound.set_visible(screen);
         self.screen_extra.set_visible(screen);
-        self.terminal_extra.set_visible(id == TileId::Terminal);
         self.browsers_extra.set_visible(id == TileId::Browsers);
         self.obsidian_extra.set_visible(id == TileId::Obsidian);
+        self.obsidian_turn_off.set_visible(matches!(
+            view.obsidian,
+            StateWord::On | StateWord::Paused | StateWord::NeedsAttention
+        ));
         if let Some(names) = view.browsers_sub.as_deref() {
             self.browsers_names.set_text(names);
             self.browsers_names.set_visible(true);
@@ -1013,11 +1053,9 @@ fn make_source_page(status: gtk::Box) -> Page {
         save,
         save_note,
     ) = screen_settings();
-    let terminal_extra = terminal_settings();
     let (browsers_extra, browsers_names) = browsers_settings();
-    let obsidian_extra = obsidian_settings();
+    let (obsidian_extra, obsidian_turn_off) = obsidian_settings();
     page_box.append(&screen_extra);
-    page_box.append(&terminal_extra);
     page_box.append(&browsers_extra);
     page_box.append(&obsidian_extra);
 
@@ -1049,9 +1087,9 @@ fn make_source_page(status: gtk::Box) -> Page {
         last_row,
         last,
         screen_extra,
-        terminal_extra,
         browsers_extra,
         obsidian_extra,
+        obsidian_turn_off,
         browsers_names,
         activity,
         titles,
@@ -1135,18 +1173,6 @@ fn screen_settings() -> (
     )
 }
 
-fn terminal_settings() -> gtk::Box {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let head = section_label("sessions");
-    head.add_css_class("sol-rule");
-    box_.append(&head);
-    box_.append(&note_label(Some(
-        solstone_linux::copy::SETTINGS_TERMINAL_HELP,
-    )));
-    box_.set_visible(false);
-    box_
-}
-
 fn browsers_settings() -> (gtk::Box, gtk::Label) {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let head = section_label("browsers");
@@ -1160,7 +1186,7 @@ fn browsers_settings() -> (gtk::Box, gtk::Label) {
     (box_, names)
 }
 
-fn obsidian_settings() -> gtk::Box {
+fn obsidian_settings() -> (gtk::Box, gtk::Button) {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let head = section_label(solstone_linux::copy::OBSIDIAN_VAULT_LABEL);
     head.add_css_class("sol-rule");
@@ -1178,7 +1204,7 @@ fn obsidian_settings() -> gtk::Box {
     turn_off.set_halign(gtk::Align::Start);
     box_.append(&turn_off);
     box_.set_visible(false);
-    box_
+    (box_, turn_off)
 }
 
 fn page_breath(id: TileId) -> &'static str {
@@ -1241,7 +1267,7 @@ fn count_label(count: usize) -> String {
     }
 }
 
-fn note_label(text: Option<&str>) -> gtk::Label {
+pub(crate) fn note_label(text: Option<&str>) -> gtk::Label {
     let label = gtk::Label::new(text);
     label.add_css_class("sol-faint");
     label.set_halign(gtk::Align::Start);
@@ -1252,7 +1278,7 @@ fn note_label(text: Option<&str>) -> gtk::Label {
     label
 }
 
-fn fact_row(name: &str) -> (gtk::Box, gtk::Label) {
+pub(crate) fn fact_row(name: &str) -> (gtk::Box, gtk::Label) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.add_css_class("sol-row");
     let label = gtk::Label::new(Some(name));
@@ -1290,7 +1316,7 @@ fn setting_row(name: &str) -> (gtk::Box, gtk::Switch) {
     (row, switch)
 }
 
-fn section_label(text: &str) -> gtk::Label {
+pub(crate) fn section_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.add_css_class("sol-section");
     label.add_css_class("sol-faint");
@@ -1755,6 +1781,50 @@ fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label, gtk::Labe
     (page, cursor, start_paused, segment, note)
 }
 
+/// The app's version, the paired journal's version when it is known, and how to
+/// update. There is no updater here: the installer's `--upgrade` updates the app.
+fn updates_page() -> (gtk::Box, gtk::Box, gtk::Label) {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    page.add_css_class("sol-pane");
+    page.add_css_class("sol-flush");
+    page.set_visible(false);
+    page.set_hexpand(true);
+    page.set_vexpand(true);
+    page.set_valign(gtk::Align::Fill);
+    let title = gtk::Label::new(Some("updates"));
+    title.add_css_class("sol-name");
+    title.add_css_class("sol-display");
+    title.add_css_class("sol-ink");
+    title.set_halign(gtk::Align::Start);
+    page.append(&title);
+    let (app_row, app_version) = fact_row(solstone_linux::copy::STATUS_VERSION);
+    app_version.set_text(env!("CARGO_PKG_VERSION"));
+    page.append(&app_row);
+    let (journal_row, journal_version) = fact_row(solstone_linux::copy::UPDATES_JOURNAL_VERSION);
+    journal_row.set_visible(false);
+    page.append(&journal_row);
+    page.append(&note_label(Some(solstone_linux::copy::UPDATES_HOW)));
+    (page, journal_row, journal_version)
+}
+
+/// The journal's version is the one the about lines read: only a version saved
+/// for the journal this computer is paired with now.
+fn paint_updates(ui: &Ui) {
+    let config = config::load_config(config::ConfigPaths::default()).config;
+    let about = solstone_linux::about::AboutBlock::snapshot(
+        &config,
+        &solstone_linux::about::host_facts(),
+        solstone_linux::about::now(),
+    );
+    match about.journal_version {
+        Some(version) => {
+            ui.updates_journal.set_text(&version);
+            ui.updates_journal_row.set_visible(true);
+        }
+        None => ui.updates_journal_row.set_visible(false),
+    }
+}
+
 fn place_shelf_button(body: &gtk::Box, button: &gtk::Button) {
     let Some(parent) = body.parent() else {
         return;
@@ -1907,6 +1977,11 @@ fn apply_view(ui: &Ui, view: &View) {
             ui.resume_button.set_visible(false);
         }
     }
+    QUIT_ROW.with(|slot| {
+        if let Some(row) = slot.borrow().as_ref() {
+            row.set_visible(quit_on_help());
+        }
+    });
     paint_pairing(ui, view);
     let words = [view.screen, view.terminal, view.browsers, view.obsidian];
     let subs = tile_subs(view);
@@ -2072,10 +2147,16 @@ fn apply_layout(
     if let Some(column) = deck_column(&ui.grid) {
         column.set_visible(home);
     }
-    ui.other_box.set_visible(!home && !computer);
-    ui.journal_slot.set_visible(row.get() == ShelfRow::Journal);
+    let journal = row.get() == ShelfRow::Journal;
+    ui.other_box.set_visible(journal);
+    ui.journal_slot.set_visible(journal);
     ui.help_slot.set_visible(row.get() == ShelfRow::Help);
     ui.computer.set_visible(computer);
+    let updates = row.get() == ShelfRow::Updates;
+    if updates {
+        paint_updates(ui);
+    }
+    ui.updates.set_visible(updates);
     if !home {
         ui.other.set_text(shelf_label(row.get()));
     }
@@ -2113,7 +2194,7 @@ fn apply_layout(
         ui.pane.set_size_request(-1, -1);
         ui.pane.set_margin_start(ui.body.margin_start());
         ui.pane.set_margin_top(sun_bg::HEADER_HEIGHT);
-        ui.pane.set_margin_end(0);
+        ui.pane.set_margin_end(ui.body.margin_start());
         ui.pane.set_margin_bottom(0);
         ui.body.set_margin_end(sun_bg::INSET);
     } else {
@@ -2228,9 +2309,19 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let paused = pause_left(&config, &snap);
     let app_paused = paused.is_some();
     let activity_running = if snap.ready {
-        snap.activity_source && !config.activity_only
+        shell_model::activity_running(
+            snap.activity_source,
+            config.activity_only,
+            app_paused,
+            snap.activity_through_pause,
+        )
     } else {
-        config.activity_source && !config.activity_only
+        shell_model::activity_running(
+            config.activity_source,
+            config.activity_only,
+            app_paused,
+            config.activity_through_pause,
+        )
     };
     let screen = screen_now(&config, app_paused, activity_running, &snap);
     let (terminal, terminal_reason) = terminal_word(&config, daemon_up, app_paused);
@@ -2619,10 +2710,38 @@ button.sol-action {\
   min-width: 0;\
   color: #3A2E24;\
 }\
-window.sol-dark button.sol-action {\
+button.sol-action:hover, button.sol-action:active, button.sol-action:checked {\
+  background-color: #FEFCF8;\
+  background-image: none;\
+  box-shadow: none;\
+  color: #3A2E24;\
+}\
+window.sol-dark button.sol-action,\
+window.sol-dark button.sol-action:hover,\
+window.sol-dark button.sol-action:active {\
   background-color: #2A221C;\
   color: #F6EDE3;\
   border-color: rgba(255, 244, 230, 0.22);\
+}\
+button.sol-action:disabled { opacity: 0.5; }\
+scrolledwindow.sol-log {\
+  background-color: #FCF3E4;\
+  border: 1px solid rgba(58, 46, 36, 0.14);\
+  border-radius: 12px;\
+}\
+textview.sol-log, textview.sol-log text {\
+  background-color: #FCF3E4;\
+  color: #3A2E24;\
+  font-family: monospace;\
+  font-size: 12px;\
+}\
+window.sol-dark scrolledwindow.sol-log {\
+  background-color: #221C19;\
+  border-color: rgba(255, 244, 230, 0.16);\
+}\
+window.sol-dark textview.sol-log, window.sol-dark textview.sol-log text {\
+  background-color: #221C19;\
+  color: #F6EDE3;\
 }\
 .sol-tile {\
   background-color: #FEFCF8;\
@@ -2635,7 +2754,10 @@ window.sol-dark .sol-tile {\
   background-color: #2A221C;\
   border-color: rgba(255, 244, 230, 0.16);\
 }\
-.sol-tile.sol-selected { border-color: #E8913A; border-width: 2px; }\
+.sol-tile.sol-selected, window.sol-dark .sol-tile.sol-selected {\
+  border-color: #E8913A;\
+  border-width: 2px;\
+}\
 .sol-tile.sol-dash {\
   background-color: transparent;\
   background-image: none;\
@@ -3211,21 +3333,20 @@ fn show_connect(ui: &Ui, text: Option<&str>) {
 }
 
 fn tile_subs(view: &View) -> [Option<String>; 4] {
-    let off_when_unpaired =
-        |word: StateWord| (word == StateWord::Off && !view.paired).then(|| OFF_SUB.to_owned());
+    let off_sub = |word: StateWord| (word == StateWord::Off).then(|| OFF_SUB.to_owned());
     let screen = shell_model::screen_sub_label(view.screen_sub)
         .map(str::to_owned)
-        .or_else(|| off_when_unpaired(view.screen));
+        .or_else(|| off_sub(view.screen));
     let terminal = view
         .terminal_reason
         .map(str::to_owned)
-        .or_else(|| off_when_unpaired(view.terminal));
+        .or_else(|| off_sub(view.terminal));
     let browsers = view
         .browsers_reason
         .map(str::to_owned)
         .or_else(|| view.browsers_sub.clone())
-        .or_else(|| off_when_unpaired(view.browsers));
-    let obsidian = off_when_unpaired(view.obsidian);
+        .or_else(|| off_sub(view.browsers));
+    let obsidian = off_sub(view.obsidian);
     [screen, terminal, browsers, obsidian]
 }
 
@@ -3284,6 +3405,7 @@ fn apply_document(text: &str, obsidian_text: Option<&str>) -> Option<ServiceSnap
         capture: doc.capture,
         capture_attention: doc.capture_attention,
         activity_source: doc.settings.activity_source,
+        activity_through_pause: doc.settings.activity_through_pause,
         durable: doc.durable,
         health: doc.health,
         last_sync: doc.last_delivery.as_ref().and_then(|item| item.at),

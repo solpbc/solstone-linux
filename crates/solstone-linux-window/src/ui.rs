@@ -151,8 +151,8 @@ fn build_deferred_pages(window: &gtk::ApplicationWindow) {
     );
 
     // The help page sits under the shelf's "help" row.
-    let help_page = create_help_page(Rc::clone(&controller), window);
-    crate::deck::adopt_pages(&journal_page, &help_page);
+    let (help_page, quit_row) = create_help_page(Rc::clone(&controller), window);
+    crate::deck::adopt_pages(&journal_page, &help_page, &quit_row);
 
     // The status and settings pages stay built for their state. They are not
     // shown: the deck carries status, and the screen page carries its settings.
@@ -2485,28 +2485,55 @@ fn create_obsidian_section(
     (section, update)
 }
 
+/// A line of help text in the shell's ink.
+fn help_line(text: Option<&str>) -> gtk::Label {
+    let label = gtk::Label::new(text);
+    label.add_css_class("sol-ink");
+    label.set_halign(gtk::Align::Start);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label
+}
+
+/// A status line that takes no room until it has something to say.
+fn help_status_line() -> gtk::Label {
+    let label = help_line(None);
+    label.set_visible(false);
+    label.connect_label_notify(|label| label.set_visible(!label.label().is_empty()));
+    label
+}
+
+/// One of the shell's pill buttons.
+fn help_button(text: &str) -> gtk::Button {
+    let button = gtk::Button::with_label(text);
+    button.add_css_class("sol-action");
+    button.set_halign(gtk::Align::Start);
+    button
+}
+
+/// The help page, on the same card as `this computer`, and its quit row. The quit
+/// row shows only while no panel menu carries `quit solstone`.
 fn create_help_page(
     controller: Rc<RefCell<Controller>>,
     parent_window: &gtk::ApplicationWindow,
-) -> gtk::ScrolledWindow {
+) -> (gtk::ScrolledWindow, gtk::Box) {
     let scrolled = gtk::ScrolledWindow::new();
-    let container = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    container.set_margin_top(24);
-    container.set_margin_bottom(24);
-    container.set_margin_start(24);
-    container.set_margin_end(24);
+    scrolled.add_css_class("sol-page");
+    scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
-    let heading = gtk::Label::new(Some(CopyKey::HelpHeading.as_str()));
-    heading.set_halign(gtk::Align::Start);
-    let intro = gtk::Label::new(Some(CopyKey::HelpIntro.as_str()));
-    intro.set_halign(gtk::Align::Start);
-    intro.set_wrap(true);
+    let title = gtk::Label::new(Some("help"));
+    title.add_css_class("sol-name");
+    title.add_css_class("sol-display");
+    title.add_css_class("sol-ink");
+    title.set_halign(gtk::Align::Start);
 
-    let open_button = gtk::Button::with_label(CopyKey::HelpOpen.as_str());
-    open_button.set_halign(gtk::Align::Start);
-    let help_error = gtk::Label::new(None);
-    help_error.set_wrap(true);
-    help_error.set_halign(gtk::Align::Start);
+    let heading = crate::deck::section_label(CopyKey::HelpHeading.as_str());
+    heading.add_css_class("sol-rule");
+    let intro = help_line(Some(CopyKey::HelpIntro.as_str()));
+
+    let open_button = help_button(CopyKey::HelpOpen.as_str());
+    let help_error = help_status_line();
     {
         let help_error = help_error.clone();
         open_button.connect_clicked(move |button| {
@@ -2531,8 +2558,7 @@ fn create_help_page(
             });
         });
     }
-    let email_button = gtk::Button::with_label(CopyKey::HelpEmail.as_str());
-    email_button.set_halign(gtk::Align::Start);
+    let email_button = help_button(CopyKey::HelpEmail.as_str());
     {
         let help_error = help_error.clone();
         email_button.connect_clicked(move |button| {
@@ -2558,38 +2584,84 @@ fn create_help_page(
         });
     }
 
-    let logs_title = gtk::Label::new(Some(CopyKey::LogsTitle.as_str()));
-    logs_title.set_halign(gtk::Align::Start);
-    let logs_intro = gtk::Label::new(Some(CopyKey::LogsIntro.as_str()));
-    logs_intro.set_halign(gtk::Align::Start);
-    logs_intro.set_wrap(true);
+    let logs_title = crate::deck::section_label(CopyKey::LogsTitle.as_str());
+    logs_title.add_css_class("sol-rule");
+    let logs_intro = help_line(Some(CopyKey::LogsIntro.as_str()));
 
-    let read_logs_btn = gtk::Button::with_label(CopyKey::LogsRead.as_str());
-    read_logs_btn.set_halign(gtk::Align::Start);
+    let read_logs_btn = help_button(CopyKey::LogsRead.as_str());
 
     let logs_view = gtk::TextView::new();
+    logs_view.add_css_class("sol-log");
     logs_view.set_editable(false);
     logs_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    logs_view.set_left_margin(12);
+    logs_view.set_right_margin(12);
+    logs_view.set_top_margin(10);
+    logs_view.set_bottom_margin(10);
     let logs_scrolled = gtk::ScrolledWindow::new();
+    logs_scrolled.add_css_class("sol-log");
+    logs_scrolled.set_overflow(gtk::Overflow::Hidden);
     logs_scrolled.set_min_content_height(140);
     logs_scrolled.set_child(Some(&logs_view));
 
-    let save_logs_btn = gtk::Button::with_label(CopyKey::LogsSave.as_str());
-    save_logs_btn.set_halign(gtk::Align::Start);
+    let save_logs_btn = help_button(CopyKey::LogsSave.as_str());
 
-    let log_status = gtk::Label::new(None);
-    log_status.set_halign(gtk::Align::Start);
-    log_status.set_wrap(true);
+    let log_status = help_status_line();
     let busy = Rc::new(Cell::new(false));
     let chooser = Rc::new(RefCell::new(None::<gtk::FileChooserNative>));
     save_logs_btn.set_sensitive(false);
-    let save_help = gtk::Label::new(Some(CopyKey::LogsSaveHelp.as_str()));
-    save_help.set_halign(gtk::Align::Start);
+    let save_help = crate::deck::note_label(Some(CopyKey::LogsSaveHelp.as_str()));
+    save_help.set_max_width_chars(-1);
 
+    // Linux with no panel menu has nowhere else for about and quit.
+    let about_title = crate::deck::section_label(solstone_linux::copy::ABOUT_HEADING);
+    about_title.add_css_class("sol-rule");
+    let (version_row, version) = crate::deck::fact_row(CopyKey::StatusVersion.as_str());
+    version.set_text(env!("CARGO_PKG_VERSION"));
+    let made_by = crate::deck::note_label(Some(solstone_linux::copy::ABOUT_MADE_BY));
+    let quit_row = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    quit_row.set_margin_top(8);
+    let quit_button = help_button(solstone_linux::copy::QUIT);
+    let quit_error = help_status_line();
+    quit_row.append(&quit_button);
+    quit_row.append(&quit_error);
+    {
+        let window = parent_window.clone();
+        let quit_error = quit_error.clone();
+        quit_button.connect_clicked(move |button| {
+            let button = button.clone();
+            let window = window.clone();
+            let quit_error = quit_error.clone();
+            button.set_sensitive(false);
+            quit_error.set_text("");
+            glib::MainContext::default().spawn_local(async move {
+                // Stops the user service and does not disable it, so it still
+                // starts at sign-in. The window exits only once the stop is done.
+                let stopped = gio::spawn_blocking(|| {
+                    solstone_linux::service::stop_for_window(&solstone_linux::cli::SystemRunner)
+                })
+                .await;
+                if matches!(stopped, Ok(Ok(()))) {
+                    match window.application() {
+                        Some(app) => app.quit(),
+                        None => window.close(),
+                    }
+                } else {
+                    quit_error.set_text(solstone_linux::copy::QUIT_FAILED);
+                    button.set_sensitive(true);
+                }
+            });
+        });
+    }
+
+    let help_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    help_buttons.append(&open_button);
+    help_buttons.append(&email_button);
+
+    container.append(&title);
     container.append(&heading);
     container.append(&intro);
-    container.append(&open_button);
-    container.append(&email_button);
+    container.append(&help_buttons);
     container.append(&help_error);
     container.append(&logs_title);
     container.append(&logs_intro);
@@ -2598,6 +2670,10 @@ fn create_help_page(
     container.append(&log_status);
     container.append(&save_logs_btn);
     container.append(&save_help);
+    container.append(&about_title);
+    container.append(&version_row);
+    container.append(&made_by);
+    container.append(&quit_row);
     scrolled.set_child(Some(&container));
 
     {
@@ -2730,7 +2806,7 @@ fn create_help_page(
         });
     }
 
-    scrolled
+    (scrolled, quit_row)
 }
 
 /// A solstone tmux app on this computer moves in only with the owner's agreement,

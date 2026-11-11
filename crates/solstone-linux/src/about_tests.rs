@@ -109,6 +109,7 @@ fn current_stale_legacy_crossed_and_unknown_versions_are_canonical() {
     assert_eq!(current.native().journal_seen_at_epoch_secs, Some(0));
     let stale = AboutBlock::from_version(host(), Some(&saved), false, 172800);
     assert_eq!(stale.journal_line, "journal 1.2.3 · macos 26.5 · arm64");
+    assert_eq!(stale.journal_version.as_deref(), Some("1.2.3"));
     assert!(stale.text.ends_with(" · last seen 2 days ago"));
     assert!(!stale.native().journal_current);
     assert!(!stale.native().journal_line.contains("last seen"));
@@ -128,6 +129,10 @@ fn current_stale_legacy_crossed_and_unknown_versions_are_canonical() {
     assert_eq!(
         AboutBlock::from_version(host(), None, true, 172800).journal_line,
         "journal unknown"
+    );
+    assert_eq!(
+        AboutBlock::from_version(host(), None, true, 172800).journal_version,
+        None
     );
     assert_eq!(
         parse_os_release("NAME=PRIVATE_OWNER\nID=ubuntu\nVERSION_ID=\"24.04\"\n"),
