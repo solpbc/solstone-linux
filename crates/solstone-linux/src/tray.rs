@@ -47,8 +47,8 @@ fn journal_paired(state: HealthState) -> bool {
     )
 }
 
-/// The disabled status row. A timed pause uses the time-left line. Offline without
-/// a real count stays blank: the count is not on this model, and it is not invented.
+/// The disabled status row. A timed pause uses the time-left line. Offline is never
+/// blank: the word alone, or the count when one is known.
 fn menu_status_line(model: &TrayModel) -> String {
     if model.resume_visible {
         return if model.pause_seconds > 0 {
@@ -60,7 +60,10 @@ fn menu_status_line(model: &TrayModel) -> String {
     match model.health_state {
         HealthState::PairingRequired | HealthState::NotReported => "not paired".to_string(),
         HealthState::Connected => "connected · all caught up".to_string(),
-        HealthState::Offline => String::new(),
+        HealthState::Offline => match model.waiting_count {
+            Some(count) if count > 0 => format!("offline · {count} waiting"),
+            _ => "offline".to_string(),
+        },
         _ => String::new(),
     }
 }
@@ -331,6 +334,18 @@ mod tests {
         };
         (quit.activate)(&mut tray);
         assert_eq!(receiver.try_recv(), Ok(TrayCommand::Quit));
+    }
+
+    #[test]
+    fn offline_status_line_is_never_blank() {
+        let mut tray = tray();
+        tray.model.health_state = crate::sync_health::HealthState::Offline;
+        tray.model.waiting_count = None;
+        assert_eq!(labels(&tray.menu())[0], "offline");
+        tray.model.waiting_count = Some(12);
+        assert_eq!(labels(&tray.menu())[0], "offline · 12 waiting");
+        tray.model.waiting_count = Some(0);
+        assert_eq!(labels(&tray.menu())[0], "offline");
     }
 
     #[test]

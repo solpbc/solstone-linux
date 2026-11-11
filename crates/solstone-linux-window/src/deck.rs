@@ -26,9 +26,8 @@ const PANE_WIDTH: i32 = 360;
 /// Space between the deck and the pane's hairline. The shelf inset stays 8 px.
 const PANE_GUTTER: i32 = 24;
 const OFF_SUB: &str = "turn it on any time.";
-const SCREEN_BREATH: &str = "while this is on, the solstone app takes in what's on your screen, the sound from your microphone and what this computer plays, and which apps and windows you're using, and all of it goes into your journal.";
-const SCREEN_COVER: &str =
-    "this one switch covers your screen, the sound, and which apps and windows you're using.";
+const SCREEN_WAITING: &str = "waiting to take in the screen.";
+const SCREEN_BREATH: &str = "while this is on, this one switch takes in what's on your screen, the sound, and which apps and windows you're using, and all of it goes into your journal.";
 const SCREEN_SOUND: &str = "sound covers your microphone and what this computer plays. if there is no microphone, neither comes in.";
 const TERMINAL_BREATH: &str = "the solstone app takes in your tmux sessions, and all of it goes into your journal. needs tmux on this computer, and works in any terminal session, including when you SSH into this computer.";
 const BROWSERS_BREATH: &str = "on the sites you allow, the solstone extension takes in the page's text and rough layout, and all of it goes into your journal.";
@@ -198,6 +197,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     let deck_scroll = gtk::ScrolledWindow::new();
     deck_scroll.add_css_class("sol-deck-scroll");
     deck_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    deck_scroll.set_propagate_natural_height(false);
     deck_scroll.set_vexpand(true);
     deck_scroll.set_child(Some(&grid));
     column.append(&greet_row);
@@ -476,7 +476,6 @@ struct Page {
     reason: gtk::Label,
     next: gtk::Label,
     breath: gtk::Label,
-    cover: gtk::Label,
     sound: gtk::Label,
     so_far_row: gtk::Box,
     so_far: gtk::Label,
@@ -529,7 +528,6 @@ impl Page {
         set_fact(&self.next, next);
         self.breath.set_text(page_breath(id));
         let screen = id == TileId::Screen;
-        self.cover.set_visible(screen);
         self.sound.set_visible(screen);
         self.screen_extra.set_visible(screen);
         self.terminal_extra.set_visible(id == TileId::Terminal);
@@ -687,6 +685,7 @@ struct BuiltPane {
 fn make_pane() -> BuiltPane {
     let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
     pane.add_css_class("sol-pane");
+    pane.set_overflow(gtk::Overflow::Hidden);
     pane.set_size_request(PANE_WIDTH, -1);
 
     let status = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -868,13 +867,12 @@ fn make_source_page(status: gtk::Box) -> Page {
     let next = note_label(None);
     let breath = note_label(None);
     breath.set_visible(true);
-    let cover = note_label(Some(SCREEN_COVER));
     let sound = note_label(Some(SCREEN_SOUND));
+    sound.add_css_class("sol-quiet");
+    page_box.append(&sound);
     page_box.append(&reason);
     page_box.append(&next);
     page_box.append(&breath);
-    page_box.append(&cover);
-    page_box.append(&sound);
 
     let (so_far_row, so_far) = fact_row("so far");
     let (last_row, last) = fact_row("last taken in");
@@ -902,6 +900,9 @@ fn make_source_page(status: gtk::Box) -> Page {
     let scrolled = gtk::ScrolledWindow::new();
     scrolled.add_css_class("sol-page");
     scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    // The page's own height must not become the window's height.
+    scrolled.set_propagate_natural_height(false);
+    scrolled.set_propagate_natural_width(false);
     scrolled.set_vexpand(true);
     scrolled.set_visible(false);
     scrolled.set_child(Some(&page_box));
@@ -918,7 +919,6 @@ fn make_source_page(status: gtk::Box) -> Page {
         reason,
         next,
         breath,
-        cover,
         sound,
         so_far_row,
         so_far,
@@ -955,9 +955,6 @@ fn screen_settings() -> (
     let head = section_label("goes along with it");
     head.add_css_class("sol-rule");
     box_.append(&head);
-    box_.append(&note_label(Some(
-        solstone_linux::copy::SETTINGS_ACTIVITY_EXPLAIN,
-    )));
     let (activity_row, activity) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_SOURCE);
     let (titles_row, titles) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_TITLES);
     let (urls_row, urls) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_URLS);
@@ -1065,10 +1062,7 @@ fn page_reason(
         return (None, None);
     }
     match id {
-        TileId::Screen => (
-            Some(solstone_linux::copy::STATUS_SCREEN_WAITING),
-            Some(solstone_linux::copy::STATUS_SCREEN_WAITING_DETAIL),
-        ),
+        TileId::Screen => (Some(SCREEN_WAITING), None),
         TileId::Terminal => (view.terminal_reason, None),
         TileId::Browsers => (view.browsers_reason, None),
         TileId::Obsidian => (Some(solstone_linux::copy::OBSIDIAN_ATTENTION_VAULT), None),
@@ -1399,10 +1393,12 @@ fn wire_page_switch(
 
 fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    page.add_css_class("sol-pane");
+    page.add_css_class("sol-flush");
     page.set_visible(false);
     page.set_hexpand(true);
-    page.set_valign(gtk::Align::Start);
-    page.set_margin_top(8);
+    page.set_vexpand(true);
+    page.set_valign(gtk::Align::Fill);
     let title = gtk::Label::new(Some("this computer"));
     title.add_css_class("sol-name");
     title.add_css_class("sol-display");
@@ -1415,9 +1411,6 @@ fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label) {
     page.append(&cursor_row);
     page.append(&paused_row);
     page.append(&segment_row);
-    page.append(&note_label(Some(
-        solstone_linux::copy::SETTINGS_SEGMENT_HELP,
-    )));
     let (file_row, file_value) = fact_row(solstone_linux::copy::SETTINGS_FILE);
     let loaded = config::load_config(config::ConfigPaths::default());
     file_value.set_text(&loaded.config.config_path().display().to_string());
@@ -1582,7 +1575,11 @@ fn apply_view(ui: &Ui, view: &View) {
     ui.kept.set_text(&view.kept);
     ui.cursor.set_active(view.draw_cursor);
     ui.start_paused.set_active(view.start_paused);
-    ui.segment.set_text(&view.segment_interval.to_string());
+    ui.segment.set_text(&format!(
+        "{} {}",
+        view.segment_interval,
+        solstone_linux::copy::SETTINGS_SEGMENT_HELP
+    ));
     if hidden {
         ui.unread.set_text(shell_model::INTAKE_UNREADABLE);
         ui.unread.set_visible(true);
@@ -1665,7 +1662,13 @@ fn apply_layout(
         // The open shelf floats over the deck. Reserving its width pushes the
         // second column under the pane.
         ui.body.set_margin_start(sun_bg::INSET);
+        if shelf_open.get() {
+            ui.shelf.add_css_class("sol-shelf-over");
+        } else {
+            ui.shelf.remove_css_class("sol-shelf-over");
+        }
     } else {
+        ui.shelf.remove_css_class("sol-shelf-over");
         ui.shelf_button.set_visible(false);
         ui.shelf.set_visible(true);
         ui.body
@@ -1833,8 +1836,14 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let (terminal, terminal_reason) = terminal_word(&config, daemon_up, app_paused);
     let (browsers, browsers_reason, browsers_sub) = browsers_word(&config, seen_report);
     let obsidian = obsidian_word(&snap);
-    let (paired, offline, offline_waiting) = journal_face(&snap);
-    let connection = paired.then(|| connection_words(&snap.health).to_owned());
+    let (mut paired, mut offline, mut offline_waiting) = journal_face(&snap);
+    let mut connection = paired.then(|| connection_words(&snap.health).to_owned());
+    apply_journal_fixture(
+        &mut paired,
+        &mut offline,
+        &mut offline_waiting,
+        &mut connection,
+    );
     let last_reached = if paired {
         snap.last_sync.and_then(shell_model::relative_unix_now)
     } else {
@@ -1942,6 +1951,54 @@ fn obsidian_word(snap: &ServiceSnap) -> StateWord {
         vaults_found: snap.obsidian_vault,
         vault_chosen: snap.obsidian_vault,
     })
+}
+
+/// A frame can show a paired journal this desktop has not reached. A normal
+/// launch leaves the live reading alone.
+fn apply_journal_fixture(
+    paired: &mut bool,
+    offline: &mut bool,
+    waiting: &mut Option<i64>,
+    connection: &mut Option<String>,
+) {
+    let framed = std::env::var("SOLSTONE_FRAME_PNG")
+        .ok()
+        .is_some_and(|value| !value.is_empty());
+    if !framed {
+        return;
+    }
+    let Ok(raw) = std::env::var("SOLSTONE_JOURNAL") else {
+        return;
+    };
+    match raw.as_str() {
+        "connected" => {
+            *paired = true;
+            *offline = false;
+            *waiting = None;
+            *connection = Some(solstone_linux::copy::JOURNAL_CONNECTED.to_owned());
+        }
+        "offline" => {
+            *paired = true;
+            *offline = true;
+            *waiting = None;
+            *connection = Some(solstone_linux::copy::JOURNAL_OFFLINE.to_owned());
+        }
+        _ => {
+            let Some(count) = raw.strip_prefix("offline:") else {
+                return;
+            };
+            let Ok(count) = count.parse::<i64>() else {
+                return;
+            };
+            if count <= 0 {
+                return;
+            }
+            *paired = true;
+            *offline = true;
+            *waiting = Some(count);
+            *connection = Some(solstone_linux::copy::JOURNAL_OFFLINE.to_owned());
+        }
+    }
 }
 
 fn journal_face(snap: &ServiceSnap) -> (bool, bool, Option<i64>) {
@@ -2254,6 +2311,17 @@ switch.sol-switch:focus-visible, menubutton.sol-pill > button:focus-visible,\
 button.sol-action:focus-visible, button.sol-glyph:focus-visible, button.sol-back:focus-visible {\
   outline: 2px solid #E8913A;\
   outline-offset: 2px;\
+}\
+.sol-quiet { font-size: 12.5px; }\
+.sol-shelf.sol-shelf-over {\
+  background-color: #FEFCF8;\
+  background-image: none;\
+  padding: 44px 8px 10px;\
+  box-shadow: 0 14px 40px rgba(60, 40, 10, 0.30);\
+}\
+window.sol-dark .sol-shelf.sol-shelf-over {\
+  background-color: #2A221C;\
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);\
 }\
 .sol-shelf-row { padding: 7px 9px; }\
 .sol-journal {\

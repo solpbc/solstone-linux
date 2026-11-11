@@ -47,6 +47,8 @@ pub struct TrayModel {
     pub health_state: crate::sync_health::HealthState,
     /// Whole seconds left on a timed pause. Zero is "until I resume" or none.
     pub pause_seconds: i32,
+    /// Items waiting, when the count is known and above zero.
+    pub waiting_count: Option<u64>,
 }
 
 pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
@@ -192,6 +194,7 @@ pub fn build_with_open_journal(
         open_journal_enabled,
         health_state: health.state,
         pause_seconds: pause,
+        waiting_count: health.waiting_count,
     }
 }
 
