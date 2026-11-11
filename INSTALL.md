@@ -17,11 +17,24 @@ checks its signature, starts it and adds solstone to your app menu:
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop
 ```
 
-Install `minisign` and the system dependencies below first if your desktop
-doesn't have them. Then [open the window](#open-the-window). It finds a journal
-running on this computer under your account and connects with one press. For a
-journal on another computer, paste its pairing link. The next sections install a release by hand; Verify and Desktop
-notes apply either way.
+To install the app with your system's package manager instead, add
+`--route package`. The installer verifies the signed release, then installs the
+`.deb` with `apt` or the `.rpm` with `dnf`, using `sudo`:
+
+```bash
+curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --route package
+```
+
+If you installed the `.deb` or `.rpm` yourself, run that command once. It
+checks every file the package installed against the signed release before it
+records the package, and changes nothing if a file doesn't match. After that,
+the installer's `--upgrade` updates it.
+
+Install the system dependencies below first if your desktop doesn't have them.
+Then [open the window](#open-the-window). It finds a journal running on this
+computer under your account and connects with one press. For a journal on
+another computer, paste its pairing link. The next sections install the
+portable archive by hand; Verify and Desktop notes apply either way.
 
 ## System dependencies
 
@@ -112,31 +125,16 @@ jq -r --arg package "<downloaded-package>" \
 ```
 
 Minisign authenticates the release manifest. The next command checks the
-downloaded package against the authenticated SHA-256 digest. Replace
+downloaded file against the authenticated SHA-256 digest. Replace
 `<downloaded-package>` with its exact filename, such as
-`solstone-linux_${SOLSTONE_VERSION}-1_amd64.deb`. You run these checks; `apt`,
-`dnf`, and `scripts/install.sh` do not. If either command refuses the files,
-stop.
+`solstone-linux-${SOLSTONE_VERSION}-linux-x86_64.tar.gz`. You run these checks;
+`scripts/install.sh` does not. If either command refuses the files, stop.
 
-Then install one of the release artifacts. Use the Debian or RPM package
-published for your distribution when available.
-
-**Debian / Ubuntu:** `apt` does not check our minisign signature, so complete
-the verify-first step above before running:
-
-```bash
-sudo apt install "./solstone-linux_${SOLSTONE_VERSION}-1_amd64.deb"
-```
-
-**Fedora / RHEL:** `dnf` does not check our minisign signature, so complete the
-verify-first step above before running:
-
-```bash
-sudo dnf install "./solstone-linux-$SOLSTONE_VERSION-1.x86_64.rpm"
-```
+For a `.deb` or `.rpm`, use the installer's [package route](#the-quick-way),
+which checks the package for you.
 
 For the portable archive, `scripts/install.sh` does not check our minisign
-signature either. Complete the verify-first step above before running it. The
+signature. Complete the verify-first step above before running it. The
 installer is in the matching release source checkout, not inside the archive:
 
 ```bash
@@ -162,13 +160,14 @@ It restarts the app on the new version:
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --upgrade
 ```
 
-To update by hand, verify and install the newer package as above, then run:
+That works for the package route too. To update the portable archive by
+hand, verify and install the newer archive as above, then run:
 
 ```bash
 solstone-linux install-service
 ```
 
-Installing a package replaces the app on disk but doesn't restart it, so the
+Installing by hand replaces the app on disk but doesn't restart it, so the
 solstone app keeps running the old version until this step. It rewrites the
 service files for the new version and restarts the app. If the window is open,
 close it and open it again.
