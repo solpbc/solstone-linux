@@ -13,6 +13,10 @@ mod ui;
 use gtk::gio::prelude::*;
 
 fn main() {
+    // Comfortaa is the display face for names and headings. Fontconfig reads
+    // this directory on its own; the process does not set an environment variable.
+    install_display_face();
+
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("solstone-linux-window {}", env!("CARGO_PKG_VERSION"));
@@ -62,4 +66,32 @@ fn main() {
         gtk::glib::ExitCode::SUCCESS
     });
     std::process::exit(app.run().into());
+}
+
+/// The bundled face is Comfortaa, weight 700 (the name table still says Regular).
+fn install_display_face() {
+    let Some(dir) = display_face_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("Comfortaa-Bold.ttf");
+    let bytes: &[u8] = include_bytes!("../assets/Comfortaa-Bold.ttf");
+    if std::fs::read(&path).ok().as_deref() != Some(bytes) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+fn display_face_dir() -> Option<std::path::PathBuf> {
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME")
+        && !data.is_empty()
+    {
+        return Some(std::path::PathBuf::from(data).join("fonts"));
+    }
+    let home = std::env::var_os("HOME")?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(home).join(".local/share/fonts"))
 }

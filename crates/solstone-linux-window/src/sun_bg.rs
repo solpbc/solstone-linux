@@ -7,6 +7,20 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+thread_local! {
+    static FRAME_HOLD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While this is set, a requested frame file waits. The deck releases it once
+/// the service has answered, so a shot is not the unread `checking…` paint.
+pub(crate) fn set_frame_hold(hold: bool) {
+    FRAME_HOLD.with(|cell| cell.set(hold));
+}
+
+fn frame_held() -> bool {
+    FRAME_HOLD.with(|cell| cell.get())
+}
 use std::time::{Duration, Instant};
 
 use gtk::cairo::{self, ImageSurface};
@@ -212,7 +226,7 @@ fn queue_frame_file(window: &gtk::ApplicationWindow, paint: &Rc<Paint>) {
         let attempt = tries.get().saturating_add(1);
         tries.set(attempt);
         let written = write_frame_file(&window, &path);
-        if written || attempt >= 12 {
+        if written || attempt >= 30 {
             // Break stops the source. Take the id so destroy does not call remove()
             // on a source that is already gone: that call panics. SourceId's Drop
             // does not remove it.
@@ -236,6 +250,10 @@ pub(crate) fn try_frame_file(window: &gtk::ApplicationWindow) -> bool {
 }
 
 fn write_frame_file(window: &gtk::ApplicationWindow, path: &str) -> bool {
+    if frame_held() {
+        frame_note(path, "hold\n");
+        return false;
+    }
     let width = window.width();
     let height = window.height();
     if !window.is_mapped() || width < 400 || height < 400 {
