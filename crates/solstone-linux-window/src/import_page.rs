@@ -13,6 +13,7 @@ pub struct ImportPage {
     pub widget: gtk::Box,
     choose: gtk::Button,
     addition: gtk::Label,
+    intake_refused: gtk::Box,
     notice: gtk::Box,
     error: gtk::Label,
     recent: gtk::Label,
@@ -74,6 +75,8 @@ impl ImportPage {
         choose.set_halign(gtk::Align::Start);
         let addition = label("");
         addition.set_visible(false);
+        let intake_refused = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        intake_refused.set_visible(false);
         let error = label("");
         error.add_css_class("sol-attn");
         error.set_visible(false);
@@ -89,6 +92,7 @@ impl ImportPage {
         let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
         widget.append(&choose);
         widget.append(&addition);
+        widget.append(&intake_refused);
         widget.append(&error);
         widget.append(&notice);
         let recent_heading = section("recent");
@@ -101,6 +105,7 @@ impl ImportPage {
             widget,
             choose,
             addition,
+            intake_refused,
             notice,
             error,
             recent,
@@ -247,6 +252,17 @@ impl ImportPage {
             .set_text(document.addition.as_deref().unwrap_or(""));
         self.addition
             .set_visible(document.addition.is_some() && !document.store_error);
+        while let Some(child) = self.intake_refused.first_child() {
+            self.intake_refused.remove(&child);
+        }
+        for refusal in &document.intake_refused {
+            self.intake_refused.append(&label(&refusal.line()));
+        }
+        self.intake_refused.set_visible(
+            document.addition.is_some()
+                && !document.store_error
+                && !document.intake_refused.is_empty(),
+        );
         let was_down = self.store_down.replace(document.store_error);
         if was_down && !document.store_error {
             self.clear_step();

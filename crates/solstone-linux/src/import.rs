@@ -80,6 +80,20 @@ pub struct ImportRow {
     pub can_remove: bool,
 }
 
+/// A file the app didn't take at intake. Nothing of it is kept on this device, so it is
+/// named under the result of the addition instead of listed with what is.
+#[derive(Clone, Debug, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct IntakeRefusal {
+    pub name: String,
+    pub reason: String,
+}
+
+impl IntakeRefusal {
+    pub fn line(&self) -> String {
+        format!("{}: {}", self.name, self.reason)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RemoveConfirmation {
     pub token: String,
@@ -97,6 +111,8 @@ pub struct ImportDocument {
     pub rows: Vec<ImportRow>,
     pub recent: String,
     pub addition: Option<String>,
+    #[serde(default)]
+    pub intake_refused: Vec<IntakeRefusal>,
     pub adding: bool,
     pub interrupted: bool,
     pub store_error: bool,
@@ -136,6 +152,7 @@ struct Store {
     version: Option<String>,
     delivered_journal: Option<String>,
     addition: Option<String>,
+    intake_refused: Vec<IntakeRefusal>,
     interrupted: bool,
     cursor: String,
     auth_status: Option<u16>,
@@ -411,6 +428,12 @@ impl ImportHandle {
             handle.restore()?;
             let total = paths.len();
             let mut accepted = 0;
+            handle
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .intake_refused
+                .clear();
             for (index, path) in paths.into_iter().enumerate() {
                 handle
                     .state
@@ -501,14 +524,14 @@ impl ImportHandle {
             File::open(&dir)?.sync_all()?;
             Ok::<_, io::Error>(copied)
         })();
-        let accepted = copied.is_ok();
         match copied {
             Ok(size) => {
                 item.size = size;
                 item.phase = Phase::Pending;
+                self.publish(item)?;
+                Ok(true)
             }
             Err(error) => {
-                item.phase = Phase::Refused;
                 let reason = match error.to_string().as_str() {
                     "unsupported" => "your journal can't take this kind of file",
                     "too_large" => "it's larger than your journal takes",
@@ -517,11 +540,28 @@ impl ImportHandle {
                     }
                     _ => "this couldn't be read. add it again",
                 };
-                item.refusal = Some(local_refusal(reason));
+                self.state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .intake_refused
+                    .push(IntakeRefusal {
+                        name: item.name.clone(),
+                        reason: reason.to_owned(),
+                    });
+                // Nothing was taken, so the pre-copy record goes the way a removal does:
+                // a tombstone first, so a crash during cleanup never brings it back.
+                let id = item.id.clone();
+                item.phase = Phase::Delivered;
+                self.publish(item)?;
+                self.cleanup(&id)?;
+                self.state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .items
+                    .remove(&id);
+                Ok(false)
             }
         }
-        self.publish(item)?;
-        Ok(accepted)
     }
 
     pub fn document(&self) -> ImportDocument {
@@ -567,6 +607,7 @@ impl ImportHandle {
             document.recent = STORE_ERROR.to_owned();
             return document;
         }
+        document.intake_refused = state.intake_refused.clone();
         let current_binding = capability.as_ref().map(binding);
         for item in state.items.values().filter(|i| i.phase != Phase::Delivered) {
             let sending = state.busy.contains(&item.id);
@@ -1268,6 +1309,133 @@ mod tests {
         }
     }
 
+    fn store_entries(root: &Path) -> Vec<String> {
+        fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn unsupported_file_is_named_under_the_result_and_leaves_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("import");
+        let handle = ImportHandle {
+            root: Some(root.clone()),
+            ..ImportHandle::default()
+        };
+        let source = temp.path().join("unsupported.mp4");
+        fs::write(&source, b"not an import").unwrap();
+        assert!(handle.add_files(vec![source.display().to_string()]).await);
+        assert!(handle.state.lock().unwrap().items.is_empty());
+        assert!(store_entries(&root).is_empty());
+        let document = handle.document();
+        assert!(document.rows.is_empty());
+        assert!(!document.held);
+        assert!(!document.interrupted);
+        assert_eq!(
+            document.addition.as_deref(),
+            Some("nothing was saved on this device.")
+        );
+        assert_eq!(
+            document.intake_refused,
+            vec![IntakeRefusal {
+                name: "unsupported.mp4".to_owned(),
+                reason: "your journal can't take this kind of file".to_owned(),
+            }]
+        );
+        assert_eq!(
+            document.intake_refused[0].line(),
+            "unsupported.mp4: your journal can't take this kind of file"
+        );
+        let reopened = ImportHandle {
+            root: Some(root.clone()),
+            ..ImportHandle::default()
+        };
+        reopened.restore().unwrap();
+        assert!(reopened.document().rows.is_empty());
+        assert!(!reopened.document().interrupted);
+        // The next addition starts its own result.
+        let other = temp.path().join("other.mov");
+        fs::write(&other, b"not an import either").unwrap();
+        assert!(handle.add_files(vec![other.display().to_string()]).await);
+        let names: Vec<_> = handle
+            .document()
+            .intake_refused
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, vec!["other.mov"]);
+        // An unreadable store shows only its own sentence.
+        handle.state.lock().unwrap().failed = true;
+        assert!(handle.document().intake_refused.is_empty());
+    }
+
+    #[test]
+    fn documents_without_intake_refusals_still_read() {
+        let document: ImportDocument = serde_json::from_value(serde_json::json!({
+            "v": 1, "rows": [], "recent": "nothing yet.", "addition": null, "adding": false,
+            "interrupted": false, "store_error": false, "waiting": 0, "held": false,
+            "sending": false
+        }))
+        .unwrap();
+        assert!(document.intake_refused.is_empty());
+    }
+
+    // Copying a file checks free space on the host.
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn mixed_addition_keeps_the_copy_and_names_the_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("import");
+        let handle = ImportHandle {
+            root: Some(root.clone()),
+            ..ImportHandle::default()
+        };
+        let large = temp.path().join("large.pdf");
+        File::create(&large)
+            .unwrap()
+            .set_len(FILE_LIMIT + 1)
+            .unwrap();
+        let note = temp.path().join("note.txt");
+        fs::write(&note, b"kept bytes").unwrap();
+        assert!(
+            handle
+                .add_files(vec![
+                    large.display().to_string(),
+                    note.display().to_string()
+                ])
+                .await
+        );
+        let items: Vec<_> = handle
+            .state
+            .lock()
+            .unwrap()
+            .items
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "note.txt");
+        assert_eq!(items[0].phase, Phase::Pending);
+        assert_eq!(store_entries(&root), vec![items[0].id.clone()]);
+        let document = handle.document();
+        assert_eq!(document.rows.len(), 1);
+        assert_eq!(document.rows[0].name, "note.txt");
+        assert_eq!(
+            document.addition.as_deref(),
+            Some("saved on this device: 1")
+        );
+        assert_eq!(
+            document
+                .intake_refused
+                .iter()
+                .map(IntakeRefusal::line)
+                .collect::<Vec<_>>(),
+            vec!["large.pdf: it's larger than your journal takes"]
+        );
+    }
+
     #[cfg(feature = "full-tests")]
     #[tokio::test]
     async fn copies_survive_source_changes_and_incomplete_restart() {
@@ -1312,7 +1480,15 @@ mod tests {
             ..ImportHandle::default()
         };
         reopened.restore().unwrap();
-        assert!(reopened.document().interrupted);
+        let document = reopened.document();
+        assert!(document.interrupted);
+        assert!(document.intake_refused.is_empty());
+        assert!(
+            document
+                .rows
+                .iter()
+                .any(|r| r.id == interrupted.id && r.state == "needs attention")
+        );
         assert_eq!(
             reopened.state.lock().unwrap().items[&interrupted.id].phase,
             Phase::Refused

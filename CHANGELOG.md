@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- when you add a file the app can't take, such as a video, it's now named with the reason under the line that says what was saved, instead of being listed under "on this device", where you had to remove it.
+
 ## [2.0.40] - 2026-11-12
 
 ### Added
