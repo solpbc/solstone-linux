@@ -18,6 +18,7 @@ pub enum TileId {
     Terminal,
     Browsers,
     Obsidian,
+    Import,
 }
 
 const TILE_ORDER: [TileId; 4] = [
@@ -27,7 +28,7 @@ const TILE_ORDER: [TileId; 4] = [
     TileId::Obsidian,
 ];
 
-/// A tile's state word. Every tile shows one. There is no blank word.
+/// A source tile's state word. Import is an action destination and has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateWord {
     Off,
@@ -340,6 +341,7 @@ pub fn tile_name(tile: TileId) -> &'static str {
         TileId::Terminal => "terminal",
         TileId::Browsers => "browsers",
         TileId::Obsidian => "Obsidian",
+        TileId::Import => "import",
     }
 }
 

@@ -167,6 +167,7 @@ impl LinkFactPersistence {
 }
 
 pub struct SyncService {
+    imports: crate::import::ImportHandle,
     notify: Arc<Notify>,
     pending_trigger: Arc<AtomicBool>,
     check_requested: Arc<AtomicBool>,
@@ -188,6 +189,7 @@ pub struct SyncService {
 
 #[derive(Clone)]
 pub struct SyncSampler {
+    pub(crate) imports: crate::import::ImportHandle,
     pub(crate) facts: Arc<Mutex<SyncFacts>>,
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     pub(crate) stale_threshold: f64,
@@ -236,8 +238,13 @@ impl SyncSampler {
             if woke {
                 facts.episode_started = Some(wall);
             }
-            let state = presenter.present(derive_state(facts, wall, self.stale_threshold), mono);
-            (health_for_state(state, facts, wall), facts.progress.clone())
+            facts.imports = Some(self.imports.document().into());
+            let combined = facts.with_import_counts();
+            let state =
+                presenter.present(derive_state(&combined, wall, self.stale_threshold), mono);
+            let mut health = health_for_state(state, &combined, wall);
+            crate::sync_health::apply_import_health(&mut health, facts);
+            (health, facts.progress.clone())
         });
         drop(presenter);
         if woke {
@@ -255,7 +262,13 @@ impl SyncSampler {
     }
 
     pub fn facts(&self) -> SyncFacts {
-        self.with_facts(|facts| facts.clone())
+        self.with_facts(|facts| {
+            facts.imports = Some(self.imports.document().into());
+            let mut combined = facts.with_import_counts();
+            // This public snapshot already includes imports in pending_confirmed.
+            combined.imports = None;
+            combined
+        })
     }
 }
 
@@ -358,6 +371,30 @@ impl SyncControl {
             circuit_unblock_requested: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+fn import_custody(
+    config: &Config,
+    client: &Arc<UploadClient>,
+    trigger: SyncTrigger,
+    facts: Arc<Mutex<SyncFacts>>,
+) -> crate::import::ImportHandle {
+    let state_dir = config.state_dir();
+    let imports = crate::import::ImportHandle::new(config.base_dir.join("import"), client, trigger)
+        .with_status_sink(Arc::new(move |summary| {
+            let mut facts = facts.lock().unwrap_or_else(|p| p.into_inner());
+            if facts.imports.as_ref() == Some(&summary) {
+                return;
+            }
+            facts.imports = Some(summary);
+            if let Err(error) = save_facts(&state_dir, &facts) {
+                tracing::warn!(%error, "could not persist import status");
+            }
+        }));
+    if let Err(error) = imports.restore() {
+        tracing::warn!(%error, "import recovery could not read the store");
+    }
+    imports
 }
 
 impl SyncService {
@@ -467,9 +504,20 @@ impl SyncService {
             browser_custody,
         );
         worker.terminal = terminal;
+        let imports = import_custody(
+            &config,
+            &client,
+            SyncTrigger {
+                notify: notify.clone(),
+                pending_trigger: pending_trigger.clone(),
+            },
+            facts.clone(),
+        );
+        worker.imports = imports.clone();
         let task = tokio::spawn(async move { worker.run().await });
         let abort = task.abort_handle();
         Self {
+            imports,
             notify,
             pending_trigger,
             check_requested,
@@ -492,6 +540,10 @@ impl SyncService {
     pub fn trigger(&self) {
         self.pending_trigger.store(true, Ordering::Release);
         self.notify.notify_one();
+    }
+
+    pub fn import_handle(&self) -> crate::import::ImportHandle {
+        self.imports.clone()
     }
 
     pub fn trigger_handle(&self) -> SyncTrigger {
@@ -519,6 +571,7 @@ impl SyncService {
 
     pub(crate) fn reset_handle(&self) -> SyncResetHandle {
         SyncResetHandle {
+            imports: self.imports.clone(),
             presenter: Arc::clone(&self.presenter),
             fresh_check: self.fresh_check(),
             facts: Arc::clone(&self.facts),
@@ -533,6 +586,7 @@ impl SyncService {
 
     pub fn sampler_handle(&self) -> SyncSampler {
         SyncSampler {
+            imports: self.imports.clone(),
             facts: Arc::clone(&self.facts),
             clock: Arc::clone(&self.clock),
             stale_threshold: self.stale_threshold,
@@ -575,6 +629,7 @@ impl SyncService {
 
 #[derive(Clone)]
 pub(crate) struct SyncResetHandle {
+    imports: crate::import::ImportHandle,
     presenter: Arc<Mutex<Presenter>>,
     fresh_check: FreshCheck,
     clock: Arc<dyn Clock + Send + Sync>,
@@ -589,6 +644,7 @@ pub(crate) struct SyncResetHandle {
 impl SyncResetHandle {
     pub(crate) fn sampler_handle(&self) -> SyncSampler {
         SyncSampler {
+            imports: self.imports.clone(),
             facts: self.facts.clone(),
             clock: self.clock.clone(),
             stale_threshold: self.stale_threshold,
@@ -613,6 +669,7 @@ impl SyncResetHandle {
             facts.last_successful_contact = None;
             facts.last_successful_sync = None;
             facts.pending_confirmed = None;
+            facts.imports = None;
             facts.in_progress = false;
             facts.progress.clear();
             facts.episode_started = Some(self.clock.wall_seconds());
@@ -621,6 +678,7 @@ impl SyncResetHandle {
                 tracing::warn!(%error, "Failed to persist cleared sync facts during association reset");
             }
         }
+        self.imports.publish_status();
     }
 
     #[cfg(test)]
@@ -630,6 +688,7 @@ impl SyncResetHandle {
         state_dir: PathBuf,
     ) -> Self {
         Self {
+            imports: crate::import::ImportHandle::default(),
             presenter: Arc::default(),
             fresh_check: FreshCheck::default(),
             clock: Arc::new(crate::run::SystemClock::new()),
@@ -653,7 +712,7 @@ impl SyncResetHandle {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SyncTrigger {
     notify: Arc<Notify>,
     pending_trigger: Arc<AtomicBool>,
@@ -667,6 +726,7 @@ impl SyncTrigger {
 }
 
 struct SyncWorker {
+    imports: crate::import::ImportHandle,
     config: Config,
     client: Arc<UploadClient>,
     clock: Arc<dyn Clock + Send + Sync>,
@@ -731,6 +791,7 @@ impl SyncWorker {
         let association = client.capture_association();
         let (last_pass, started) = (clock.monotonic_seconds(), clock.wall_seconds());
         Self {
+            imports: crate::import::ImportHandle::default(),
             config,
             client,
             clock,
@@ -942,6 +1003,12 @@ impl SyncWorker {
         }
         self.sync_pass().await;
         self.takeover_drain().await;
+        if self.is_running() {
+            self.imports.deliver(&self.client, &self.running).await;
+            if let Some(status) = self.imports.take_auth_status() {
+                self.record_failure(Some(ErrorType::Auth), Some(i64::from(status)));
+            }
+        }
         Ok(())
     }
 
@@ -2851,6 +2918,7 @@ mod tests {
         link_facts.publish(crate::private_link::LinkFact::CarrierProven);
         link_facts.publish(crate::private_link::LinkFact::ObserverRegistered);
         let sampler = SyncSampler {
+            imports: crate::import::ImportHandle::default(),
             facts,
             clock: Arc::new(FixedClock {
                 wall: 0.0,
@@ -3096,6 +3164,101 @@ mod tests {
         responses: Vec<(u16, Value)>,
     ) -> (LinkedMockServer, SyncWorker) {
         test_worker(temp, responses).await
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn import_only_production_pass_holds_old_versions_and_combines_counts_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (server, mut worker) = test_worker(&temp, Vec::new()).await;
+        worker.imports = import_custody(
+            &worker.config,
+            &worker.client,
+            SyncTrigger::default(),
+            worker.facts.clone(),
+        );
+        let source = temp.path().join("note.txt");
+        fs::write(&source, b"only an import, no capture segments").unwrap();
+        assert!(
+            worker
+                .imports
+                .add_files(vec![source.display().to_string()])
+                .await
+        );
+        for status in [
+            json!({"version":{"current":"2.0.51"}}),
+            json!({"version":{}}),
+        ] {
+            server.set_route("/api/system/status", 200, status);
+            worker.execute_pass().await.unwrap();
+            assert_eq!(server.request_count("/app/import/"), 0);
+            assert_eq!(worker.imports.document().waiting, 0);
+            assert!(worker.imports.document().held);
+        }
+        server.set_route(
+            "/api/system/status",
+            200,
+            json!({"version":{"current":"2.0.52"}}),
+        );
+        server.set_route("/app/import/api/save", 500, json!({}));
+        worker.execute_pass().await.unwrap();
+        let sampler = SyncSampler {
+            imports: worker.imports.clone(),
+            facts: worker.facts.clone(),
+            clock: worker.clock.clone(),
+            stale_threshold: 600.0,
+            poison_reports: Arc::default(),
+            link_facts: worker.link_facts.clone(),
+            presenter: Arc::default(),
+            fresh_check: FreshCheck::default(),
+        };
+        assert_eq!(sampler.facts().pending_confirmed, Some(1));
+        assert_eq!(sampler.facts().pending_confirmed, Some(1));
+        assert_eq!(sampler.health().waiting_count, Some(1));
+        assert!(!sampler.facts().in_progress);
+        let saved = load_facts(&worker.config.state_dir());
+        assert_eq!(saved.imports.as_ref().unwrap().waiting, 1);
+        let mut cli_facts = saved;
+        cli_facts.link = worker.client.link_fact_state();
+        let cli = crate::sync_health::derive_health(&cli_facts, worker.clock.wall_seconds(), 600.0);
+        assert_eq!(cli.waiting_count, Some(1));
+        assert!(cli.import_held);
+        assert_eq!(cli.state, crate::sync_health::HealthState::Connected);
+        server.set_route(
+            "/app/import/api/save",
+            413,
+            json!({"reason_code":"multipart_part_too_large","error":"too large"}),
+        );
+        worker.execute_pass().await.unwrap();
+        assert_eq!(sampler.facts().pending_confirmed, Some(0));
+        assert!(worker.imports.document().held);
+        assert_eq!(sampler.health().sni_status, "NeedsAttention");
+        server.set_route(
+            "/api/system/status",
+            200,
+            json!({"version":{"current":"2.0.53"}}),
+        );
+        server.set_route(
+            "/app/import/api/save",
+            200,
+            json!({"status":"staged","path":"/imports/item/note.txt","timestamp":"item"}),
+        );
+        server.set_route(
+            "/app/import/api/start",
+            200,
+            json!({"status":"ok","task_id":"task","import_id":"item"}),
+        );
+        worker.execute_pass().await.unwrap();
+        let requests = server.requests();
+        let imports: Vec<_> = requests
+            .iter()
+            .filter(|r| r.uri.starts_with("/app/import/"))
+            .collect();
+        assert_eq!(imports[imports.len() - 2].uri, "/app/import/api/save");
+        assert_eq!(imports[imports.len() - 1].uri, "/app/import/api/start");
+        assert!(worker.imports.document().rows.is_empty());
+        assert!(!worker.imports.document().held);
+        assert_eq!(sampler.facts().pending_confirmed, Some(0));
     }
 
     trait RequestLog {

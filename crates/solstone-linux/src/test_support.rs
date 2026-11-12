@@ -345,6 +345,12 @@ impl LinkedMockServer {
         self.peer.credential()
     }
 
+    #[cfg(feature = "full-tests")]
+    pub(crate) fn set_route(&self, path: &str, status: u16, body: Value) {
+        self.peer
+            .set_route(path, status, body.to_string().into_bytes());
+    }
+
     pub(crate) fn enqueue_day_custody(&self, fixture: DayCustodyFixture) {
         self.peer.enqueue_day_custody(fixture);
     }

@@ -4157,6 +4157,7 @@ mod tests {
         link_facts.publish(LinkFact::ListenerReady);
 
         let sampler = SyncSampler {
+            imports: crate::import::ImportHandle::default(),
             facts: harness.sync_facts.clone(),
             clock: Arc::new(SystemClock::new()),
             stale_threshold: 600.0,

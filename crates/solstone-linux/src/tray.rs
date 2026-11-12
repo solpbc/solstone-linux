@@ -59,6 +59,7 @@ fn menu_status_line(model: &TrayModel) -> String {
     }
     match model.health_state {
         HealthState::PairingRequired | HealthState::NotReported => "not paired".to_string(),
+        HealthState::Connected if model.import_held => model.sync.clone(),
         HealthState::Connected => "connected · all caught up".to_string(),
         HealthState::Offline => match model.waiting_count {
             Some(count) if count > 0 => format!("offline · {count} waiting"),

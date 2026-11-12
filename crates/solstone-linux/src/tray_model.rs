@@ -30,6 +30,7 @@ impl TrayStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayModel {
+    pub import_held: bool,
     pub status: TrayStatus,
     pub about: crate::about::AboutBlock,
     pub header: String,
@@ -174,6 +175,7 @@ pub fn build_with_open_journal(
     let pause = pause_remaining(snapshot, now);
     let up = uptime(snapshot, now);
     TrayModel {
+        import_held: health.import_held,
         status,
         about: crate::about::AboutBlock::unknown(crate::about::HostFacts::default()),
         header: header_label(status, health, pause),

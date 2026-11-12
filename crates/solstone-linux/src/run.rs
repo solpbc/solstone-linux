@@ -585,6 +585,7 @@ fn run_capture(
             open_journal: open_journal.clone(),
             window_control,
             obsidian: obsidian.clone(),
+            imports: sync.import_handle(),
         },
     );
     if initialized && run_result.is_ok() {

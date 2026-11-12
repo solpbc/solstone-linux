@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- choose "import" on the home page to add PDFs, audio, images and text to your journal. the page shows what's still on this device and why anything needs attention.
+
 ### Fixed
 
 - the screen and terminal switches, on the home page and on each one's page, now turn screen or terminal on or off right away. before, the change waited until the app next started, so screen, audio and desktop activity could keep coming in, and going into your journal, while the screen tile said off.

@@ -147,6 +147,7 @@ pub(crate) struct ShellInputs {
     pub open_journal: crate::private_link::OpenJournalAccess,
     pub window_control: crate::window_control::WindowControlHandler,
     pub obsidian: crate::obsidian::ObsidianHandle,
+    pub imports: crate::import::ImportHandle,
 }
 
 pub(crate) struct DesktopShell {
@@ -181,6 +182,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
     commands: O,
     window_control: crate::window_control::WindowControlHandler,
     obsidian: crate::obsidian::ObsidianHandle,
+    imports: crate::import::ImportHandle,
 ) -> (Observer1<C, O>, TrayHealth) {
     let tray_health = TrayHealth {
         cell: Arc::clone(&health),
@@ -195,6 +197,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
             commands,
             window_control,
             obsidian,
+            imports,
         },
         tray_health,
     )
@@ -229,6 +232,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         inputs.commands.clone(),
         inputs.window_control,
         inputs.obsidian,
+        inputs.imports,
     );
     let signal_sink = with_connection(inputs.connection.as_ref(), |connection| {
         // Setup owns the name before recovery. Observer1 can only be served after recovery and
@@ -697,6 +701,7 @@ mod tests {
             link_facts.publish(crate::private_link::LinkFact::ObserverRegistered);
         }
         SyncSampler {
+            imports: crate::import::ImportHandle::default(),
             facts,
             clock: Arc::new(TestClock(Arc::new(AtomicU64::new(0)))),
             stale_threshold: 600.0,
@@ -773,6 +778,7 @@ mod tests {
             CommandSender::new(command_sender),
             crate::window_control::WindowControlHandler::default(),
             crate::obsidian::ObsidianHandle::default(),
+            crate::import::ImportHandle::default(),
         );
         assert!(Arc::ptr_eq(&interface.health, &tray_health.cell));
         assert!(Arc::ptr_eq(&interface.progress, &progress));

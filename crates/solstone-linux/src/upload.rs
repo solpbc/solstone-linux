@@ -258,6 +258,37 @@ impl UploadClient {
             && captured.facts.association_epoch() == captured.epoch
     }
 
+    pub(crate) fn import_auth_failure(
+        &self,
+        captured: &CapturedAssociation,
+        outcome: &LinkOutcome,
+    ) -> Option<u16> {
+        let status = outcome
+            .status_code()
+            .filter(|status| matches!(status, 401 | 403))?;
+        let capability = captured.capability.as_ref()?;
+        let mut accepted = false;
+        let current = self
+            .inner
+            .with_installed_for_epoch(capability, captured.epoch, || {
+                if self.inner.installation_generation.load(Ordering::Acquire)
+                    != captured.installation_generation
+                {
+                    return;
+                }
+                accepted = true;
+                if status == 403
+                    && captured.facts.publish_if_association_current(
+                        crate::private_link::LinkFact::TerminalRevocation,
+                        captured.epoch,
+                    )
+                {
+                    self.inner.revoked.store(true, Ordering::Release);
+                }
+            });
+        (current && accepted).then_some(status)
+    }
+
     /// Local segment disposal only: no client, health or facts callbacks inside action.
     pub(crate) fn with_association_current<R>(
         &self,

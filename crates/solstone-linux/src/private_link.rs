@@ -2354,7 +2354,6 @@ impl PrivateLinkCapability {
         }
     }
 
-    #[allow(dead_code)] // Used by the durable import queue.
     pub(crate) async fn import_save(&self, form: multipart::Form) -> LinkOutcome {
         let Ok(url) = confine_path(&self.inner.origin, "/app/import/api/save") else {
             return LinkOutcome::LocalRejected {
@@ -2368,7 +2367,6 @@ impl PrivateLinkCapability {
         .await
     }
 
-    #[allow(dead_code)] // Used by the durable import queue.
     pub(crate) async fn import_start(&self, path: &str, timestamp: &str) -> LinkOutcome {
         let Ok(url) = confine_path(&self.inner.origin, "/app/import/api/start") else {
             return LinkOutcome::LocalRejected {

@@ -5,6 +5,7 @@ mod controller;
 mod copy_map;
 mod deck;
 mod format;
+mod import_page;
 mod logs;
 mod mark_card;
 mod sun_bg;

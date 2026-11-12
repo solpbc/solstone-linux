@@ -112,6 +112,7 @@ impl ProcessEpoch {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SyncFacts {
+    pub imports: Option<crate::import::ImportSummary>,
     pub last_successful_sync: Option<f64>,
     pub last_successful_contact: Option<f64>,
     pub last_error_class: Option<ErrorType>,
@@ -134,6 +135,20 @@ pub struct SyncFacts {
     pub(crate) link_epoch: Option<ProcessEpoch>,
 }
 
+impl SyncFacts {
+    pub(crate) fn with_import_counts(&self) -> Self {
+        let mut combined = self.clone();
+        if let Some(imports) = &self.imports {
+            let count = i64::try_from(imports.waiting).unwrap_or(i64::MAX);
+            combined.pending_confirmed = self
+                .pending_confirmed
+                .and_then(|n| (n >= 0).then(|| n.saturating_add(count)));
+            combined.in_progress |= imports.sending;
+        }
+        combined
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HealthSurface {
     pub header_recording: &'static str,
@@ -152,6 +167,7 @@ pub struct HealthSurface {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SyncHealth {
+    pub import_held: bool,
     pub state: HealthState,
     pub header_recording: String,
     pub header_idle: String,
@@ -457,7 +473,46 @@ fn fill(template: &str, values: &HashMap<&str, String>) -> String {
 }
 
 pub fn derive_health(facts: &SyncFacts, now: f64, stale_threshold: f64) -> SyncHealth {
-    health_for_state(derive_state(facts, now, stale_threshold), facts, now)
+    let combined = facts.with_import_counts();
+    let mut health = health_for_state(
+        derive_state(&combined, now, stale_threshold),
+        &combined,
+        now,
+    );
+    apply_import_health(&mut health, facts);
+    health
+}
+
+pub(crate) fn apply_import_health(health: &mut SyncHealth, facts: &SyncFacts) {
+    let Some(imports) = &facts.imports else {
+        return;
+    };
+    health.import_held = imports.held;
+    if imports.held
+        && facts.pending_confirmed == Some(0)
+        && !facts.in_progress
+        && matches!(health.state, HealthState::Connected | HealthState::Syncing)
+    {
+        let text = imports.recent.clone();
+        health.header_recording = text.clone();
+        health.header_idle = text.clone();
+        health.sync_line = text.clone();
+        health.tooltip = text.clone();
+        health.accessible_recording = text.clone();
+        health.accessible_idle = text.clone();
+        health.cli = text.clone();
+        health.doctor_detail = text;
+        if !imports.sending {
+            health.state = HealthState::Connected;
+            health.dbus = "connected".to_owned();
+            health.icon = "healthy".to_owned();
+        }
+        if imports.waiting == 0 && !imports.sending {
+            health.icon = "attention".to_owned();
+            health.sni_status = "NeedsAttention".to_owned();
+        }
+        health.pending_display = "pending unconfirmed".to_owned();
+    }
 }
 
 /// The one rule for what the connection status says, from facts alone. Connected needs the
@@ -534,6 +589,7 @@ pub(crate) fn health_for_state(state: HealthState, facts: &SyncFacts, now: f64) 
         ("sync_ts", format_ts(facts.last_successful_sync)),
     ]);
     let mut health = SyncHealth {
+        import_held: false,
         state,
         header_recording: fill(surface.header_recording, &values),
         header_idle: fill(surface.header_idle, &values),
@@ -875,6 +931,14 @@ pub(crate) fn load_facts_with_liveness(
         return SyncFacts::default();
     };
     SyncFacts {
+        imports: data.get("import").filter(|v| !v.is_null()).map(|v| {
+            serde_json::from_value(v.clone()).unwrap_or_else(|_| crate::import::ImportSummary {
+                waiting: 0,
+                held: true,
+                sending: false,
+                recent: "needs attention".to_owned(),
+            })
+        }),
         last_successful_sync: optional_float(&data, "last_successful_sync"),
         last_successful_contact: optional_float(&data, "last_successful_contact"),
         last_error_class: data.get("last_error_class").and_then(ErrorType::parse),
@@ -950,6 +1014,7 @@ pub fn save_facts(state_dir: &Path, facts: &SyncFacts) -> io::Result<()> {
         });
     let mut text = serde_json::to_string(&json!({
         "schema_version": SCHEMA_VERSION,
+        "import": facts.imports,
         "last_successful_sync": facts.last_successful_sync,
         "last_successful_contact": facts.last_successful_contact,
         "last_error_class": facts.last_error_class.map(ErrorType::as_str),
@@ -1133,6 +1198,31 @@ pub(crate) fn save_paired_journal_about_guarded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_counts_preserve_unknown_segments_and_add_known_counts_once() {
+        let summary = crate::import::ImportSummary {
+            waiting: 1,
+            held: true,
+            sending: false,
+            recent: String::new(),
+        };
+        for pending in [None, Some(-1)] {
+            let facts = SyncFacts {
+                pending_confirmed: pending,
+                imports: Some(summary.clone()),
+                ..SyncFacts::default()
+            };
+            assert_eq!(facts.with_import_counts().pending_confirmed, None);
+        }
+        let facts = SyncFacts {
+            pending_confirmed: Some(3),
+            imports: Some(summary),
+            ..SyncFacts::default()
+        };
+        assert_eq!(facts.with_import_counts().pending_confirmed, Some(4));
+        assert_eq!(facts.pending_confirmed, Some(3));
+    }
     use crate::config::DEFAULT_SYNC_STALE_THRESHOLD;
     use crate::private_link::LinkFactState;
 
@@ -1368,6 +1458,12 @@ mod tests {
     fn save_and_load_facts_round_trip() {
         let temp = tempfile::tempdir().unwrap();
         let facts = SyncFacts {
+            imports: Some(crate::import::ImportSummary {
+                waiting: 2,
+                held: true,
+                sending: false,
+                recent: "waiting".to_owned(),
+            }),
             last_successful_sync: Some(100.5),
             last_successful_contact: Some(200.5),
             last_error_class: Some(ErrorType::Incompatible),

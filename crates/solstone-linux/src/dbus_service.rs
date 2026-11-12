@@ -32,6 +32,7 @@ pub struct Observer1<C: Clock, O: ObserverCommands> {
     pub commands: O,
     pub window_control: crate::window_control::WindowControlHandler,
     pub obsidian: crate::obsidian::ObsidianHandle,
+    pub imports: crate::import::ImportHandle,
 }
 impl<C: Clock, O: ObserverCommands> Observer1<C, O> {
     fn with_snapshot<R>(&self, f: impl FnOnce(&StateSnapshot) -> R) -> R {
@@ -120,6 +121,68 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     }
     fn get_control_state(&self) -> String {
         self.window_control.get_control_state()
+    }
+    fn import_state(&self) -> String {
+        self.imports.state_json()
+    }
+    async fn import_files(&self, paths: Vec<String>) -> String {
+        serde_json::json!({"ok":self.imports.add_files(paths).await}).to_string()
+    }
+    async fn import_retry(&self, id: String) -> String {
+        serde_json::json!({"ok":self.imports.retry(id).await}).to_string()
+    }
+    async fn import_begin_remove(
+        &self,
+        id: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> String {
+        let Some(owner) = header.sender().map(|owner| owner.to_string()) else {
+            return "null".to_owned();
+        };
+        match self.imports.begin_remove(&id, &owner) {
+            Ok(Some(confirmation)) => {
+                if watch_remove_owner(self.imports.clone(), connection.clone(), owner.clone()).await
+                {
+                    serde_json::to_string(&confirmation).expect("remove confirmation serializes")
+                } else {
+                    self.imports.cancel_remove(&id, &confirmation.token, &owner);
+                    "{}".to_owned()
+                }
+            }
+            Ok(None) => "null".to_owned(),
+            Err(_) => "{}".to_owned(),
+        }
+    }
+    fn import_cancel_remove(
+        &self,
+        id: String,
+        token: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> String {
+        if let Some(owner) = header.sender() {
+            self.imports.cancel_remove(&id, &token, owner);
+        }
+        "ok".to_owned()
+    }
+    async fn import_remove(
+        &self,
+        id: String,
+        token: String,
+        may_have_saved: bool,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> String {
+        let Some(owner) = header.sender().map(|owner| owner.to_string()) else {
+            return "failed".to_owned();
+        };
+        self.imports
+            .remove_confirmed(id, token, owner, may_have_saved)
+            .await
+            .to_owned()
+    }
+    fn import_dismiss_interrupted(&self) -> String {
+        self.imports.dismiss_interrupted();
+        "ok".to_owned()
     }
     async fn begin_pairing(&self, link: String) -> String {
         self.window_control.begin_pairing(link).await
@@ -222,6 +285,42 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
 // test_about_to_show_uses_optional_hook: retired-by-dependency; ksni exposes no AboutToShow hook.
 // test_about_to_show_group_uses_optional_hook: retired-by-dependency; ksni exposes no AboutToShowGroup hook.
 
+async fn watch_remove_owner(
+    handle: crate::import::ImportHandle,
+    connection: zbus::Connection,
+    owner: String,
+) -> bool {
+    use futures_util::StreamExt;
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut ready = Some(ready);
+        let _: Result<(), zbus::Error> = async {
+            let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
+            let mut changes = proxy
+                .receive_name_owner_changed_with_args(&[(0, owner.as_str())])
+                .await?;
+            let name = zbus::names::BusName::try_from(owner.as_str())
+                .map_err(|e| zbus::Error::Failure(e.to_string()))?;
+            if !proxy.name_has_owner(name).await? {
+                return Ok(());
+            }
+            let _ = ready.take().expect("readiness sent once").send(true);
+            while let Some(change) = changes.next().await {
+                if change.args()?.new_owner().is_none() {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Some(ready) = ready {
+            let _ = ready.send(false);
+        }
+        handle.cancel_remove_owner(&owner);
+    });
+    waiting.await.unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +406,7 @@ mod tests {
                 commands: commands.clone(),
                 window_control: crate::window_control::WindowControlHandler::default(),
                 obsidian: crate::obsidian::ObsidianHandle::default(),
+                imports: crate::import::ImportHandle::default(),
             },
             commands,
             clock,
@@ -395,6 +495,7 @@ mod tests {
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
+            imports: crate::import::ImportHandle::default(),
         };
         let mut xml = String::new();
         service.introspect_to_writer(&mut xml, 0);
@@ -432,6 +533,7 @@ mod tests {
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
+            imports: crate::import::ImportHandle::default(),
         };
         let first = service.segment_timer();
         now.store(101, std::sync::atomic::Ordering::Release);

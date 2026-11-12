@@ -255,6 +255,53 @@ impl ControlClient {
             .await
     }
 
+    pub async fn import_state(&self) -> Result<String, ControlClientError> {
+        self.call_method("ImportState", &(), DEFAULT_TIMEOUT).await
+    }
+
+    pub async fn import_files(&self, paths: Vec<String>) -> Result<String, ControlClientError> {
+        self.call_method("ImportFiles", &(paths,), Duration::from_secs(24 * 60 * 60))
+            .await
+    }
+
+    pub async fn import_retry(&self, id: &str) -> Result<String, ControlClientError> {
+        self.call_method("ImportRetry", &(id,), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn import_begin_remove(&self, id: &str) -> Result<String, ControlClientError> {
+        self.call_method("ImportBeginRemove", &(id,), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn import_cancel_remove(
+        &self,
+        id: &str,
+        token: &str,
+    ) -> Result<String, ControlClientError> {
+        self.call_method("ImportCancelRemove", &(id, token), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn import_remove(
+        &self,
+        id: &str,
+        token: &str,
+        may_have_saved: bool,
+    ) -> Result<String, ControlClientError> {
+        self.call_method(
+            "ImportRemove",
+            &(id, token, may_have_saved),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
+    pub async fn import_dismiss_interrupted(&self) -> Result<String, ControlClientError> {
+        self.call_method("ImportDismissInterrupted", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
     pub async fn obsidian_turn_on(&self, path: &str) -> Result<String, ControlClientError> {
         self.call_method("ObsidianTurnOn", &(path.to_string(),), DEFAULT_TIMEOUT)
             .await

@@ -26,6 +26,7 @@ use crate::sun_bg::{self, Chrome};
 const PANE_WIDTH: i32 = 360;
 /// Space between the deck and the pane's hairline. The shelf inset stays 8 px.
 const PANE_GUTTER: i32 = 24;
+const GLYPH_IMPORT: &str = r#"<path d="M12 3v11m-4-4 4 4 4-4M4 14v6h16v-6"/>"#;
 const OFF_SUB: &str = "turn it on any time.";
 const SCREEN_WAITING: &str = "waiting to take in the screen.";
 const SCREEN_BREATH: &str = "while this is on, the solstone app takes in what's on your screen, the sound, and which apps and windows you're using, and all of it goes into your journal.";
@@ -95,6 +96,7 @@ struct ServiceSnap {
     queue: Option<i64>,
     obsidian: Option<solstone_linux::obsidian::State>,
     obsidian_vault: bool,
+    imports: Option<solstone_linux::import::ImportDocument>,
     kept: String,
     /// The running app's own pause: `Some(bounded)` while it is paused.
     pause_bounded: Option<bool>,
@@ -115,6 +117,7 @@ impl ServiceSnap {
             queue: None,
             obsidian: None,
             obsidian_vault: false,
+            imports: None,
             kept: "nothing yet".to_owned(),
             pause_bounded: None,
             mark: None,
@@ -198,12 +201,18 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     );
     let browsers = make_tile("browsers", GLYPH_BROWSERS, None, false);
     let obsidian = make_tile("Obsidian", GLYPH_OBSIDIAN, None, false);
+    let import = make_tile("import", GLYPH_IMPORT, None, false);
+    import.1.set_visible(false);
+    import.3.set_visible(false);
+    import.2.set_text("files");
+    import.2.set_visible(true);
     let (add_more, _, _, _, _) = make_tile("add more", GLYPH_PLUS, None, true);
     let tiles = vec![
         tile_widgets(screen, TileId::Screen),
         tile_widgets(terminal, TileId::Terminal),
         tile_widgets(browsers, TileId::Browsers),
         tile_widgets(obsidian, TileId::Obsidian),
+        tile_widgets(import, TileId::Import),
     ];
 
     let built = make_pane();
@@ -307,6 +316,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         reached: built.reached,
         unread: built.unread,
         page: built.page,
+        import_attention: built.import_attention,
         shelf_rows,
         journal,
         journal_label,
@@ -371,6 +381,39 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         home.connect_clicked(move |_| back_home());
         wire_page_switch(&ui, &view, &seen_report, &daemon_up, &selected);
         SHOW_HOME.with(|slot| *slot.borrow_mut() = Some(back));
+    }
+
+    {
+        let ui_open = ui.clone();
+        let selected = selected.clone();
+        let row = row.clone();
+        let page_open = page_open.clone();
+        let shelf_open = shelf_open.clone();
+        let view = view.clone();
+        let open_import: Rc<dyn Fn()> = Rc::new(move || {
+            row.set(ShelfRow::Home);
+            selected.set(Some(TileId::Import));
+            page_open.set(true);
+            ui_open.page.show_tile(TileId::Import, &view.borrow());
+            apply_layout(&ui_open, &selected, &row, &shelf_open, &page_open);
+        });
+        let status_open = open_import.clone();
+        ui.import_attention.connect_clicked(move |_| status_open());
+        let target = gtk::DropTarget::new(
+            gtk::gdk::FileList::static_type(),
+            gtk::gdk::DragAction::COPY,
+        );
+        target.set_types(&[gtk::gdk::FileList::static_type(), gio::File::static_type()]);
+        let imports = ui.page.imports.clone();
+        target.connect_drop(move |_, value, _, _| {
+            let Some(paths) = crate::import_page::drop_paths(value) else {
+                return false;
+            };
+            open_import();
+            imports.add(paths);
+            true
+        });
+        window.add_controller(target);
     }
 
     let show_row: Rc<dyn Fn(ShelfRow)> = {
@@ -598,6 +641,7 @@ struct Ui {
     reached: gtk::Label,
     unread: gtk::Label,
     page: Page,
+    import_attention: gtk::Button,
     shelf_rows: Vec<ShelfWidgets>,
     journal: gtk::Box,
     journal_label: gtk::Label,
@@ -616,7 +660,9 @@ struct Page {
     status: gtk::Box,
     box_: gtk::ScrolledWindow,
     home: gtk::Button,
-    glyphs: [gtk::Widget; 4],
+    glyphs: [gtk::Widget; 5],
+    verdict: gtk::Box,
+    imports: crate::import_page::ImportPage,
     title: gtk::Label,
     mark: gtk::DrawingArea,
     word: gtk::Label,
@@ -660,17 +706,24 @@ impl Page {
             TileId::Terminal => view.terminal,
             TileId::Browsers => view.browsers,
             TileId::Obsidian => view.obsidian,
+            TileId::Import => StateWord::Checking,
         };
         let shown = match id {
             TileId::Screen => 0,
             TileId::Terminal => 1,
             TileId::Browsers => 2,
             TileId::Obsidian => 3,
+            TileId::Import => 4,
         };
         for (index, glyph) in self.glyphs.iter().enumerate() {
             glyph.set_visible(index == shown);
         }
         self.title.set_text(shell_model::tile_name(id));
+        self.verdict.set_visible(id != TileId::Import);
+        self.imports.widget.set_visible(id == TileId::Import);
+        if let Some(document) = current_snap().imports {
+            self.imports.refresh(&document);
+        }
         self.word.set_text(shell_model::state_label(word));
         paint_word(&self.word, word);
         paint_mark(&self.mark, word);
@@ -705,7 +758,7 @@ impl Page {
             let on = match id {
                 TileId::Screen => view.screen_on,
                 TileId::Terminal => view.terminal_on,
-                TileId::Browsers | TileId::Obsidian => false,
+                TileId::Browsers | TileId::Obsidian | TileId::Import => false,
             };
             self.painting.set(true);
             self.switch.set_active(on);
@@ -840,6 +893,7 @@ struct BuiltPane {
     reached: gtk::Label,
     unread: gtk::Label,
     page: Page,
+    import_attention: gtk::Button,
 }
 
 fn make_pane() -> BuiltPane {
@@ -908,6 +962,12 @@ fn make_pane() -> BuiltPane {
         facts.push(FactWidgets { so_far, last });
     }
 
+    let import_attention = gtk::Button::with_label("import");
+    import_attention.add_css_class("sol-back");
+    import_attention.set_halign(gtk::Align::Start);
+    import_attention.set_visible(false);
+    status.append(&import_attention);
+
     let journal_head = section_label("your journal");
     journal_head.add_css_class("sol-rule");
     status.append(&journal_head);
@@ -973,6 +1033,7 @@ fn make_pane() -> BuiltPane {
         reached,
         unread,
         page,
+        import_attention,
     }
 }
 
@@ -992,6 +1053,7 @@ fn make_source_page(status: gtk::Box) -> Page {
         glyph_widget(GLYPH_TERMINAL),
         glyph_widget(GLYPH_BROWSERS),
         glyph_widget(GLYPH_OBSIDIAN),
+        glyph_widget(GLYPH_IMPORT),
     ];
     for glyph in &glyphs {
         glyph.set_visible(false);
@@ -1062,6 +1124,9 @@ fn make_source_page(status: gtk::Box) -> Page {
     page_box.append(&screen_extra);
     page_box.append(&browsers_extra);
     page_box.append(&obsidian_extra);
+    let imports = crate::import_page::ImportPage::new();
+    imports.widget.set_visible(false);
+    page_box.append(&imports.widget);
 
     let scrolled = gtk::ScrolledWindow::new();
     scrolled.add_css_class("sol-page");
@@ -1078,6 +1143,8 @@ fn make_source_page(status: gtk::Box) -> Page {
         box_: scrolled,
         home,
         glyphs,
+        verdict,
+        imports,
         title,
         mark,
         word,
@@ -1203,6 +1270,7 @@ fn page_breath(id: TileId) -> &'static str {
         TileId::Terminal => TERMINAL_BREATH,
         TileId::Browsers => BROWSERS_BREATH,
         TileId::Obsidian => solstone_linux::copy::OBSIDIAN_EXPLAIN,
+        TileId::Import => solstone_linux::import::EXPLANATION,
     }
 }
 
@@ -1219,6 +1287,7 @@ fn page_reason(
         TileId::Terminal => (view.terminal_reason, None),
         TileId::Browsers => (view.browsers_reason, None),
         TileId::Obsidian => (Some(solstone_linux::copy::OBSIDIAN_ATTENTION_VAULT), None),
+        TileId::Import => (None, None),
     }
 }
 
@@ -1228,6 +1297,7 @@ fn page_facts(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>)
         TileId::Terminal => shell_model::terminal_so_far(file),
         TileId::Browsers => shell_model::browsers_so_far(file),
         TileId::Obsidian => shell_model::obsidian_so_far(file),
+        TileId::Import => return (None, None),
     };
     let started = match file {
         IntakeFile::Rows(rows) => match id {
@@ -1235,6 +1305,7 @@ fn page_facts(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>)
             TileId::Terminal => rows.terminal.started.as_deref(),
             TileId::Browsers => rows.browsers.started.as_deref(),
             TileId::Obsidian => rows.obsidian.started.as_deref(),
+            TileId::Import => None,
         },
         IntakeFile::Missing | IntakeFile::Refused => None,
     };
@@ -1973,6 +2044,14 @@ fn apply_view(ui: &Ui, view: &View) {
         }
     });
     paint_pairing(ui, view);
+    if let Some(imports) = current_snap().imports {
+        ui.page.imports.refresh(&imports);
+        ui.import_attention.set_visible(
+            imports.store_error
+                || imports.rows.iter().any(|row| row.reason.is_some())
+                || (!imports.rows.is_empty() && imports.waiting == 0 && !imports.sending),
+        );
+    }
     let words = [view.screen, view.terminal, view.browsers, view.obsidian];
     let subs = tile_subs(view);
     for (tile, (word, sub)) in ui.tiles.iter().zip(words.into_iter().zip(subs)) {
@@ -1990,7 +2069,7 @@ fn apply_view(ui: &Ui, view: &View) {
             let on = match tile.id {
                 TileId::Screen => view.screen_on,
                 TileId::Terminal => view.terminal_on,
-                TileId::Browsers | TileId::Obsidian => false,
+                TileId::Browsers | TileId::Obsidian | TileId::Import => false,
             };
             if switch.is_active() != on && !switch.has_focus() && switch.is_sensitive() {
                 ui.tile_painting.set(true);
@@ -2063,6 +2142,7 @@ fn facts_for(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>) 
         TileId::Terminal => shell_model::terminal_so_far(file),
         TileId::Browsers => shell_model::browsers_so_far(file),
         TileId::Obsidian => shell_model::obsidian_so_far(file),
+        TileId::Import => return (None, None),
     };
     let last_raw = match file {
         IntakeFile::Rows(rows) => counter_last(rows, id),
@@ -2081,6 +2161,7 @@ fn counter_last(rows: &IntakeRows, id: TileId) -> Option<&str> {
         TileId::Terminal => &rows.terminal,
         TileId::Browsers => &rows.browsers,
         TileId::Obsidian => &rows.obsidian,
+        TileId::Import => return None,
     };
     counter.last.as_deref()
 }
@@ -2282,6 +2363,7 @@ fn apply_shot_hooks(
         "terminal" => Some(TileId::Terminal),
         "browsers" => Some(TileId::Browsers),
         "obsidian" => Some(TileId::Obsidian),
+        "import" => Some(TileId::Import),
         _ => None,
     };
     if let Some(id) = id {
@@ -3296,6 +3378,21 @@ fn paint_pairing(ui: &Ui, view: &View) {
         return;
     }
     ui.pill_label.set_text("connected");
+    if let Some(imports) = current_snap().imports
+        && imports.held
+    {
+        ui.lead.set_text(&imports.recent);
+        show_connect(ui, None);
+        apply_mark_kind(
+            &ui.pill_mark,
+            if imports.sending {
+                MarkKind::Good
+            } else {
+                MarkKind::Ring
+            },
+        );
+        return;
+    }
     ui.lead.set_text("all caught up");
     show_connect(ui, Some("everything is in your journal"));
     apply_mark_kind(&ui.pill_mark, MarkKind::Good);
@@ -3410,6 +3507,7 @@ fn apply_document(text: &str, obsidian_text: Option<&str>) -> Option<ServiceSnap
         health: doc.health,
         last_sync: doc.last_delivery.as_ref().and_then(|item| item.at),
         queue: doc.queue_count,
+        imports: None,
         obsidian: decoded.as_ref().map(|document| document.status.state),
         obsidian_vault: decoded
             .as_ref()
@@ -3426,7 +3524,13 @@ async fn fetch_service() -> Option<ServiceSnap> {
         .ok()?;
     let state = client.get_control_state().await.ok()?;
     let obsidian = client.obsidian_state().await.ok();
-    apply_document(&state, obsidian.as_deref())
+    let mut snap = apply_document(&state, obsidian.as_deref())?;
+    snap.imports = client
+        .import_state()
+        .await
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    Some(snap)
 }
 
 async fn watcher_present() -> Option<bool> {

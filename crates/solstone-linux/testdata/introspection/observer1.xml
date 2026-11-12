@@ -30,6 +30,13 @@
       <method name="GetControlState">
           <arg direction="out" type="s" />
         </method>
+      <method name="ImportBeginRemove"><arg name="id" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="ImportCancelRemove"><arg name="id" direction="in" type="s" /><arg name="token" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="ImportState"><arg direction="out" type="s" /></method>
+      <method name="ImportFiles"><arg name="paths" direction="in" type="as" /><arg direction="out" type="s" /></method>
+      <method name="ImportRetry"><arg name="id" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="ImportRemove"><arg name="id" direction="in" type="s" /><arg name="token" direction="in" type="s" /><arg name="may_have_saved" direction="in" type="b" /><arg direction="out" type="s" /></method>
+      <method name="ImportDismissInterrupted"><arg direction="out" type="s" /></method>
       <method name="GetStats">
           <arg direction="out" type="a{sv}" />
         </method>
