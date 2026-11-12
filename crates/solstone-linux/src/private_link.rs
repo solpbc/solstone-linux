@@ -50,10 +50,15 @@ const MAX_PAIR_LINK_BYTES: u64 = 4096;
 #[cfg(test)]
 pub(crate) const DIRECT_PAIR_LINK_FOR_TEST: &str =
     "0G0QY00004EYJ001081G81860W40J2GB1G6GW3X0M6HA7955MTKTHADANEPAVBNF";
-pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 128 * 1024 * 1024;
+// Match the journal's outer HTTP limit. Producers keep their own bounds; the
+// bridge streams through a credit-bounded stage.
+pub(crate) const MAX_REQUEST_BODY_BYTES: u64 = 4 * 1024 * 1024 * 1024 + 1024 * 1024;
 const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
+// A 4 GiB save at 50 KiB/s can take almost a day over a slow relay.
+const IMPORT_SAVE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_IMPORT_RESPONSE_BYTES: usize = 64 * 1024;
 const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 // A journal probe is often the request that dials a fresh carrier, and the
 // request timeout covers that dial. When a LAN endpoint does not answer, the
@@ -1806,9 +1811,14 @@ fn proxy_headers_for_v3(
 }
 
 fn streams_journal_response(request: &RequestHead) -> bool {
-    request.method == "GET"
-        && (request.path() == "/sse/events"
-            || request.path().starts_with(JOURNAL_MEDIA_PATH_PREFIX))
+    (request.method == "POST"
+        && matches!(
+            request.path(),
+            "/app/import/api/save" | "/app/import/api/start"
+        ))
+        || request.method == "GET"
+            && (request.path() == "/sse/events"
+                || request.path().starts_with(JOURNAL_MEDIA_PATH_PREFIX))
 }
 
 pub(crate) struct PrivateLinkSession {
@@ -2320,6 +2330,59 @@ impl PrivateLinkCapability {
             }
             Err(_) => LinkOutcome::TransportUnavailable,
         }
+    }
+
+    // Import refusals carry an owner-readable reason. Bound the response while
+    // reading it, including when it arrives without a length.
+    async fn send_import(&self, builder: RequestBuilder, timeout: Duration) -> LinkOutcome {
+        let Ok(mut response) = builder.timeout(timeout).send().await else {
+            return LinkOutcome::TransportUnavailable;
+        };
+        let status = response.status();
+        if status == StatusCode::FORBIDDEN || self.refused_gateway(status) {
+            return LinkOutcome::Forbidden;
+        }
+        let mut body = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) if chunk.len() <= MAX_IMPORT_RESPONSE_BYTES - body.len() => {
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(None) => return LinkOutcome::Success { status, body },
+                _ => return LinkOutcome::TransportUnavailable,
+            }
+        }
+    }
+
+    #[allow(dead_code)] // Used by the durable import queue.
+    pub(crate) async fn import_save(&self, form: multipart::Form) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.inner.origin, "/app/import/api/save") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import(
+            self.inner.client.post(url).multipart(form),
+            IMPORT_SAVE_TIMEOUT,
+        )
+        .await
+    }
+
+    #[allow(dead_code)] // Used by the durable import queue.
+    pub(crate) async fn import_start(&self, path: &str, timestamp: &str) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.inner.origin, "/app/import/api/start") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import(
+            self.inner
+                .client
+                .post(url)
+                .json(&serde_json::json!({"path": path, "timestamp": timestamp})),
+            INGEST_TIMEOUT,
+        )
+        .await
     }
 
     fn ingest_v3_url(&self, suffix: &str) -> Result<Url, LinkOutcome> {
@@ -5429,7 +5492,101 @@ pub(crate) mod tests {
     #[test]
     fn ingest_uses_300_second_policy() {
         assert_eq!(INGEST_TIMEOUT, Duration::from_secs(300));
-        assert_eq!(MAX_REQUEST_BODY_BYTES, 128 * 1024 * 1024);
+        assert_eq!(MAX_REQUEST_BODY_BYTES, 4 * 1024 * 1024 * 1024 + 1024 * 1024);
+        assert_eq!(IMPORT_SAVE_TIMEOUT, Duration::from_secs(24 * 60 * 60));
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn import_save_streams_above_segment_cap_and_preserves_refusal() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(400, br#"{"error":"your journal can't take this kind of file","reason_code":"unsupported_type"}"#.to_vec());
+        let (_temp, session) = start_keyless_peer_session(&peer).await;
+        let length = crate::upload::MAX_SEGMENT_REQUEST_BODY_BYTES + 1;
+        let stream = futures_util::stream::unfold(length, |remaining| async move {
+            if remaining == 0 {
+                return None;
+            }
+            let count = remaining.min(64 * 1024);
+            Some((
+                Ok::<_, std::io::Error>(vec![b'x'; count as usize]),
+                remaining - count,
+            ))
+        });
+        let part = multipart::Part::stream_with_length(reqwest::Body::wrap_stream(stream), length)
+            .file_name("large.txt")
+            .mime_str("text/plain")
+            .unwrap();
+        let result = session
+            .capability()
+            .import_save(
+                multipart::Form::new()
+                    .text("client_item_id", "large-test-item")
+                    .text("imported_via", "desktop")
+                    .part("file", part),
+            )
+            .await;
+        assert!(
+            matches!(result, LinkOutcome::Success { status: StatusCode::BAD_REQUEST, ref body }
+            if serde_json::from_slice::<serde_json::Value>(body).unwrap()["reason_code"] == "unsupported_type")
+        );
+        peer.wait_for_requests(1).await;
+        let requests = peer.requests();
+        assert_eq!(requests[0].path, "/app/import/api/save");
+        assert!(requests[0].body.len() as u64 > length);
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn import_completed_refusals_keep_the_status_and_body() {
+        let peer = PrivateLinkPeer::start().await;
+        let (_temp, session) = start_keyless_peer_session(&peer).await;
+        let body = br#"{"error":"your journal couldn't accept this.","reason_code":"refused"}"#;
+        for code in [400, 409, 413, 500] {
+            peer.enqueue_response(code, body.to_vec());
+            let outcome = session
+                .capability()
+                .import_start("imports/item", "20261111_120000")
+                .await;
+            assert!(
+                matches!(outcome, LinkOutcome::Success { status, body: actual }
+                if status.as_u16() == code && actual == body)
+            );
+        }
+        peer.enqueue_response(403, body.to_vec());
+        assert!(matches!(
+            session
+                .capability()
+                .import_start("imports/item", "20261111_120000")
+                .await,
+            LinkOutcome::Forbidden
+        ));
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn import_start_confines_route_and_bounds_response() {
+        let peer = PrivateLinkPeer::start().await;
+        peer.enqueue_response(200, vec![b'x'; MAX_IMPORT_RESPONSE_BYTES + 1]);
+        let (_temp, session) = start_keyless_peer_session(&peer).await;
+        assert!(matches!(
+            session
+                .capability()
+                .import_start("../../ignored-as-url", "20261111_120000")
+                .await,
+            LinkOutcome::TransportUnavailable
+        ));
+        peer.wait_for_requests(1).await;
+        let requests = peer.requests();
+        assert_eq!(requests[0].path, "/app/import/api/start");
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["path"], "../../ignored-as-url");
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
     }
 
     #[tokio::test]

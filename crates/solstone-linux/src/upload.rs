@@ -4,7 +4,7 @@
 use crate::{
     config::Config,
     observer::Clock,
-    private_link::{LinkOutcome, MAX_REQUEST_BODY_BYTES, PrivateLinkCapability},
+    private_link::{LinkOutcome, PrivateLinkCapability},
     sync_health::ErrorType,
 };
 use reqwest::{StatusCode, multipart};
@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 const OBSERVER_PROTOCOL_VERSION_HEADER: &str = "X-Solstone-Protocol-Version";
 const DEFAULT_RETRY_DELAYS: [i64; 4] = [5, 30, 120, 300];
 const MAX_IMMEDIATE_ATTEMPTS: usize = 2;
+pub(crate) const MAX_SEGMENT_REQUEST_BODY_BYTES: u64 = 128 * 1024 * 1024;
 pub(crate) const MAX_MULTIPART_PART_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -400,7 +401,7 @@ impl UploadClient {
                     return UploadResult::local_failure(Some(ErrorType::Client), Some(413));
                 }
             };
-            debug_assert!(framed_length <= MAX_REQUEST_BODY_BYTES);
+            debug_assert!(framed_length <= MAX_SEGMENT_REQUEST_BODY_BYTES);
 
             {
                 match captured.capability.ingest(form).await {
@@ -870,7 +871,7 @@ async fn build_multipart_form(
         .and_then(|length| length.checked_add(boundary.len() as u64))
         .and_then(|length| length.checked_add(4))
         .ok_or(MultipartBuildError::RequestTooLarge)?;
-    if length > MAX_REQUEST_BODY_BYTES {
+    if length > MAX_SEGMENT_REQUEST_BODY_BYTES {
         return Err(MultipartBuildError::RequestTooLarge);
     }
     Ok((form, length))
@@ -1321,7 +1322,7 @@ mod tests {
             build_multipart_form("20260101", "boundary", &[first, second], None, None)
                 .await
                 .unwrap();
-        assert!(encoded_length <= MAX_REQUEST_BODY_BYTES);
+        assert!(encoded_length <= MAX_SEGMENT_REQUEST_BODY_BYTES);
     }
 
     #[tokio::test]
