@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "7541c981b9940bfb87731ec6e163ca47defe4be18026080551cc3feb42fb06ad",
+  "cargo_lock_sha256": "7e972366811be2cc0e7299a63715a332d15c2df8d052740b4b76338c1db1d3e4",
   "notices_sha256": "c9d0397cf3f69f1ce3b135c6c81ab1a2945f50e73f889431b879aef33f540b55",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux-window",
@@ -5857,7 +5857,7 @@
     },
     {
       "name": "rustix",
-      "version": "1.1.4",
+      "version": "1.1.6",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "members": [
