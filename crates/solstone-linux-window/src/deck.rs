@@ -761,17 +761,17 @@ impl Page {
                 TileId::Browsers | TileId::Obsidian | TileId::Import => false,
             };
             self.painting.set(true);
-            self.switch.set_active(on);
+            paint_switch(&self.switch, on);
             self.painting.set(false);
         }
         // An unsaved change stays as the owner set it until they save.
         if !self.edited.get() {
             self.painting.set(true);
-            self.activity.set_active(view.activity_source);
-            self.titles.set_active(view.activity_titles);
-            self.urls.set_active(view.activity_urls);
-            self.through_pause.set_active(view.activity_through_pause);
-            self.activity_only.set_active(view.activity_only);
+            paint_switch(&self.activity, view.activity_source);
+            paint_switch(&self.titles, view.activity_titles);
+            paint_switch(&self.urls, view.activity_urls);
+            paint_switch(&self.through_pause, view.activity_through_pause);
+            paint_switch(&self.activity_only, view.activity_only);
             self.painting.set(false);
         }
         self.exclude_apps.set_text(&count_label(view.exclude_apps));
@@ -779,6 +779,14 @@ impl Page {
             .set_text(&count_label(view.exclude_titles));
         self.status.set_visible(false);
         self.box_.set_visible(true);
+    }
+}
+
+fn paint_switch(switch: &gtk::Switch, active: bool) {
+    // Even setting the current value cancels GTK's pending toggle animation,
+    // before it can emit state-set and mark the owner's edit. Leave it running.
+    if switch.is_active() != active {
+        switch.set_active(active);
     }
 }
 
@@ -2103,10 +2111,10 @@ fn apply_view(ui: &Ui, view: &View) {
     // A switch waiting on its save keeps the owner's flip until the app answers.
     ui.computer_painting.set(true);
     if ui.cursor.is_sensitive() {
-        ui.cursor.set_active(view.draw_cursor);
+        paint_switch(&ui.cursor, view.draw_cursor);
     }
     if ui.start_paused.is_sensitive() {
-        ui.start_paused.set_active(view.start_paused);
+        paint_switch(&ui.start_paused, view.start_paused);
     }
     ui.computer_painting.set(false);
     ui.segment.set_text(&format!(
