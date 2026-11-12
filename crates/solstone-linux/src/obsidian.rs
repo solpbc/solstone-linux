@@ -226,6 +226,8 @@ struct HandleInner {
     cancel_notify: Arc<tokio::sync::Notify>,
     stop: Arc<AtomicBool>,
     stop_notify: Arc<tokio::sync::Notify>,
+    restart: Arc<AtomicBool>,
+    restart_notify: Arc<tokio::sync::Notify>,
 }
 
 impl ObsidianHandle {
@@ -275,6 +277,17 @@ impl ObsidianHandle {
 
     pub async fn cancel_warning(&self) -> String {
         self.call(Command::Cancel).await
+    }
+
+    /// The owner paired a journal: the vault's current notes go to it once, as
+    /// their first send. Returns at once; the source does it with its own work,
+    /// before it scans again.
+    pub fn restart_send(&self) {
+        let Some(inner) = &self.inner else { return };
+        // A scan under way stops early, so the restart isn't kept waiting.
+        inner.cancel.store(true, Ordering::Release);
+        inner.restart.store(true, Ordering::Release);
+        inner.restart_notify.notify_one();
     }
 
     /// Stop the source and wait for it to save what it holds.
@@ -341,6 +354,8 @@ fn spawnable<T: Transport>(
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let stop_notify = Arc::new(tokio::sync::Notify::new());
+    let restart = Arc::new(AtomicBool::new(false));
+    let restart_notify = Arc::new(tokio::sync::Notify::new());
     let handle = ObsidianHandle {
         inner: Some(Arc::new(HandleInner {
             commands,
@@ -349,6 +364,8 @@ fn spawnable<T: Transport>(
             cancel_notify: Arc::clone(&cancel_notify),
             stop: Arc::clone(&stop),
             stop_notify: Arc::clone(&stop_notify),
+            restart: Arc::clone(&restart),
+            restart_notify: Arc::clone(&restart_notify),
         })),
     };
     let worker = Worker {
@@ -361,6 +378,8 @@ fn spawnable<T: Transport>(
         cancel_notify,
         stop,
         stop_notify,
+        restart,
+        restart_notify,
         next_scan: Instant::now(),
         next_vault_check: Instant::now(),
         capability: None,
@@ -379,6 +398,8 @@ struct Worker<T: Transport> {
     cancel_notify: Arc<tokio::sync::Notify>,
     stop: Arc<AtomicBool>,
     stop_notify: Arc<tokio::sync::Notify>,
+    restart: Arc<AtomicBool>,
+    restart_notify: Arc<tokio::sync::Notify>,
     next_scan: Instant,
     next_vault_check: Instant,
     capability: Option<bool>,
@@ -418,6 +439,7 @@ impl<T: Transport> Worker<T> {
             if self.stop.load(Ordering::Acquire) || self.engine.is_none() {
                 break;
             }
+            self.restart_if_asked().await;
             while let Ok(command) = self.commands.try_recv() {
                 self.handle(command).await;
             }
@@ -429,6 +451,7 @@ impl<T: Transport> Worker<T> {
             let wait = if busy { Duration::ZERO } else { TICK };
             tokio::select! {
                 () = self.stop_notify.notified() => break,
+                () = self.restart_notify.notified() => {}
                 command = self.commands.recv() => {
                     let Some(command) = command else { break };
                     self.handle(command).await;
@@ -501,6 +524,21 @@ impl<T: Transport> Worker<T> {
                 let _ = reply.send(self.document(None));
             }
         }
+    }
+
+    async fn restart_if_asked(&mut self) {
+        if !self.restart.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        self.cancel.store(false, Ordering::Release);
+        if let Some(Err(error)) = self.with_engine(Engine::restart_send).await {
+            tracing::warn!(%error, "Couldn't start the Obsidian first send again");
+        }
+        self.next_scan = Instant::now();
+        self.next_vault_check = Instant::now();
+        self.capability = None;
+        self.capability_checked = None;
+        self.publish();
     }
 
     /// One turn of the source. Returns whether there's more to do right away.
@@ -947,6 +985,48 @@ mod tests {
         assert_eq!(answer.await.unwrap().status.state, State::Off);
         assert!(f.journal.delivered.lock().unwrap().is_empty());
         assert_eq!(state(&f).status.waiting, 0);
+    }
+
+    #[tokio::test]
+    async fn a_restart_sends_the_vault_again_after_the_same_name_check() {
+        let mut f = fixture();
+        write_note(&f.vault, "a.md", "aaa", T0 - 7_200_000);
+        turn_on(&mut f).await;
+        steps_until_quiet(&mut f).await;
+        assert_eq!(f.journal.delivered.lock().unwrap().len(), 1);
+        let asks = *f.journal.capability_calls.lock().unwrap();
+
+        *f.journal.vaults.lock().unwrap() = Some(VaultList::Listed(vec![ListedVault {
+            vault: "Notes".into(),
+            device: Some("studio".into()),
+            last_synced_at: None,
+        }]));
+        f.handle.restart_send();
+        f.worker.restart_if_asked().await;
+        assert_eq!(state(&f).status.state, State::Checking);
+        assert_eq!(state(&f).status.vault.as_deref(), Some("Notes"));
+        steps_until_quiet(&mut f).await;
+        assert!(
+            *f.journal.capability_calls.lock().unwrap() > asks,
+            "the journal is asked again"
+        );
+        assert_eq!(state(&f).status.state, State::Confirm);
+        assert_eq!(f.journal.delivered.lock().unwrap().len(), 1, "not yet");
+
+        let (reply, _answer) = oneshot::channel();
+        f.worker.handle(Command::Continue(reply)).await;
+        f.worker.step().await;
+        steps_until_quiet(&mut f).await;
+        let delivered = f.journal.delivered.lock().unwrap().clone();
+        assert_eq!(delivered.len(), 2, "the note went again");
+        assert_eq!(delivered[1].first_sight, 1);
+        let doc = state(&f);
+        assert_eq!(doc.status.state, State::On);
+        assert_eq!(doc.status.first_sync, None, "and the first send finished");
+
+        // Nothing more to restart until asked again.
+        f.worker.restart_if_asked().await;
+        assert_eq!(state(&f).status.state, State::On);
     }
 
     #[tokio::test]

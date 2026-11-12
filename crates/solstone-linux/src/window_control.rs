@@ -1223,6 +1223,9 @@ pub struct WindowControlSupervisor {
     attempt_counter: u64,
     local_journal: Arc<dyn LocalJournal>,
     cmd_rx: mpsc::Receiver<SupervisorCommand>,
+    /// Told when the owner has just paired a journal, so each source starts its
+    /// first setup again for it.
+    new_pairing: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl WindowControlSupervisor {
@@ -1314,8 +1317,21 @@ impl WindowControlSupervisor {
             attempt_counter: 0,
             local_journal,
             cmd_rx,
+            new_pairing: None,
         };
         (supervisor, handler)
+    }
+
+    pub(crate) fn attach_new_pairing(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.new_pairing = Some(hook);
+    }
+
+    /// A pairing the owner just made is saved and confirmed. Not a relaunch or
+    /// a reconnect, which find the pairing already on disk.
+    fn paired_anew(&self) {
+        if let Some(hook) = &self.new_pairing {
+            hook();
+        }
     }
 
     pub(crate) fn attach_live_settings(&self, live: Arc<dyn LiveSettings>) {
@@ -1525,15 +1541,23 @@ impl WindowControlSupervisor {
         if let Some(cred) = cred_opt {
             let pairing_id = crate::private_link::compute_pairing_id(&cred.client_cert_pem);
             if is_pairing_confirmed(&config_root, &pairing_id) {
-                let already_failed = {
+                let (already_failed, was_confirmed) = {
                     let phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
-                    phase.failed_owner_pairing_id.as_deref() == Some(&pairing_id)
+                    (
+                        phase.failed_owner_pairing_id.as_deref() == Some(&pairing_id),
+                        phase.durable == "confirmed",
+                    )
                 };
                 if already_failed {
                     return;
                 }
                 self.upload.prepare_new_owner();
                 self.sync_reset.reset_association_blockers();
+                // The terminal's setup or confirm finished a pairing while the
+                // app was running.
+                if !was_confirmed {
+                    self.paired_anew();
+                }
                 let lock_res = self.cloned_lock.try_clone();
                 let Ok(lock_clone) = lock_res else { return };
                 match self
@@ -1973,6 +1997,7 @@ impl WindowControlSupervisor {
         }
 
         self.sync_reset.reset_association_blockers();
+        self.paired_anew();
 
         let lock_clone = match self.cloned_lock.try_clone() {
             Ok(l) => l,
@@ -2932,6 +2957,14 @@ mod tests {
         effective_settings: Arc<Mutex<Option<SettingsDocument>>>,
         handler: WindowControlHandler,
         supervisor_task: tokio::task::JoinHandle<Result<(), PrivateStateError>>,
+        new_pairings: Arc<AtomicUsize>,
+    }
+
+    fn count_new_pairings(supervisor: &mut WindowControlSupervisor, count: &Arc<AtomicUsize>) {
+        let count = Arc::clone(count);
+        supervisor.attach_new_pairing(Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
     }
 
     impl TestHarness {
@@ -3005,7 +3038,7 @@ mod tests {
             let shutdown_notify = Arc::new(tokio::sync::Notify::new());
             let open_journal = OpenJournalAccess::default();
 
-            let (supervisor, handler) = WindowControlSupervisor::new(
+            let (mut supervisor, handler) = WindowControlSupervisor::new(
                 supervisor_lock,
                 Arc::clone(&upload),
                 config_paths.clone(),
@@ -3029,6 +3062,8 @@ mod tests {
                 Arc::clone(&local_journal) as Arc<dyn LocalJournal>,
             );
 
+            let new_pairings = Arc::new(AtomicUsize::new(0));
+            count_new_pairings(&mut supervisor, &new_pairings);
             let supervisor_task = tokio::spawn(supervisor.run());
             tokio::task::yield_now().await;
 
@@ -3053,6 +3088,7 @@ mod tests {
                 effective_settings,
                 handler,
                 supervisor_task,
+                new_pairings,
             }
         }
 
@@ -3077,7 +3113,7 @@ mod tests {
             );
             self.open_journal = OpenJournalAccess::default();
             self.shutdown_notify = Arc::new(tokio::sync::Notify::new());
-            let (supervisor, handler) = WindowControlSupervisor::new(
+            let (mut supervisor, handler) = WindowControlSupervisor::new(
                 self._daemon_lock.try_clone().unwrap(),
                 self.upload.clone(),
                 self.config_paths.clone(),
@@ -3100,6 +3136,7 @@ mod tests {
                 Arc::new(Mutex::new(None)),
                 Arc::clone(&self.local_journal) as Arc<dyn LocalJournal>,
             );
+            count_new_pairings(&mut supervisor, &self.new_pairings);
             self.handler = handler;
             self.supervisor_task = tokio::spawn(supervisor.run());
             // Go through the real command channel after startup has reconstructed disk state.
@@ -3173,6 +3210,58 @@ mod tests {
         assert_eq!(starter.starts.load(Ordering::SeqCst), 1);
         assert_eq!(starter.recorded_link_facts.lock().unwrap().len(), 1);
 
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_pairing_confirmed_here_starts_sources_again_and_a_relaunch_does_not() {
+        let cred = sample_valid_credential("cert-pem-bytes");
+        let pairer = Arc::new(FakePairer::new(cred));
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let mut harness =
+            TestHarness::new(None, false, pairer, starter.clone(), Arc::new(NoWriteFault)).await;
+
+        let begin = harness.handler.begin_pairing(TEST_PAIR_LINK.into()).await;
+        let att = decode_control_str(&begin).unwrap().attempt.unwrap();
+        assert_eq!(
+            harness.new_pairings.load(Ordering::SeqCst),
+            0,
+            "not before yes"
+        );
+        let answer = harness
+            .handler
+            .answer_pairing(att.id, att.pairing_id, true)
+            .await;
+        assert_eq!(decode_control_str(&answer).unwrap().durable, "confirmed");
+        assert_eq!(harness.new_pairings.load(Ordering::SeqCst), 1);
+
+        harness.restart().await;
+        assert_eq!(starter.starts.load(Ordering::SeqCst), 2, "running again");
+        harness
+            .clock
+            .advance_and_yield(JOURNAL_MARK_RECHECK_INTERVAL)
+            .await;
+        harness.handler.open_journal().await;
+        assert_eq!(
+            harness.new_pairings.load(Ordering::SeqCst),
+            1,
+            "a relaunch is not a new pairing"
+        );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_mark_answered_no_starts_nothing_again() {
+        let pairer = Arc::new(FakePairer::new(sample_valid_credential("cert-pem-bytes")));
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(None, false, pairer, starter, Arc::new(NoWriteFault)).await;
+        let begin = harness.handler.begin_pairing(TEST_PAIR_LINK.into()).await;
+        let att = decode_control_str(&begin).unwrap().attempt.unwrap();
+        harness
+            .handler
+            .answer_pairing(att.id, att.pairing_id, false)
+            .await;
+        assert_eq!(harness.new_pairings.load(Ordering::SeqCst), 0);
         harness.shutdown().await;
     }
 
@@ -3667,6 +3756,34 @@ mod tests {
         assert_eq!(model.owner, "running");
         assert_eq!(model.health, "listener-ready");
         assert!(!pairing_commit_pending(&harness.config_root));
+        assert_eq!(
+            harness.new_pairings.load(Ordering::SeqCst),
+            1,
+            "confirmed at the terminal while the app ran"
+        );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn starting_with_a_confirmed_pairing_is_not_a_new_pairing() {
+        let cred = sample_valid_credential("saved-cert");
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(
+            Some(cred),
+            true,
+            Arc::new(FakePairer::new(sample_valid_credential("next-cert"))),
+            starter.clone(),
+            Arc::new(NoWriteFault),
+        )
+        .await;
+        harness.handler.open_journal().await;
+        harness
+            .clock
+            .advance_and_yield(JOURNAL_MARK_RECHECK_INTERVAL)
+            .await;
+        harness.handler.open_journal().await;
+        assert_eq!(starter.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.new_pairings.load(Ordering::SeqCst), 0);
         harness.shutdown().await;
     }
 
@@ -3753,6 +3870,44 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn the_old_pairing_running_again_after_a_failed_commit_is_not_a_new_pairing() {
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let fault = Arc::new(CommitWriteFault {
+            armed: AtomicBool::new(false),
+            writes: AtomicUsize::new(0),
+            target: 1,
+            stage: DurableWriteStage::Create,
+        });
+        let harness = TestHarness::new(
+            Some(sample_valid_credential("old-cert")),
+            true,
+            Arc::new(FakePairer::new(sample_valid_credential("new-cert"))),
+            starter.clone(),
+            fault.clone(),
+        )
+        .await;
+        let begin = harness.handler.begin_pairing(TEST_PAIR_LINK.into()).await;
+        let att = decode_control_str(&begin).unwrap().attempt.unwrap();
+        fault.armed.store(true, Ordering::SeqCst);
+        let answer = harness
+            .handler
+            .answer_pairing(att.id, att.pairing_id, true)
+            .await;
+        let model = decode_control_str(&answer).unwrap();
+        assert_eq!(model.fault.as_deref(), Some("commit-failed"));
+        assert_eq!(model.durable, "confirmed", "the old pairing stands");
+        fault.armed.store(false, Ordering::SeqCst);
+        harness
+            .clock
+            .advance_and_yield(JOURNAL_MARK_RECHECK_INTERVAL)
+            .await;
+        harness.handler.open_journal().await;
+        assert_eq!(starter.starts.load(Ordering::SeqCst), 2, "running again");
+        assert_eq!(harness.new_pairings.load(Ordering::SeqCst), 0);
+        harness.shutdown().await;
     }
 
     #[tokio::test]

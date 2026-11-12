@@ -467,7 +467,7 @@ fn run_capture(
                 terminal_status: String::new(),
             })));
         let captures_dir = Some(config.captures_dir());
-        let (supervisor, handler) = crate::window_control::WindowControlSupervisor::new(
+        let (mut supervisor, handler) = crate::window_control::WindowControlSupervisor::new(
             linked_state_lock,
             linked_upload,
             crate::config::ConfigPaths {
@@ -494,6 +494,8 @@ fn run_capture(
             Arc::new(crate::local_journal::SocketLocalJournal::default()),
         );
         supervisor.attach_live_settings(Arc::clone(&live_settings));
+        let restart_obsidian = obsidian.clone();
+        supervisor.attach_new_pairing(Arc::new(move || restart_obsidian.restart_send()));
         supervisor.attach_activity_runtime(
             Arc::clone(&activity_fault),
             Arc::clone(&activity_capability),
