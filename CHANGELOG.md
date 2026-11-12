@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- when you pair a new journal, or your journal again, your Obsidian notes go into it, as when you first turned Obsidian on. before, only notes you changed afterwards reached it.
 - when you add a file the app can't take, such as a video, it's now named with the reason under the line that says what was saved, instead of being listed under "on this device", where you had to remove it.
 - activity switches on the screen page keep changes made with a screen reader until you save settings.
 
