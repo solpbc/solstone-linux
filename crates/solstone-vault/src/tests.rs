@@ -1689,3 +1689,240 @@ fn a_file_gone_from_the_outbox_sends_its_notes_again_and_says_so() {
         "delivered again, so nothing to flag"
     );
 }
+
+/// Every file waiting in the outbox.
+fn outbox_files(h: &Harness) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_files(&h.root.join("outbox"), &mut files);
+    files.sort();
+    files
+}
+
+fn same_name_vault() -> ListedVault {
+    ListedVault {
+        vault: "Notes".into(),
+        device: Some("laptop".into()),
+        last_synced_at: None,
+    }
+}
+
+#[test]
+fn a_restart_while_on_sends_every_current_note_once_after_the_same_name_check() {
+    let mut h = Harness::turned_on();
+    h.write("a.md", "alpha", T0 - 3_600_000);
+    h.write("sub/b.md", "beta", T0 - 7_200_000);
+    h.scan();
+    h.clock.advance_s(1);
+    assert_eq!(h.deliver_all().len(), 2);
+    assert!(h.status().first_sync.is_none());
+    h.clock.advance_s(60);
+    h.scan();
+    assert!(h.deliver_all().is_empty(), "nothing new to send");
+
+    h.engine.restart_send().unwrap();
+    assert_eq!(h.engine.phase(), Some(&Phase::Checking));
+    assert_eq!(h.status().state, State::Checking);
+    assert_eq!(h.status().vault.as_deref(), Some("Notes"), "the same vault");
+    assert_eq!(
+        h.scan(),
+        ScanOutcome::NotActive,
+        "nothing goes before the check"
+    );
+
+    h.engine.apply_vault_list(&[same_name_vault()]).unwrap();
+    assert_eq!(h.status().state, State::Confirm);
+    h.engine.continue_warning().unwrap();
+    assert_eq!(h.scan(), ScanOutcome::Done);
+    let sync = h.status().first_sync.expect("a first send again");
+    assert_eq!((sync.sent, sync.found), (0, 2));
+
+    h.clock.advance_s(1);
+    let delivered = h.deliver_all();
+    for (path, text) in [("a.md", "alpha"), ("sub/b.md", "beta")] {
+        let lines = line_for(&delivered, path);
+        assert_eq!(lines.len(), 1, "{path} once");
+        assert_eq!(lines[0].change, Change::Changed);
+        assert_eq!(lines[0].text.as_deref(), Some(text));
+    }
+    assert!(
+        h.status().first_sync.is_none(),
+        "progress reached every note"
+    );
+
+    h.clock.advance_s(60);
+    h.scan();
+    h.clock.advance_s(600);
+    assert!(h.deliver_all().is_empty(), "and only once");
+}
+
+#[test]
+fn a_restart_while_off_leaves_it_off_and_the_next_turn_on_is_a_first_setup() {
+    let mut h = Harness::turned_on();
+    h.write("a.md", "alpha", T0 - 3_600_000);
+    h.scan();
+    h.clock.advance_s(1);
+    h.deliver_all();
+    h.engine.turn_off().unwrap();
+
+    h.engine.restart_send().unwrap();
+    assert_eq!(h.status().state, State::Off);
+    assert!(!h.engine.is_on());
+
+    h.engine.turn_on(&h.vault).unwrap();
+    assert_eq!(h.engine.phase(), Some(&Phase::Checking), "checks again");
+    h.engine.apply_vault_list(&[same_name_vault()]).unwrap();
+    assert_eq!(h.status().state, State::Confirm);
+    h.engine.continue_warning().unwrap();
+    h.scan();
+    let sync = h.status().first_sync.expect("a first send again");
+    assert_eq!((sync.sent, sync.found), (0, 1));
+    h.clock.advance_s(1);
+    let delivered = h.deliver_all();
+    assert_eq!(line_for(&delivered, "a.md").len(), 1);
+    assert!(h.status().first_sync.is_none());
+}
+
+#[test]
+fn a_restart_also_starts_again_for_a_vault_not_on_now() {
+    let mut h = Harness::turned_on();
+    h.write("a.md", "alpha", T0 - 3_600_000);
+    h.scan();
+    h.clock.advance_s(1);
+    h.deliver_all();
+    h.engine.turn_off().unwrap();
+    let other = h.vault.parent().unwrap().join("Other");
+    fs::create_dir_all(other.join(".obsidian")).unwrap();
+    h.engine.turn_on(&other).unwrap();
+    h.engine.apply_vault_list(&[]).unwrap();
+
+    h.engine.restart_send().unwrap();
+    h.engine.turn_off().unwrap();
+    h.engine.turn_on(&h.vault).unwrap();
+    assert_eq!(h.engine.phase(), Some(&Phase::Checking));
+}
+
+#[test]
+fn the_intake_ids_keep_counting_after_a_restart() {
+    let mut h = Harness::turned_on();
+    h.engine.set_intake_hook(Arc::new(|_| false));
+    h.write("a.md", "alpha", T0 - 3_600_000);
+    h.scan();
+    let before = h.engine.intakes();
+    assert_eq!(before.iter().map(|i| i.id).collect::<Vec<_>>(), vec![1]);
+
+    h.engine.restart_send().unwrap();
+    assert_eq!(h.engine.intakes(), before, "uncounted intakes stay");
+    h.engine.apply_vault_list(&[]).unwrap();
+    h.write("b.md", "beta", T0 - 3_600_000);
+    h.scan();
+    let after = h.engine.intakes();
+    let mut ids: Vec<u64> = after.iter().map(|i| i.id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 3], "new ids follow the old ones");
+    assert!(
+        after.iter().filter(|i| i.id > 1).all(|i| i.inventory),
+        "the notes sent again are the vault as it was, not new notes"
+    );
+    let table = Table::load(&h.root.join("tables").join(table_name(&h))).unwrap();
+    assert_eq!(table.next_intake_id, 4);
+
+    h.write("c.md", "gamma", T0);
+    h.clock.advance_s(60);
+    h.scan();
+    let added = h
+        .engine
+        .intakes()
+        .into_iter()
+        .find(|i| i.path == "c.md")
+        .unwrap();
+    assert_eq!(added.id, 4);
+    assert!(added.first_sight && !added.inventory, "a later note counts");
+}
+
+#[test]
+fn files_waiting_at_a_restart_stay_and_go_with_progress_never_past_the_notes() {
+    let mut h = Harness::turned_on();
+    h.write("a.md", "alpha", T0 - 3_600_000);
+    h.write("b.md", "beta", T0 - 7_200_000);
+    h.scan();
+    h.clock.advance_s(1);
+    h.close_due();
+    let held = outbox_files(&h);
+    assert_eq!(held.len(), 2, "both windows waiting");
+    let bytes: Vec<Vec<u8>> = held.iter().map(|path| fs::read(path).unwrap()).collect();
+
+    h.engine.restart_send().unwrap();
+    assert_eq!(outbox_files(&h), held, "kept");
+    for (path, before) in held.iter().zip(&bytes) {
+        assert_eq!(&fs::read(path).unwrap(), before, "unchanged");
+    }
+    assert_eq!(h.status().waiting, 2);
+
+    h.engine.apply_vault_list(&[]).unwrap();
+    h.scan();
+    h.clock.advance_s(1);
+    h.close_due();
+    let mut delivered = Vec::new();
+    while let Some(delivery) = h.engine.next_delivery() {
+        delivered.push(delivery.path.clone());
+        h.engine
+            .record_answer(&delivery, Answer::Delivered)
+            .unwrap();
+        if let Some(sync) = h.status().first_sync {
+            assert!(sync.sent <= sync.found, "{} of {}", sync.sent, sync.found);
+            assert_eq!(sync.found, 2);
+        }
+    }
+    for path in &held {
+        assert!(delivered.contains(path), "{} went", path.display());
+    }
+    assert_eq!(delivered.len(), 4, "the waiting files and the first send");
+    assert!(h.status().first_sync.is_none());
+}
+
+#[test]
+fn a_change_waiting_at_a_restart_counts_toward_the_first_send() {
+    let mut h = Harness::turned_on();
+    h.write("a.md", "v0", T0 - 3_600_000);
+    h.scan();
+    h.clock.advance_s(1);
+    h.deliver_all();
+    let base = T0 + 11 * 60_000;
+    h.clock.set(base);
+    h.write("a.md", "v1", base - 5_000);
+    h.scan();
+    assert_eq!(h.status().waiting, 1, "the edit is pending");
+
+    h.engine.restart_send().unwrap();
+    h.engine.apply_vault_list(&[]).unwrap();
+    h.scan();
+    assert_eq!(h.status().waiting, 1, "one line for the note in its window");
+    assert_eq!(h.status().first_sync.map(|sync| sync.found), Some(1));
+    h.clock.set(T0 + 17 * 60_000);
+    let delivered = h.deliver_all();
+    let lines = line_for(&delivered, "a.md");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].text.as_deref(), Some("v1"));
+    assert!(
+        h.status().first_sync.is_none(),
+        "and the first send finishes"
+    );
+}
+
+#[test]
+fn a_stop_between_the_restarts_two_saves_still_checks_first() {
+    let mut h = Harness::turned_on();
+    h.write("a.md", "alpha", T0 - 3_600_000);
+    h.scan();
+    h.clock.advance_s(1);
+    h.deliver_all();
+    // The table is saved first; the source still says active.
+    let path = h.root.join("tables").join(table_name(&h));
+    let mut table = Table::load(&path).unwrap();
+    table.restart_send();
+    table.save(&path).unwrap();
+
+    h.engine = Engine::open(h.root.clone(), Arc::new(h.clock.clone())).unwrap();
+    assert_eq!(h.engine.phase(), Some(&Phase::Checking));
+    assert_eq!(h.scan(), ScanOutcome::NotActive);
+}

@@ -95,4 +95,19 @@ impl Table {
         let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
         store::atomic_write(path, &bytes)
     }
+
+    /// Forget what was sent, so the vault's next scan is its first send again.
+    /// The intakes and their ids stay: the counters ignore an id they have
+    /// already passed.
+    pub fn restart_send(&mut self) {
+        self.rows.clear();
+        self.held.clear();
+        self.first_send_done = false;
+        self.first_sync = None;
+        self.first_sync_started = false;
+        self.first_list_open = false;
+        self.listing_paths = None;
+        self.listing_absent.clear();
+        self.listing_ids.clear();
+    }
 }

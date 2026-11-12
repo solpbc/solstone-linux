@@ -275,7 +275,13 @@ impl Engine {
             intake_hook: None,
         };
         if engine.source.enabled {
-            engine.table = Some(Table::load(&engine.table_path())?);
+            let table = Table::load(&engine.table_path())?;
+            // A restart saves the table before the source: stopped between the
+            // two, the vault still gets its check before the first send.
+            if engine.source.phase == Phase::Active && !table.first_send_done {
+                engine.source.phase = Phase::Checking;
+            }
+            engine.table = Some(table);
         }
         engine.outbox.restore_aside()?;
         Ok(engine)
@@ -397,6 +403,43 @@ impl Engine {
         self.table = None;
         self.save_source()?;
         self.runtime = Runtime::default();
+        Ok(())
+    }
+
+    /// Send every vault's current notes again, once, as its first send. A source
+    /// that is on keeps its vault and asks the journal about a vault of the same
+    /// name before that send, as turning it on does. A source that is off stays
+    /// off, and turning it on later runs the whole first setup. What is waiting
+    /// to go stays and still goes.
+    pub fn restart_send(&mut self) -> io::Result<()> {
+        let current = self.table_path();
+        if let Some(table) = &mut self.table {
+            table.restart_send();
+            table.save(&current)?;
+            self.table_saved_ms = self.clock.now_ms();
+            self.table_dirty = false;
+        }
+        if self.source.enabled {
+            self.source.phase = Phase::Checking;
+            self.save_source()?;
+        }
+        self.retry_after_ms = None;
+        self.retry_step = 0;
+        // Every other vault this source has held, for a later turn-on. A table
+        // that can't be read already can't be turned on, so it is left as it is.
+        for entry in std::fs::read_dir(self.root.join("tables"))? {
+            let path = entry?.path();
+            if (path == current && self.table.is_some())
+                || path.extension().is_none_or(|ext| ext != "json")
+            {
+                continue;
+            }
+            let Ok(mut table) = Table::load(&path) else {
+                continue;
+            };
+            table.restart_send();
+            table.save(&path)?;
+        }
         Ok(())
     }
 
@@ -1205,7 +1248,11 @@ impl Engine {
             Change::Changed => {
                 if let Some(existing) = self.pending.get(&here).cloned() {
                     replace.push(here);
-                    meta.first_sight = existing.first_sight;
+                    // A note with no row and an ordinary change waiting is one
+                    // the send restarted for: a first sight, which the first
+                    // send counts.
+                    meta.first_sight = existing.first_sight
+                        || (change.first_sight && existing.change != Change::Removed);
                     if existing.change == Change::Renamed {
                         meta.change = Change::Renamed;
                         meta.previous_path = existing.previous_path;
@@ -1422,7 +1469,12 @@ impl Engine {
                         .as_mut()
                         .and_then(|table| table.first_sync.as_mut())
                     {
-                        sync.sent += u64::from(delivery.first_sight);
+                        // A file waiting from before a restart carries notes this
+                        // first send counts again.
+                        sync.sent = sync
+                            .sent
+                            .saturating_add(u64::from(delivery.first_sight))
+                            .min(sync.found);
                     }
                     self.table_dirty = true;
                 }
