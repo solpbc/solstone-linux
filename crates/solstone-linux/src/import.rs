@@ -660,7 +660,7 @@ impl ImportHandle {
         {
             "waiting to go to your journal."
         } else if !document.rows.is_empty() {
-            "imports here won't go on their own. each one says why."
+            "not going to your journal right now. each one says why."
         } else if capability
             .as_ref()
             .is_some_and(|c| state.delivered_journal.as_deref() == Some(c.writer().identity_key()))

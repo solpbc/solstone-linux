@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- when imports still on this device aren't going to your journal, the import page now says just that. before, it said they wouldn't go on their own, but an import your journal turned away goes again on its own once your journal is updated.
+
 ## [2.0.41] - 2026-11-13
 
 ### Fixed
