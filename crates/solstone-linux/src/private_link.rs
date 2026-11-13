@@ -1898,7 +1898,7 @@ impl OpenJournalCapability {
         // The target is accepted in child argv here; it remains excluded from the
         // secrecy contract's logs, errors, status, clipboard, D-Bus, state, and Debug surfaces.
         self.open_inner(|target| {
-            let executable = std::env::current_exe().map_err(|_| ())?;
+            let executable = crate::service::current_executable().map_err(|_| ())?;
             // Scope metadata carries only a fixed description and PIDs. The approved URL
             // stays in child argv, never in a transient service's ExecStart properties.
             let output = crate::bounded_process::run(

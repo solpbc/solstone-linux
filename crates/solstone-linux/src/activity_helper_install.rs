@@ -19,7 +19,7 @@ fn data_dir() -> PathBuf {
 
 fn source_dir() -> Option<PathBuf> {
     // 1. Check relative to current exe
-    if let Ok(exe) = std::env::current_exe()
+    if let Ok(exe) = crate::service::current_executable()
         && let Some(prefix) = exe.parent().and_then(|p| p.parent())
     {
         let candidate = prefix.join("share/solstone-linux/activity-helpers");

@@ -31,9 +31,29 @@ pub struct ServicePaths {
     pub path: Option<String>,
 }
 
+/// Strips the Linux `/proc/self/exe` `" (deleted)"` suffix added when an in-place
+/// package upgrade (`dpkg` / `rpm`) replaces the running binary on disk.
+pub fn normalize_executable_path(executable: &Path) -> PathBuf {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    if !executable.exists()
+        && let Some(stripped) = executable
+            .as_os_str()
+            .as_bytes()
+            .strip_suffix(b" (deleted)")
+        && !stripped.is_empty()
+    {
+        return PathBuf::from(OsString::from_vec(stripped.to_vec()));
+    }
+    executable.to_path_buf()
+}
+
+pub fn current_executable() -> io::Result<PathBuf> {
+    env::current_exe().map(|executable| normalize_executable_path(&executable))
+}
+
 impl ServicePaths {
     pub fn for_window() -> io::Result<Self> {
-        let executable = env::current_exe()?;
+        let executable = current_executable()?;
         let binary = executable
             .parent()
             .ok_or_else(|| io::Error::other("missing executable directory"))?
@@ -43,7 +63,7 @@ impl ServicePaths {
     pub fn production() -> io::Result<Self> {
         Self::from_environment(
             env::var_os("HOME"),
-            env::current_exe()?,
+            current_executable()?,
             env::var("PATH").ok(),
         )
     }
@@ -162,31 +182,12 @@ fn remove_graphical_enablement(paths: &ServicePaths, output: &mut dyn io::Write)
     }
 }
 
-fn write_unit(paths: &ServicePaths, output: &mut dyn io::Write) -> Result<(), String> {
-    let path =
-        service_path(&paths.binary, paths.path.as_deref()).map_err(|error| error.to_string())?;
-    let unit = UNIT_TEMPLATE
-        .replace("{BINARY}", &paths.binary.to_string_lossy())
-        .replace("{PATH}", &path);
-    let unit_path = paths.unit();
-    fs::create_dir_all(unit_path.parent().unwrap_or(Path::new(".")))
-        .and_then(|()| fs::write(&unit_path, unit))
-        .map_err(|error| error.to_string())?;
-    let _ = writeln!(output, "Wrote {}", unit_path.display());
-    remove_graphical_enablement(paths, output);
-    Ok(())
-}
-
-pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::Write) -> i32 {
-    // Preserve update semantics without racing a freshly-created service: an existing
-    // owner is stopped before its replacement starts, while a first install reaches
-    // `enable --now` exactly once.
-    let was_active = service_is_active(runner);
+fn write_service_files(paths: &ServicePaths, output: &mut dyn io::Write) -> bool {
     let path = match service_path(&paths.binary, paths.path.as_deref()) {
         Ok(path) => path,
         Err(error) => {
             let _ = writeln!(output, "Error: {error}");
-            return 1;
+            return false;
         }
     };
     let unit = UNIT_TEMPLATE
@@ -206,7 +207,7 @@ pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::W
     })();
     if let Err(error) = write_result {
         let _ = writeln!(output, "Error writing service files: {error}");
-        return 1;
+        return false;
     }
     if crate::browser::ENABLED
         && let Err(error) = crate::browser::registration::write_all(
@@ -221,6 +222,17 @@ pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::W
         );
     }
     remove_graphical_enablement(paths, output);
+    true
+}
+
+pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::Write) -> i32 {
+    // Preserve update semantics without racing a freshly-created service: an existing
+    // owner is stopped before its replacement starts, while a first install reaches
+    // `enable --now` exactly once.
+    let was_active = service_is_active(runner);
+    if !write_service_files(paths, output) {
+        return 1;
+    }
     systemctl_nonfatal(
         runner,
         &["--user", "daemon-reload"],
@@ -360,8 +372,7 @@ pub fn start_for_window(
         ServicePresence::Uncertain => WindowStart::Uncertain,
         ServicePresence::Inactive => {
             // An install made under the graphical session moves to the account here.
-            if let Err(error) = write_unit(paths, output) {
-                let _ = writeln!(output, "Error writing service files: {error}");
+            if !write_service_files(paths, output) {
                 return WindowStart::Failed;
             }
             systemctl_nonfatal(
@@ -393,42 +404,8 @@ pub fn start_for_window(
             }
         }
         ServicePresence::Absent => {
-            let path = match service_path(&paths.binary, paths.path.as_deref()) {
-                Ok(path) => path,
-                Err(error) => {
-                    let _ = writeln!(output, "Error: {error}");
-                    return WindowStart::Failed;
-                }
-            };
-            let unit = UNIT_TEMPLATE
-                .replace("{BINARY}", &paths.binary.to_string_lossy())
-                .replace("{PATH}", &path);
-            let unit_path = paths.unit();
-            let desktop_path = paths.desktop();
-            let write_result = (|| -> io::Result<()> {
-                fs::create_dir_all(unit_path.parent().unwrap_or(Path::new(".")))?;
-                fs::write(&unit_path, unit)?;
-                writeln!(output, "Wrote {}", unit_path.display())?;
-                fs::create_dir_all(desktop_path.parent().unwrap_or(Path::new(".")))?;
-                fs::write(&desktop_path, DESKTOP_ENTRY)?;
-                writeln!(output, "Wrote {}", desktop_path.display())?;
-                Ok(())
-            })();
-            if let Err(error) = write_result {
-                let _ = writeln!(output, "Error writing service files: {error}");
+            if !write_service_files(paths, output) {
                 return WindowStart::Failed;
-            }
-            if crate::browser::ENABLED
-                && let Err(error) = crate::browser::registration::write_all(
-                    &paths.home,
-                    &crate::browser::registration::stable_binary(&paths.binary),
-                    crate::browser::DEV_ENABLED,
-                )
-            {
-                let _ = writeln!(
-                    output,
-                    "Warning: could not write every browser registration: {error}"
-                );
             }
             systemctl_nonfatal(
                 runner,
@@ -1081,5 +1058,26 @@ mod tests {
             WindowStart::Started
         );
         assert!(!wants.join("solstone-linux.service").exists());
+        assert!(paths.desktop().is_file());
+        assert!(
+            paths
+                .home
+                .join(".config/google-chrome/NativeMessagingHosts/app.solstone.browser.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn normalize_executable_path_strips_deleted_suffix_unless_file_exists_on_disk() {
+        let t = tempfile::tempdir().unwrap();
+        let live = t.path().join("bin/solstone-linux");
+        fs::create_dir_all(live.parent().unwrap()).unwrap();
+        fs::write(&live, b"binary").unwrap();
+        let deleted = t.path().join("bin/solstone-linux (deleted)");
+        assert_eq!(normalize_executable_path(&deleted), live);
+
+        let literal_deleted = t.path().join("bin/literal (deleted)");
+        fs::write(&literal_deleted, b"binary").unwrap();
+        assert_eq!(normalize_executable_path(&literal_deleted), literal_deleted);
     }
 }

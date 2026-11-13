@@ -719,7 +719,7 @@ fn start_browser(
     custody_handle: Arc<Mutex<crate::browser::custody::Custody>>,
 ) -> Option<crate::browser::server::ServerHandle> {
     use crate::browser::{custody, registration, server};
-    match (env::var_os("HOME"), env::current_exe()) {
+    match (env::var_os("HOME"), crate::service::current_executable()) {
         (Some(home), Ok(executable)) => {
             if let Err(error) = registration::write_all(
                 std::path::Path::new(&home),

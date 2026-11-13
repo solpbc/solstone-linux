@@ -623,8 +623,10 @@ impl DoctorChecks for RealDoctor<'_> {
         if !crate::browser::ENABLED {
             return Vec::new();
         }
-        let (Some(home), Ok(executable)) = (std::env::var_os("HOME"), std::env::current_exe())
-        else {
+        let (Some(home), Ok(executable)) = (
+            std::env::var_os("HOME"),
+            crate::service::current_executable(),
+        ) else {
             return Vec::new();
         };
         let home = std::path::PathBuf::from(home);

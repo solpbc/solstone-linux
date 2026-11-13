@@ -174,6 +174,7 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
 /// `<prefix>/opt/solstone/desktop/<version>/bin/` and publishes `<prefix>/bin/` as the
 /// stable pointer; a package installs `/usr/bin/solstone-linux` directly.
 pub fn stable_binary(current_exe: &Path) -> PathBuf {
+    let current_exe = crate::service::normalize_executable_path(current_exe);
     let components: Vec<_> = current_exe.components().collect();
     let name = current_exe.file_name();
     if components.len() >= 6 {
@@ -186,7 +187,7 @@ pub fn stable_binary(current_exe: &Path) -> PathBuf {
             }
         }
     }
-    current_exe.to_path_buf()
+    current_exe
 }
 
 #[cfg(test)]
@@ -275,7 +276,17 @@ mod tests {
             PathBuf::from("/home/o/.local/bin/solstone-linux")
         );
         assert_eq!(
+            stable_binary(Path::new(
+                "/home/o/.local/opt/solstone/desktop/2.0.12-0123456789ab/bin/solstone-linux (deleted)"
+            )),
+            PathBuf::from("/home/o/.local/bin/solstone-linux")
+        );
+        assert_eq!(
             stable_binary(Path::new("/usr/bin/solstone-linux")),
+            PathBuf::from("/usr/bin/solstone-linux")
+        );
+        assert_eq!(
+            stable_binary(Path::new("/usr/bin/solstone-linux (deleted)")),
             PathBuf::from("/usr/bin/solstone-linux")
         );
         assert_eq!(

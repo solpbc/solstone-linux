@@ -315,7 +315,7 @@ fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
     {
         eprintln!("couldn't keep that pairing link for the window: {error}");
     }
-    let Ok(current) = std::env::current_exe() else {
+    let Ok(current) = crate::service::current_executable() else {
         return launch_window(false, false);
     };
     let error = Command::new(current).arg("window").exec();
@@ -336,7 +336,7 @@ pub(crate) fn spawn_settings_window_from_tray() {
 }
 
 fn launch_window(in_scope: bool, settings: bool) -> i32 {
-    let current = match env::current_exe() {
+    let current = match crate::service::current_executable() {
         Ok(exe) => exe,
         Err(error) => return handle_window_failure(&error.to_string(), false),
     };

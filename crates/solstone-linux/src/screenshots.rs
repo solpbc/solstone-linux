@@ -385,7 +385,7 @@ impl Converter {
     fn convert(&self, source: &Path, target: &Path) -> Result<(), ()> {
         match self {
             Self::Window => {
-                let window = std::env::current_exe()
+                let window = crate::service::current_executable()
                     .ok()
                     .and_then(|exe| exe.parent().map(|dir| dir.join("solstone-linux-window")))
                     .ok_or(())?;
