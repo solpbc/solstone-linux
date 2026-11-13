@@ -6,11 +6,13 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.41] - 2026-11-13
+
 ### Fixed
 
-- when you pair a new journal, or your journal again, your Obsidian notes go into it, as when you first turned Obsidian on. before, only notes you changed afterwards reached it.
-- when you add a file the app can't take, such as a video, it's now named with the reason under the line that says what was saved, instead of being listed under "on this device", where you had to remove it.
-- activity switches on the screen page keep changes made with a screen reader until you save settings.
+- when you pair from the app's window, with a new journal or your journal again, your Obsidian notes go into it, as when you first turned Obsidian on. before, only notes you changed afterwards reached it.
+- when you add a file the app can't take, such as a video, it's now named, with the reason, under the line that says what was saved, instead of being listed under "on this device", where you had to remove it.
+- a switch you flip on the screen or terminal page, or under "this computer", no longer goes back on its own now and then.
 
 ## [2.0.40] - 2026-11-12
 
