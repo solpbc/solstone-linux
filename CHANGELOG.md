@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- choose "screenshots" on the home page to bring the screenshots you take on this computer into your journal, each at the minute you took it. you choose how far back to start, and only what the solstone app can tell is a screenshot comes in. they come from your Screenshots folder, or one you choose.
+
 ### Fixed
 
 - when imports still on this device aren't going to your journal, the import page now says just that. before, it said they wouldn't go on their own, but an import your journal turned away goes again on its own once your journal is updated.

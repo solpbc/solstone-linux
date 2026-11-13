@@ -66,6 +66,13 @@
       <method name="Resume">
           <arg direction="out" type="s" />
         </method>
+      <method name="ScreenshotsChooseFolder"><arg name="path" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="ScreenshotsConfirm"><arg name="span" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="ScreenshotsCount"><arg name="span" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="ScreenshotsRetry"><arg direction="out" type="s" /></method>
+      <method name="ScreenshotsState"><arg direction="out" type="s" /></method>
+      <method name="ScreenshotsTurnOff"><arg direction="out" type="s" /></method>
+      <method name="ScreenshotsTurnOn"><arg direction="out" type="s" /></method>
       <method name="WriteSetting">
           <arg name="field" direction="in" type="s" />
           <arg name="value" direction="in" type="s" />

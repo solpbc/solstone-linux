@@ -147,6 +147,7 @@ pub(crate) struct ShellInputs {
     pub open_journal: crate::private_link::OpenJournalAccess,
     pub window_control: crate::window_control::WindowControlHandler,
     pub obsidian: crate::obsidian::ObsidianHandle,
+    pub screenshots: crate::screenshots::ScreenshotsHandle,
     pub imports: crate::import::ImportHandle,
 }
 
@@ -182,6 +183,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
     commands: O,
     window_control: crate::window_control::WindowControlHandler,
     obsidian: crate::obsidian::ObsidianHandle,
+    screenshots: crate::screenshots::ScreenshotsHandle,
     imports: crate::import::ImportHandle,
 ) -> (Observer1<C, O>, TrayHealth) {
     let tray_health = TrayHealth {
@@ -197,6 +199,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
             commands,
             window_control,
             obsidian,
+            screenshots,
             imports,
         },
         tray_health,
@@ -232,6 +235,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         inputs.commands.clone(),
         inputs.window_control,
         inputs.obsidian,
+        inputs.screenshots,
         inputs.imports,
     );
     let signal_sink = with_connection(inputs.connection.as_ref(), |connection| {
@@ -778,6 +782,7 @@ mod tests {
             CommandSender::new(command_sender),
             crate::window_control::WindowControlHandler::default(),
             crate::obsidian::ObsidianHandle::default(),
+            crate::screenshots::ScreenshotsHandle::default(),
             crate::import::ImportHandle::default(),
         );
         assert!(Arc::ptr_eq(&interface.health, &tray_health.cell));

@@ -68,6 +68,32 @@ pub(crate) fn record_terminal_segment(state_dir: &Path, day: &str, segment: &str
     record_terminal_segment_at(state_dir, day, segment, dir, &ClockStamp::now());
 }
 
+/// A screenshot taken in, by its identity. The same screenshot counts once.
+pub(crate) fn add_screenshot(state_dir: &Path, id: &str) {
+    add_screenshot_at(state_dir, id, &ClockStamp::now());
+}
+
+fn add_screenshot_at(state_dir: &Path, id: &str, stamp: &ClockStamp) {
+    let _ = update(state_dir, stamp, |file| {
+        let source = &mut file["screenshots"];
+        let seen = source["seen"]
+            .as_array()
+            .is_some_and(|seen| seen.iter().any(|value| value.as_str() == Some(id)));
+        if seen {
+            return false;
+        }
+        let Some(total) = source.get("screenshots").and_then(Value::as_u64) else {
+            return false;
+        };
+        source["screenshots"] = json!(total.saturating_add(1));
+        source["last"] = json!(stamp.at.clone());
+        if let Some(seen) = source["seen"].as_array_mut() {
+            seen.push(json!(id));
+        }
+        true
+    });
+}
+
 pub(crate) fn note_browser_batch(state_dir: &Path, batch: &Value, accepted: bool) {
     note_browser_batch_at(state_dir, batch, accepted, &ClockStamp::now());
 }
@@ -632,6 +658,7 @@ fn parse_file(bytes: &[u8]) -> Option<Value> {
         ("terminal", "seconds"),
         ("browsers", "pages"),
         ("obsidian", "notes"),
+        ("screenshots", "screenshots"),
     ] {
         if !total_field_ok(&value, source, field) {
             return None;
@@ -640,7 +667,9 @@ fn parse_file(bytes: &[u8]) -> Option<Value> {
             return None;
         }
     }
-    if !string_array_ok(&value["terminal"], "seen") || !string_array_ok(&value["obsidian"], "paths")
+    if !string_array_ok(&value["terminal"], "seen")
+        || !string_array_ok(&value["obsidian"], "paths")
+        || !string_array_ok(&value["screenshots"], "seen")
     {
         return None;
     }
@@ -704,6 +733,7 @@ fn fresh_file(stamp: &ClockStamp) -> Value {
         "terminal": terminal_object(stamp),
         "browsers": pages_object(stamp),
         "obsidian": notes_object(stamp),
+        "screenshots": screenshots_object(stamp),
         "carried": [],
     })
 }
@@ -728,7 +758,14 @@ fn ensure_sources(file: &mut Value, stamp: &ClockStamp) {
     fill_source(file, "screen", "seconds", stamp);
     fill_source(file, "terminal", "seconds", stamp);
     fill_source(file, "browsers", "pages", stamp);
+    if !file.get("screenshots").is_some_and(Value::is_object) {
+        file["screenshots"] = screenshots_object(stamp);
+    }
     fill_source(file, "obsidian", "notes", stamp);
+    fill_source(file, "screenshots", "screenshots", stamp);
+    if !file["screenshots"]["seen"].is_array() {
+        file["screenshots"]["seen"] = json!([]);
+    }
     if !file["terminal"]["seen"].is_array() {
         file["terminal"]["seen"] = json!([]);
     }
@@ -805,6 +842,16 @@ fn pages_object(stamp: &ClockStamp) -> Value {
     })
 }
 
+fn screenshots_object(stamp: &ClockStamp) -> Value {
+    json!({
+        "screenshots": 0,
+        "started": stamp.started,
+        "started_at": stamp.at,
+        "last": Value::Null,
+        "seen": [],
+    })
+}
+
 fn notes_object(stamp: &ClockStamp) -> Value {
     json!({
         "notes": 0,
@@ -833,6 +880,7 @@ pub struct IntakeRows {
     pub terminal: Counter,
     pub browsers: Counter,
     pub obsidian: Counter,
+    pub screenshots: Counter,
 }
 
 /// A read of `source-intake.json`. Missing stays missing. A refused file is not zeros.
@@ -860,6 +908,7 @@ pub fn read_rows(path: &Path) -> IntakeFile {
         terminal: counter_of(&value, "terminal", "seconds"),
         browsers: counter_of(&value, "browsers", "pages"),
         obsidian: counter_of(&value, "obsidian", "notes"),
+        screenshots: counter_of(&value, "screenshots", "screenshots"),
     }))
 }
 
@@ -1112,6 +1161,21 @@ mod tests {
             "https://back.example/"
         );
         assert_eq!(file["audio"]["seconds"], 0);
+    }
+
+    #[test]
+    fn a_screenshot_counts_once_and_moves_last() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        add_screenshot_at(dir, "a", &stamp_afternoon());
+        add_screenshot_at(dir, "a", &stamp_later());
+        add_screenshot_at(dir, "b", &stamp_later());
+        let IntakeFile::Rows(rows) = read_rows(&path(dir)) else {
+            panic!("rows");
+        };
+        assert_eq!(rows.screenshots.total, 2);
+        assert_eq!(rows.screenshots.last, Some(stamp_later().at));
+        assert_eq!(rows.obsidian.total, 0);
     }
 
     #[test]

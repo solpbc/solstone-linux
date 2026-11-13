@@ -2,23 +2,31 @@
 // Copyright (c) 2026 sol pbc
 
 mod controller;
+mod convert;
 mod copy_map;
 mod deck;
 mod format;
 mod import_page;
 mod logs;
 mod mark_card;
+mod screenshots_page;
 mod sun_bg;
 mod ui;
 
 use gtk::gio::prelude::*;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    // The running app converts a screenshot the journal can't keep through here,
+    // with the desktop's own imaging. No window opens.
+    if args.get(1).map(String::as_str) == Some(solstone_linux::screenshots::CONVERT_ARG) {
+        std::process::exit(convert::run(&args[2..]));
+    }
+
     // Comfortaa is the display face for names and headings. Fontconfig reads
     // this directory on its own; the process does not set an environment variable.
     install_display_face();
 
-    let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("solstone-linux-window {}", env!("CARGO_PKG_VERSION"));
         return;

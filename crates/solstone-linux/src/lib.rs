@@ -48,6 +48,7 @@ pub mod recovery;
 pub mod restore_token;
 pub mod rotation;
 pub mod run;
+pub mod screenshots;
 pub mod segment;
 pub mod service;
 pub mod session_env;

@@ -302,6 +302,48 @@ impl ControlClient {
             .await
     }
 
+    pub async fn screenshots_state(&self) -> Result<String, ControlClientError> {
+        self.call_method("ScreenshotsState", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn screenshots_turn_on(&self) -> Result<String, ControlClientError> {
+        self.call_method("ScreenshotsTurnOn", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn screenshots_turn_off(&self) -> Result<String, ControlClientError> {
+        self.call_method("ScreenshotsTurnOff", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn screenshots_choose_folder(
+        &self,
+        path: &str,
+    ) -> Result<String, ControlClientError> {
+        self.call_method(
+            "ScreenshotsChooseFolder",
+            &(path.to_string(),),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
+    pub async fn screenshots_count(&self, span: &str) -> Result<String, ControlClientError> {
+        self.call_method("ScreenshotsCount", &(span.to_string(),), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn screenshots_confirm(&self, span: &str) -> Result<String, ControlClientError> {
+        self.call_method("ScreenshotsConfirm", &(span.to_string(),), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn screenshots_retry(&self) -> Result<String, ControlClientError> {
+        self.call_method("ScreenshotsRetry", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
     pub async fn obsidian_turn_on(&self, path: &str) -> Result<String, ControlClientError> {
         self.call_method("ObsidianTurnOn", &(path.to_string(),), DEFAULT_TIMEOUT)
             .await

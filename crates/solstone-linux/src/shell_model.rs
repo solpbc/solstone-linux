@@ -18,14 +18,16 @@ pub enum TileId {
     Terminal,
     Browsers,
     Obsidian,
+    Screenshots,
     Import,
 }
 
-const TILE_ORDER: [TileId; 4] = [
+const TILE_ORDER: [TileId; 5] = [
     TileId::Screen,
     TileId::Terminal,
     TileId::Browsers,
     TileId::Obsidian,
+    TileId::Screenshots,
 ];
 
 /// A source tile's state word. Import is an action destination and has none.
@@ -269,7 +271,7 @@ pub fn obsidian_tile(facts: ObsidianFacts) -> StateWord {
 
 /// Every tile in deck order whose word is `needs attention`.
 #[must_use]
-pub fn attention_tiles(words: &[StateWord; 4]) -> Vec<TileId> {
+pub fn attention_tiles(words: &[StateWord; 5]) -> Vec<TileId> {
     TILE_ORDER
         .into_iter()
         .zip(words)
@@ -280,7 +282,7 @@ pub fn attention_tiles(words: &[StateWord; 4]) -> Vec<TileId> {
 
 /// The first tile in deck order whose word is `needs attention`.
 #[must_use]
-pub fn attention_tile(words: &[StateWord; 4]) -> Option<TileId> {
+pub fn attention_tile(words: &[StateWord; 5]) -> Option<TileId> {
     attention_tiles(words).into_iter().next()
 }
 
@@ -311,7 +313,7 @@ pub struct MenuRow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MenuInput {
-    pub words: [StateWord; 4],
+    pub words: [StateWord; 5],
     pub paused: bool,
     pub journal_paired: bool,
     pub journal_reachable: bool,
@@ -341,6 +343,7 @@ pub fn tile_name(tile: TileId) -> &'static str {
         TileId::Terminal => "terminal",
         TileId::Browsers => "browsers",
         TileId::Obsidian => "Obsidian",
+        TileId::Screenshots => crate::copy::screenshots::S1,
         TileId::Import => "import",
     }
 }
@@ -543,6 +546,11 @@ pub fn obsidian_so_far(file: &IntakeFile) -> ShownTotal {
     so_far(file, |rows| &rows.obsidian, TotalUnit::Notes)
 }
 
+#[must_use]
+pub fn screenshots_so_far(file: &IntakeFile) -> ShownTotal {
+    so_far(file, |rows| &rows.screenshots, TotalUnit::Screenshots)
+}
+
 fn so_far(
     file: &IntakeFile,
     pick: impl Fn(&IntakeRows) -> &Counter,
@@ -629,6 +637,7 @@ enum TotalUnit {
     Seconds,
     Pages,
     Notes,
+    Screenshots,
 }
 
 fn format_total(total: u64, unit: TotalUnit) -> String {
@@ -636,6 +645,7 @@ fn format_total(total: u64, unit: TotalUnit) -> String {
         TotalUnit::Seconds => format_seconds(total),
         TotalUnit::Pages => format_count(total, "page", "pages"),
         TotalUnit::Notes => format_count(total, "note", "notes"),
+        TotalUnit::Screenshots => format_count(total, "screenshot", "screenshots"),
     }
 }
 
@@ -796,6 +806,11 @@ mod tests {
                 started: None,
                 last: None,
             },
+            screenshots: Counter {
+                total: 0,
+                started: None,
+                last: None,
+            },
         }))
     }
 
@@ -864,6 +879,11 @@ mod tests {
                 started: None,
                 last: None,
             },
+            screenshots: Counter {
+                total: 0,
+                started: None,
+                last: None,
+            },
         }));
         assert_eq!(
             browsers_so_far(&one),
@@ -888,6 +908,11 @@ mod tests {
             },
             obsidian: Counter {
                 total: 412,
+                started: None,
+                last: None,
+            },
+            screenshots: Counter {
+                total: 0,
                 started: None,
                 last: None,
             },
@@ -1254,6 +1279,7 @@ mod tests {
             StateWord::NeedsAttention,
             StateWord::NeedsAttention,
             StateWord::Off,
+            StateWord::Off,
         ];
         assert_eq!(attention_tile(&words), Some(TileId::Terminal));
         assert!(header_shows_pause(false, false));
@@ -1287,6 +1313,7 @@ mod tests {
             words: [
                 StateWord::NeedsAttention,
                 StateWord::NeedsAttention,
+                StateWord::Off,
                 StateWord::Off,
                 StateWord::Off,
             ],
@@ -1328,6 +1355,7 @@ mod tests {
                 StateWord::NeedsAttention,
                 StateWord::NeedsAttention,
                 StateWord::Off,
+                StateWord::Off,
             ],
             paused: true,
             journal_paired: true,
@@ -1352,6 +1380,7 @@ mod tests {
         assert!(!journal.enabled);
         let open = menu_rows(MenuInput {
             words: [
+                StateWord::Off,
                 StateWord::Off,
                 StateWord::Off,
                 StateWord::Off,

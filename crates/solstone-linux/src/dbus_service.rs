@@ -32,6 +32,7 @@ pub struct Observer1<C: Clock, O: ObserverCommands> {
     pub commands: O,
     pub window_control: crate::window_control::WindowControlHandler,
     pub obsidian: crate::obsidian::ObsidianHandle,
+    pub screenshots: crate::screenshots::ScreenshotsHandle,
     pub imports: crate::import::ImportHandle,
 }
 impl<C: Clock, O: ObserverCommands> Observer1<C, O> {
@@ -225,6 +226,27 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     async fn obsidian_cancel(&self) -> String {
         self.obsidian.cancel_warning().await
     }
+    fn screenshots_state(&self) -> String {
+        self.screenshots.state_json()
+    }
+    async fn screenshots_turn_on(&self) -> String {
+        self.screenshots.turn_on().await
+    }
+    async fn screenshots_turn_off(&self) -> String {
+        self.screenshots.turn_off().await
+    }
+    async fn screenshots_choose_folder(&self, path: String) -> String {
+        self.screenshots.choose_folder(path).await
+    }
+    async fn screenshots_count(&self, span: String) -> String {
+        self.screenshots.count(span).await
+    }
+    async fn screenshots_confirm(&self, span: String) -> String {
+        self.screenshots.confirm(span).await
+    }
+    async fn screenshots_retry(&self) -> String {
+        self.screenshots.retry().await
+    }
     #[zbus(signal)]
     pub(crate) async fn status_changed(
         emitter: &zbus::object_server::SignalEmitter<'_>,
@@ -406,6 +428,7 @@ mod tests {
                 commands: commands.clone(),
                 window_control: crate::window_control::WindowControlHandler::default(),
                 obsidian: crate::obsidian::ObsidianHandle::default(),
+                screenshots: crate::screenshots::ScreenshotsHandle::default(),
                 imports: crate::import::ImportHandle::default(),
             },
             commands,
@@ -495,6 +518,7 @@ mod tests {
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
+            screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),
         };
         let mut xml = String::new();
@@ -533,6 +557,7 @@ mod tests {
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
+            screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),
         };
         let first = service.segment_timer();

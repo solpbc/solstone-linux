@@ -379,6 +379,13 @@ fn run_capture(
         tray_receiver.clone(),
         config.state_dir(),
     );
+    let (screenshots, screenshots_task) = crate::screenshots::start(
+        runtime,
+        config.state_dir().join("screenshots"),
+        Arc::clone(&upload),
+        tray_receiver.clone(),
+        config.state_dir(),
+    );
     let (command_sender, command_receiver) = std::sync::mpsc::channel();
     let commands = CommandSender::new(command_sender.clone());
     let legacy_probe = crate::terminal::control::production_legacy_probe(config.state_dir());
@@ -495,7 +502,11 @@ fn run_capture(
         );
         supervisor.attach_live_settings(Arc::clone(&live_settings));
         let restart_obsidian = obsidian.clone();
-        supervisor.attach_new_pairing(Arc::new(move || restart_obsidian.restart_send()));
+        let restart_screenshots = screenshots.clone();
+        supervisor.attach_new_pairing(Arc::new(move || {
+            restart_obsidian.restart_send();
+            restart_screenshots.restart_setup();
+        }));
         supervisor.attach_activity_runtime(
             Arc::clone(&activity_fault),
             Arc::clone(&activity_capability),
@@ -587,6 +598,7 @@ fn run_capture(
             open_journal: open_journal.clone(),
             window_control,
             obsidian: obsidian.clone(),
+            screenshots: screenshots.clone(),
             imports: sync.import_handle(),
         },
     );
@@ -650,6 +662,9 @@ fn run_capture(
     }
     if let Some(task) = obsidian_task {
         runtime.block_on(obsidian.shutdown(task));
+    }
+    if let Some(task) = screenshots_task {
+        runtime.block_on(screenshots.shutdown(task));
     }
     let linked_start = async move {
         linked_shutdown_notify.notify_one();

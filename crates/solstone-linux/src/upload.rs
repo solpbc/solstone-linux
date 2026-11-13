@@ -377,6 +377,36 @@ impl UploadClient {
         meta: Option<&crate::recovery::CaptureZone>,
         source: Option<&str>,
     ) -> UploadResult {
+        self.upload_described(day, segment, files, meta.map(EnvelopeMeta::Zone), source)
+            .await
+    }
+
+    /// Upload one screenshot under the `screenshots` source, with its `meta.screenshot`.
+    pub async fn upload_screenshot(
+        &self,
+        day: &str,
+        segment: &str,
+        file: &std::path::Path,
+        screenshot: &ScreenshotMeta,
+    ) -> UploadResult {
+        self.upload_described(
+            day,
+            segment,
+            &[file.to_path_buf()],
+            Some(EnvelopeMeta::Screenshot { screenshot }),
+            Some(crate::screenshots::SOURCE),
+        )
+        .await
+    }
+
+    async fn upload_described(
+        &self,
+        day: &str,
+        segment: &str,
+        files: &[PathBuf],
+        meta: Option<EnvelopeMeta<'_>>,
+        source: Option<&str>,
+    ) -> UploadResult {
         let Some(capability) = self.inner.capability() else {
             return UploadResult::failure(Some(ErrorType::Transient), None, None);
         };
@@ -404,7 +434,7 @@ impl UploadClient {
         day: &str,
         segment: &str,
         files: &[PathBuf],
-        meta: Option<&crate::recovery::CaptureZone>,
+        meta: Option<EnvelopeMeta<'_>>,
         source: Option<&str>,
         captured: &CapturedCapability,
     ) -> UploadResult {
@@ -767,6 +797,13 @@ async fn multipart_part(
         Some(extension) if extension.eq_ignore_ascii_case("flac") => "audio/flac",
         Some(extension) if extension.eq_ignore_ascii_case("webm") => "video/webm",
         Some(extension) if extension.eq_ignore_ascii_case("jsonl") => "application/jsonl",
+        Some(extension) if extension.eq_ignore_ascii_case("png") => "image/png",
+        Some(extension)
+            if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") =>
+        {
+            "image/jpeg"
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("webp") => "image/webp",
         _ => "application/octet-stream",
     };
     let file_name = path
@@ -799,9 +836,47 @@ struct UploadEnvelope<'a> {
     segment: &'a str,
     files: Vec<SubmittedFile>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    meta: Option<&'a crate::recovery::CaptureZone>,
+    meta: Option<EnvelopeMeta<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'a str>,
+}
+
+/// The envelope one screenshot travels under, as the journal reads it.
+#[cfg(test)]
+pub(crate) fn screenshot_envelope(
+    day: &str,
+    segment: &str,
+    file: &str,
+    screenshot: &ScreenshotMeta,
+) -> String {
+    serde_json::to_string(&UploadEnvelope {
+        day,
+        segment,
+        files: vec![SubmittedFile {
+            submitted: file.to_owned(),
+        }],
+        meta: Some(EnvelopeMeta::Screenshot { screenshot }),
+        source: Some(crate::screenshots::SOURCE),
+    })
+    .expect("upload envelope is serializable")
+}
+
+/// The envelope's `meta`: a capture's zone, or a screenshot's moment.
+#[derive(Clone, Copy, Serialize)]
+#[serde(untagged)]
+enum EnvelopeMeta<'a> {
+    Zone(&'a crate::recovery::CaptureZone),
+    Screenshot { screenshot: &'a ScreenshotMeta },
+}
+
+/// `meta.screenshot`, as the client ingest contract defines it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ScreenshotMeta {
+    pub v: u32,
+    /// RFC 3339 with the offset in force where it was taken.
+    pub captured_at: String,
+    /// `platform` or `file`.
+    pub taken_from: &'static str,
 }
 
 #[derive(Serialize)]
@@ -842,7 +917,7 @@ async fn build_multipart_form(
     day: &str,
     segment: &str,
     files: &[PathBuf],
-    meta: Option<&crate::recovery::CaptureZone>,
+    meta: Option<EnvelopeMeta<'_>>,
     source: Option<&str>,
 ) -> Result<(multipart::Form, u64), MultipartBuildError> {
     let form = multipart::Form::new();

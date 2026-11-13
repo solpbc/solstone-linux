@@ -49,6 +49,116 @@ pub fn obsidian_progress(sent: &str, found: &str) -> String {
     format!("{sent} of {found} notes in your journal")
 }
 
+/// The screenshots source's owner strings, each named for its id in the locked
+/// screenshots copy. Used as they stand.
+pub mod screenshots {
+    /// S1, D11's label.
+    pub const S1: &str = "screenshots";
+    /// S4: `from {folder}`, the tile while on.
+    pub fn s4(folder: &str) -> String {
+        format!("from {folder}")
+    }
+    /// S5: the tile while what the owner chose is still going in.
+    pub fn s5(done: &str, total: &str) -> String {
+        format!("{done} of {total} in your journal")
+    }
+    /// S6: the page, same moment.
+    pub fn s6(done: &str, total: &str) -> String {
+        format!("{done} of {total} screenshots in your journal")
+    }
+    /// S7: the how-far-back heading.
+    pub const S7: &str = "from before today";
+    /// S8: the five choices, in calendar's order; the first is preselected.
+    pub const S8: [&str; 5] = [
+        "the last 30 days",
+        "the last 6 months",
+        "the last year",
+        "all of it",
+        "nothing from before today",
+    ];
+    /// S9: under the five choices.
+    pub const S9: &str = "you'll see how many screenshots there are before any come in.";
+    /// S10: the confirm button.
+    pub fn s10(count: u64, formatted: &str) -> String {
+        match count {
+            0 => S10_TODAY.to_owned(),
+            1 => "bring in 1 screenshot".to_owned(),
+            _ => format!("bring in {formatted} screenshots"),
+        }
+    }
+    /// S10, for `nothing from before today` or a count of zero.
+    pub const S10_TODAY: &str = "start from today";
+    /// S10 while counting: the locked state word.
+    pub const S10_COUNTING: &str = "checking…";
+    /// S11: the tile at `ready to set up`, before the confirm.
+    pub const S11: &str = "choose how far back to start, then bring them in.";
+    /// S12: the count failed, and its button.
+    pub const S12: &str = "couldn't count your screenshots.";
+    pub const S12_ACTION: &str = "try again";
+    /// S14, on a computer: `the folder`.
+    pub const S14: &str =
+        "a screenshot already in your journal stays there if you delete it from the folder.";
+    /// S15.
+    pub const S15: &str = "what's already in your journal stays when you pause or turn this off.";
+    /// S16 under a computer's whole pause: its second sentence alone.
+    pub const S16_COMPUTER: &str = "screenshots you take while it's paused don't come in.";
+    /// S17: under the five choices when the source is turned back on.
+    pub const S17: &str = "screenshots already in your journal aren't brought in again.";
+    /// S18.
+    pub const S18: &str = "last checked";
+    /// S19, shown only while above zero.
+    pub const S19: &str = "waiting to go to your journal";
+    /// S20: the `so far` total.
+    pub fn s20(count: u64, formatted: &str) -> String {
+        if count == 1 {
+            "1 screenshot".to_owned()
+        } else {
+            format!("{formatted} screenshots")
+        }
+    }
+    /// S21 on linux: `this computer`.
+    pub const S21: &str = "waiting for a journal update. your screenshots wait on this computer.";
+    /// S22.
+    pub const S22: &str = "folder";
+    /// S23: the facts block, never collapsed.
+    pub const S23: &str = "only what the solstone app can tell is a screenshot comes in.";
+    /// D1 on linux: `this computer`.
+    pub const D1: &str = "while this is on, the solstone app takes in the screenshots you take on this computer, and your journal keeps each one at the minute you took it.";
+    /// D3: a folder the owner chose, by its own name.
+    pub fn d3(folder: &str) -> String {
+        format!("other files in {folder} stay where they are.")
+    }
+    /// D8, and its button.
+    pub const D8: &str = "couldn't find a Screenshots folder on this computer. choose the folder your screenshots save to.";
+    pub const CHOOSE_FOLDER: &str = "choose a folder…";
+    /// D8's second sentence without its period: the folder dialog's title.
+    pub const D8_PICKER_TITLE: &str = "choose the folder your screenshots save to";
+    /// D9: the folder is gone, by its own name.
+    pub fn d9(folder: &str) -> String {
+        format!("the {folder} folder isn't on this computer anymore.")
+    }
+    /// D10, in the collapsed detail.
+    pub const D10: &str = "some screenshot tools save only when you ask them to, and a screenshot that isn't saved doesn't come in.";
+    /// D12: screenshots that reached the final state.
+    pub fn d12(count: u64, formatted: &str) -> String {
+        if count == 1 {
+            "1 screenshot can't come in, so it stays in the folder.".to_owned()
+        } else {
+            format!("{formatted} screenshots can't come in, so they stay in the folder.")
+        }
+    }
+    /// D13: screenshots in the folder that can't be read, and S12's button.
+    pub fn d13(count: u64, formatted: &str) -> String {
+        if count == 1 {
+            "couldn't read 1 screenshot.".to_owned()
+        } else {
+            format!("couldn't read {formatted} screenshots.")
+        }
+    }
+    /// D15: the disclosure that holds D10.
+    pub const D15: &str = "more about this";
+}
+
 pub const WINDOW_TITLE: &str = "solstone";
 pub const NAV_STATUS: &str = "status";
 pub const NAV_JOURNAL: &str = "journal";
