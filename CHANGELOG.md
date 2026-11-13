@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.42] - 2026-11-13
+
 ### Added
 
 - choose "screenshots" on the home page to bring the screenshots you take on this computer into your journal, each at the minute you took it. you choose how far back to start, and only what the solstone app can tell is a screenshot comes in. they come from your Screenshots folder, or one you choose.
