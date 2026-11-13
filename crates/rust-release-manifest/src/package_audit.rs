@@ -57,14 +57,17 @@ const EXPECTED_NEEDED: [&str; 8] = [
     "libm.so.6",
     "libc.so.6",
 ];
-// Closed GTK4/Pango/Cairo/GLib and Rust/C runtime surface, plus the architecture's
-// own dynamic loader. The optimized candidate's actual imports are checked
-// against this set; no other native library is admitted just because GTK4 is
-// present. Pango is here because the window calls it directly (the mark card's
-// heading weight), and the deb and rpm GTK4 dependency already requires it.
-const WINDOW_ALLOWED_NEEDED: [&str; 9] = [
+// Closed GTK4/Pango/gdk-pixbuf/Cairo/GLib and Rust/C runtime surface, plus the
+// architecture's own dynamic loader. The optimized candidate's actual imports are
+// checked against this set; no other native library is admitted just because GTK4
+// is present. Pango is here because the window calls it directly (the mark card's
+// heading weight), and gdk-pixbuf because the window converts a screenshot the
+// journal can't keep (`--convert-screenshot`); the deb and rpm GTK4 dependency
+// already requires both.
+const WINDOW_ALLOWED_NEEDED: [&str; 10] = [
     "libgtk-4.so.1",
     "libpango-1.0.so.0",
+    "libgdk_pixbuf-2.0.so.0",
     "libcairo.so.2",
     "libgio-2.0.so.0",
     "libgobject-2.0.so.0",
