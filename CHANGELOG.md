@@ -6,6 +6,8 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.43] - 2026-11-14
+
 ### Changed
 
 - the solstone app no longer rewrites several of its own files every few seconds when nothing in them has changed, and its window does less while it's minimized. that's easier on your battery and your drive.
