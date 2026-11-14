@@ -437,6 +437,10 @@ async fn run_panel_icon_offer(
                 if gate.observe(readiness, offer_enabled, now) {
                     present_panel_icon_offer(&connection, &config).await;
                 }
+                // One offer per run: once it is shown there is nothing left to probe for.
+                if gate.offered() {
+                    break;
+                }
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
