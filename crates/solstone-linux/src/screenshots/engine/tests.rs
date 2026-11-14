@@ -242,6 +242,42 @@ fn a_pause_skips_and_a_resume_starts_from_the_moment_of_resume() {
     assert_eq!(desk.taken_in.lock().unwrap().len(), 1);
 }
 
+/// Each write of the record replaces the file, so a new inode means a write.
+fn record_inode(desk: &Desk) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(desk.state.join(LEDGER)).unwrap().ino()
+}
+
+#[test]
+fn looks_that_find_nothing_new_leave_the_record_alone() {
+    let desk = Desk::new();
+    desk.gnome("one.png", NOW - HOUR);
+    let mut engine = desk.engine();
+    engine.turn_on().unwrap();
+    engine.count(Span::Today);
+    engine.confirm(Span::Today).unwrap();
+    deliver_all(&mut engine);
+    engine.tick().unwrap();
+    let before = record_inode(&desk);
+    for look in 1..=100 {
+        desk.at(NOW + look * 5_000);
+        engine.tick().unwrap();
+    }
+    assert_eq!(
+        record_inode(&desk),
+        before,
+        "100 unchanged looks wrote the record"
+    );
+    assert_eq!(engine.ledger().last_checked_ms, Some(NOW + 100 * 5_000));
+    // A new screenshot still lands in the record.
+    desk.gnome("two.png", NOW + 400_000);
+    desk.at(NOW + 101 * 5_000);
+    engine.tick().unwrap();
+    assert_ne!(record_inode(&desk), before);
+    let reopened = desk.engine();
+    assert_eq!(names(&reopened, ItemState::Waiting), vec!["two.png"]);
+}
+
 #[test]
 fn what_was_taken_while_the_app_was_not_running_comes_in_once() {
     let desk = Desk::new();

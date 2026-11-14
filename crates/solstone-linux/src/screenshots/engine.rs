@@ -162,7 +162,9 @@ pub(crate) struct Ledger {
     /// What the last confirm brought in, so its count completes on its own.
     #[serde(default)]
     pub backfill: BTreeSet<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// When the folder was last looked at. Kept in memory only: a look that finds
+    /// nothing new must not rewrite the record.
+    #[serde(skip)]
     pub last_checked_ms: Option<i64>,
 }
 
@@ -244,6 +246,8 @@ pub(crate) struct Engine {
     /// The last look's unreadable screenshots.
     unreadable: Vec<(PathBuf, i64)>,
     on_intake: Option<IntakeHook>,
+    /// The record as last written, so an unchanged one isn't written again.
+    saved: Option<Vec<u8>>,
 }
 
 impl Engine {
@@ -269,6 +273,7 @@ impl Engine {
             counted: None,
             unreadable: Vec::new(),
             on_intake: None,
+            saved: None,
         }
     }
 
@@ -291,11 +296,16 @@ impl Engine {
             .map(|counted| (counted.span, counted.ids.len() + counted.unreadable))
     }
 
-    fn save(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+    fn save(&mut self) -> std::io::Result<()> {
         let bytes = serde_json::to_vec(&self.ledger).map_err(std::io::Error::other)?;
+        if self.saved.as_ref() == Some(&bytes) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.dir)?;
         crate::private_file::atomic_write_bytes(&self.dir.join(LEDGER), &bytes)
-            .map_err(|error| std::io::Error::other(error.to_string()))
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        self.saved = Some(bytes);
+        Ok(())
     }
 
     /// The folder screenshots come from: the owner's choice, or the one resolved.
