@@ -656,6 +656,8 @@ struct AuditPayloadOptions {
     omit: Option<crate::package_audit::PayloadRole>,
     replacement: Option<(crate::package_audit::PayloadRole, Vec<u8>, u32)>,
     extras: Vec<(String, Vec<u8>, u32)>,
+    // The one rpm payload role flagged %doc, as cargo-generate-rpm's `doc = true` does.
+    doc: Option<crate::package_audit::PayloadRole>,
     // Package names, metadata, and window ELF architecture; x86_64 when unset.
     arch: Option<ReleaseArch>,
 }
@@ -749,18 +751,19 @@ fn audit_deb_with(
     let mut md5sums = String::new();
     let copyright_path = "usr/share/doc/solstone-linux/copyright";
     let mut copyright_header = tar::Header::new_gnu();
-    copyright_header.set_size(crate::package_audit::DEB_COPYRIGHT.len() as u64);
+    let copyright = crate::package_audit::deb_copyright();
+    copyright_header.set_size(copyright.len() as u64);
     copyright_header.set_mode(0o644);
     copyright_header.set_cksum();
     data.append_data(
         &mut copyright_header,
         format!("./{copyright_path}"),
-        crate::package_audit::DEB_COPYRIGHT,
+        copyright.as_slice(),
     )
     .unwrap();
     md5sums.push_str(&format!(
         "{}  {copyright_path}\n",
-        crate::package_audit::md5_digest(crate::package_audit::DEB_COPYRIGHT)
+        crate::package_audit::md5_digest(&copyright)
     ));
     for authority in crate::package_audit::PAYLOAD_AUTHORITY {
         if payload.omit == Some(authority.role) {
@@ -875,13 +878,12 @@ fn audit_rpm_with(
                     authority.mode,
                 )
             });
-        builder
-            .with_file_contents(
-                bytes,
-                rpm::FileOptions::new(authority.installed)
-                    .permissions(u16::try_from(mode).unwrap()),
-            )
-            .unwrap();
+        let mut options =
+            rpm::FileOptions::new(authority.installed).permissions(u16::try_from(mode).unwrap());
+        if payload.doc == Some(authority.role) {
+            options = options.doc();
+        }
+        builder.with_file_contents(bytes, options).unwrap();
     }
     for (installed, bytes, mode) in &payload.extras {
         let installed = format!("/{}", installed.trim_start_matches('/'));
@@ -1448,6 +1450,58 @@ fn package_audit_refuses_the_windows_libraries_as_hard_dependencies() {
         &[],
         &AuditPayloadOptions::default(),
     );
+    audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap();
+}
+
+// A minimized image installs without documentation: Ubuntu keeps only the
+// deb's copyright, and dnf's nodocs skips every rpm %doc file. Each licence
+// the package carries has to survive both.
+#[test]
+fn package_licences_survive_installs_without_documentation() {
+    use crate::package_audit::PayloadRole;
+    let copyright = String::from_utf8(crate::package_audit::deb_copyright()).unwrap();
+    for text in [
+        "GNU AFFERO GENERAL PUBLIC LICENSE",
+        "SIL OPEN FONT LICENSE",
+        "Rust dependency notices",
+    ] {
+        assert!(copyright.contains(text), "deb copyright lacks {text}");
+    }
+    assert!(!copyright.contains('\r'));
+
+    for role in [
+        PayloadRole::License,
+        PayloadRole::MarkFontLicense,
+        PayloadRole::DependencyNotices,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let executable = crate::elf64::pinned_elf64_for_test();
+        let tar = audit_tar(root.path(), &executable);
+        let deb = audit_deb(root.path(), &executable);
+        let options = AuditPayloadOptions {
+            doc: Some(role),
+            ..AuditPayloadOptions::default()
+        };
+        let rpm = audit_rpm_with(root.path(), &executable, &options, |_| {});
+        let installed = crate::package_audit::PAYLOAD_AUTHORITY
+            .iter()
+            .find(|authority| authority.role == role)
+            .unwrap()
+            .installed;
+        let error = audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap_err();
+        assert_package_audit_diagnostic(error, &rpm, "DocOnlyLicense", "%doc", installed);
+    }
+
+    // Install notes are documentation, and may be skipped.
+    let root = tempfile::tempdir().unwrap();
+    let executable = crate::elf64::pinned_elf64_for_test();
+    let tar = audit_tar(root.path(), &executable);
+    let deb = audit_deb(root.path(), &executable);
+    let options = AuditPayloadOptions {
+        doc: Some(PayloadRole::InstallNotes),
+        ..AuditPayloadOptions::default()
+    };
+    let rpm = audit_rpm_with(root.path(), &executable, &options, |_| {});
     audit_packages(&tar, &deb, &rpm, &digest(&executable)).unwrap();
 }
 

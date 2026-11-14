@@ -129,7 +129,7 @@ fn package_metadata_and_resolved_licenses() {
     assert_eq!(
         deb["license-file"].as_array().unwrap(),
         &[
-            Value::String("../../LICENSE".into()),
+            Value::String("../../target/deb-copyright".into()),
             Value::String("0".into())
         ]
     );

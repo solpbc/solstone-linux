@@ -28,15 +28,38 @@ const MARK_FONT_LICENSE: &[u8] =
     include_bytes!("../../solstone-linux-window/assets/Comfortaa-OFL.txt");
 const DESKTOP_ENTRY: &[u8] =
     include_bytes!("../../../packaging/org.solpbc.solstone.Window.desktop");
-pub(crate) const DEB_COPYRIGHT: &[u8] = concat!(
+const DEB_COPYRIGHT_HEADER: &str = concat!(
     "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n",
     "Upstream-Name: solstone-linux\n",
     "Source: https://github.com/solpbc/solstone-linux\n",
     "Copyright: 2026 sol pbc\n",
     "License: AGPL-3.0-only\n",
-    include_str!("../../../LICENSE")
-)
-.as_bytes();
+);
+
+/// The deb's `copyright`: the app's licence, the mark font's licence and the
+/// dependency notices. Minimized images keep this one file of
+/// `/usr/share/doc` and drop the rest, so every licence the package carries
+/// must be in it. Line endings are normalized the way cargo-deb copies the file.
+pub fn deb_copyright() -> Vec<u8> {
+    let mut text = String::from(DEB_COPYRIGHT_HEADER);
+    for (index, part) in [
+        include_str!("../../../LICENSE"),
+        include_str!("../../solstone-linux-window/assets/Comfortaa-OFL.txt"),
+        include_str!("../../../RUST_DEPENDENCY_NOTICES.txt"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            text.push('\n');
+        }
+        for line in part.lines() {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    text.into_bytes()
+}
 const PACKAGE_NOTE_PHRASES: &[&str] = &["observer key", "pipx"];
 
 // Derived with:
@@ -872,6 +895,32 @@ fn rpm_members(path: &Path) -> Result<Vec<Member>> {
             "rpm:trigger",
         ));
     }
+    // dnf's `tsflags=nodocs` (the default in Fedora container images) skips
+    // every %doc file, so a licence flagged %doc never reaches the computer.
+    for entry in package
+        .metadata
+        .get_file_entries()
+        .map_err(|error| audit_error(path, "MalformedMetadata", &error.to_string(), "rpm:files"))?
+    {
+        let installed = entry.path();
+        if entry.flags().contains(rpm::FileFlags::DOC)
+            && PAYLOAD_AUTHORITY.iter().any(|authority| {
+                matches!(
+                    authority.role,
+                    PayloadRole::License
+                        | PayloadRole::MarkFontLicense
+                        | PayloadRole::DependencyNotices
+                ) && Path::new(authority.installed) == installed
+            })
+        {
+            return Err(audit_error(
+                path,
+                "DocOnlyLicense",
+                "%doc",
+                &installed.to_string_lossy(),
+            ));
+        }
+    }
     let mut seen = BTreeSet::new();
     let mut members = Vec::new();
     for file in package
@@ -964,7 +1013,7 @@ fn inspect_payload(
                 expected,
             ));
         }
-        if copyright.bytes != DEB_COPYRIGHT {
+        if copyright.bytes != deb_copyright() {
             return Err(audit_error(path, "DivergentPayload", "copyright", expected));
         }
     }
@@ -1301,7 +1350,7 @@ mod tests {
             members.push(Member {
                 path: "usr/share/doc/solstone-linux/copyright".into(),
                 mode: 0o644,
-                bytes: DEB_COPYRIGHT.to_vec(),
+                bytes: deb_copyright(),
             });
         }
         members

@@ -76,6 +76,7 @@ RUN actual="$(cargo deb --version)" \
     && { test "${actual}" = "cargo-deb ${CARGO_DEB_VERSION}" \
         || { echo "error: cargo-deb mismatch: expected 'cargo-deb ${CARGO_DEB_VERSION}', actual '${actual:-unavailable}'" >&2; \
              echo "repair: provision the local Ubuntu tool image with cargo-deb ${CARGO_DEB_VERSION}" >&2; exit 1; }; } \
+    && target/release/rust-release-manifest notices deb-copyright --output target/deb-copyright \
     && cargo deb --locked --no-build -p solstone-linux \
     && VERSION=$(cat /release/VERSION) \
     && test "$VERSION" = "$RELEASE_VERSION" \

@@ -30,7 +30,7 @@ pub mod authority_vocabulary;
 mod elf64;
 mod package_audit;
 pub use audit::*;
-pub use package_audit::{audit_packages, audit_packages_for_arch};
+pub use package_audit::{audit_packages, audit_packages_for_arch, deb_copyright};
 mod spl_pin;
 pub use spl_pin::validate_spl_pin;
 mod dependency_notices;

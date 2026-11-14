@@ -6,10 +6,10 @@ use rust_release_manifest::{
     AuditRequest, DependencyNoticesPaths, Lane, LaneEmitRequest, MANIFEST_OK_MESSAGE,
     ProcessEnvironment, ProofHandoffInput, RELEASE_DIR_OK_MESSAGE, ReleaseArch, RepoRoot,
     SPL_PIN_OK_MESSAGE, audit_packages, check_dependency_notices, classify_release_dir,
-    create_candidate_for_arch, emit_lane_handoff, emit_proof_handoff, generate_dependency_notices,
-    prove_candidate, publish_transparency, recover_candidate, resign_transparency_pointer,
-    run_audit, select_release_arch, sign_release_manifest, validate_spl_pin, verify_manifest_mode,
-    verify_release_signature,
+    create_candidate_for_arch, deb_copyright, emit_lane_handoff, emit_proof_handoff,
+    generate_dependency_notices, prove_candidate, publish_transparency, recover_candidate,
+    resign_transparency_pointer, run_audit, select_release_arch, sign_release_manifest,
+    validate_spl_pin, verify_manifest_mode, verify_release_signature,
 };
 use std::path::PathBuf;
 
@@ -82,6 +82,11 @@ enum Command {
 enum NoticesCommand {
     Generate,
     Check,
+    /// Write the deb's copyright source: every licence the package carries.
+    DebCopyright {
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -319,6 +324,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 NoticesCommand::Check => {
                     check_dependency_notices(&paths)?;
                     println!("Rust dependency notices verified successfully.");
+                }
+                NoticesCommand::DebCopyright { output } => {
+                    std::fs::write(&output, deb_copyright())?;
                 }
             }
         }
