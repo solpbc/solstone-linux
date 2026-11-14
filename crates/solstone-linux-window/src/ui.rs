@@ -2559,6 +2559,52 @@ fn create_help_page(
             });
         });
     }
+    let report_button = help_button(CopyKey::HelpReport.as_str());
+    {
+        let help_error = help_error.clone();
+        let controller = Rc::clone(&controller);
+        report_button.connect_clicked(move |button| {
+            let button = button.clone();
+            let help_error = help_error.clone();
+            // The same status word the tray used to put in the draft.
+            let capture = controller.borrow().document.capture.clone();
+            button.set_sensitive(false);
+            glib::MainContext::default().spawn_local(async move {
+                let url = gio::spawn_blocking(move || {
+                    let loaded = solstone_linux::config::load_config(
+                        solstone_linux::config::ConfigPaths::default(),
+                    );
+                    let about = solstone_linux::about::AboutBlock::snapshot(
+                        &loaded.config,
+                        &solstone_linux::about::host_facts(),
+                        solstone_linux::about::now(),
+                    );
+                    solstone_linux::support::report_url(&capture, &about)
+                })
+                .await;
+                let opened = match url {
+                    Ok(url) => matches!(
+                        tokio::time::timeout(
+                            Duration::from_secs(10),
+                            gio::AppInfo::launch_default_for_uri_future(
+                                &url,
+                                None::<&gio::AppLaunchContext>,
+                            ),
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ),
+                    Err(_) => false,
+                };
+                help_error.set_text(if opened {
+                    ""
+                } else {
+                    CopyKey::HelpLinkFailed.as_str()
+                });
+                button.set_sensitive(true);
+            });
+        });
+    }
     let email_button = help_button(CopyKey::HelpEmail.as_str());
     {
         let help_error = help_error.clone();
@@ -2656,8 +2702,15 @@ fn create_help_page(
     }
 
     let help_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    help_buttons.append(&open_button);
-    help_buttons.append(&email_button);
+    for key in solstone_linux::copy::help_action_keys() {
+        let button = match key {
+            CopyKey::HelpOpen => &open_button,
+            CopyKey::HelpReport => &report_button,
+            CopyKey::HelpEmail => &email_button,
+            _ => continue,
+        };
+        help_buttons.append(button);
+    }
 
     container.append(&title);
     container.append(&heading);

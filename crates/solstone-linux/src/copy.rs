@@ -330,7 +330,13 @@ pub const SETTINGS_ACTIVITY_EXPLAIN: &str = "desktop activity is on whenever the
 pub const HELP_HEADING: &str = "get help";
 pub const HELP_INTRO: &str = "need a hand? reach us. we're happy to help.";
 pub const HELP_OPEN: &str = "get help";
+pub const HELP_REPORT: &str = "report a problem";
 pub const HELP_EMAIL: &str = "support@solstone.app";
+
+/// The help page's actions, in the order they are shown.
+pub fn help_action_keys() -> [CopyKey; 3] {
+    [CopyKey::HelpOpen, CopyKey::HelpReport, CopyKey::HelpEmail]
+}
 pub const LOGS_TITLE: &str = "recent logs";
 pub const LOGS_INTRO: &str = "read the solstone app's recent logs before saving a copy for a support report. nothing is sent from here.";
 pub const LOGS_READ: &str = "read recent logs";
@@ -386,6 +392,19 @@ pub fn plural_copy(key: PluralKey, count: usize, formatted_count: &str) -> Strin
         (PluralKey::OmittedBytes, false) => "\n[omitted {count} bytes]\n",
     };
     template.replace("{count}", formatted_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_offers_a_problem_report_between_get_help_and_email() {
+        assert_eq!(
+            help_action_keys(),
+            [CopyKey::HelpOpen, CopyKey::HelpReport, CopyKey::HelpEmail]
+        );
+    }
 }
 
 pub enum ValueKey {
@@ -577,6 +596,7 @@ pub enum CopyKey {
     HelpHeading,
     HelpIntro,
     HelpOpen,
+    HelpReport,
     HelpEmail,
     LogsTitle,
     LogsIntro,
@@ -771,6 +791,7 @@ impl CopyKey {
             Self::HelpHeading => HELP_HEADING,
             Self::HelpIntro => HELP_INTRO,
             Self::HelpOpen => HELP_OPEN,
+            Self::HelpReport => HELP_REPORT,
             Self::HelpEmail => HELP_EMAIL,
             Self::LogsTitle => LOGS_TITLE,
             Self::LogsIntro => LOGS_INTRO,

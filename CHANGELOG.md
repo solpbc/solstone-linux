@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- on help, "report a problem" opens a support page with the app version, the linux version, and the app's status filled in. you edit and send it there. nothing is sent before that.
+
 ### Fixed
 
 - on a minimal ubuntu or fedora install, which leaves out documentation, the package now keeps the licenses for the solstone app, its font and the software it's built with.
