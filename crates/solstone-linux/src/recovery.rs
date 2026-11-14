@@ -56,26 +56,14 @@ fn stream_duration(samples: Option<u64>, sample_rate: u32) -> Option<f64> {
     Some(samples? as f64 / f64::from(sample_rate))
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
-pub struct SegmentProgress {
-    pub has_durable_media: bool,
-    pub durable_byte_count: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_durable_write_at: Option<f64>,
-}
-
 #[derive(Serialize)]
 struct SegmentMetadataFile {
     start_timestamp: f64,
-    #[serde(flatten)]
-    progress: SegmentProgress,
 }
 
-pub fn write_segment_metadata(segment_dir: &Path, start_timestamp: f64, progress: SegmentProgress) {
-    let document = SegmentMetadataFile {
-        start_timestamp,
-        progress,
-    };
+/// Written once when a segment opens. Recovery reads only the start.
+pub fn write_segment_metadata(segment_dir: &Path, start_timestamp: f64) {
+    let document = SegmentMetadataFile { start_timestamp };
     let Ok(mut text) = serde_json::to_string(&document) else {
         tracing::warn!("Failed to write segment metadata");
         return;
@@ -110,30 +98,6 @@ pub fn read_capture_zone(segment_dir: &Path) -> Option<CaptureZone> {
         return None;
     }
     serde_json::from_str(&text).ok()
-}
-
-// Existence of a non-sidecar regular file, not byte_count > 0 — a 0-byte leftover
-// is media, matching finalize_segment.
-pub fn scan_segment_progress(segment_dir: &Path) -> (bool, u64) {
-    let Ok(entries) = fs::read_dir(segment_dir) else {
-        return (false, 0);
-    };
-    let mut has_durable_media = false;
-    let mut durable_byte_count = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.file_name().is_some_and(is_segment_sidecar) {
-            continue;
-        }
-        if !path.is_file() {
-            continue;
-        }
-        has_durable_media = true;
-        durable_byte_count += fs::metadata(&path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-    }
-    (has_durable_media, durable_byte_count)
 }
 
 pub fn read_segment_start(segment_dir: &Path) -> Option<f64> {
@@ -414,7 +378,7 @@ mod tests {
     fn metadata_duration() {
         let t = tempfile::tempdir().unwrap();
         let path = incomplete(t.path(), "140000", 1000.0);
-        write_segment_metadata(&path, 940.0, SegmentProgress::default());
+        write_segment_metadata(&path, 940.0);
         age(&path, 1000.0);
         recover_incomplete_segments(t.path(), 300, 1000.0, &NoMedia);
         assert!(path.with_file_name("140000_60").exists());
@@ -424,7 +388,7 @@ mod tests {
     fn metadata_ceiling() {
         let t = tempfile::tempdir().unwrap();
         let path = incomplete(t.path(), "140000", 1000.0);
-        write_segment_metadata(&path, 0.0, SegmentProgress::default());
+        write_segment_metadata(&path, 0.0);
         age(&path, 1000.0);
         recover_incomplete_segments(t.path(), 60, 1000.0, &NoMedia);
         assert!(path.with_file_name("140000_60").exists());
@@ -447,7 +411,7 @@ mod tests {
             path.join("audio.flac"),
         )
         .unwrap();
-        write_segment_metadata(&path, 0.0, SegmentProgress::default());
+        write_segment_metadata(&path, 0.0);
         age(&path, 1000.0);
         recover_incomplete_segments(t.path(), 300, 1000.0, &ClaxonMediaDurationProbe);
         assert!(path.with_file_name("140000_4").exists());
@@ -457,7 +421,7 @@ mod tests {
     fn webm_uses_ceiling() {
         let t = tempfile::tempdir().unwrap();
         let path = incomplete(t.path(), "140000", 1000.0);
-        write_segment_metadata(&path, 0.0, SegmentProgress::default());
+        write_segment_metadata(&path, 0.0);
         age(&path, 1000.0);
         recover_incomplete_segments(t.path(), 60, 1000.0, &NoMedia);
         assert!(path.with_file_name("140000_60").exists());
@@ -508,7 +472,7 @@ mod tests {
     fn metadata_removed() {
         let t = tempfile::tempdir().unwrap();
         let path = incomplete(t.path(), "140000", 1000.0);
-        write_segment_metadata(&path, 940.0, SegmentProgress::default());
+        write_segment_metadata(&path, 940.0);
         age(&path, 1000.0);
         recover_incomplete_segments(t.path(), 300, 1000.0, &NoMedia);
         assert!(
@@ -534,7 +498,7 @@ mod tests {
         assert_eq!(filesystem_duration(0.5, 0.0, 300), 1);
         let t = tempfile::tempdir().unwrap();
         let path = incomplete(t.path(), "140000", 1000.0);
-        write_segment_metadata(&path, 999.5, SegmentProgress::default());
+        write_segment_metadata(&path, 999.5);
         age(&path, 1000.0);
         recover_incomplete_segments(t.path(), 300, 1000.0, &FixedMedia(0.5));
         assert!(path.with_file_name("140000_1").exists());
@@ -544,13 +508,13 @@ mod tests {
     fn rename_failure_continues() {
         let t = tempfile::tempdir().unwrap();
         let first = incomplete(t.path(), "120000", 1000.0);
-        write_segment_metadata(&first, 940.0, SegmentProgress::default());
+        write_segment_metadata(&first, 940.0);
         age(&first, 1000.0);
         let collision = first.with_file_name("120000_60");
         fs::create_dir(&collision).unwrap();
         fs::write(collision.join("occupied"), b"x").unwrap();
         let second = incomplete(t.path(), "130000", 1000.0);
-        write_segment_metadata(&second, 940.0, SegmentProgress::default());
+        write_segment_metadata(&second, 940.0);
         age(&second, 1000.0);
         assert_eq!(
             recover_incomplete_segments(t.path(), 300, 1000.0, &NoMedia),
@@ -571,7 +535,7 @@ mod tests {
         let path = incomplete(t.path(), "140000", 1000.0);
         fs::remove_file(path.join("screen.webm")).unwrap();
         fs::create_dir(path.join("nested")).unwrap();
-        write_segment_metadata(&path, 940.0, SegmentProgress::default());
+        write_segment_metadata(&path, 940.0);
         assert!(recover_segment(&path, 300, 1000.0, &NoMedia));
     }
     // media candidates use max duration and swallow individual failures.
@@ -629,7 +593,7 @@ mod tests {
         let segment = actual_day.join("archon/140000.incomplete");
         fs::create_dir_all(&segment).unwrap();
         fs::write(segment.join("screen.webm"), b"x").unwrap();
-        write_segment_metadata(&segment, 940.0, SegmentProgress::default());
+        write_segment_metadata(&segment, 940.0);
         age(&segment, 1000.0);
         fs::create_dir(&captures).unwrap();
         symlink(&actual_day, captures.join("20260403")).unwrap();
@@ -639,15 +603,6 @@ mod tests {
             1
         );
         assert!(actual_day.join("archon/140000_60").exists());
-    }
-
-    // Existence, not byte_count > 0: a 0-byte leftover is durable media (D3).
-    #[test]
-    fn scan_zero_byte_file_is_media() {
-        let t = tempfile::tempdir().unwrap();
-        fs::write(t.path().join(METADATA_FILENAME), b"{}\n").unwrap();
-        fs::write(t.path().join("leftover.bin"), b"").unwrap();
-        assert_eq!(scan_segment_progress(t.path()), (true, 0));
     }
 
     // in-flight legacy sidecars from the previous writer still recover.
@@ -678,23 +633,10 @@ mod tests {
     #[test]
     fn metadata_document_byte_shape() {
         let t = tempfile::tempdir().unwrap();
-        write_segment_metadata(t.path(), 1234.5, SegmentProgress::default());
+        write_segment_metadata(t.path(), 1234.5);
         assert_eq!(
             fs::read_to_string(t.path().join(METADATA_FILENAME)).unwrap(),
-            "{\"start_timestamp\":1234.5,\"has_durable_media\":false,\"durable_byte_count\":0}\n"
-        );
-        write_segment_metadata(
-            t.path(),
-            1234.5,
-            SegmentProgress {
-                has_durable_media: true,
-                durable_byte_count: 4,
-                last_durable_write_at: Some(5678.5),
-            },
-        );
-        assert_eq!(
-            fs::read_to_string(t.path().join(METADATA_FILENAME)).unwrap(),
-            "{\"start_timestamp\":1234.5,\"has_durable_media\":true,\"durable_byte_count\":4,\"last_durable_write_at\":5678.5}\n"
+            "{\"start_timestamp\":1234.5}\n"
         );
     }
 
@@ -723,7 +665,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let now = 1_700_000_060.0;
         let path = incomplete(t.path(), "140000", now);
-        write_segment_metadata(&path, 1_700_000_000.0, SegmentProgress::default());
+        write_segment_metadata(&path, 1_700_000_000.0);
         let zone = CaptureZone {
             tz: Some("Asia/Kolkata".into()),
             utc_offset_seconds: 19800,

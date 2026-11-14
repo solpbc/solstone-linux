@@ -494,7 +494,7 @@ pub(crate) fn civil_time_in_zoneinfo(zone: &str, unix_seconds: i64) -> Option<Ci
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recovery::{SegmentProgress, read_segment_start, write_segment_metadata};
+    use crate::recovery::{read_segment_start, write_segment_metadata};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn metadata_round_trip() {
         let t = tempfile::tempdir().unwrap();
-        write_segment_metadata(t.path(), 1234.5, SegmentProgress::default());
+        write_segment_metadata(t.path(), 1234.5);
         assert_eq!(read_segment_start(t.path()), Some(1234.5));
     }
 

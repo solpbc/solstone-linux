@@ -17,8 +17,8 @@ use crate::{
     encoding::{AudioOutputPlan, audio_output_plan},
     pause_hold::{self, HeldPause, StartingPause},
     recovery::{
-        CAPTURE_ZONE_FILENAME, CaptureZone, SegmentProgress, is_segment_sidecar,
-        scan_segment_progress, write_capture_zone, write_segment_metadata,
+        CAPTURE_ZONE_FILENAME, CaptureZone, is_segment_sidecar, write_capture_zone,
+        write_segment_metadata,
     },
     segment::{
         ZoneReading, ZoneSource, clamp_duration, finalize_segment_dir, segment_key, timestamp_parts,
@@ -571,20 +571,6 @@ where
             self.publish();
             return Ok(());
         }
-        if let Some(dir) = self.state.segment_dir.as_ref() {
-            let (has_durable_media, durable_byte_count) = scan_segment_progress(dir);
-            let last_durable_write_at =
-                has_durable_media.then(|| self.backends.clock.wall_seconds());
-            write_segment_metadata(
-                dir,
-                self.state.segment_start_wall,
-                SegmentProgress {
-                    has_durable_media,
-                    durable_byte_count,
-                    last_durable_write_at,
-                },
-            );
-        }
         let mut target = self.probe_status().unwrap_or(self.state.mode);
         if !self.session_live() {
             // The session in front of the seat stopped being this owner's: keep what
@@ -864,7 +850,7 @@ where
         }
         fs::create_dir_all(dir.parent().expect("segment directory has a parent"))?;
         fs::create_dir(&dir)?;
-        write_segment_metadata(&dir, wall, SegmentProgress::default());
+        write_segment_metadata(&dir, wall);
         write_capture_zone(
             &dir,
             &CaptureZone {
@@ -2862,69 +2848,25 @@ pub(crate) mod tests {
         serde_json::from_str(&fs::read_to_string(dir.join(".metadata")).unwrap()).unwrap()
     }
 
-    // open sidecar is default progress with last_durable_write_at omitted.
+    // The sidecar is written once when the segment opens; ticks leave it alone.
     #[test]
-    fn open_metadata_is_default_progress() {
-        let mut f = fixture(false);
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        initialize(&mut f);
-        let meta = sidecar(f.observer.state.segment_dir.as_ref().unwrap());
-        assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
-        assert_eq!(meta["has_durable_media"], false);
-        assert_eq!(meta["durable_byte_count"], 0);
-        assert!(meta.get("last_durable_write_at").is_none());
-    }
-
-    // production tick refresh sees a test-planted file. Do not call the writer.
-    #[test]
-    fn tick_refresh_stamps_observer_wall() {
+    fn ticks_leave_the_open_sidecar_alone() {
         let mut f = fixture(false);
         f.observer.backends.activity.0.push_back(Ok(idle()));
         initialize(&mut f);
         let dir = f.observer.state.segment_dir.clone().unwrap();
+        let written = fs::read(dir.join(".metadata")).unwrap();
+        assert_eq!(sidecar(&dir)["start_timestamp"], 1_700_000_000.0);
         fs::write(dir.join("planted.bin"), b"abcd").unwrap();
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.observer.tick().unwrap();
-        let meta = sidecar(&dir);
-        assert_eq!(meta["has_durable_media"], true);
-        assert_eq!(meta["durable_byte_count"], 4);
-        assert_eq!(meta["last_durable_write_at"], 1_700_000_000.0);
-        assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
-    }
-
-    // a tick with no media omits last_durable_write_at.
-    #[test]
-    fn tick_refresh_without_media_omits_write_at() {
-        let mut f = fixture(false);
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        initialize(&mut f);
-        let dir = f.observer.state.segment_dir.clone().unwrap();
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.observer.tick().unwrap();
-        let meta = sidecar(&dir);
-        assert_eq!(meta["has_durable_media"], false);
-        assert_eq!(meta["durable_byte_count"], 0);
-        assert!(meta.get("last_durable_write_at").is_none());
-    }
-
-    // start_timestamp is write-once from state; last_durable_write_at is the refresh wall.
-    #[test]
-    fn tick_refresh_keeps_open_start_timestamp() {
-        let mut f = fixture(false);
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        initialize(&mut f);
-        let dir = f.observer.state.segment_dir.clone().unwrap();
-        fs::write(dir.join("planted.bin"), b"x").unwrap();
-        f.wall.set(1_700_000_050.0);
-        f.observer.backends.activity.0.push_back(Ok(idle()));
-        f.observer.tick().unwrap();
-        let meta = sidecar(&dir);
-        assert_eq!(meta["start_timestamp"], 1_700_000_000.0);
-        assert_eq!(meta["last_durable_write_at"], 1_700_000_050.0);
-        assert_eq!(
-            crate::recovery::read_segment_start(&dir),
-            Some(1_700_000_000.0)
-        );
+        fs::write(dir.join(".metadata"), b"sentinel").unwrap();
+        for _ in 0..10 {
+            f.wall.set(f.wall.get() + 5.0);
+            f.observer.backends.activity.0.push_back(Ok(idle()));
+            f.observer.tick().unwrap();
+        }
+        assert_eq!(f.observer.state.segment_dir.as_ref(), Some(&dir));
+        assert_eq!(fs::read(dir.join(".metadata")).unwrap(), b"sentinel");
+        assert!(!written.is_empty());
     }
 
     // Idle→Idle boundary that keeps planted media completes.
