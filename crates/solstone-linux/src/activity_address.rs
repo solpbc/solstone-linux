@@ -402,20 +402,47 @@ impl AccessibilitySetting for NativeSetting {
     }
 }
 
+/// The first retry after the accessibility setting couldn't be reached; each one
+/// after waits twice as long, up to [`RETRY_LONGEST`].
+const RETRY_FIRST: Duration = Duration::from_millis(500);
+const RETRY_LONGEST: Duration = Duration::from_secs(30);
+
 pub fn follow_permission(prefs: Arc<ActivityPrefs>, state_dir: PathBuf) {
     std::thread::spawn(move || {
         let mut setting = NativeSetting {
             marker: state_dir.join("activity-address-accessibility-owned"),
         };
-        let mut applied = None;
-        loop {
-            let wanted = prefs.snapshot().urls;
-            if applied != Some(wanted) && reconcile(&mut setting, wanted).is_some() {
-                applied = Some(wanted);
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        follow(&mut setting, &prefs, |seen, timeout| {
+            prefs.wait_policy_change(seen, timeout);
+            true
+        });
     });
+}
+
+/// Keep the setting where the owner's choice wants it. Once it is there, sleep until
+/// the choice changes; while it can't be reached, retry with a growing wait.
+fn follow(
+    setting: &mut impl AccessibilitySetting,
+    prefs: &ActivityPrefs,
+    mut wait: impl FnMut(u64, Option<Duration>) -> bool,
+) {
+    let mut applied = None;
+    let mut retry: Option<Duration> = None;
+    loop {
+        let seen = prefs.policy_changes();
+        let wanted = prefs.snapshot().urls;
+        if applied != Some(wanted) {
+            if reconcile(setting, wanted).is_some() {
+                applied = Some(wanted);
+                retry = None;
+            } else {
+                retry = Some(retry.map_or(RETRY_FIRST, |last| (last * 2).min(RETRY_LONGEST)));
+            }
+        }
+        if !wait(seen, retry) {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -614,5 +641,35 @@ mod tests {
         };
         assert!(reconcile(&mut failed, true).is_none());
         assert!(!failed.owned);
+    }
+
+    #[test]
+    fn the_follower_sleeps_until_a_change_and_backs_off_while_unreachable() {
+        let config = crate::config::Config {
+            activity_urls: true,
+            ..crate::config::Config::default()
+        };
+        let prefs = ActivityPrefs::new(&config);
+        let mut waits = Vec::new();
+        let mut reached = Setting::default();
+        follow(&mut reached, &prefs, |_, timeout| {
+            waits.push(timeout);
+            waits.len() < 5
+        });
+        assert!(reached.enabled);
+        assert_eq!(waits, vec![None; 5], "an applied choice polled again");
+
+        let mut unreachable = Setting {
+            fail: true,
+            ..Setting::default()
+        };
+        let mut retries = Vec::new();
+        follow(&mut unreachable, &prefs, |_, timeout| {
+            retries.push(timeout.expect("a failed reach is retried"));
+            retries.len() < 10
+        });
+        assert!(retries.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(retries[0] >= Duration::from_millis(500));
+        assert_eq!(retries[9], RETRY_LONGEST);
     }
 }

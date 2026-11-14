@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, RwLock};
+use std::time::Duration;
 
 use crate::config::Config;
 
@@ -48,6 +49,9 @@ pub struct ActivityPrefsSnapshot {
 pub struct ActivityPrefs {
     state: RwLock<ActivityPrefsSnapshot>,
     generation: AtomicU64,
+    /// Counts owner policy changes, so a follower can sleep until the next one.
+    policy_changes: Mutex<u64>,
+    policy_changed: Condvar,
 }
 
 impl ActivityPrefs {
@@ -66,6 +70,8 @@ impl ActivityPrefs {
         Self {
             state: RwLock::new(snapshot),
             generation: AtomicU64::new(initial_gen),
+            policy_changes: Mutex::new(0),
+            policy_changed: Condvar::new(),
         }
     }
 
@@ -108,7 +114,42 @@ impl ActivityPrefs {
             lock.policy_boundary_ms
                 .map_or(now_ms, |old| old.min(now_ms)),
         );
+        drop(lock);
+        *self
+            .policy_changes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) += 1;
+        self.policy_changed.notify_all();
         next
+    }
+
+    /// How many policy changes there have been.
+    pub fn policy_changes(&self) -> u64 {
+        *self
+            .policy_changes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Sleep until the policy changes after `seen` changes, or `timeout` passes.
+    pub fn wait_policy_change(&self, seen: u64, timeout: Option<Duration>) {
+        let changes = self
+            .policy_changes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let unchanged = |changes: &mut u64| *changes == seen;
+        match timeout {
+            Some(timeout) => drop(
+                self.policy_changed
+                    .wait_timeout_while(changes, timeout, unchanged)
+                    .unwrap_or_else(|p| p.into_inner()),
+            ),
+            None => drop(
+                self.policy_changed
+                    .wait_while(changes, unchanged)
+                    .unwrap_or_else(|p| p.into_inner()),
+            ),
+        }
     }
 
     pub fn take_policy_snapshot(
