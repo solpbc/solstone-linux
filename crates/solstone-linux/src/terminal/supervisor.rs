@@ -396,13 +396,17 @@ impl Supervisor {
     }
 
     /// The periodic check: the legacy find, then tmux again while it is missing.
+    /// Off or paused, nothing runs for either to change; a start finds again.
     async fn recheck(
         &mut self,
         engine: &mut Option<RunningEngine>,
         relay: &watch::Receiver<SyncActivity>,
     ) {
+        if !self.wanted() {
+            return;
+        }
         self.legacy_found = self.find_legacy().await;
-        if self.legacy_found || !self.wanted() {
+        if self.legacy_found {
             return;
         }
         let Some(running) = engine.as_ref() else {
@@ -573,6 +577,7 @@ mod tests {
         bin: PathBuf,
         fake: FakeTmux,
         found: Arc<AtomicBool>,
+        legacy_finds: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     fn executable(path: &Path) {
@@ -595,16 +600,19 @@ mod tests {
             bin,
             fake: FakeTmux::with_server(&[("status-left", "OWNER"), ("status-left-length", "10")]),
             found: Arc::new(AtomicBool::new(false)),
+            legacy_finds: Arc::default(),
         }
     }
 
     fn config(harness: &Harness, enabled: bool) -> SupervisorConfig {
         let found = Arc::clone(&harness.found);
+        let finds = Arc::clone(&harness.legacy_finds);
         let (_sender, activity) = watch::channel(SyncActivity::Idle);
         let mut config = SupervisorConfig::new(
             harness.captures.clone(),
             harness.state.clone(),
             Arc::new(move || {
+                finds.fetch_add(1, Ordering::AcqRel);
                 let mut findings = LegacyFindings::default();
                 if found.load(Ordering::Acquire) {
                     findings.credentials.push("/x".into());
@@ -675,6 +683,18 @@ mod tests {
         assert_eq!(harness.fake.polls(), polls, "paused does not poll");
         supervisor.set_paused(false);
         wait_for("resumed capture", || harness.fake.polls() > polls);
+        supervisor.shutdown();
+    }
+
+    #[test]
+    fn off_does_not_look_for_an_old_install_on_each_recheck() {
+        let harness = harness();
+        let supervisor = TerminalSupervisor::spawn(config(&harness, false)).unwrap();
+        wait_for("the off state", || state_is(&harness, EngineState::Off));
+        let finds = harness.legacy_finds.load(Ordering::Acquire);
+        // Ten recheck intervals.
+        thread::sleep(Duration::from_millis(1000));
+        assert_eq!(harness.legacy_finds.load(Ordering::Acquire), finds);
         supervisor.shutdown();
     }
 

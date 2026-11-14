@@ -831,26 +831,30 @@ impl Applier for DaemonApplier {
 
 /// What holds the engine back. Once the old spool is recovered the move no longer
 /// does; with an unreadable record, only a service that may still be running does.
-pub fn engine_hold(state_dir: &std::path::Path, sources: &LegacyRootSources) -> LegacyFindings {
+/// `sources` is only asked for when the record leaves something to find: building
+/// them asks the user manager for its environment.
+pub fn engine_hold(
+    state_dir: &std::path::Path,
+    sources: impl FnOnce() -> LegacyRootSources,
+) -> LegacyFindings {
     match takeover_state::load(state_dir) {
         Stored::Present(state) if state.phase >= Phase::Recovered && state.settings_applied => {
             LegacyFindings::default()
         }
         Stored::Unusable(_) => LegacyFindings {
-            units: legacy_find::find(sources).units,
+            units: legacy_find::find(&sources()).units,
             ..LegacyFindings::default()
         },
-        Stored::Present(_) | Stored::Absent => legacy_find::find(sources),
+        Stored::Present(_) | Stored::Absent => legacy_find::find(&sources()),
     }
 }
 
 /// The real legacy find, for the daemon.
 pub fn production_legacy_probe(state_dir: PathBuf) -> LegacyProbe {
     Arc::new(move || {
-        engine_hold(
-            &state_dir,
-            &LegacyRootSources::current(&crate::cli::SystemRunner),
-        )
+        engine_hold(&state_dir, || {
+            LegacyRootSources::current(&crate::cli::SystemRunner)
+        })
     })
 }
 
@@ -1317,11 +1321,11 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(takeover_state::state_path(&state_dir), b"{").unwrap();
         let sources = sources(&home, Vec::new());
-        assert!(!engine_hold(&state_dir, &sources).found());
+        assert!(!engine_hold(&state_dir, || sources.clone()).found());
         let unit = home.join(".config/systemd/user/solstone-tmux.service");
         fs::create_dir_all(unit.parent().unwrap()).unwrap();
         fs::write(&unit, "[Unit]\n").unwrap();
-        assert!(engine_hold(&state_dir, &sources).found());
+        assert!(engine_hold(&state_dir, || sources.clone()).found());
     }
 
     #[test]
@@ -1332,19 +1336,20 @@ mod tests {
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         let sources = sources(&home, Vec::new());
-        assert!(engine_hold(&state_dir, &sources).found());
+        assert!(engine_hold(&state_dir, || sources.clone()).found());
         let mut state = TakeoverState {
             phase: Phase::Recovered,
             ..TakeoverState::default()
         };
         takeover_state::save(&state_dir, &state).unwrap();
         assert!(
-            engine_hold(&state_dir, &sources).found(),
+            engine_hold(&state_dir, || sources.clone()).found(),
             "the engine waits for the carried settings"
         );
         state.settings_applied = true;
         takeover_state::save(&state_dir, &state).unwrap();
-        assert!(!engine_hold(&state_dir, &sources).found());
+        // Finished, it no longer asks the user manager for anything.
+        assert!(!engine_hold(&state_dir, || unreachable!("sources built")).found());
     }
 
     #[test]
