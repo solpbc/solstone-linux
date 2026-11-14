@@ -523,7 +523,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     let ui_tick = Rc::clone(&ui);
     let selected_tick = Rc::clone(&selected);
     glib::timeout_add_local(Duration::from_secs(2), move || {
-        if !ui_tick.window.is_mapped() {
+        if !crate::sun_bg::shown(&ui_tick.window) {
             return glib::ControlFlow::Continue;
         }
         refresh(

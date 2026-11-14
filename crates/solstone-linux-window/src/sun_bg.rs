@@ -735,6 +735,11 @@ fn stop_tick(slot: &RefCell<Option<glib::SourceId>>) {
     }
 }
 
+/// The window is on screen: mapped and not minimized. Periodic work stops otherwise.
+pub(crate) fn shown(window: &gtk::ApplicationWindow) -> bool {
+    window.is_mapped() && !minimized(window)
+}
+
 fn minimized(window: &gtk::ApplicationWindow) -> bool {
     let Some(surface) = window.surface() else {
         return false;

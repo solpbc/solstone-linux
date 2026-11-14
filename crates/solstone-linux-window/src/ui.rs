@@ -173,7 +173,11 @@ fn build_deferred_pages(window: &gtk::ApplicationWindow) {
     show_any_clicked_link();
 
     // Kick off async poll loop
-    spawn_poll_loop(Rc::clone(&controller), Rc::clone(&update_all));
+    spawn_poll_loop(
+        window.clone(),
+        Rc::clone(&controller),
+        Rc::clone(&update_all),
+    );
 }
 
 async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
@@ -264,9 +268,19 @@ async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
     c.refreshing = false;
 }
 
-fn spawn_poll_loop(controller: Rc<RefCell<Controller>>, update_all: Rc<dyn Fn()>) {
+/// Every 2 s while the window is on screen. Each pass asks systemd and the app, so
+/// a minimized window skips it; the first pass after it returns catches up.
+fn spawn_poll_loop(
+    window: gtk::ApplicationWindow,
+    controller: Rc<RefCell<Controller>>,
+    update_all: Rc<dyn Fn()>,
+) {
     let busy = Rc::new(Cell::new(false));
-    let refresh = move || {
+    let mut first = true;
+    let mut refresh = move || {
+        if !std::mem::take(&mut first) && !crate::sun_bg::shown(&window) {
+            return glib::ControlFlow::Continue;
+        }
         if busy.replace(true) {
             return glib::ControlFlow::Continue;
         }
