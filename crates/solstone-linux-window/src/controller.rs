@@ -226,6 +226,35 @@ pub enum StartActionKind {
     Start,
 }
 
+/// A later link survives the completion of an earlier browser request.
+/// Deliberately has no Debug implementation.
+#[derive(Default)]
+pub struct PendingJournalLink {
+    generation: u64,
+    target: Option<(u64, String)>,
+}
+
+impl PendingJournalLink {
+    pub fn replace(&mut self, path: String) {
+        self.generation += 1;
+        self.target = Some((self.generation, path));
+    }
+
+    pub fn current(&self) -> Option<(u64, String)> {
+        self.target.clone()
+    }
+
+    pub fn finish(&mut self, generation: u64, opened: bool) -> bool {
+        if self.target.as_ref().is_none_or(|(id, _)| *id != generation) {
+            return false;
+        }
+        if opened {
+            self.target = None;
+        }
+        true
+    }
+}
+
 #[allow(dead_code)]
 pub struct Controller {
     pub refreshing: bool,
@@ -237,6 +266,7 @@ pub struct Controller {
     pub start_deadline: Option<std::time::Instant>,
     pub restart_expected: Option<(String, u32, Option<SettingsModel>, std::time::Instant)>,
     pub restart_verified: bool,
+    pub pending_journal_link: PendingJournalLink,
     pub browser_error: Option<solstone_linux::copy::CopyKey>,
     pub browser_request: Option<InFlight<()>>,
     pub bus_owner: Option<String>,
@@ -285,6 +315,7 @@ impl Controller {
             start_deadline: None,
             restart_expected: None,
             restart_verified: false,
+            pending_journal_link: PendingJournalLink::default(),
             browser_error: None,
             browser_request: None,
             bus_owner: None,
@@ -1862,5 +1893,26 @@ mod tests {
                 Some(solstone_linux::copy::CopyKey::LocalJournalConnectFailed)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod journal_link_tests {
+    use super::PendingJournalLink;
+
+    #[test]
+    fn a_later_target_survives_an_earlier_completion_and_failed_launch_is_retryable() {
+        let mut pending = PendingJournalLink::default();
+        pending.replace("/app/open/first".into());
+        let (first, _) = pending.current().unwrap();
+        pending.replace("/app/open/second~090020".into());
+        assert!(!pending.finish(first, true));
+        assert!(!pending.finish(first, false));
+        let (second, path) = pending.current().unwrap();
+        assert_eq!(path, "/app/open/second~090020");
+        assert!(pending.finish(second, false));
+        assert_eq!(pending.current().unwrap().1, path);
+        assert!(pending.finish(second, true));
+        assert!(pending.current().is_none());
     }
 }

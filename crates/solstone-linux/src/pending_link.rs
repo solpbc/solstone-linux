@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-//! Carries a clicked pairing link from the launcher to the window.
+//! Carries a clicked pairing or journal link from the launcher to the window.
 //!
 //! A pairing link is good until it's used, and a command line is readable by every
 //! account on the computer for as long as the process lives. So the link waits in a
@@ -19,7 +19,15 @@ const NEWEST_USEFUL_AGE: Duration = Duration::from_secs(15 * 60);
 
 /// The clicked link to hand over, when this argument is a pairing link.
 pub fn clicked_link(argument: &str) -> Option<String> {
-    crate::window_control::adapt_graphical_link(argument).ok()
+    if !matches!(
+        crate::journal_link::classify(argument),
+        crate::journal_link::Incoming::Other
+    ) {
+        // Even a malformed journal link reaches the window's own refusal notice.
+        Some(argument.to_owned())
+    } else {
+        crate::window_control::adapt_graphical_link(argument).ok()
+    }
 }
 
 pub fn default_path() -> PathBuf {
@@ -46,6 +54,14 @@ pub fn store(path: &Path, link: &str) -> io::Result<()> {
 
 /// The link waiting for the window, once. One older than a link can last is dropped.
 pub fn take(path: &Path) -> Option<String> {
+    // A launcher can replace the pending file at any instant. Claim this version
+    // atomically, so consuming it cannot unlink a newer click at the shared path.
+    let claimed = path.with_extension(format!("{}.claimed", std::process::id()));
+    fs::rename(path, &claimed).ok()?;
+    take_claimed(&claimed)
+}
+
+fn take_claimed(path: &Path) -> Option<String> {
     let age = fs::metadata(path).ok()?.modified().ok()?.elapsed();
     let link = fs::read_to_string(path).ok();
     let _ = fs::remove_file(path);
@@ -74,13 +90,47 @@ mod tests {
     }
 
     #[test]
-    fn only_pairing_links_are_handed_over() {
+    fn pairing_and_journal_links_are_handed_over() {
         assert!(clicked_link("solstone://pair#FRAG").is_some());
         assert!(clicked_link("solstone://pair/#FRAG").is_some());
         assert!(clicked_link("SOLSTONE://pair#FRAG").is_some());
         assert!(clicked_link("solstone://pair").is_none());
-        assert!(clicked_link("solstone://open#FRAG").is_none());
+        assert!(clicked_link("solstone://open#FRAG").is_some());
+        assert!(clicked_link("solstone://open?bad#FRAG").is_some());
         assert!(clicked_link("--in-scope").is_none());
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[test]
+    fn journal_urls_survive_the_private_handoff_including_invalid_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        for url in [
+            "solstone://open#abc~090020",
+            "solstone://user@open#abc",
+            "solstone://open/#abc",
+            "solstone://open?bad#abc",
+        ] {
+            store(&path, &clicked_link(url).unwrap()).unwrap();
+            assert_eq!(take(&path).as_deref(), Some(url));
+            assert!(take(&path).is_none());
+        }
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[test]
+    fn consuming_a_claim_cannot_remove_the_next_clicked_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let claimed = path.with_extension("claimed");
+        store(&path, "solstone://open#first").unwrap();
+        fs::rename(&path, &claimed).unwrap();
+        store(&path, "solstone://open#second").unwrap();
+        assert_eq!(
+            take_claimed(&claimed).as_deref(),
+            Some("solstone://open#first")
+        );
+        assert_eq!(take(&path).as_deref(), Some("solstone://open#second"));
     }
 
     #[test]

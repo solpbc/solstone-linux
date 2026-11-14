@@ -59,6 +59,10 @@
       <method name="OpenJournal">
           <arg direction="out" type="s" />
         </method>
+      <method name="OpenJournalAtPath">
+          <arg name="path" direction="in" type="s" />
+          <arg direction="out" type="s" />
+        </method>
       <method name="Pause">
           <arg name="duration_seconds" direction="in" type="i" />
           <arg direction="out" type="s" />

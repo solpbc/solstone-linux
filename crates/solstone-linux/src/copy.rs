@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+pub const JOURNAL_LINK_INVALID_TITLE: &str = "this journal link isn't valid.";
+pub const JOURNAL_LINK_INVALID_BODY: &str = "copy the full link from your chat and open it again.";
+
 pub const OBSIDIAN_HEADING: &str = "Obsidian";
 pub const OBSIDIAN_EXPLAIN: &str = "the solstone app takes in the notes in one vault on this computer. all of them go into your journal, then each one as it changes. your vault stays as it is.";
 pub const OBSIDIAN_FOUND_LABEL: &str = "vaults on this computer";

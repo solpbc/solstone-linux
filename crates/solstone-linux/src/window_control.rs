@@ -709,6 +709,7 @@ pub(crate) enum SupervisorCommand {
         responder: oneshot::Sender<String>,
     },
     OpenJournal {
+        path: String,
         opener: Option<CustomOpener>,
         responder: oneshot::Sender<String>,
     },
@@ -1654,8 +1655,12 @@ impl WindowControlSupervisor {
                 let doc = self.handle_write_setting(field, value).await;
                 let _ = responder.send(doc);
             }
-            SupervisorCommand::OpenJournal { opener, responder } => {
-                let doc = self.handle_open_journal(opener).await;
+            SupervisorCommand::OpenJournal {
+                path,
+                opener,
+                responder,
+            } => {
+                let doc = self.handle_open_journal(&path, opener).await;
                 let _ = responder.send(doc);
             }
         }
@@ -2183,7 +2188,7 @@ impl WindowControlSupervisor {
         }
     }
 
-    async fn handle_open_journal(&mut self, opener: Option<CustomOpener>) -> String {
+    async fn handle_open_journal(&mut self, path: &str, opener: Option<CustomOpener>) -> String {
         let is_confirmed = {
             let phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
             phase.durable == "confirmed"
@@ -2196,8 +2201,8 @@ impl WindowControlSupervisor {
             return self.assemble_current(None);
         }
         let open_result = match opener {
-            Some(opener) => self.open_journal.open_with(|url| opener(url)),
-            None => self.open_journal.open(),
+            Some(opener) => self.open_journal.open_at_path_with(path, |url| opener(url)),
+            None => self.open_journal.open_at_path(path),
         };
         if open_result.is_err() {
             let mut phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
@@ -2516,12 +2521,24 @@ impl WindowControlHandler {
     }
 
     pub async fn open_journal(&self) -> String {
+        self.request_open_journal("/").await
+    }
+
+    pub async fn open_journal_at_path(&self, path: &str) -> String {
+        if !crate::journal_link::valid_path(path) {
+            return self.fallback_unavailable();
+        }
+        self.request_open_journal(path).await
+    }
+
+    async fn request_open_journal(&self, path: &str) -> String {
         let Some(ref tx) = self.inner.tx else {
             return self.get_control_state();
         };
         let (resp_tx, resp_rx) = oneshot::channel();
         if tx
             .send(SupervisorCommand::OpenJournal {
+                path: path.to_owned(),
                 opener: self.inner.custom_opener.clone(),
                 responder: resp_tx,
             })
@@ -4674,6 +4691,73 @@ mod tests {
         let m4 = decode_control_str(&doc4).unwrap();
         assert_eq!(m4.open_journal, Some("unavailable".into()));
 
+        harness.shutdown().await;
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn journal_link_path_uses_confirmation_and_preserves_the_target_after_failure() {
+        let cred = sample_valid_credential("cert-pem-bytes");
+        let pairer = Arc::new(FakePairer::new(cred));
+        let starter = Arc::new(FakeOwnerStarter::default());
+        let harness = TestHarness::new(None, false, pairer, starter, Arc::new(NoWriteFault)).await;
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let opened_copy = Arc::clone(&opened);
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fail_copy = Arc::clone(&fail);
+        let handler = harness.handler.with_custom_opener(Arc::new(move |target| {
+            opened_copy.lock().unwrap().push(target.to_owned());
+            if fail_copy.load(std::sync::atomic::Ordering::Relaxed) {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }));
+        let path = "/app/open/opaque~090020";
+        let doc = handler.open_journal_at_path(path).await;
+        assert_eq!(
+            decode_control_str(&doc).unwrap().open_journal.as_deref(),
+            Some("not-confirmed")
+        );
+        assert!(opened.lock().unwrap().is_empty());
+        let pairing = handler.begin_pairing(TEST_PAIR_LINK.to_owned()).await;
+        let attempt = decode_control_str(&pairing).unwrap().attempt.unwrap();
+        handler
+            .answer_pairing(attempt.id, attempt.pairing_id, true)
+            .await;
+        assert_eq!(
+            decode_control_str(&handler.open_journal_at_path(path).await)
+                .unwrap()
+                .open_journal
+                .as_deref(),
+            Some("unavailable")
+        );
+        let (_target, cap) = open_journal_fixture("https://journal.example");
+        harness.open_journal.install(cap);
+        assert_eq!(
+            decode_control_str(&handler.open_journal_at_path(path).await)
+                .unwrap()
+                .open_journal
+                .as_deref(),
+            Some("unavailable")
+        );
+        fail.store(false, std::sync::atomic::Ordering::Relaxed);
+        let doc = handler.open_journal_at_path(path).await;
+        assert_eq!(
+            decode_control_str(&doc).unwrap().open_journal.as_deref(),
+            Some("opened")
+        );
+        assert!(!doc.contains("opaque"));
+        assert_eq!(
+            opened.lock().unwrap().as_slice(),
+            [
+                "https://journal.example/app/open/opaque~090020",
+                "https://journal.example/app/open/opaque~090020"
+            ]
+        );
+        handler.open_journal_at_path("//other.example/").await;
+        handler.open_journal_at_path("/app/open/opaque?x").await;
+        assert_eq!(opened.lock().unwrap().len(), 2);
         harness.shutdown().await;
     }
 

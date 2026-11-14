@@ -136,9 +136,33 @@ fn build_deferred_pages(window: &gtk::ApplicationWindow) {
     let (journal_page, update_journal, link_entry) =
         create_journal_page(Rc::clone(&controller), Rc::clone(&changed));
 
+    let link_controller = Rc::clone(&controller);
+    let link_changed = Rc::clone(&changed);
+    let link_window = window.clone();
     SHOW_CLICKED_LINK.set(Some(Rc::new(move |link: &str| {
-        link_entry.set_text(link);
+        use solstone_linux::journal_link::{Incoming, classify};
+        match classify(link) {
+            Incoming::Other => link_entry.set_text(link),
+            Incoming::Open(path) => {
+                let mut c = link_controller.borrow_mut();
+                c.pending_journal_link.replace(path);
+                c.browser_error = None;
+            }
+            Incoming::Invalid => {
+                let notice = gtk::MessageDialog::builder()
+                    .transient_for(&link_window)
+                    .modal(true)
+                    .message_type(gtk::MessageType::Warning)
+                    .text(solstone_linux::copy::JOURNAL_LINK_INVALID_TITLE)
+                    .secondary_text(solstone_linux::copy::JOURNAL_LINK_INVALID_BODY)
+                    .build();
+                notice.add_button("close", gtk::ResponseType::Close);
+                notice.connect_response(|dialog, _| dialog.close());
+                notice.present();
+            }
+        }
         crate::deck::show_journal();
+        notify(&link_changed);
     })));
 
     // Page 3: Settings
@@ -160,10 +184,22 @@ fn build_deferred_pages(window: &gtk::ApplicationWindow) {
         let update_status = update_status.clone();
         let update_journal = update_journal.clone();
         let update_settings = update_settings.clone();
+        let ctrl = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
         Rc::new(move || {
             update_status();
             update_journal();
             update_settings();
+            if ctrl.borrow().pending_journal_link.current().is_some()
+                && ctrl.borrow().browser_error.is_none()
+                && ctrl.borrow().document.durable == "confirmed"
+                && matches!(
+                    ctrl.borrow().document.health.as_str(),
+                    "connected" | "syncing"
+                )
+            {
+                begin_open_journal(Rc::clone(&ctrl), Rc::clone(&changed));
+            }
         })
     };
 
@@ -443,46 +479,67 @@ fn connect_open_journal(
     changed: Changed,
 ) {
     button.connect_clicked(move |_| {
-        if controller.borrow().browser_request.is_some() {
-            return;
-        }
-        let Some(owner) = controller.borrow().bus_owner.clone() else {
-            return;
-        };
-        let id = {
-            let mut c = controller.borrow_mut();
-            let id = c.alloc_id();
-            c.browser_error = None;
-            c.browser_request = Some(crate::controller::InFlight {
-                id,
-                bus_owner: owner.clone(),
-                payload: (),
-            });
-            id
-        };
-        notify(&changed);
-        let ctrl = Rc::clone(&controller);
-        let changed = Rc::clone(&changed);
-        glib::MainContext::default().spawn_local(async move {
-            let result = match ControlClient::session().await {
-                Ok(client) => client.expect_owner(owner.clone()).open_journal().await,
-                Err(error) => Err(error),
-            };
-            if ctrl.borrow().bus_owner.as_deref() == Some(owner.as_str())
-                && ctrl
-                    .borrow()
-                    .browser_request
-                    .as_ref()
-                    .is_some_and(|request| request.id == id)
-            {
-                ctrl.borrow_mut().browser_request = None;
-                ctrl.borrow_mut().browser_error = match result {
-                    Ok(json) => map_open_journal_outcome(&json),
-                    Err(_) => Some(CopyKey::BrowserOpenFailed),
-                };
-            }
-            notify(&changed);
+        begin_open_journal(Rc::clone(&controller), Rc::clone(&changed));
+    });
+}
+
+fn begin_open_journal(controller: Rc<RefCell<Controller>>, changed: Changed) {
+    if controller.borrow().browser_request.is_some() {
+        return;
+    }
+    let Some(owner) = controller.borrow().bus_owner.clone() else {
+        return;
+    };
+    let target = controller.borrow().pending_journal_link.current();
+    let id = {
+        let mut c = controller.borrow_mut();
+        let id = c.alloc_id();
+        c.browser_error = None;
+        c.browser_request = Some(crate::controller::InFlight {
+            id,
+            bus_owner: owner.clone(),
+            payload: (),
         });
+        id
+    };
+    notify(&changed);
+    let ctrl = Rc::clone(&controller);
+    let changed = Rc::clone(&changed);
+    glib::MainContext::default().spawn_local(async move {
+        let result = match ControlClient::session().await {
+            Ok(client) => {
+                let client = client.expect_owner(owner.clone());
+                match &target {
+                    Some((_, path)) => client.open_journal_at_path(path).await,
+                    None => client.open_journal().await,
+                }
+            }
+            Err(error) => Err(error),
+        };
+        if ctrl.borrow().bus_owner.as_deref() == Some(owner.as_str())
+            && ctrl
+                .borrow()
+                .browser_request
+                .as_ref()
+                .is_some_and(|request| request.id == id)
+        {
+            ctrl.borrow_mut().browser_request = None;
+            let error = match result {
+                Ok(json) => map_open_journal_outcome(&json),
+                Err(_) => Some(CopyKey::BrowserOpenFailed),
+            };
+            let applies = match target {
+                Some((generation, _)) => ctrl
+                    .borrow_mut()
+                    .pending_journal_link
+                    .finish(generation, error.is_none()),
+                None => ctrl.borrow().pending_journal_link.current().is_none(),
+            };
+            if applies {
+                ctrl.borrow_mut().browser_error = error;
+            }
+        }
+        notify(&changed);
     });
 }
 

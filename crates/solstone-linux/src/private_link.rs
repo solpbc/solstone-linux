@@ -1894,10 +1894,14 @@ impl OpenJournalCapability {
     }
 
     pub(crate) fn open(&self) -> Result<(), ()> {
+        self.open_at_path("/")
+    }
+
+    pub(crate) fn open_at_path(&self, path: &str) -> Result<(), ()> {
         // Opening necessarily hands the approved target to the desktop browser.
         // The target is accepted in child argv here; it remains excluded from the
         // secrecy contract's logs, errors, status, clipboard, D-Bus, state, and Debug surfaces.
-        self.open_inner(|target| {
+        self.open_inner(path, |target| {
             let executable = crate::service::current_executable().map_err(|_| ())?;
             // Scope metadata carries only a fixed description and PIDs. The approved URL
             // stays in child argv, never in a transient service's ExecStart properties.
@@ -1926,23 +1930,33 @@ impl OpenJournalCapability {
         })
     }
 
-    fn open_inner(&self, opener: impl FnOnce(&str) -> Result<(), ()>) -> Result<(), ()> {
+    fn open_inner(
+        &self,
+        path: &str,
+        opener: impl FnOnce(&str) -> Result<(), ()>,
+    ) -> Result<(), ()> {
         let target = self.target.upgrade().ok_or(())?;
         let gate = target.gate.lock().map_err(|_| ())?;
         match &*gate {
             OpenJournalGate::Open(authorizer) => {
-                let url = authorizer.issue_url().map_err(|_| ())?;
+                let url = authorizer.issue_url_for_path(path).map_err(|_| ())?;
                 opener(&url)
             }
             #[cfg(test)]
-            OpenJournalGate::Fixture(target) => opener(target),
+            OpenJournalGate::Fixture(target) => {
+                if path == "/" {
+                    opener(target)
+                } else {
+                    opener(&format!("{target}{path}"))
+                }
+            }
             OpenJournalGate::Closed => Err(()),
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn open_with(&self, opener: impl FnOnce(&str) -> Result<(), ()>) -> Result<(), ()> {
-        self.open_inner(opener)
+        self.open_inner("/", opener)
     }
 
     fn close(&self) {
@@ -1979,6 +1993,20 @@ impl OpenJournalAccess {
     pub(crate) fn open_with(&self, opener: impl FnOnce(&str) -> Result<(), ()>) -> Result<(), ()> {
         let capability = self.current.lock().map_err(|_| ())?.clone().ok_or(())?;
         capability.open_with(opener)
+    }
+
+    pub(crate) fn open_at_path(&self, path: &str) -> Result<(), ()> {
+        let capability = self.current.lock().map_err(|_| ())?.clone().ok_or(())?;
+        capability.open_at_path(path)
+    }
+
+    pub(crate) fn open_at_path_with(
+        &self,
+        path: &str,
+        opener: impl FnOnce(&str) -> Result<(), ()>,
+    ) -> Result<(), ()> {
+        let capability = self.current.lock().map_err(|_| ())?.clone().ok_or(())?;
+        capability.open_inner(path, opener)
     }
 
     pub(crate) fn install(&self, capability: OpenJournalCapability) {

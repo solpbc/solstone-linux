@@ -313,7 +313,7 @@ fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
         .and_then(crate::pending_link::clicked_link)
         && let Err(error) = crate::pending_link::store(&crate::pending_link::default_path(), &link)
     {
-        eprintln!("couldn't keep that pairing link for the window: {error}");
+        eprintln!("couldn't keep that link for the window: {error}");
     }
     let Ok(current) = crate::service::current_executable() else {
         return launch_window(false, false);

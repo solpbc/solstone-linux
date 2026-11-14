@@ -211,6 +211,9 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     async fn open_journal(&self) -> String {
         self.window_control.open_journal().await
     }
+    async fn open_journal_at_path(&self, path: String) -> String {
+        self.window_control.open_journal_at_path(&path).await
+    }
     fn obsidian_state(&self) -> String {
         self.obsidian.state_json()
     }

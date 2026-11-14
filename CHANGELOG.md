@@ -8,6 +8,8 @@ and this project adheres to Semantic Versioning.
 
 ### Added
 
+- open a journal link from your agent to go straight to that place in your journal in your browser.
+
 - on help, "report a problem" opens a support page with the app version, the linux version, and the app's status filled in. you edit and send it there. nothing is sent before that.
 
 ### Fixed

@@ -250,6 +250,11 @@ impl ControlClient {
         self.call_method("OpenJournal", &(), DEFAULT_TIMEOUT).await
     }
 
+    pub async fn open_journal_at_path(&self, path: &str) -> Result<String, ControlClientError> {
+        self.call_method("OpenJournalAtPath", &(path,), DEFAULT_TIMEOUT)
+            .await
+    }
+
     pub async fn obsidian_state(&self) -> Result<String, ControlClientError> {
         self.call_method("ObsidianState", &(), DEFAULT_TIMEOUT)
             .await
