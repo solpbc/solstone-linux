@@ -4357,7 +4357,6 @@ mod tests {
                 activity_through_pause: false,
                 away: false,
             },
-            300,
             100.0,
             &sampled,
         );

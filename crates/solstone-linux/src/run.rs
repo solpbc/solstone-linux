@@ -1845,7 +1845,6 @@ mod tests {
         let mut tray = crate::tray::KsniTray {
             model: crate::tray_model::build_with_open_journal(
                 &initial_snapshot,
-                300,
                 42.0,
                 &health,
                 true,
@@ -1947,8 +1946,7 @@ mod tests {
 
         // 5. resume -> Resume. The menu offers resume only while paused, so the tray
         // takes the paused state the way the run loop gives it.
-        tray.model =
-            crate::tray_model::build_with_open_journal(&published, 300, 42.0, &health, true);
+        tray.model = crate::tray_model::build_with_open_journal(&published, 42.0, &health, true);
         let menu_items = tray.menu();
         let resume_item = menu_items
             .into_iter()

@@ -292,7 +292,6 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
     let about_config = inputs.config.clone();
     let mut initial_model = tray_model::build_with_open_journal(
         &initial_snapshot,
-        inputs.config.segment_interval,
         inputs.clock.monotonic_seconds(),
         &initial_health,
         inputs.open_journal.available(),
@@ -311,7 +310,6 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
                 component,
                 inputs.tray_receiver,
                 models,
-                inputs.config.segment_interval,
                 inputs.clock,
                 (tray_health, about_host),
                 inputs.open_journal,
@@ -357,13 +355,13 @@ async fn run_tray_renderer(
     component: DesktopComponent,
     receiver: watch::Receiver<StateSnapshot>,
     models: watch::Sender<TrayModel>,
-    segment_interval: i64,
     clock: SystemClock,
     health_and_host: (TrayHealth, crate::about::HostFacts),
     open_journal: crate::private_link::OpenJournalAccess,
 ) {
     let (health, about_host) = health_and_host;
     let about_config = component.config.clone();
+    let mut about = AboutCache::default();
     component
         .watch_until_lost(receiver, move |snapshot| {
             let health = health
@@ -373,17 +371,58 @@ async fn run_tray_renderer(
                 .unwrap_or_else(|error| error.into_inner().clone());
             let mut model = tray_model::build_with_open_journal(
                 snapshot,
-                segment_interval,
                 clock.monotonic_seconds(),
                 &health,
                 open_journal.available(),
             );
-            model.about =
-                crate::about::AboutBlock::snapshot(&about_config, &about_host, crate::about::now());
-            models.send_replace(model);
+            model.about = about.get(&health, std::time::Instant::now(), || {
+                crate::about::AboutBlock::snapshot(&about_config, &about_host, crate::about::now())
+            });
+            // The tray redraws on each send, so an unchanged model isn't sent.
+            models.send_if_modified(|current| {
+                let changed = *current != model;
+                if changed {
+                    *current = model;
+                }
+                changed
+            });
             Ok(())
         })
         .await;
+}
+
+/// How long the About lines are kept before they are read again. They change with
+/// the connection state, which also rereads them, and otherwise only by the minute.
+const ABOUT_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The About lines, read from disk only when the connection state changes or a
+/// minute passes.
+#[derive(Default)]
+struct AboutCache {
+    held: Option<(
+        crate::about::AboutBlock,
+        crate::sync_health::HealthState,
+        std::time::Instant,
+    )>,
+}
+
+impl AboutCache {
+    fn get(
+        &mut self,
+        health: &SyncHealth,
+        now: std::time::Instant,
+        read: impl FnOnce() -> crate::about::AboutBlock,
+    ) -> crate::about::AboutBlock {
+        if let Some((about, seen, at)) = &self.held
+            && *seen == health.state
+            && now.duration_since(*at) < ABOUT_REFRESH
+        {
+            return about.clone();
+        }
+        let about = read();
+        self.held = Some((about.clone(), health.state, now));
+        about
+    }
 }
 
 async fn run_tray_applier(
@@ -665,6 +704,31 @@ async fn stop_task(name: &str, task: Option<JoinHandle<()>>, timeout: Duration) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_about_lines_are_reread_on_a_state_change_or_after_a_minute() {
+        use crate::sync_health::{SyncFacts, derive_health};
+        let mut cache = AboutCache::default();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::about::AboutBlock::unknown(crate::about::HostFacts::default())
+        };
+        let start = std::time::Instant::now();
+        let health = derive_health(&SyncFacts::default(), 0.0, 600.0);
+        for second in 0..60 {
+            let mut aged = health.clone();
+            aged.last_success_age = Some(second as f64);
+            cache.get(&aged, start + std::time::Duration::from_secs(second), read);
+        }
+        assert_eq!(reads.get(), 1, "a minute of ticks reread the About lines");
+        cache.get(&health, start + ABOUT_REFRESH, read);
+        assert_eq!(reads.get(), 2);
+        let mut changed = health.clone();
+        changed.state = crate::sync_health::HealthState::Connected;
+        cache.get(&changed, start + ABOUT_REFRESH, read);
+        assert_eq!(reads.get(), 3);
+    }
     use crate::{
         dbus_service::{ObserverCommands, clamp_pause},
         observer::{Mode, StateSink, WatchStateSink},

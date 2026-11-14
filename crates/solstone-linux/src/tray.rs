@@ -255,7 +255,7 @@ mod tests {
         );
         let (commands, _) = std::sync::mpsc::channel();
         KsniTray {
-            model: tray_model::build(&snapshot, 300, 0.0, &health),
+            model: tray_model::build(&snapshot, 0.0, &health),
             commands,
         }
     }

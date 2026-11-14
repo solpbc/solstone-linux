@@ -38,9 +38,7 @@ pub struct TrayModel {
     pub tooltip: String,
     pub icon: String,
     pub sni_status: String,
-    pub segment: String,
     pub cache: String,
-    pub uptime: String,
     pub resume: String,
     pub pause_visible: bool,
     pub resume_visible: bool,
@@ -159,21 +157,18 @@ pub fn icon_name(status: TrayStatus, health: &SyncHealth) -> String {
     .to_owned()
 }
 
-pub fn build(snapshot: &StateSnapshot, interval: i64, now: f64, health: &SyncHealth) -> TrayModel {
-    build_with_open_journal(snapshot, interval, now, health, false)
+pub fn build(snapshot: &StateSnapshot, now: f64, health: &SyncHealth) -> TrayModel {
+    build_with_open_journal(snapshot, now, health, false)
 }
 
 pub fn build_with_open_journal(
     snapshot: &StateSnapshot,
-    interval: i64,
     now: f64,
     health: &SyncHealth,
     open_journal_enabled: bool,
 ) -> TrayModel {
     let status = status(snapshot);
-    let segment = segment_remaining(snapshot, interval, now);
     let pause = pause_remaining(snapshot, now);
-    let up = uptime(snapshot, now);
     TrayModel {
         import_held: health.import_held,
         status,
@@ -183,9 +178,7 @@ pub fn build_with_open_journal(
         tooltip: tooltip(status, health),
         icon: icon_name(status, health),
         sni_status: sni_status(status, health),
-        segment: format!("segment: {}:{:02} remaining", segment / 60, segment % 60),
         cache: format!("cache: {} MB", snapshot.total_size_mb),
-        uptime: format!("uptime: {}h {}m", up / 3600, (up % 3600) / 60),
         resume: if pause > 0 {
             format!("resume ({}m remaining)", pause / 60)
         } else {
@@ -225,19 +218,19 @@ mod tests {
         let mut value = snapshot();
         value.mode = Mode::Screencast;
         value.session = SessionPresence::NotActive;
-        let away = build(&value, 300, 0.0, &health);
+        let away = build(&value, 0.0, &health);
         assert_eq!(away.status, TrayStatus::Waiting(SessionPresence::NotActive));
         assert_eq!(status_name(away.status), "waiting");
         assert_eq!(away.header, "waiting for your desktop");
         assert_eq!(away.icon, "paused");
         assert_ne!(away.sni_status, "NeedsAttention");
         value.session = SessionPresence::Unreachable;
-        let broken = build(&value, 300, 0.0, &health);
+        let broken = build(&value, 0.0, &health);
         assert_eq!(broken.header, "can't reach your desktop");
         assert_eq!(broken.icon, "attention");
         assert_eq!(broken.sni_status, "NeedsAttention");
         value.paused = true;
-        assert_eq!(build(&value, 300, 0.0, &health).status, TrayStatus::Paused);
+        assert_eq!(build(&value, 0.0, &health).status, TrayStatus::Paused);
     }
 
     fn snapshot() -> StateSnapshot {
@@ -403,17 +396,23 @@ mod tests {
         value.mode = Mode::Idle;
         assert_eq!(status(&value), TrayStatus::Idle);
         value.paused = true;
-        let model = build(&value, 300, 100.0, &connected_health());
+        let model = build(&value, 100.0, &connected_health());
         assert!(!model.pause_visible);
         assert!(model.resume_visible);
     }
     #[test]
     fn live_stats_and_tooltip_are_rendered_from_snapshot_and_health() {
-        let model = build(&snapshot(), 300, 100.0, &connected_health());
+        let model = build(&snapshot(), 100.0, &connected_health());
         assert_eq!(model.cache, "cache: 3 MB");
-        assert_eq!(model.uptime, "uptime: 0h 0m");
-        assert_eq!(model.segment, "segment: 5:00 remaining");
         assert_eq!(model.tooltip, "on\nsync: up to date");
+    }
+    #[test]
+    fn a_recording_tray_is_unchanged_from_one_second_to_the_next() {
+        let health = connected_health();
+        let at = |now: f64| build(&snapshot(), now, &health);
+        for now in 101..160 {
+            assert_eq!(at(now as f64), at(100.0), "the tray changed at {now}");
+        }
     }
     #[test]
     fn stopped_and_syncing_tooltips_are_byte_exact() {
@@ -449,8 +448,8 @@ mod tests {
     fn identical_inputs_produce_an_identical_model() {
         let health = connected_health();
         assert_eq!(
-            build(&snapshot(), 300, 100.0, &health),
-            build(&snapshot(), 300, 100.0, &health)
+            build(&snapshot(), 100.0, &health),
+            build(&snapshot(), 100.0, &health)
         );
     }
     #[test]
@@ -460,8 +459,8 @@ mod tests {
         value.pause_until = Some(1_000.0);
         let health = connected_health();
         assert_ne!(
-            build(&value, 300, 100.0, &health).resume,
-            build(&value, 300, 160.0, &health).resume
+            build(&value, 100.0, &health).resume,
+            build(&value, 160.0, &health).resume
         );
     }
     #[test]
@@ -474,7 +473,7 @@ mod tests {
             100.0,
             600.0,
         );
-        let m = build(&snapshot(), 300, 100.0, &h);
+        let m = build(&snapshot(), 100.0, &h);
         assert_eq!(m.icon, "attention");
         assert_eq!(m.sni_status, "NeedsAttention");
     }
@@ -495,10 +494,7 @@ mod tests {
         ];
         for facts in facts {
             let health = derive_health(&facts, 100.0, 600.0);
-            assert_eq!(
-                build(&snapshot(), 300, 100.0, &health).sync,
-                health.sync_line
-            );
+            assert_eq!(build(&snapshot(), 100.0, &health).sync, health.sync_line);
         }
     }
 }
