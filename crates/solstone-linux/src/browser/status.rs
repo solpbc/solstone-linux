@@ -25,8 +25,11 @@ pub const STORE_LINKS: &[(&str, &str)] = &[
         "https://addons.mozilla.org/firefox/addon/solstone/",
     ),
 ];
-/// The running app rewrites its status every five seconds. Older than this, the host is down.
+/// The running app rewrites its status when it changes, and at least every
+/// [`RUNNING_HEARTBEAT_MS`]. Older than this, the host is down.
 pub const RUNNING_STALE_MS: i64 = 30_000;
+/// How old an unchanged status may get before it is written again.
+const RUNNING_HEARTBEAT_MS: i64 = RUNNING_STALE_MS / 2;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Running {
@@ -39,8 +42,19 @@ pub struct Running {
     pub browsers: Vec<String>,
 }
 
+/// Write the status, unless the file already says the same and is fresh enough.
 pub fn write_running(layout: &Layout, status: &Running) -> io::Result<()> {
     let path = layout.root.join(RUNNING_FILE);
+    if let Some(written) = load_running(&path) {
+        let age = status.updated_at_ms - written.updated_at_ms;
+        let same = Running {
+            updated_at_ms: status.updated_at_ms,
+            ..written
+        } == *status;
+        if same && (0..RUNNING_HEARTBEAT_MS).contains(&age) {
+            return Ok(());
+        }
+    }
     let temporary = layout.root.join(format!(".{RUNNING_FILE}.tmp"));
     fs::write(
         &temporary,
@@ -317,6 +331,41 @@ mod tests {
             status_lines(temp.path(), 1_000_000 + RUNNING_STALE_MS)[0],
             "browser: the solstone app is not running"
         );
+    }
+
+    #[test]
+    fn an_unchanged_status_is_rewritten_only_to_stay_fresh() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let layout = Layout::new(temp.path());
+        fs::create_dir_all(&layout.root).unwrap();
+        let inode = || fs::metadata(layout.root.join(RUNNING_FILE)).unwrap().ino();
+        let mut status = Running {
+            updated_at_ms: 1_000_000,
+            capture: "permitted".into(),
+            delivery: "kept_locally".into(),
+            ..Running::default()
+        };
+        write_running(&layout, &status).unwrap();
+        let mut writes = 0;
+        let mut last = inode();
+        for _ in 0..100 {
+            status.updated_at_ms += 5_000;
+            write_running(&layout, &status).unwrap();
+            if inode() != last {
+                writes += 1;
+                last = inode();
+            }
+            // Never stale to a reader at the time of the write.
+            let read = read_running(&layout, status.updated_at_ms).unwrap();
+            assert!(status.updated_at_ms - read.updated_at_ms <= RUNNING_STALE_MS / 2);
+        }
+        assert!(writes <= 34, "{writes} rewrites of an unchanged status");
+        // A change is written at once.
+        status.updated_at_ms += 5_000;
+        status.browsers = vec!["firefox".into()];
+        write_running(&layout, &status).unwrap();
+        assert_eq!(read_running(&layout, status.updated_at_ms).unwrap(), status);
     }
 
     #[test]
