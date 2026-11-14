@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- on a minimal ubuntu or fedora install, which leaves out documentation, the package now keeps the licenses for the solstone app, its font and the software it's built with.
+
 ## [2.0.43] - 2026-11-14
 
 ### Changed
