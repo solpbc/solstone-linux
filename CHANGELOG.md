@@ -6,11 +6,13 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.44] - 2026-11-15
+
 ### Added
 
-- open a journal link from your agent to go straight to that place in your journal in your browser.
+- under "help", "report a problem" opens a support page with the app's version, your journal's version, your linux version and the app's status filled in. you edit and send it there. nothing is sent before that.
 
-- on help, "report a problem" opens a support page with the app version, the linux version, and the app's status filled in. you edit and send it there. nothing is sent before that.
+- when your agent gives you a journal link, opening it takes you straight to that place in your journal, in your browser.
 
 ### Fixed
 
