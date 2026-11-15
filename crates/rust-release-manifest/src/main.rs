@@ -314,15 +314,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             TransparencyCommand::ResignPointer => resign_transparency_pointer()?,
         },
         Command::Notices { command } => {
-            let root = RepoRoot::resolve()?;
-            let paths = DependencyNoticesPaths::from_workspace_root(root.path());
+            // The deb copyright is built into this binary, so writing it needs no checkout:
+            // it runs inside the release container, which has the source but no Git metadata.
+            let paths = || -> Result<DependencyNoticesPaths, Box<dyn std::error::Error>> {
+                let root = RepoRoot::resolve()?;
+                Ok(DependencyNoticesPaths::from_workspace_root(root.path()))
+            };
             match command {
                 NoticesCommand::Generate => {
-                    generate_dependency_notices(&paths)?;
+                    generate_dependency_notices(&paths()?)?;
                     println!("Rust dependency notices generated successfully.");
                 }
                 NoticesCommand::Check => {
-                    check_dependency_notices(&paths)?;
+                    check_dependency_notices(&paths()?)?;
                     println!("Rust dependency notices verified successfully.");
                 }
                 NoticesCommand::DebCopyright { output } => {
