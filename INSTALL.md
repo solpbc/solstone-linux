@@ -25,10 +25,44 @@ To install the app with your system's package manager instead, add
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --route package
 ```
 
-If you installed the `.deb` or `.rpm` yourself, run that command once. It
-checks every file the package installed against the signed release before it
-records the package, and changes nothing if a file doesn't match. After that,
-the installer's `--upgrade` updates it.
+If you installed a standalone `.deb` or `.rpm` yourself without the package
+repository, run that command once. It checks every file the package installed
+against the signed release before it records the package, and changes nothing
+if a file doesn't match. After that, the installer's `--upgrade` updates it.
+
+You can also install `solstone-linux` (or `solstone` for both your journal and
+the desktop app) directly from our signed `apt`, `dnf` or `zypper` repository
+(OpenPGP fingerprint `BD77BD200A710D13EDF1D2555BF7582BF7EBA751`):
+
+**Debian / Ubuntu:**
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSLo /etc/apt/keyrings/solstone-archive-keyring.gpg https://updates.solstone.app/linux/keys/solstone-archive-keyring.gpg
+sudo chmod a+r /etc/apt/keyrings/solstone-archive-keyring.gpg
+printf 'Types: deb\nURIs: https://updates.solstone.app/linux/apt\nSuites: release\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/solstone-archive-keyring.gpg\n' "$(dpkg --print-architecture)" | sudo tee /etc/apt/sources.list.d/solstone.sources >/dev/null
+sudo apt update && sudo apt install solstone-linux
+```
+
+**Fedora / RHEL:**
+```bash
+sudo rpmkeys --import https://updates.solstone.app/linux/keys/solstone-archive-keyring.asc
+printf '[solstone]\nname=solstone\nbaseurl=https://updates.solstone.app/linux/rpm/release/$basearch\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=1\ngpgkey=https://updates.solstone.app/linux/keys/solstone-archive-keyring.asc\n' | sudo tee /etc/yum.repos.d/solstone.repo >/dev/null
+sudo dnf install solstone-linux
+```
+
+**openSUSE:**
+```bash
+sudo rpm --import https://updates.solstone.app/linux/keys/solstone-archive-keyring.asc
+printf '[solstone]\nname=solstone\nenabled=1\nautorefresh=1\nbaseurl=https://updates.solstone.app/linux/rpm/release/$basearch\ntype=rpm-md\ngpgcheck=1\nrepo_gpgcheck=1\npkg_gpgcheck=1\ngpgkey=https://updates.solstone.app/linux/keys/solstone-archive-keyring.asc\n' | sudo tee /etc/zypp/repos.d/solstone.repo >/dev/null
+sudo zypper refresh solstone && sudo zypper install solstone-linux
+```
+
+When you install from the package repository, open the app from your app menu
+and choose `start the solstone app`, or run `solstone-linux install-service`
+under your own account. Your distribution's package manager (`apt upgrade`,
+`dnf upgrade` or `zypper update`) updates the package from then on; run
+`systemctl --user restart solstone-linux` after a package upgrade so the running
+service switches to the new version.
 
 Install the system dependencies below first if your desktop doesn't have them.
 Then [open the window](#open-the-window). It finds a journal running on this
