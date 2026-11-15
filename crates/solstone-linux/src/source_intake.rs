@@ -5,14 +5,22 @@
 //!
 //! The file is `state/source-intake.json`, beside the pause file. It stays on
 //! this computer: nothing copies it, and a new journal does not clear it.
-//! Totals count finished material only. A file that is not version 1, or whose
-//! totals are not whole numbers, is left byte for byte untouched.
+//! Totals count finished material only. A file that is not version 1 or 2, or
+//! whose totals are not whole numbers, is left byte for byte untouched.
+//!
+//! A terminal segment or screenshot counted once is never counted again, so its
+//! key is never forgotten. The newest keys stay in the file beside the total
+//! they were counted with. Once a source holds `SEEN_TAIL_LIMIT` of them, the
+//! next write first appends them to that source's seen log and syncs it, then
+//! drops them from the file, recording the log's length in the same write, so
+//! the file a count rewrites stays small. Version 1 kept every key in the file.
 //!
 //! `started` is the local date counting began. `started_at` is that moment.
 //! A terminal segment named for an earlier moment adds nothing, even when the
 //! directory was renamed later. `last` moves only when that source's total grows.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -26,6 +34,10 @@ use crate::private_file::atomic_write_bytes;
 
 pub const FILENAME: &str = "source-intake.json";
 const LOCK_NAME: &str = "source-intake.lock";
+const FILE_VERSION: u64 = 2;
+const SEEN_TAIL_LIMIT: usize = 32;
+/// The sources whose counted keys are only ever added.
+const SEEN_SOURCES: [&str; 2] = ["terminal", "screenshots"];
 
 pub(crate) fn path(state_dir: &Path) -> PathBuf {
     state_dir.join(FILENAME)
@@ -74,14 +86,11 @@ pub(crate) fn add_screenshot(state_dir: &Path, id: &str) {
 }
 
 fn add_screenshot_at(state_dir: &Path, id: &str, stamp: &ClockStamp) {
-    let _ = update(state_dir, stamp, |file| {
-        let source = &mut file["screenshots"];
-        let seen = source["seen"]
-            .as_array()
-            .is_some_and(|seen| seen.iter().any(|value| value.as_str() == Some(id)));
-        if seen {
+    let _ = update(state_dir, stamp, |file, seen| {
+        if seen.counted(file, "screenshots", id) {
             return false;
         }
+        let source = &mut file["screenshots"];
         let Some(total) = source.get("screenshots").and_then(Value::as_u64) else {
             return false;
         };
@@ -124,15 +133,15 @@ pub(crate) fn carry_tmux_roots(state_dir: &Path, roots: &[PathBuf]) {
 }
 
 fn ensure_at(state_dir: &Path, stamp: &ClockStamp) {
-    let _ = update(state_dir, stamp, |_| false);
+    let _ = update(state_dir, stamp, |_, _| false);
 }
 
 fn add_seconds_at(state_dir: &Path, source: &str, seconds: u64, stamp: &ClockStamp) {
     if seconds == 0 {
-        let _ = update(state_dir, stamp, |_| false);
+        let _ = update(state_dir, stamp, |_, _| false);
         return;
     }
-    let _ = update(state_dir, stamp, |file| {
+    let _ = update(state_dir, stamp, |file, _| {
         let Some(total) = total_of(file, source) else {
             return false;
         };
@@ -156,8 +165,8 @@ fn record_terminal_segment_at(
         return;
     };
     let identity = format!("{day}/{segment}");
-    let _ = update(state_dir, stamp, |file| {
-        if seen_contains(file, &identity) {
+    let _ = update(state_dir, stamp, |file, seen| {
+        if seen.counted(file, "terminal", &identity) {
             return false;
         }
         if before_cutoff(file, "terminal", day, segment) {
@@ -180,7 +189,7 @@ fn note_browser_batch_at(state_dir: &Path, batch: &Value, accepted: bool, stamp:
     let Some((inst, ctx, url)) = accepted_page(batch) else {
         return;
     };
-    let _ = update(state_dir, stamp, |file| {
+    let _ = update(state_dir, stamp, |file, _| {
         if tab_url(file, inst, ctx) == Some(url) {
             return false;
         }
@@ -200,7 +209,7 @@ fn keep_notes(
     intakes: &[solstone_vault::Intake],
     stamp: &ClockStamp,
 ) -> bool {
-    match update(state_dir, stamp, |file| {
+    match update(state_dir, stamp, |file, _| {
         apply_notes(file, known_paths, intakes, stamp)
     }) {
         Ok(Keep::Saved | Keep::Already) => true,
@@ -322,7 +331,7 @@ fn apply_effects(file: &mut Value, intake: &solstone_vault::Intake, stamp: &Cloc
 }
 
 fn carry_tmux_roots_at(state_dir: &Path, roots: &[PathBuf], stamp: &ClockStamp) {
-    let _ = update(state_dir, stamp, |file| {
+    let _ = update(state_dir, stamp, |file, _| {
         let mut changed = false;
         for root in roots {
             let key = root_key(root);
@@ -589,20 +598,238 @@ fn root_key(root: &Path) -> String {
         .to_string()
 }
 
+fn seen_log_path(state_dir: &Path, source: &str) -> PathBuf {
+    state_dir.join(format!("source-intake-seen-{source}.log"))
+}
+
+fn tail_contains(file: &Value, source: &str, key: &str) -> bool {
+    file[source]
+        .get("seen")
+        .and_then(Value::as_array)
+        .is_some_and(|seen| seen.iter().any(|item| item.as_str() == Some(key)))
+}
+
+/// A log's keys and the length of its complete lines, or `None` when the log
+/// cannot be trusted: unreadable, or missing or shorter than the file says it
+/// committed.
+type LoggedKeys = Option<(HashSet<String>, u64)>;
+
+/// A source's counted keys for one locked pass: the file's tail and the
+/// source's seen log. Each log is read at most once, and only when asked about.
+struct SeenLogs {
+    state_dir: PathBuf,
+    committed: BTreeMap<String, u64>,
+    logged: RefCell<BTreeMap<String, LoggedKeys>>,
+}
+
+impl SeenLogs {
+    fn new(state_dir: &Path, file: &Value) -> Self {
+        let committed = file
+            .get("seen_logs")
+            .and_then(Value::as_object)
+            .map(|logs| {
+                logs.iter()
+                    .filter_map(|(source, length)| Some((source.clone(), length.as_u64()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            committed,
+            logged: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    fn load(&self, source: &str) {
+        if self.logged.borrow().contains_key(source) {
+            return;
+        }
+        let committed = self.committed.get(source).copied().unwrap_or(0);
+        let read = read_seen_log(&seen_log_path(&self.state_dir, source), committed).ok();
+        self.logged.borrow_mut().insert(source.to_owned(), read);
+    }
+
+    /// Whether `key` was counted. A log that cannot be trusted answers yes, so
+    /// nothing is counted twice.
+    fn counted(&self, file: &Value, source: &str, key: &str) -> bool {
+        if tail_contains(file, source, key) {
+            return true;
+        }
+        self.load(source);
+        match self.logged.borrow().get(source) {
+            Some(Some((keys, _))) => keys.contains(key),
+            _ => true,
+        }
+    }
+
+    /// Append every tail that reached the limit to its log, then empty it in
+    /// `file`. Every key here was committed with its count by an earlier write.
+    /// If the write that follows never lands, the keys are in both places,
+    /// which counts nothing twice. A log that cannot take them leaves them in
+    /// the file.
+    fn move_full_tails(&self, file: &mut Value) {
+        for source in SEEN_SOURCES {
+            let tail: Vec<String> = file[source]
+                .get("seen")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect();
+            if tail.len() < SEEN_TAIL_LIMIT {
+                continue;
+            }
+            self.load(source);
+            let mut logged = self.logged.borrow_mut();
+            let Some(Some((keys, length))) = logged.get_mut(source) else {
+                continue;
+            };
+            let mut adding = HashSet::new();
+            let fresh: Vec<String> = tail
+                .iter()
+                .filter(|key| !keys.contains(*key) && adding.insert((*key).clone()))
+                .cloned()
+                .collect();
+            let log = seen_log_path(&self.state_dir, source);
+            if fresh.is_empty() {
+                // Lines an earlier pass wrote may never have reached the disk if
+                // its sync failed, so sync them before the file stops holding
+                // these keys.
+                if *length > 0 && sync_seen_log(&log).is_err() {
+                    continue;
+                }
+            } else {
+                match append_seen_log(&log, &fresh, *length) {
+                    Ok(appended) => *length = appended,
+                    Err(_) => continue,
+                }
+            }
+            keys.extend(adding);
+            file[source]["seen"] = json!([]);
+            if !file.get("seen_logs").is_some_and(Value::is_object) {
+                file["seen_logs"] = json!({});
+            }
+            file["seen_logs"][source] = json!(*length);
+        }
+    }
+}
+
+/// The keys on the log's complete lines, and their length. A last line without
+/// its newline is an append that did not finish; its keys are still in the
+/// file. A log shorter than the file says it committed has lost keys.
+fn read_seen_log(path: &Path, committed: u64) -> io::Result<(HashSet<String>, u64)> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && committed == 0 => {
+            return Ok((HashSet::new(), 0));
+        }
+        Err(error) => return Err(error),
+    };
+    let length = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |at| at + 1);
+    if (length as u64) < committed {
+        return Err(io::Error::other("seen log is shorter than committed"));
+    }
+    let mut keys = HashSet::new();
+    if length > 0 {
+        // Every line ends in a newline, so an empty line is an empty key.
+        for line in bytes[..length - 1].split(|byte| *byte == b'\n') {
+            keys.insert(unescape_seen_key(&String::from_utf8_lossy(line)));
+        }
+    }
+    Ok((keys, length as u64))
+}
+
+/// Append whole lines after the last complete one and sync them, so they are
+/// on disk before the write that drops the same keys from the file.
+fn append_seen_log(path: &Path, keys: &[String], after: u64) -> io::Result<u64> {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    let created = !path.exists();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(no_follow())
+        .open(path)?;
+    file.set_len(after)?;
+    file.seek(SeekFrom::Start(after))?;
+    let mut bytes = Vec::new();
+    for key in keys {
+        bytes.extend_from_slice(escape_seen_key(key).as_bytes());
+        bytes.push(b'\n');
+    }
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    if created && let Some(directory) = path.parent() {
+        File::open(directory)?.sync_all()?;
+    }
+    Ok(after + bytes.len() as u64)
+}
+
+fn sync_seen_log(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(no_follow())
+        .open(path)?
+        .sync_all()
+}
+
+/// The log is opened without following a symlink, like every private file here.
+fn no_follow() -> i32 {
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
+}
+
+/// A line holds one key, so a backslash, newline or carriage return is escaped.
+fn escape_seen_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for character in key.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn unescape_seen_key(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            out.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
+}
+
 enum Keep {
     Saved,
     Already,
-    /// The file is not version 1. It was not rewritten.
+    /// The file is not version 1 or 2. It was not rewritten.
     Refused,
 }
 
 /// Load the whole file, apply `change`, and write it back. `change` returns
 /// whether anything that must be saved happened. A file that cannot be read as
-/// version 1 is left as it was, and `change` is not called.
+/// version 1 or 2 is left as it was, and `change` is not called.
 fn update(
     state_dir: &Path,
     stamp: &ClockStamp,
-    change: impl FnOnce(&mut Value) -> bool,
+    change: impl FnOnce(&mut Value, &SeenLogs) -> bool,
 ) -> io::Result<Keep> {
     let Some(_lock) = lock_state(state_dir) else {
         return Err(io::Error::other("could not lock source intake"));
@@ -621,11 +848,15 @@ fn update(
         },
     };
     ensure_sources(&mut file, stamp);
-    let changed = change(&mut file);
+    let seen = SeenLogs::new(state_dir, &file);
+    // Only keys an earlier write committed move, before this one adds its own.
+    seen.move_full_tails(&mut file);
+    let changed = change(&mut file, &seen);
     let creating = existing.is_none();
     if !changed && !creating {
         return Ok(Keep::Already);
     }
+    file["version"] = json!(FILE_VERSION);
     let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
     atomic_write_bytes(&file_path, &bytes).map_err(|error| io::Error::other(error.to_string()))?;
     Ok(Keep::Saved)
@@ -646,10 +877,22 @@ fn lock_state(state_dir: &Path) -> Option<File> {
 
 fn parse_file(bytes: &[u8]) -> Option<Value> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
-    if value.get("version").and_then(Value::as_u64) != Some(1) {
+    if !value
+        .get("version")
+        .and_then(Value::as_u64)
+        .is_some_and(|version| (1..=FILE_VERSION).contains(&version))
+    {
         return None;
     }
     if !value.get("version").is_some_and(Value::is_u64) {
+        return None;
+    }
+    if let Some(logs) = value.get("seen_logs")
+        && !logs.as_object().is_some_and(|logs| {
+            logs.values()
+                .all(|length| length.as_u64().is_some() && length.is_u64())
+        })
+    {
         return None;
     }
     for (source, field) in [
@@ -727,7 +970,7 @@ fn tabs_ok(browsers: &Value) -> bool {
 
 fn fresh_file(stamp: &ClockStamp) -> Value {
     json!({
-        "version": 1,
+        "version": FILE_VERSION,
         "audio": source_object("seconds", stamp),
         "screen": source_object("seconds", stamp),
         "terminal": terminal_object(stamp),
@@ -1188,12 +1431,207 @@ mod tests {
         assert_eq!(file["audio"]["started_at"], stamp.at);
     }
 
+    fn segment_name(index: usize) -> String {
+        format!("16{:02}{:02}_005", index / 60, index % 60)
+    }
+
+    fn record_segments(dir: &Path, range: std::ops::Range<usize>) {
+        let frames = dir.join("frames");
+        write_frames(&frames);
+        for index in range {
+            record_terminal_segment_at(
+                dir,
+                "20200101",
+                &segment_name(index),
+                &frames,
+                &stamp_later(),
+            );
+        }
+    }
+
+    fn log_lines(dir: &Path, source: &str) -> Vec<String> {
+        let text = fs::read_to_string(seen_log_path(dir, source)).unwrap();
+        assert!(text.ends_with('\n'));
+        text.lines().map(str::to_owned).collect()
+    }
+
+    /// The file a count rewrites stays the same size however many segments and
+    /// screenshots come in, and every one counted earlier counts nothing again.
     #[test]
-    fn a_file_that_is_not_version_1_or_whose_total_is_not_whole_is_left_alone() {
+    fn older_keys_move_to_their_log_and_a_replay_still_counts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_at(temp.path(), &stamp_afternoon());
+        let count = SEEN_TAIL_LIMIT * 4 + 3;
+        record_segments(temp.path(), 0..count);
+        for index in 0..count {
+            add_screenshot_at(temp.path(), &format!("shot-{index}"), &stamp_later());
+        }
+        let file = read_file(temp.path());
+        assert_eq!(file["version"], FILE_VERSION);
+        assert_eq!(file["terminal"]["seconds"], json!(count * 5));
+        assert_eq!(file["screenshots"]["screenshots"], json!(count));
+        assert_eq!(file["terminal"]["seen"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            log_lines(temp.path(), "terminal").len(),
+            SEEN_TAIL_LIMIT * 4
+        );
+        assert_eq!(
+            log_lines(temp.path(), "screenshots").len(),
+            SEEN_TAIL_LIMIT * 4
+        );
+        assert!(fs::metadata(path(temp.path())).unwrap().len() < 6_000);
+        let before = fs::read(path(temp.path())).unwrap();
+
+        record_segments(temp.path(), 0..count);
+        for index in 0..count {
+            add_screenshot_at(temp.path(), &format!("shot-{index}"), &stamp_later());
+        }
+        assert_eq!(fs::read(path(temp.path())).unwrap(), before);
+    }
+
+    /// A version 1 file with every key inline keeps its totals and counts none
+    /// of its keys again.
+    #[test]
+    fn a_version_one_file_with_every_key_inline_counts_no_key_again() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_at(temp.path(), &stamp_afternoon());
+        let mut file = read_file(temp.path());
+        let old: Vec<String> = (0..100)
+            .map(|index| format!("20200101/{}", segment_name(index)))
+            .collect();
+        file["version"] = json!(1);
+        file["terminal"]["seconds"] = json!(500);
+        file["terminal"]["seen"] = json!(old);
+        fs::write(path(temp.path()), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+        record_segments(temp.path(), 0..100);
+        record_segments(temp.path(), 100..101);
+        let file = read_file(temp.path());
+        assert_eq!(file["version"], FILE_VERSION);
+        assert_eq!(file["terminal"]["seconds"], 505);
+        assert_eq!(
+            file["terminal"]["seen"],
+            json!([format!("20200101/{}", segment_name(100))])
+        );
+        record_segments(temp.path(), 0..101);
+        assert_eq!(read_file(temp.path())["terminal"]["seconds"], 505);
+    }
+
+    /// Keys reach the log before the write that drops them from the file. When
+    /// that write never lands, the next count is still once, and the log gains
+    /// no second copy.
+    #[test]
+    fn a_write_that_never_lands_after_the_move_counts_the_next_segment_once() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_at(temp.path(), &stamp_afternoon());
+        record_segments(temp.path(), 0..SEEN_TAIL_LIMIT);
+        let unmoved = fs::read(path(temp.path())).unwrap();
+        record_segments(temp.path(), SEEN_TAIL_LIMIT..SEEN_TAIL_LIMIT + 1);
+        fs::write(path(temp.path()), &unmoved).unwrap();
+
+        record_segments(temp.path(), SEEN_TAIL_LIMIT..SEEN_TAIL_LIMIT + 1);
+        record_segments(temp.path(), 0..SEEN_TAIL_LIMIT + 1);
+        let file = read_file(temp.path());
+        assert_eq!(
+            file["terminal"]["seconds"],
+            json!((SEEN_TAIL_LIMIT + 1) * 5)
+        );
+        let lines = log_lines(temp.path(), "terminal");
+        assert_eq!(lines.len(), SEEN_TAIL_LIMIT);
+        assert_eq!(lines.iter().collect::<HashSet<_>>().len(), SEEN_TAIL_LIMIT);
+    }
+
+    /// An append cut off before its newline is not a key, and the next append
+    /// replaces it.
+    #[test]
+    fn a_torn_last_log_line_is_not_a_key_and_the_next_append_replaces_it() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_at(temp.path(), &stamp_afternoon());
+        for index in 0..=SEEN_TAIL_LIMIT {
+            add_screenshot_at(temp.path(), &format!("shot-{index}"), &stamp_later());
+        }
+        let mut log = OpenOptions::new()
+            .append(true)
+            .open(seen_log_path(temp.path(), "screenshots"))
+            .unwrap();
+        std::io::Write::write_all(&mut log, b"shot-torn").unwrap();
+        drop(log);
+
+        add_screenshot_at(temp.path(), "shot-torn", &stamp_later());
+        for index in 0..SEEN_TAIL_LIMIT * 2 {
+            add_screenshot_at(temp.path(), &format!("extra-{index}"), &stamp_later());
+        }
+        let lines = log_lines(temp.path(), "screenshots");
+        assert_eq!(lines.iter().filter(|line| *line == "shot-torn").count(), 1);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("shot-torn") && line != "shot-torn")
+        );
+        assert_eq!(lines.iter().collect::<HashSet<_>>().len(), lines.len());
+        add_screenshot_at(temp.path(), "shot-torn", &stamp_later());
+        assert_eq!(
+            read_file(temp.path())["screenshots"]["screenshots"],
+            json!(SEEN_TAIL_LIMIT * 3 + 2)
+        );
+    }
+
+    /// A log that is gone or shorter than the file says holds keys that could
+    /// count again, so its source counts nothing rather than counting twice.
+    #[test]
+    fn a_lost_or_shortened_log_counts_nothing_on_its_source() {
+        for damage in ["lost", "shortened"] {
+            let temp = tempfile::tempdir().unwrap();
+            ensure_at(temp.path(), &stamp_afternoon());
+            record_segments(temp.path(), 0..SEEN_TAIL_LIMIT + 1);
+            let log = seen_log_path(temp.path(), "terminal");
+            if damage == "lost" {
+                fs::remove_file(&log).unwrap();
+            } else {
+                let bytes = fs::read(&log).unwrap();
+                fs::write(&log, &bytes[..bytes.len() / 2]).unwrap();
+            }
+            let before = fs::read(path(temp.path())).unwrap();
+            record_segments(temp.path(), 0..1);
+            record_segments(temp.path(), 100..101);
+            assert_eq!(fs::read(path(temp.path())).unwrap(), before, "{damage}");
+            add_screenshot_at(temp.path(), "other-source", &stamp_later());
+            assert_eq!(
+                read_file(temp.path())["screenshots"]["screenshots"],
+                1,
+                "{damage}"
+            );
+        }
+    }
+
+    /// A line holds one key, including an empty key or one with a line break.
+    #[test]
+    fn a_key_with_a_line_break_or_an_empty_key_survives_its_log() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_at(temp.path(), &stamp_afternoon());
+        let odd = ["", "line\nbreak", "back\\slash", "cr\rkey", "\\n"];
+        for id in odd {
+            add_screenshot_at(temp.path(), id, &stamp_later());
+        }
+        for index in 0..SEEN_TAIL_LIMIT {
+            add_screenshot_at(temp.path(), &format!("shot-{index}"), &stamp_later());
+        }
+        assert!(seen_log_path(temp.path(), "screenshots").exists());
+        for id in odd {
+            add_screenshot_at(temp.path(), id, &stamp_later());
+        }
+        assert_eq!(
+            read_file(temp.path())["screenshots"]["screenshots"],
+            json!(SEEN_TAIL_LIMIT + odd.len())
+        );
+    }
+
+    #[test]
+    fn a_file_of_an_unknown_version_or_whose_total_is_not_whole_is_left_alone() {
         let temp = tempfile::tempdir().unwrap();
         let file_path = path(temp.path());
         fs::create_dir_all(temp.path()).unwrap();
-        let bad_version = br#"{"version":2,"audio":{"seconds":1,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null}}"#;
+        let bad_version = br#"{"version":3,"audio":{"seconds":1,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null}}"#;
         fs::write(&file_path, bad_version).unwrap();
         add_seconds_at(temp.path(), "audio", 5, &stamp_afternoon());
         assert_eq!(fs::read(&file_path).unwrap(), bad_version);
@@ -2683,7 +3121,7 @@ mod tests {
     #[test]
     fn a_refused_counter_file_stays_byte_for_byte_across_a_reopen() {
         for body in [
-            br#"{"version":2,"audio":{"seconds":99}}"#.as_slice(),
+            br#"{"version":3,"audio":{"seconds":99}}"#.as_slice(),
             br#"{"version":1,"audio":{"seconds":99,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null},"screen":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null},"terminal":{"seconds":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"seen":[]},"browsers":{"pages":0,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"tabs":{}},"obsidian":{"notes":1.5,"started":"2020-01-01","started_at":"2020-01-01T00:00:00Z","last":null,"paths":[],"baselined":true},"carried":[]}"#.as_slice(),
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -2716,7 +3154,7 @@ mod tests {
         engine
             .scan(&std::sync::atomic::AtomicBool::new(false))
             .unwrap();
-        let refused = br#"{"version":2,"audio":{"seconds":99}}"#;
+        let refused = br#"{"version":3,"audio":{"seconds":99}}"#;
         fs::write(path(&state), refused).unwrap();
         fs::write(vault.join("two.md"), "two").unwrap();
         engine
