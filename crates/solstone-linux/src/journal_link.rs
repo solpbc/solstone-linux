@@ -23,7 +23,11 @@ pub fn classify(url: &str) -> Incoming {
     let Some((authority, token)) = rest.split_once('#') else {
         return Incoming::Invalid;
     };
-    if authority.eq_ignore_ascii_case("//open") && valid_token(token) {
+    // Some browsers hand the link over with an empty root path: `solstone://open/#…`.
+    let address_ok = ["//open", "//open/"]
+        .iter()
+        .any(|address| authority.eq_ignore_ascii_case(address));
+    if address_ok && valid_token(token) {
         Incoming::Open(format!("/app/open/{token}"))
     } else {
         Incoming::Invalid
@@ -69,12 +73,14 @@ mod tests {
 
     #[test]
     fn journal_links_keep_the_exact_opaque_target_and_reject_other_url_parts() {
-        for token in ["Ab_-9", "Ab_-9~090020", "A~256199"] {
-            let Incoming::Open(path) = classify(&format!("solstone://open#{token}")) else {
-                panic!("valid link rejected");
-            };
-            assert_eq!(path, format!("/app/open/{token}"));
-            assert!(valid_path(&path));
+        for prefix in ["solstone://open#", "solstone://open/#", "SOLSTONE://OPEN/#"] {
+            for token in ["Ab_-9", "Ab_-9~090020", "A~256199"] {
+                let Incoming::Open(path) = classify(&format!("{prefix}{token}")) else {
+                    panic!("valid link rejected");
+                };
+                assert_eq!(path, format!("/app/open/{token}"));
+                assert!(valid_path(&path));
+            }
         }
         assert!(valid_token(&"A".repeat(512)));
         for token in [
@@ -88,15 +94,19 @@ mod tests {
             "abc~１２３４５６",
             &"A".repeat(513),
         ] {
-            assert!(matches!(
-                classify(&format!("solstone://open#{token}")),
-                Incoming::Invalid
-            ));
+            for prefix in ["solstone://open#", "solstone://open/#"] {
+                assert!(matches!(
+                    classify(&format!("{prefix}{token}")),
+                    Incoming::Invalid
+                ));
+            }
         }
         for link in [
             "solstone://open",
-            "solstone://open/#abc",
+            "solstone://open//#abc",
+            "solstone://open/x#abc",
             "solstone://open?x#abc",
+            "solstone://open/?x#abc",
             "solstone://open.evil#abc",
             "solstone://open:99#abc",
             "solstone://user@open#abc",
