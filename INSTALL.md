@@ -188,7 +188,8 @@ runtime dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-pa
 ### Update a release
 
 If you installed the quick way, update with the same command and `--upgrade`.
-It restarts the app on the new version:
+If the app is running, it restarts on the new version. From version 2.0.45, an
+app you quit stays quit, and an app that didn't change isn't restarted:
 
 ```bash
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --upgrade
@@ -203,8 +204,9 @@ solstone-linux install-service
 
 Installing by hand replaces the app on disk but doesn't restart it, so the
 solstone app keeps running the old version until this step. It rewrites the
-service files for the new version and restarts the app. If the window is open,
-close it and open it again.
+service files for the new version and restarts the app if it's running. From
+version 2.0.45, an app you quit stays quit. If the window is open, close it and
+open it again.
 
 ### Open the window
 
@@ -251,7 +253,8 @@ with no desktop can run the app without GTK, for terminal.
 
 Save the pairing link as `pairing-link.txt`. The service command writes the
 systemd user unit and desktop autostart entry, enables the unit, and starts the
-solstone app:
+solstone app the first time. From version 2.0.45, it leaves an app you quit
+stopped:
 
 ```bash
 solstone-linux install-service

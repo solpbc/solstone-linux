@@ -226,10 +226,13 @@ fn write_service_files(paths: &ServicePaths, output: &mut dyn io::Write) -> bool
 }
 
 pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::Write) -> i32 {
-    // Preserve update semantics without racing a freshly-created service: an existing
-    // owner is stopped before its replacement starts, while a first install reaches
-    // `enable --now` exactly once.
+    // An update keeps the app's run state. A running app is stopped before its
+    // replacement starts (a restart after `enable --now` would race a freshly-created
+    // service during desktop initialization). An app the owner quit stays quit: its
+    // unit is rewritten and enabled for the next login, and nothing starts it. Only a
+    // first install, with no unit yet, starts it now.
     let was_active = service_is_active(runner);
+    let first_install = !paths.unit().exists();
     if !write_service_files(paths, output) {
         return 1;
     }
@@ -247,11 +250,19 @@ pub fn install(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io::W
             output,
         );
     }
-    for (args, operation) in [
+    let enable: (&[&str], &str) = if was_active || first_install {
         (
-            &["--user", "enable", "--now", "solstone-linux.service"][..],
+            &["--user", "enable", "--now", "solstone-linux.service"],
             "enable --now solstone-linux.service",
-        ),
+        )
+    } else {
+        (
+            &["--user", "enable", "solstone-linux.service"],
+            "enable solstone-linux.service",
+        )
+    };
+    for (args, operation) in [
+        enable,
         (
             &["--user", "--no-pager", "status", "solstone-linux.service"][..],
             "--no-pager status solstone-linux.service",
@@ -676,6 +687,33 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "stop" || argument == "restart")
         }));
+    }
+    #[test]
+    fn an_update_leaves_an_app_the_owner_quit_stopped() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = fixture(&t, None);
+        install(&paths, &FakeRunner::ok(), &mut Vec::new());
+        let runner = FakeRunner {
+            found: true,
+            success: true,
+            active: false,
+            stdout: String::new(),
+            error: false,
+            calls: RefCell::new(Vec::new()),
+        };
+
+        assert_eq!(install(&paths, &runner, &mut Vec::new()), 0);
+
+        let calls = runner.calls.borrow();
+        assert_eq!(
+            calls.as_slice(),
+            [
+                vec!["--user", "is-active", "--quiet", "solstone-linux.service"],
+                vec!["--user", "daemon-reload"],
+                vec!["--user", "enable", "solstone-linux.service"],
+                vec!["--user", "--no-pager", "status", "solstone-linux.service"],
+            ]
+        );
     }
     // tests/test_cli.py::test_cmd_install_service_writes_autostart_entry
     #[test]

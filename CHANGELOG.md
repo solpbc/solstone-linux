@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- an update no longer starts the solstone app if you quit it. if the app is running, it still restarts on the new version.
 - a journal link now opens when your browser hands it to the solstone app with an extra slash. before, the app said the link wasn't valid.
 
 ## [2.0.44] - 2026-11-15
