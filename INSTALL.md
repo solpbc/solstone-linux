@@ -189,7 +189,7 @@ runtime dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-pa
 
 If you installed the quick way, update with the same command and `--upgrade`.
 If the app is running, it restarts on the new version. From version 2.0.45, an
-app you quit stays quit, and an app that didn't change isn't restarted:
+app you quit stays quit:
 
 ```bash
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --upgrade
