@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- a journal link now opens when your browser hands it to the solstone app with an extra slash. before, the app said the link wasn't valid.
+
 ## [2.0.44] - 2026-11-15
 
 ### Added
