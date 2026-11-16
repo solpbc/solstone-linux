@@ -199,6 +199,8 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 # The full gate: the routine gate, then the tests behind the full-tests feature
 # (processes, sockets, host state, wall-clock waits), linted and run.
 ci-full: ci
+	$(CARGO) clippy $(CARGO_LOCKED) -p rust-release-manifest --features full-tests --all-targets -- -D warnings
+	$(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest --features full-tests --test notices
 	$(CARGO) clippy $(CARGO_LOCKED) -p solstone-linux --features full-tests --all-targets -- -D warnings
 	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux --features full-tests
 	$(CARGO) clippy $(CARGO_LOCKED) -p solstone-terminal --features full-tests --all-targets -- -D warnings
