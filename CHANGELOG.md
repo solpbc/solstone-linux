@@ -6,12 +6,17 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.45] - 2026-11-17
+
+### Added
+
+- after a package install, you can start journal setup from the app's "your journal" page. setup opens in your browser.
+
 ### Fixed
 
-- your journal now opens in Konqueror when its default shortcut would leave you on the start page.
-- after a package install, you can start journal setup from the app's "your journal" page. setup opens in your browser.
-- an update no longer starts the solstone app if you quit it. if the app is running, it still restarts on the new version.
-- a journal link now opens when your browser hands it to the solstone app with an extra slash. before, the app said the link wasn't valid.
+- when Konqueror is your default browser, your journal now opens in it. before, Konqueror opened to its start page.
+- updating with the installer or `solstone-linux install-service` no longer starts the solstone app if you quit it. if the app is running, it still restarts on the new version.
+- a journal link now opens from browsers that hand it over in a slightly different form. before, the app said the link wasn't valid.
 
 ## [2.0.44] - 2026-11-15
 
