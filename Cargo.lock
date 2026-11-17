@@ -3704,6 +3704,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "solstone-folder-sync"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "solstone-linux"
 version = "2.0.45"
 dependencies = [
@@ -3736,6 +3745,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "solstone-folder-sync",
  "solstone-terminal",
  "solstone-vault",
  "spl-core",
@@ -3790,7 +3800,7 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
- "sha2",
+ "solstone-folder-sync",
  "tempfile",
 ]
 

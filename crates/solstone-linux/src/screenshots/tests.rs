@@ -95,7 +95,7 @@ fn the_envelope_is_the_contracts_golden_one() {
 
 fn delivery(path: &Path, bytes: &[u8]) -> Delivery {
     Delivery {
-        id: engine::hash_bytes(bytes),
+        id: solstone_folder_sync::files::sha256_hex(bytes),
         path: path.to_path_buf(),
         captured_ms: 1_794_571_200_000,
         offset_s: -7 * 3600,
@@ -240,6 +240,7 @@ fn the_tile_reads_each_condition_in_its_own_words() {
 
 struct FakeJournal {
     capability: Mutex<Capability>,
+    asked: Mutex<Option<Capability>>,
     answers: Mutex<VecDeque<Outcome>>,
     sent: Mutex<Vec<(String, String, Vec<u8>)>>,
 }
@@ -248,15 +249,23 @@ impl Default for FakeJournal {
     fn default() -> Self {
         Self {
             capability: Mutex::new(Capability::Unknown),
+            asked: Mutex::new(None),
             answers: Mutex::new(VecDeque::new()),
             sent: Mutex::new(Vec::new()),
         }
     }
 }
 
-impl Transport for Arc<FakeJournal> {
+impl Transport for FakeJournal {
+    type Upload = Upload;
+    type Reply = Option<Outcome>;
+
     fn capability(&self) -> BoxFuture<'_, Capability> {
-        Box::pin(async move { *self.capability.lock().unwrap() })
+        Box::pin(async move {
+            let capability = *self.capability.lock().unwrap();
+            *self.asked.lock().unwrap() = Some(capability);
+            capability
+        })
     }
     fn deliver<'a>(&'a self, upload: &'a Upload) -> BoxFuture<'a, Option<Outcome>> {
         Box::pin(async move {
@@ -274,9 +283,11 @@ impl Transport for Arc<FakeJournal> {
             )
         })
     }
-    /// Asked again on every turn, so a test sees an update at once.
-    fn pairing_unchanged(&self) -> bool {
-        false
+    /// Simulate an association change when the test switches capabilities.
+    fn pairing_unchanged(&self) -> BoxFuture<'_, bool> {
+        Box::pin(
+            async move { *self.asked.lock().unwrap() == Some(*self.capability.lock().unwrap()) },
+        )
     }
 }
 
@@ -334,6 +345,7 @@ async fn screenshots_wait_for_a_journal_that_lists_them_then_go_once() {
     let engine = Engine::open(temp.path().join("state"), places, Arc::new(SystemClock));
     let journal = Arc::new(FakeJournal {
         capability: Mutex::new(Capability::NotListed),
+        asked: Mutex::new(None),
         ..FakeJournal::default()
     });
     let (_paused_tx, paused_rx) = watch::channel(snapshot(false));

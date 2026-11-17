@@ -8,16 +8,19 @@ pub use solstone_vault::{FoundVault, Refusal, State, Status};
 
 use crate::upload::{CapturedAssociation, UploadClient, UploadResult};
 use serde::{Deserialize, Serialize};
+use solstone_folder_sync::worker::Journal as FolderJournal;
+use solstone_folder_sync::worker::{
+    self as folder_worker, CapabilityCache, CheckSchedule, Event, Wake,
+};
+use solstone_folder_sync::worker::{BoxFuture, Capability};
 use solstone_vault::{Answer, Delivery, Engine, ListedVault, Phase, ScanOutcome, SystemClock};
 use std::{
-    future::Future,
     path::PathBuf,
-    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -26,7 +29,6 @@ pub const CAPABILITY: &str = "obsidian_notes";
 pub(crate) const INVALID_REASON: &str = "obsidian_note_invalid";
 
 const TICK: Duration = Duration::from_secs(2);
-const CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
 const CAPABILITY_RETRY: Duration = Duration::from_secs(30);
 const VAULT_CHECK_RETRY: Duration = Duration::from_secs(30);
 const CLOSE_BATCH: usize = 500;
@@ -83,30 +85,16 @@ pub fn found_vaults() -> Vec<FoundVault> {
     solstone_vault::found_vaults(&solstone_vault::linux_candidates(&home))
 }
 
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// Whether the paired journal has said it accepts note changes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Capability {
-    Supported,
-    NotListed,
-    /// Not paired, or no answer.
-    Unknown,
-}
-
 pub(crate) enum VaultList {
     Listed(Vec<ListedVault>),
     Unavailable,
 }
 
 /// The journal, as far as the source needs it.
-pub(crate) trait Transport: Send + Sync + 'static {
-    fn capability(&self) -> BoxFuture<'_, Capability>;
+pub(crate) trait Transport:
+    FolderJournal<Upload = Delivery, Reply = Option<Answer>>
+{
     fn vault_list(&self) -> BoxFuture<'_, VaultList>;
-    /// Send one file. `None` means no answer from the journal to act on.
-    fn deliver<'a>(&'a self, delivery: &'a Delivery) -> BoxFuture<'a, Option<Answer>>;
-    /// Whether the journal this was last asked of is still the paired one.
-    fn pairing_unchanged(&self) -> bool;
 }
 
 /// The real journal over the paired upload path.
@@ -115,7 +103,10 @@ struct LinkTransport {
     asked: Mutex<Option<CapturedAssociation>>,
 }
 
-impl Transport for LinkTransport {
+impl FolderJournal for LinkTransport {
+    type Upload = Delivery;
+    type Reply = Option<Answer>;
+
     fn capability(&self) -> BoxFuture<'_, Capability> {
         Box::pin(async move {
             *self.asked.lock().unwrap_or_else(|p| p.into_inner()) =
@@ -127,27 +118,6 @@ impl Transport for LinkTransport {
                 Ok(listed) if listed.iter().any(|name| name == CAPABILITY) => Capability::Supported,
                 Ok(_) => Capability::NotListed,
                 Err(_) => Capability::Unknown,
-            }
-        })
-    }
-
-    fn vault_list(&self) -> BoxFuture<'_, VaultList> {
-        Box::pin(async move {
-            let Some(capability) = self.client.capability() else {
-                return VaultList::Unavailable;
-            };
-            use crate::private_link::LinkOutcome;
-            match capability.obsidian_vaults().await {
-                LinkOutcome::Success { status, body } if status == reqwest::StatusCode::OK => {
-                    parse_vault_list(&body).map_or(VaultList::Unavailable, VaultList::Listed)
-                }
-                // An older journal without the route: no vault is known from elsewhere.
-                LinkOutcome::LocalRejected { status }
-                    if status == reqwest::StatusCode::NOT_FOUND =>
-                {
-                    VaultList::Listed(Vec::new())
-                }
-                _ => VaultList::Unavailable,
             }
         })
     }
@@ -171,12 +141,37 @@ impl Transport for LinkTransport {
         })
     }
 
-    fn pairing_unchanged(&self) -> bool {
-        self.asked
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .is_some_and(|asked| self.client.association_is_current(asked))
+    fn pairing_unchanged(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            self.asked
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(|asked| self.client.association_is_current(asked))
+        })
+    }
+}
+
+impl Transport for LinkTransport {
+    fn vault_list(&self) -> BoxFuture<'_, VaultList> {
+        Box::pin(async move {
+            let Some(capability) = self.client.capability() else {
+                return VaultList::Unavailable;
+            };
+            use crate::private_link::LinkOutcome;
+            match capability.obsidian_vaults().await {
+                LinkOutcome::Success { status, body } if status == reqwest::StatusCode::OK => {
+                    parse_vault_list(&body).map_or(VaultList::Unavailable, VaultList::Listed)
+                }
+                // An older journal without the route: no vault is known from elsewhere.
+                LinkOutcome::LocalRejected { status }
+                    if status == reqwest::StatusCode::NOT_FOUND =>
+                {
+                    VaultList::Listed(Vec::new())
+                }
+                _ => VaultList::Unavailable,
+            }
+        })
     }
 }
 
@@ -226,8 +221,7 @@ struct HandleInner {
     cancel_notify: Arc<tokio::sync::Notify>,
     stop: Arc<AtomicBool>,
     stop_notify: Arc<tokio::sync::Notify>,
-    restart: Arc<AtomicBool>,
-    restart_notify: Arc<tokio::sync::Notify>,
+    wake: Arc<Wake>,
 }
 
 impl ObsidianHandle {
@@ -286,8 +280,7 @@ impl ObsidianHandle {
         let Some(inner) = &self.inner else { return };
         // A scan under way stops early, so the restart isn't kept waiting.
         inner.cancel.store(true, Ordering::Release);
-        inner.restart.store(true, Ordering::Release);
-        inner.restart_notify.notify_one();
+        inner.wake.restart();
     }
 
     /// Stop the source and wait for it to save what it holds.
@@ -354,8 +347,7 @@ fn spawnable<T: Transport>(
     let cancel_notify = Arc::new(tokio::sync::Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let stop_notify = Arc::new(tokio::sync::Notify::new());
-    let restart = Arc::new(AtomicBool::new(false));
-    let restart_notify = Arc::new(tokio::sync::Notify::new());
+    let wake = Arc::new(Wake::default());
     let handle = ObsidianHandle {
         inner: Some(Arc::new(HandleInner {
             commands,
@@ -364,8 +356,7 @@ fn spawnable<T: Transport>(
             cancel_notify: Arc::clone(&cancel_notify),
             stop: Arc::clone(&stop),
             stop_notify: Arc::clone(&stop_notify),
-            restart: Arc::clone(&restart),
-            restart_notify: Arc::clone(&restart_notify),
+            wake: Arc::clone(&wake),
         })),
     };
     let worker = Worker {
@@ -378,12 +369,10 @@ fn spawnable<T: Transport>(
         cancel_notify,
         stop,
         stop_notify,
-        restart,
-        restart_notify,
-        next_scan: Instant::now(),
-        next_vault_check: Instant::now(),
-        capability: None,
-        capability_checked: None,
+        wake,
+        next_scan: CheckSchedule::default(),
+        next_vault_check: CheckSchedule::default(),
+        capability: CapabilityCache::default(),
     };
     (handle, worker)
 }
@@ -398,12 +387,10 @@ struct Worker<T: Transport> {
     cancel_notify: Arc<tokio::sync::Notify>,
     stop: Arc<AtomicBool>,
     stop_notify: Arc<tokio::sync::Notify>,
-    restart: Arc<AtomicBool>,
-    restart_notify: Arc<tokio::sync::Notify>,
-    next_scan: Instant,
-    next_vault_check: Instant,
-    capability: Option<bool>,
-    capability_checked: Option<Instant>,
+    wake: Arc<Wake>,
+    next_scan: CheckSchedule,
+    next_vault_check: CheckSchedule,
+    capability: CapabilityCache,
 }
 
 impl<T: Transport> Worker<T> {
@@ -412,17 +399,8 @@ impl<T: Transport> Worker<T> {
         &mut self,
         call: impl FnOnce(&mut Engine) -> R + Send + 'static,
     ) -> Option<R> {
-        let mut engine = self.engine.take()?;
-        let result = tokio::task::spawn_blocking(move || {
-            let result = call(&mut engine);
-            (engine, result)
-        })
-        .await;
-        match result {
-            Ok((engine, result)) => {
-                self.engine = Some(engine);
-                Some(result)
-            }
+        match folder_worker::with_state(&mut self.engine, call).await {
+            Ok(result) => result,
             Err(error) => {
                 tracing::error!(%error, "Obsidian vault source stopped");
                 None
@@ -451,12 +429,11 @@ impl<T: Transport> Worker<T> {
             let wait = if busy { Duration::ZERO } else { TICK };
             tokio::select! {
                 () = self.stop_notify.notified() => break,
-                () = self.restart_notify.notified() => {}
-                command = self.commands.recv() => {
-                    let Some(command) = command else { break };
-                    self.handle(command).await;
-                }
-                () = tokio::time::sleep(wait) => {}
+                event = folder_worker::wait(&mut self.commands, &self.wake, wait) => match event {
+                    Event::Command(command) => self.handle(command).await,
+                    Event::Closed => break,
+                    Event::Wake => {}
+                },
             }
         }
         if let Some(mut engine) = self.engine.take() {
@@ -466,9 +443,9 @@ impl<T: Transport> Worker<T> {
 
     fn publish(&self) {
         let Some(engine) = &self.engine else { return };
-        let mut status = engine.status(self.paused(), self.capability);
+        let mut status = engine.status(self.paused(), self.capability.listed());
         // The vault check waits for a journal that takes notes.
-        if status.state == State::Checking && self.capability == Some(false) {
+        if status.state == State::Checking && self.capability.listed() == Some(false) {
             status.state = State::WaitingForJournalUpdate;
         }
         *self.status.lock().unwrap_or_else(|p| p.into_inner()) = status;
@@ -503,10 +480,9 @@ impl<T: Transport> Worker<T> {
                     _ => None,
                 };
                 if refusal.is_none() {
-                    self.next_scan = Instant::now();
-                    self.next_vault_check = Instant::now();
-                    self.capability = None;
-                    self.capability_checked = None;
+                    self.next_scan.defer(Duration::ZERO);
+                    self.next_vault_check.defer(Duration::ZERO);
+                    self.capability.clear();
                 }
                 let _ = reply.send(self.document(refusal));
             }
@@ -516,7 +492,7 @@ impl<T: Transport> Worker<T> {
             }
             Command::Continue(reply) => {
                 let _ = self.with_engine(|engine| engine.continue_warning()).await;
-                self.next_scan = Instant::now();
+                self.next_scan.defer(Duration::ZERO);
                 let _ = reply.send(self.document(None));
             }
             Command::Cancel(reply) => {
@@ -527,17 +503,16 @@ impl<T: Transport> Worker<T> {
     }
 
     async fn restart_if_asked(&mut self) {
-        if !self.restart.swap(false, Ordering::AcqRel) {
+        if !self.wake.take_restart() {
             return;
         }
         self.cancel.store(false, Ordering::Release);
         if let Some(Err(error)) = self.with_engine(Engine::restart_send).await {
             tracing::warn!(%error, "Couldn't start the Obsidian first send again");
         }
-        self.next_scan = Instant::now();
-        self.next_vault_check = Instant::now();
-        self.capability = None;
-        self.capability_checked = None;
+        self.next_scan.defer(Duration::ZERO);
+        self.next_vault_check.defer(Duration::ZERO);
+        self.capability.clear();
         self.publish();
     }
 
@@ -558,7 +533,7 @@ impl<T: Transport> Worker<T> {
             return false;
         }
         let mut busy = false;
-        if Instant::now() >= self.next_scan {
+        if self.next_scan.due() {
             let cancel = Arc::clone(&self.cancel);
             let outcome = self.with_engine(move |engine| engine.scan(&cancel)).await;
             match outcome {
@@ -570,7 +545,8 @@ impl<T: Transport> Worker<T> {
                 .engine
                 .as_ref()
                 .map_or(Duration::ZERO, Engine::last_scan_duration);
-            self.next_scan = Instant::now() + solstone_vault::next_scan_delay(duration);
+            self.next_scan
+                .defer(solstone_vault::next_scan_delay(duration));
         }
         if !self.paused() {
             let closed = self
@@ -589,18 +565,21 @@ impl<T: Transport> Worker<T> {
     }
 
     async fn check_vault_list(&mut self) -> bool {
-        if Instant::now() < self.next_vault_check {
+        if !self.next_vault_check.due() {
             return false;
         }
-        self.next_vault_check = Instant::now() + VAULT_CHECK_RETRY;
-        if let VaultList::Listed(listed) = self.transport.vault_list().await {
+        self.next_vault_check.defer(VAULT_CHECK_RETRY);
+        if let VaultList::Listed(listed) = self.transport.vault_list().await
+            && !self.wake.restart_pending()
+            && self.transport.pairing_unchanged().await
+        {
             if let Some(Err(error)) = self
                 .with_engine(move |engine| engine.apply_vault_list(&listed))
                 .await
             {
                 tracing::warn!(%error, "Couldn't save the Obsidian vault check");
             }
-            self.next_scan = Instant::now();
+            self.next_scan.defer(Duration::ZERO);
             return true;
         }
         false
@@ -609,27 +588,9 @@ impl<T: Transport> Worker<T> {
     /// Whether the paired journal takes note changes, re-asking now and then or
     /// when the pairing has changed.
     async fn journal_supports_notes(&mut self) -> bool {
-        let stale = match self.capability_checked {
-            None => true,
-            Some(_) if !self.transport.pairing_unchanged() => true,
-            Some(checked) => {
-                let ttl = if self.capability == Some(true) {
-                    CAPABILITY_TTL
-                } else {
-                    CAPABILITY_RETRY
-                };
-                checked.elapsed() >= ttl
-            }
-        };
-        if stale {
-            self.capability = match self.transport.capability().await {
-                Capability::Supported => Some(true),
-                Capability::NotListed => Some(false),
-                Capability::Unknown => None,
-            };
-            self.capability_checked = Some(Instant::now());
-        }
-        self.capability == Some(true)
+        self.capability
+            .check(&self.transport, CAPABILITY_RETRY)
+            .await
     }
 
     /// Deliver one file if the journal allows it. True if one went.
@@ -657,10 +618,14 @@ impl<T: Transport> Worker<T> {
         }
         // Turning off doesn't wait on the journal. The file stays in the outbox, and
         // if the journal did take it, sending it again answers `duplicate`.
-        let answer = tokio::select! {
-            answer = self.transport.deliver(&delivery) => answer,
-            () = self.cancel_notify.notified() => return false,
+        let Some(answer) =
+            folder_worker::deliver(&self.transport, &delivery, Some(&self.cancel_notify)).await
+        else {
+            return false;
         };
+        if self.wake.restart_pending() {
+            return false;
+        }
         let Some(answer) = answer else {
             return false;
         };
@@ -707,7 +672,10 @@ mod tests {
         hang_after: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
-    impl Transport for Arc<FakeJournal> {
+    impl FolderJournal for FakeJournal {
+        type Upload = Delivery;
+        type Reply = Option<Answer>;
+
         fn capability(&self) -> BoxFuture<'_, Capability> {
             Box::pin(async move {
                 *self.capability_calls.lock().unwrap() += 1;
@@ -719,15 +687,6 @@ mod tests {
                     .lock()
                     .unwrap()
                     .unwrap_or(Capability::Supported)
-            })
-        }
-        fn vault_list(&self) -> BoxFuture<'_, VaultList> {
-            Box::pin(async move {
-                self.vaults
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .unwrap_or(VaultList::Listed(Vec::new()))
             })
         }
         fn deliver<'a>(&'a self, delivery: &'a Delivery) -> BoxFuture<'a, Option<Answer>> {
@@ -747,8 +706,20 @@ mod tests {
                 )
             })
         }
-        fn pairing_unchanged(&self) -> bool {
-            !self.pairing_changed.swap(false, Ordering::AcqRel)
+        fn pairing_unchanged(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async move { !self.pairing_changed.swap(false, Ordering::AcqRel) })
+        }
+    }
+
+    impl Transport for Arc<FakeJournal> {
+        fn vault_list(&self) -> BoxFuture<'_, VaultList> {
+            Box::pin(async move {
+                self.vaults
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap_or(VaultList::Listed(Vec::new()))
+            })
         }
     }
 
@@ -827,7 +798,7 @@ mod tests {
 
     async fn steps_until_quiet(f: &mut Fixture) {
         for _ in 0..50 {
-            f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+            f.worker.next_scan.defer(Duration::from_secs(3600));
             if !f.worker.step().await {
                 return;
             }
@@ -859,9 +830,9 @@ mod tests {
 
         // The journal is updated: only now does the vault check happen, then the send.
         *f.journal.current_capability.lock().unwrap() = Some(Capability::Supported);
-        f.worker.capability_checked = None;
+        f.worker.capability.clear();
         f.worker.step().await;
-        f.worker.next_scan = Instant::now();
+        f.worker.next_scan.defer(Duration::ZERO);
         f.worker.step().await;
         assert_eq!(
             f.journal.delivered.lock().unwrap().len(),
@@ -887,7 +858,7 @@ mod tests {
         );
 
         *f.journal.current_capability.lock().unwrap() = Some(Capability::Supported);
-        f.worker.capability_checked = None;
+        f.worker.capability.clear();
         f.worker.step().await;
         assert_eq!(state(&f).status.state, State::Confirm);
         assert!(f.journal.delivered.lock().unwrap().is_empty());
@@ -904,7 +875,7 @@ mod tests {
 
         // Past the retry: the file is gone, so it isn't offered again.
         f.clock.fetch_add(60 * 60_000, Ordering::SeqCst);
-        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.next_scan.defer(Duration::from_secs(3600));
         f.worker.step().await;
         assert_eq!(f.journal.delivered.lock().unwrap().len(), 1);
         let doc = state(&f);
@@ -912,10 +883,10 @@ mod tests {
         assert_eq!(doc.status.waiting, 0, "the entry was dropped");
 
         // The next scan reports the note again, and it goes through.
-        f.worker.next_scan = Instant::now();
+        f.worker.next_scan.defer(Duration::ZERO);
         f.clock.fetch_add(11 * 60_000, Ordering::SeqCst);
         f.worker.step().await;
-        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.next_scan.defer(Duration::from_secs(3600));
         f.clock.fetch_add(11 * 60_000, Ordering::SeqCst);
         f.worker.step().await;
         assert_eq!(f.journal.delivered.lock().unwrap().len(), 2, "sent again");
@@ -928,7 +899,7 @@ mod tests {
         write_note(&f.vault, "a.md", "alpha", T0 - 3_600_000);
         f.paused.send(snapshot(true)).unwrap();
         turn_on(&mut f).await;
-        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.next_scan.defer(Duration::from_secs(3600));
         f.worker.step().await;
         assert!(f.journal.delivered.lock().unwrap().is_empty());
         let doc = state(&f);
@@ -936,7 +907,7 @@ mod tests {
         assert_eq!(doc.status.waiting, 1, "scanned but held");
 
         f.paused.send(snapshot(false)).unwrap();
-        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.next_scan.defer(Duration::from_secs(3600));
         f.worker.step().await;
         assert_eq!(f.journal.delivered.lock().unwrap().len(), 1);
     }
@@ -963,7 +934,7 @@ mod tests {
         let (reply, _answer) = oneshot::channel();
         f.worker.handle(Command::Continue(reply)).await;
         f.worker.step().await;
-        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.next_scan.defer(Duration::from_secs(3600));
         f.worker.step().await;
         assert_eq!(f.journal.delivered.lock().unwrap().len(), 1);
         assert_eq!(state(&f).status.state, State::On);
@@ -1040,7 +1011,7 @@ mod tests {
 
         // A new file waits, and the pairing changed to a journal that doesn't take notes.
         write_note(&f.vault, "b.md", "bbb", T0 - 3_600_000);
-        f.worker.next_scan = Instant::now();
+        f.worker.next_scan.defer(Duration::ZERO);
         f.journal.pairing_changed.store(true, Ordering::Release);
         *f.journal.current_capability.lock().unwrap() = Some(Capability::NotListed);
         f.worker.step().await;
@@ -1069,7 +1040,7 @@ mod tests {
         assert_eq!(state(&f).status.waiting, 1, "and the file is still held");
 
         // Cancelled before an upload starts, nothing is attempted.
-        f.worker.next_scan = Instant::now() + Duration::from_secs(3600);
+        f.worker.next_scan.defer(Duration::from_secs(3600));
         f.worker.step().await;
         assert_eq!(f.journal.delivered.lock().unwrap().len(), 1);
     }

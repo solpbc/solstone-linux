@@ -8,9 +8,10 @@ use crate::{
     platform::{self, DirFileIds},
     wire::MAX_NOTE_BYTES,
 };
+use solstone_folder_sync::files::{self, ListingError};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -65,7 +66,7 @@ pub struct VaultUnreadable;
 /// proves more than a stat does: an unmounted volume can leave an empty mount
 /// point that still stats as a directory.
 pub fn vault_is_readable(root: &Path) -> bool {
-    fs::read_dir(root).is_ok() && fs::read_dir(root.join(".obsidian")).is_ok()
+    files::open_directory(root).is_ok() && files::open_directory(&root.join(".obsidian")).is_ok()
 }
 
 /// A directory name the walk does not descend into.
@@ -105,62 +106,37 @@ pub fn walk_with_ids(
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
     let mut visited = 0_usize;
     while let Some((dir, prefix)) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(_) => {
-                if prefix.is_empty() {
-                    return Err(VaultUnreadable);
-                }
-                walked.unreadable_dirs.push(prefix);
-                continue;
-            }
-        };
-        let ids = dir_ids.map_or_else(Default::default, |read| read(&dir));
-        let mut reachable = true;
-        for entry in entries {
+        let mut ids = None;
+        let result = files::visit_directory(&dir, |entry| {
             visited += 1;
             if visited.is_multiple_of(1024) && cancel.load(Ordering::Relaxed) {
                 walked.cancelled = true;
-                return Ok(walked);
+                return Err(io::ErrorKind::Interrupted.into());
             }
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => {
-                    reachable = false;
-                    break;
-                }
-            };
-            let kind = match entry.file_type() {
-                Ok(kind) => kind,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => {
-                    reachable = false;
-                    break;
-                }
-            };
+            let kind = entry.file_type()?;
             let Ok(name) = entry.file_name().into_string() else {
-                continue; // not valid UTF-8, so no contract path can name it
+                return Ok(()); // not valid UTF-8, so no contract path can name it
             };
             if kind.is_symlink() {
-                continue;
+                return Ok(());
             }
             if kind.is_dir() {
                 if !dir_is_skipped(&name) && path_is_reportable(&name) {
                     stack.push((entry.path(), format!("{prefix}{name}/")));
                 }
-                continue;
+                return Ok(());
             }
             if !kind.is_file() || !name_is_note(&name) {
-                continue;
+                return Ok(());
             }
             let rel = format!("{prefix}{name}");
             if !path_is_reportable(&rel) {
-                continue;
+                return Ok(());
             }
+            let ids =
+                ids.get_or_insert_with(|| dir_ids.map_or_else(Default::default, |read| read(&dir)));
             match entry.metadata() {
-                Ok(metadata) if platform::is_placeholder(&metadata) => {
+                Ok(metadata) if files::is_placeholder(&metadata) => {
                     if let Some(id) =
                         platform::file_id(&metadata).or_else(|| ids.get(&name).cloned())
                     {
@@ -188,18 +164,19 @@ pub fn walk_with_ids(
                         },
                     );
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => {
-                    reachable = false;
-                    break;
-                }
+                Err(error) => return Err(error),
             }
+            Ok(())
+        });
+        if walked.cancelled {
+            return Ok(walked);
         }
-        if !reachable {
-            if prefix.is_empty() {
-                return Err(VaultUnreadable);
+        match result {
+            Ok(()) => {}
+            Err(_) if prefix.is_empty() => return Err(VaultUnreadable),
+            Err(ListingError::Missing | ListingError::Incomplete(_)) => {
+                walked.unreadable_dirs.push(prefix);
             }
-            walked.unreadable_dirs.push(prefix);
         }
     }
     // A drive lost partway through reads as folders that are simply gone: Windows
@@ -214,6 +191,7 @@ pub fn walk_with_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn note_names_and_skipped_folders_follow_the_rules() {

@@ -14,13 +14,16 @@ pub use engine::{Mode, Span};
 use crate::upload::{CapturedAssociation, UploadClient, UploadResult};
 use engine::{Delivery, Engine, Outcome, TakenFrom};
 use serde::{Deserialize, Serialize};
+use solstone_folder_sync::worker::Journal as Transport;
+use solstone_folder_sync::worker::{
+    self as folder_worker, CapabilityCache, CheckSchedule, Event, Wake,
+};
+use solstone_folder_sync::worker::{BoxFuture, Capability};
 use solstone_vault::SystemClock;
 use std::{
-    future::Future,
     path::{Path, PathBuf},
-    pin::Pin,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -30,7 +33,6 @@ pub const CAPABILITY: &str = "screenshots";
 /// when the file can't be decoded.
 pub const CONVERT_ARG: &str = "--convert-screenshot";
 const LOOK_EVERY: Duration = Duration::from_secs(5);
-const CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
 const CAPABILITY_RETRY: Duration = Duration::from_secs(60);
 const CONVERT_DEADLINE: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -152,24 +154,6 @@ fn folder_label(folder: &Path, home: &Path) -> String {
     }
 }
 
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// Whether the paired journal has said it takes screenshots.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Capability {
-    Supported,
-    NotListed,
-    Unknown,
-}
-
-/// The journal, as far as the source needs it.
-pub(crate) trait Transport: Send + Sync + 'static {
-    fn capability(&self) -> BoxFuture<'_, Capability>;
-    /// Send one file. `None` means no answer to act on.
-    fn deliver<'a>(&'a self, upload: &'a Upload) -> BoxFuture<'a, Option<Outcome>>;
-    fn pairing_unchanged(&self) -> bool;
-}
-
 /// One screenshot, staged for sending.
 pub(crate) struct Upload {
     pub day: String,
@@ -184,6 +168,9 @@ struct LinkTransport {
 }
 
 impl Transport for LinkTransport {
+    type Upload = Upload;
+    type Reply = Option<Outcome>;
+
     fn capability(&self) -> BoxFuture<'_, Capability> {
         Box::pin(async move {
             *self.asked.lock().unwrap_or_else(|p| p.into_inner()) =
@@ -212,12 +199,14 @@ impl Transport for LinkTransport {
         })
     }
 
-    fn pairing_unchanged(&self) -> bool {
-        self.asked
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .is_some_and(|asked| self.client.association_is_current(asked))
+    fn pairing_unchanged(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            self.asked
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(|asked| self.client.association_is_current(asked))
+        })
     }
 }
 
@@ -257,8 +246,7 @@ pub struct ScreenshotsHandle {
 struct HandleInner {
     commands: mpsc::Sender<(Command, oneshot::Sender<ScreenshotsDocument>)>,
     status: Arc<Mutex<ScreenshotsDocument>>,
-    restart: Arc<std::sync::atomic::AtomicBool>,
-    wake: Arc<tokio::sync::Notify>,
+    wake: Arc<Wake>,
     stop: Arc<tokio::sync::Notify>,
 }
 
@@ -328,10 +316,7 @@ impl ScreenshotsHandle {
     /// The owner paired a journal: ask how far back again. Returns at once.
     pub fn restart_setup(&self) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .restart
-            .store(true, std::sync::atomic::Ordering::Release);
-        inner.wake.notify_one();
+        inner.wake.restart();
     }
 
     pub(crate) async fn shutdown(&self, task: tokio::task::JoinHandle<()>) {
@@ -415,7 +400,7 @@ impl Converter {
     }
 }
 
-fn spawnable<T: Transport>(
+fn spawnable<T: Transport<Upload = Upload, Reply = Option<Outcome>>>(
     engine: Engine,
     transport: T,
     paused: watch::Receiver<crate::observer::StateSnapshot>,
@@ -427,14 +412,12 @@ fn spawnable<T: Transport>(
         v: 1,
         ..ScreenshotsDocument::default()
     }));
-    let restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let wake = Arc::new(tokio::sync::Notify::new());
+    let wake = Arc::new(Wake::default());
     let stop = Arc::new(tokio::sync::Notify::new());
     let handle = ScreenshotsHandle {
         inner: Some(Arc::new(HandleInner {
             commands,
             status: Arc::clone(&status),
-            restart: Arc::clone(&restart),
             wake: Arc::clone(&wake),
             stop: Arc::clone(&stop),
         })),
@@ -445,52 +428,39 @@ fn spawnable<T: Transport>(
         status,
         paused,
         commands: receiver,
-        restart,
         wake,
         stop,
         outbox,
         converter,
-        capability: None,
-        capability_checked: None,
+        capability: CapabilityCache::default(),
         count_failed: false,
-        next_look: Instant::now(),
+        next_look: CheckSchedule::default(),
     };
     (handle, worker)
 }
 
-struct Worker<T: Transport> {
+struct Worker<T: Transport<Upload = Upload, Reply = Option<Outcome>>> {
     engine: Option<Engine>,
     transport: T,
     status: Arc<Mutex<ScreenshotsDocument>>,
     paused: watch::Receiver<crate::observer::StateSnapshot>,
     commands: mpsc::Receiver<(Command, oneshot::Sender<ScreenshotsDocument>)>,
-    restart: Arc<std::sync::atomic::AtomicBool>,
-    wake: Arc<tokio::sync::Notify>,
+    wake: Arc<Wake>,
     stop: Arc<tokio::sync::Notify>,
     outbox: PathBuf,
     converter: Converter,
-    capability: Option<bool>,
-    capability_checked: Option<Instant>,
+    capability: CapabilityCache,
     count_failed: bool,
-    next_look: Instant,
+    next_look: CheckSchedule,
 }
 
-impl<T: Transport> Worker<T> {
+impl<T: Transport<Upload = Upload, Reply = Option<Outcome>>> Worker<T> {
     async fn with_engine<R: Send + 'static>(
         &mut self,
         call: impl FnOnce(&mut Engine) -> R + Send + 'static,
     ) -> Option<R> {
-        let mut engine = self.engine.take()?;
-        match tokio::task::spawn_blocking(move || {
-            let result = call(&mut engine);
-            (engine, result)
-        })
-        .await
-        {
-            Ok((engine, result)) => {
-                self.engine = Some(engine);
-                Some(result)
-            }
+        match folder_worker::with_state(&mut self.engine, call).await {
+            Ok(result) => result,
             Err(error) => {
                 tracing::error!(%error, "The screenshots source stopped");
                 None
@@ -511,13 +481,9 @@ impl<T: Transport> Worker<T> {
             if self.engine.is_none() {
                 break;
             }
-            if self
-                .restart
-                .swap(false, std::sync::atomic::Ordering::AcqRel)
-            {
+            if self.wake.take_restart() {
                 self.with_engine(Engine::restart_setup).await;
-                self.capability = None;
-                self.capability_checked = None;
+                self.capability.clear();
             }
             while let Ok((command, reply)) = self.commands.try_recv() {
                 self.handle(command, reply).await;
@@ -527,22 +493,21 @@ impl<T: Transport> Worker<T> {
             let wait = if busy {
                 Duration::ZERO
             } else {
-                self.next_look.saturating_duration_since(Instant::now())
+                self.next_look.remaining()
             };
             tokio::select! {
                 () = self.stop.notified() => break,
-                () = self.wake.notified() => {}
                 changed = self.paused.changed() => {
                     if changed.is_ok() {
                         let paused = self.paused();
                         self.with_engine(move |engine| engine.set_paused(paused)).await;
                     }
                 }
-                command = self.commands.recv() => {
-                    let Some((command, reply)) = command else { break };
-                    self.handle(command, reply).await;
-                }
-                () = tokio::time::sleep(wait) => {}
+                event = folder_worker::wait(&mut self.commands, &self.wake, wait) => match event {
+                    Event::Command((command, reply)) => self.handle(command, reply).await,
+                    Event::Closed => break,
+                    Event::Wake => {}
+                },
             }
         }
     }
@@ -581,7 +546,7 @@ impl<T: Transport> Worker<T> {
             cant_come_in: engine.cant_come_in() as u64,
             cant_read: engine.unreadable() as u64,
             last_checked_ms: ledger.last_checked_ms,
-            journal_lists: self.capability,
+            journal_lists: self.capability.listed(),
             paused: self.paused(),
         }
     }
@@ -606,7 +571,7 @@ impl<T: Transport> Worker<T> {
             Command::Confirm(span) => {
                 self.count_failed = false;
                 let confirmed = self.with_engine(move |engine| engine.confirm(span)).await;
-                self.next_look = Instant::now();
+                self.next_look.defer(Duration::ZERO);
                 confirmed.map(|result| result.map(|_| ()))
             }
             Command::Retry => self.with_engine(Engine::retry).await,
@@ -623,8 +588,8 @@ impl<T: Transport> Worker<T> {
         if !self.engine.as_ref().is_some_and(Engine::is_on) {
             return false;
         }
-        if Instant::now() >= self.next_look {
-            self.next_look = Instant::now() + LOOK_EVERY;
+        if self.next_look.due() {
+            self.next_look.defer(LOOK_EVERY);
             if let Some(Err(error)) = self.with_engine(Engine::tick).await {
                 tracing::warn!(%error, "Couldn't save the screenshots source");
             }
@@ -636,27 +601,9 @@ impl<T: Transport> Worker<T> {
     }
 
     async fn journal_takes_screenshots(&mut self) -> bool {
-        let stale = match self.capability_checked {
-            None => true,
-            Some(_) if !self.transport.pairing_unchanged() => true,
-            Some(checked) => {
-                let ttl = if self.capability == Some(true) {
-                    CAPABILITY_TTL
-                } else {
-                    CAPABILITY_RETRY
-                };
-                checked.elapsed() >= ttl
-            }
-        };
-        if stale {
-            self.capability = match self.transport.capability().await {
-                Capability::Supported => Some(true),
-                Capability::NotListed => Some(false),
-                Capability::Unknown => None,
-            };
-            self.capability_checked = Some(Instant::now());
-        }
-        self.capability == Some(true)
+        self.capability
+            .check(&self.transport, CAPABILITY_RETRY)
+            .await
     }
 
     async fn deliver_one(&mut self) -> bool {
@@ -670,7 +617,13 @@ impl<T: Transport> Worker<T> {
             .unwrap_or(Staged::Hold);
         let (id, outcome) = match staged {
             Staged::Ready(id, upload) => {
-                let outcome = self.transport.deliver(&upload).await;
+                let outcome = if self.wake.restart_pending() || self.paused() {
+                    None
+                } else {
+                    folder_worker::deliver(&self.transport, &upload, None)
+                        .await
+                        .flatten()
+                };
                 let _ = std::fs::remove_file(&upload.file);
                 match outcome {
                     Some(outcome) => (id, outcome),
@@ -680,6 +633,9 @@ impl<T: Transport> Worker<T> {
             Staged::Done(id, outcome) => (id, outcome),
             Staged::Hold => return false,
         };
+        if self.wake.restart_pending() {
+            return false;
+        }
         let recorded = self
             .with_engine(move |engine| engine.record(&id, outcome))
             .await;
@@ -705,14 +661,14 @@ fn stage(delivery: &Delivery, outbox: &Path, converter: &Converter) -> Staged {
     let Some(extension) = engine::extension_of(&delivery.path) else {
         return Staged::Done(id, Outcome::Gone);
     };
-    let original = match std::fs::read(&delivery.path) {
+    let original = match solstone_folder_sync::files::read_local(&delivery.path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Staged::Done(id, Outcome::Gone);
         }
         Err(_) => return Staged::Done(id, Outcome::Hold),
     };
-    if engine::hash_bytes(&original) != delivery.id {
+    if solstone_folder_sync::files::sha256_hex(&original) != delivery.id {
         return Staged::Done(id, Outcome::Gone);
     }
     if std::fs::create_dir_all(outbox).is_err() {

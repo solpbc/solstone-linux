@@ -450,3 +450,50 @@ fn an_unreadable_record_starts_over_at_set_up() {
     fs::write(desk.state.join(LEDGER), b"{not json").unwrap();
     assert_eq!(desk.engine().ledger().mode, Mode::NotSetUp);
 }
+
+#[test]
+fn a_waiting_screenshot_is_held_while_its_file_is_settling() {
+    let desk = Desk::new();
+    let mut engine = desk.engine();
+    let path = desk.gnome("still-saving.png", NOW - HOUR);
+    engine.turn_on().unwrap();
+    assert_eq!(engine.count(Span::All), Some(1));
+    assert!(engine.confirm(Span::All).unwrap());
+
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_millis(NOW as u64))
+        .unwrap();
+    engine.tick().unwrap();
+    assert_eq!(engine.waiting(), 1);
+    assert_eq!(engine.progress(), Some((0, 1)));
+    assert!(engine.next_delivery().is_none());
+
+    desk.at(NOW + SETTLE_MS);
+    engine.tick().unwrap();
+    assert!(engine.next_delivery().is_some());
+}
+
+#[test]
+fn an_unreadable_folder_does_not_retire_waiting_screenshots() {
+    let desk = Desk::new();
+    let mut engine = desk.engine();
+    desk.gnome("waiting.png", NOW - HOUR);
+    engine.turn_on().unwrap();
+    assert_eq!(engine.count(Span::All), Some(1));
+    assert!(engine.confirm(Span::All).unwrap());
+
+    let offline = desk.shots.with_file_name("offline");
+    fs::rename(&desk.shots, &offline).unwrap();
+    fs::write(&desk.shots, "not a folder").unwrap();
+    engine.tick().unwrap();
+    assert_eq!(engine.waiting(), 1);
+    assert!(engine.next_delivery().is_none());
+
+    fs::remove_file(&desk.shots).unwrap();
+    fs::rename(offline, &desk.shots).unwrap();
+    engine.tick().unwrap();
+    assert_eq!(deliver_all(&mut engine), vec!["waiting.png"]);
+}

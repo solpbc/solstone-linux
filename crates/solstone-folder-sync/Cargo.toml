@@ -1,0 +1,17 @@
+[package]
+name = "solstone-folder-sync"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.97.1"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -6,7 +6,7 @@
 
 use crate::clock::Window;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+pub use solstone_folder_sync::files::sha256_hex;
 
 /// Most lines in one file.
 pub const MAX_FILE_LINES: usize = 5_000;
@@ -64,11 +64,6 @@ impl Line {
     pub fn to_json(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("a line always serializes")
     }
-}
-
-/// 64-character lowercase hex SHA-256.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// A finished file: `obsidian_<id>.jsonl`, where id is the SHA-256 of `bytes`.

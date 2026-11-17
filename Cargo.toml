@@ -5,6 +5,7 @@ members = [
     "crates/solstone-linux-window",
     "crates/solstone-terminal",
     "crates/solstone-vault",
+    "crates/solstone-folder-sync",
 ]
 # Vendored from solstone-browser with the browser contract; see vendor/contracts/native-browser/adoption.json.
 exclude = ["vendor/crates/native-browser-frame"]

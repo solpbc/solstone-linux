@@ -9,13 +9,12 @@
 //! pairing asks how far back again, and the journal answers what it already holds.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use solstone_folder_sync::files::{self as folder_sync, ListingError, hash_local_file, settled};
 use solstone_vault::Clock;
 
 use super::folder::{self, Places};
@@ -186,6 +185,8 @@ pub(crate) struct Look {
     pub unreadable: Vec<(PathBuf, i64)>,
     /// The folder is there.
     pub present: bool,
+    pub incomplete: bool,
+    deferred: BTreeSet<PathBuf>,
 }
 
 /// A screenshot ready to send.
@@ -245,6 +246,8 @@ pub(crate) struct Engine {
     counted: Option<Counted>,
     /// The last look's unreadable screenshots.
     unreadable: Vec<(PathBuf, i64)>,
+    deferred: BTreeSet<PathBuf>,
+    listing_incomplete: bool,
     on_intake: Option<IntakeHook>,
     /// The record as last written, so an unchanged one isn't written again.
     saved: Option<Vec<u8>>,
@@ -272,6 +275,8 @@ impl Engine {
             recents: Recents::default(),
             counted: None,
             unreadable: Vec::new(),
+            deferred: BTreeSet::new(),
+            listing_incomplete: false,
             on_intake: None,
             saved: None,
         }
@@ -438,35 +443,40 @@ impl Engine {
         let Some(folder) = self.folder() else {
             return Look::default();
         };
-        let Ok(entries) = std::fs::read_dir(&folder) else {
-            return Look::default();
-        };
-        self.reload_recents();
-        let mut look = Look {
-            present: true,
-            ..Look::default()
-        };
+        let mut look = Look::default();
         let mut present = BTreeSet::new();
-        for entry in entries.flatten() {
+        self.reload_recents();
+        let listing = folder_sync::visit_directory(&folder, |entry| {
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
+                return Ok(());
             };
             if name.starts_with('.') {
-                continue;
+                return Ok(());
             }
             let Some(extension) = extension_of(&path) else {
-                continue;
+                return Ok(());
             };
-            let Ok(meta) = std::fs::metadata(&path) else {
-                continue;
+            // Preserve files reached through links in a chosen screenshots folder.
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // A broken symlink was never a screenshot. A listed file
+                    // that just disappeared makes this scan incomplete.
+                    if entry.file_type()?.is_symlink() {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
             };
             if !meta.is_file() {
-                continue;
+                return Ok(());
             }
             let seen = seen_of(&meta);
-            if now - ((seen.mtime_ns / 1_000_000) as i64) < SETTLE_MS {
-                continue;
+            if !settled(now, (seen.mtime_ns / 1_000_000) as i64, SETTLE_MS) {
+                look.deferred.insert(path);
+                return Ok(());
             }
             present.insert(path.clone());
             if let Some(reading) = self.readings.get(&path)
@@ -475,21 +485,24 @@ impl Engine {
                 if let Some(found) = &reading.found {
                     look.found.push(found.clone());
                 }
-                continue;
+                return Ok(());
             }
             let proof = match proof::prove(&path, &extension, &self.recents) {
                 Ok(proof) => proof,
-                Err(_) => continue,
+                Err(_) => {
+                    look.deferred.insert(path);
+                    return Ok(());
+                }
             };
             let Some(proof) = proof else {
                 self.readings.insert(path, Reading { seen, found: None });
-                continue;
+                return Ok(());
             };
             let (captured_ms, taken_from) = match proof {
                 Proof::Recent { saved_ms } => (saved_ms, TakenFrom::Platform),
                 Proof::Gnome => ((seen.mtime_ns / 1_000_000) as i64, TakenFrom::File),
             };
-            match hash_file(&path) {
+            match hash_local_file(&path) {
                 Ok(id) => {
                     let found = Found {
                         id,
@@ -509,16 +522,32 @@ impl Engine {
                 }
                 Err(_) => look.unreadable.push((path, captured_ms)),
             }
+            Ok(())
+        });
+        match listing {
+            Ok(()) => {
+                look.present = true;
+                self.readings.retain(|path, _| present.contains(path));
+                look
+            }
+            Err(ListingError::Missing) => Look::default(),
+            Err(ListingError::Incomplete(error)) => {
+                tracing::debug!(%error, "Couldn't finish listing screenshots");
+                Look {
+                    incomplete: true,
+                    ..Look::default()
+                }
+            }
         }
-        self.readings.retain(|path, _| present.contains(path));
-        look
     }
 
     /// Count what the owner would bring in from `span`, and freeze it for the confirm.
     pub(crate) fn count(&mut self, span: Span) -> Option<usize> {
         let now = self.clock.now_ms();
         let look = self.look();
-        if !look.present && self.folder().is_some_and(|folder| folder.exists()) {
+        self.listing_incomplete = look.incomplete;
+        if look.incomplete {
+            self.counted = None;
             return None;
         }
         let from_ms = span.start_ms(now, self.clock.offset_s_at(now));
@@ -622,12 +651,14 @@ impl Engine {
             return Ok(());
         }
         let look = self.look();
+        self.listing_incomplete = !look.present;
         self.ledger.last_checked_ms = Some(self.clock.now_ms());
         self.unreadable = look.unreadable;
         if !look.present {
             return self.save();
         }
         self.ledger.folder_seen = true;
+        self.deferred = look.deferred;
         let from = self.ledger.span_from_ms.unwrap_or(i64::MAX);
         let unreadable = self
             .unreadable
@@ -652,6 +683,7 @@ impl Engine {
             if item.state == ItemState::Waiting
                 && !here.contains(id)
                 && !unreadable.contains(&item.path)
+                && !self.deferred.contains(&item.path)
             {
                 item.state = ItemState::Gone;
             }
@@ -706,7 +738,7 @@ impl Engine {
 
     /// The newest screenshot waiting whose turn has come.
     pub(crate) fn next_delivery(&self) -> Option<Delivery> {
-        if self.ledger.mode != Mode::On {
+        if self.ledger.mode != Mode::On || self.listing_incomplete {
             return None;
         }
         let now = self.clock.now_ms();
@@ -714,7 +746,9 @@ impl Engine {
             .items
             .iter()
             .filter(|(_, item)| {
-                item.state == ItemState::Waiting && item.retry_at_ms.is_none_or(|at| at <= now)
+                item.state == ItemState::Waiting
+                    && !self.deferred.contains(&item.path)
+                    && item.retry_at_ms.is_none_or(|at| at <= now)
             })
             .max_by_key(|(_, item)| item.captured_ms)
             .map(|(id, item)| Delivery {
@@ -777,28 +811,6 @@ fn seen_of(meta: &std::fs::Metadata) -> Seen {
         size: meta.len(),
         mtime_ns,
     }
-}
-
-pub(crate) fn hash_file(path: &Path) -> std::io::Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex(&hasher.finalize()))
-}
-
-pub(crate) fn hash_bytes(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

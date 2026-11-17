@@ -69,7 +69,7 @@ pub(crate) fn png_software(head: &[u8]) -> Option<String> {
 
 /// Whether a PNG on disk carries the GNOME screenshot mark.
 pub(crate) fn file_has_gnome_mark(path: &Path) -> std::io::Result<bool> {
-    let file = std::fs::File::open(path)?;
+    let file = solstone_folder_sync::files::open_local(path)?;
     let mut head = Vec::with_capacity(4096);
     file.take(PNG_HEAD_LIMIT as u64).read_to_end(&mut head)?;
     Ok(png_software(&head).as_deref() == Some(GNOME_SOFTWARE))
