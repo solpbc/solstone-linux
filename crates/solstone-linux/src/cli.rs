@@ -441,9 +441,13 @@ fn open_journal_in_scope(runner: &dyn Runner, target: &str) -> i32 {
 pub fn run() -> i32 {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     if arguments.len() == 2 && arguments[0] == "open-journal-in-scope" {
-        return arguments[1]
-            .to_str()
-            .map_or(1, |target| open_journal_in_scope(&SystemRunner, target));
+        return arguments[1].to_str().map_or(1, |target| {
+            match crate::browser_launch::open_known_konqueror(target) {
+                Some(true) => 0,
+                Some(false) => 1,
+                None => open_journal_in_scope(&SystemRunner, target),
+            }
+        });
     }
     if arguments.len() == 2 && arguments[0] == "window" && arguments[1] == "--in-scope" {
         return launch_window(true, false);

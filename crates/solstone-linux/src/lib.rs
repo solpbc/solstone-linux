@@ -13,6 +13,7 @@ pub mod activity_writer;
 pub mod audio;
 pub mod bounded_process;
 pub mod browser;
+mod browser_launch;
 pub mod capture_stats;
 pub mod chunking;
 pub mod cli;

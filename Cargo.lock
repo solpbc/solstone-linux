@@ -3713,6 +3713,7 @@ dependencies = [
  "claxon",
  "flac-bound",
  "futures-util",
+ "gio",
  "gstreamer",
  "http-body-util",
  "hyper",
