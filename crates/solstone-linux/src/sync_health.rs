@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use crate::copy::{UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY, unknown_journal_seen_at};
+use crate::copy::{unknown_journal_seen_at, unknown_journal_seen_through_relay};
 use crate::private_link::{LinkFactState, PrivateStateLockLiveness};
 use chrono::{DateTime, Local};
 use serde_json::{Map, Value, json};
+use solstone_i18n::{message, text};
 use std::{
     collections::HashMap,
     fs, io,
@@ -193,221 +194,223 @@ pub static SURFACE_BY_STATE: LazyLock<HashMap<HealthState, HealthSurface>> = Laz
         (
             HealthState::UnsafeLinkState,
             HealthSurface {
-                header_recording: "on, pairing unsafe",
-                header_idle: "idle, pairing unsafe",
-                sync_line: "sync: pairing unsafe",
-                tooltip: "sync: pairing unsafe; repair this device's pairing and restart the solstone app",
-                accessible_recording: "on, pairing unsafe",
-                accessible_idle: "idle, pairing unsafe",
+                header_recording: text!("linux.health.onpairingunsafe"),
+                header_idle: text!("linux.health.idlepairingunsafe"),
+                sync_line: text!("linux.health.syncpairingunsafe"),
+                tooltip: text!("linux.health.syncpairingunsaferepairthisdevicespairingand"),
+                accessible_recording: text!("linux.health.onpairingunsafe"),
+                accessible_idle: text!("linux.health.idlepairingunsafe"),
                 icon: "attention",
                 sni: "NeedsAttention",
-                cli: "sync: pairing unsafe; repair this device's pairing and restart the solstone app",
+                cli: text!("linux.health.syncpairingunsaferepairthisdevicespairingand"),
                 doctor_severity: "fail",
-                doctor_detail: "sync health: pairing unsafe; repair this device's pairing and restart the solstone app",
+                doctor_detail: text!("linux.health.synchealthpairingunsaferepairthisdevicespair"),
                 dbus: "unsafe-link-state",
             },
         ),
         (
             HealthState::JournalMarkHeld,
             HealthSurface {
-                header_recording: crate::journal_mark::HELD_FIRST_SENTENCE,
-                header_idle: crate::journal_mark::HELD_FIRST_SENTENCE,
-                sync_line: crate::journal_mark::HELD_FIRST_SENTENCE,
-                tooltip: crate::journal_mark::HELD_FIRST_SENTENCE,
-                accessible_recording: crate::journal_mark::HELD_FIRST_SENTENCE,
-                accessible_idle: crate::journal_mark::HELD_FIRST_SENTENCE,
+                header_recording: crate::journal_mark::held_first_sentence(),
+                header_idle: crate::journal_mark::held_first_sentence(),
+                sync_line: crate::journal_mark::held_first_sentence(),
+                tooltip: crate::journal_mark::held_first_sentence(),
+                accessible_recording: crate::journal_mark::held_first_sentence(),
+                accessible_idle: crate::journal_mark::held_first_sentence(),
                 icon: "attention",
                 sni: "NeedsAttention",
-                cli: "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.\nwhen you're ready, run: solstone-linux confirm",
+                cli: text!("linux.health.waitingforyoutoconfirmyourjournalsmarknothi"),
                 doctor_severity: "fail",
-                doctor_detail: "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.\nwhen you're ready, run: solstone-linux confirm",
+                doctor_detail: text!("linux.health.waitingforyoutoconfirmyourjournalsmarknothi"),
                 dbus: "journal-mark-held",
             },
         ),
         (
             HealthState::RePairRequired,
             HealthSurface {
-                header_recording: "on, pair again",
-                header_idle: "idle, pair again",
-                sync_line: "sync: pair again",
-                tooltip: "sync: pair this device with your journal again",
-                accessible_recording: "on, pair again",
-                accessible_idle: "idle, pair again",
+                header_recording: text!("linux.health.onpairagain"),
+                header_idle: text!("linux.health.idlepairagain"),
+                sync_line: text!("linux.health.syncpairagain"),
+                tooltip: text!("linux.health.syncpairthisdevicewithyourjournalagain"),
+                accessible_recording: text!("linux.health.onpairagain"),
+                accessible_idle: text!("linux.health.idlepairagain"),
                 icon: "attention",
                 sni: "NeedsAttention",
-                cli: "sync: pair again; pair this device with your journal again",
+                cli: text!("linux.health.syncpairagainpairthisdevicewithyourjournala"),
                 doctor_severity: "fail",
-                doctor_detail: "sync health: pair this device with your journal again",
+                doctor_detail: text!("linux.health.synchealthpairthisdevicewithyourjournalagain"),
                 dbus: "re-pair-required",
             },
         ),
         (
             HealthState::TokenPersistenceFailed,
             HealthSurface {
-                header_recording: "on, pairing not saved",
-                header_idle: "idle, pairing not saved",
-                sync_line: "sync: pairing not saved",
-                tooltip: "sync: pairing not saved; fix this device's pairing permissions, then restart the solstone app",
-                accessible_recording: "on, pairing not saved",
-                accessible_idle: "idle, pairing not saved",
+                header_recording: text!("linux.health.onpairingnotsaved"),
+                header_idle: text!("linux.health.idlepairingnotsaved"),
+                sync_line: text!("linux.health.syncpairingnotsaved"),
+                tooltip: text!("linux.health.syncpairingnotsavedfixthisdevicespairingper"),
+                accessible_recording: text!("linux.health.onpairingnotsaved"),
+                accessible_idle: text!("linux.health.idlepairingnotsaved"),
                 icon: "error",
                 sni: "NeedsAttention",
-                cli: "sync: pairing not saved; fix this device's pairing permissions, then restart the solstone app",
+                cli: text!("linux.health.syncpairingnotsavedfixthisdevicespairingper"),
                 doctor_severity: "fail",
-                doctor_detail: "sync health: pairing not saved; fix this device's pairing permissions, then restart the solstone app",
+                doctor_detail: text!("linux.health.synchealthpairingnotsavedfixthisdevicespair"),
                 dbus: "token-persistence-failed",
             },
         ),
         (
             HealthState::PairingRequired,
             HealthSurface {
-                header_recording: "on, pairing required",
-                header_idle: "idle, pairing required",
-                sync_line: "sync: pairing required",
-                tooltip: "sync: pair this device with your journal",
-                accessible_recording: "on, pairing required",
-                accessible_idle: "idle, pairing required",
+                header_recording: text!("linux.health.onpairingrequired"),
+                header_idle: text!("linux.health.idlepairingrequired"),
+                sync_line: text!("linux.health.syncpairingrequired"),
+                tooltip: text!("linux.health.syncpairthisdevicewithyourjournal"),
+                accessible_recording: text!("linux.health.onpairingrequired"),
+                accessible_idle: text!("linux.health.idlepairingrequired"),
                 icon: "attention",
                 sni: "NeedsAttention",
-                cli: "sync: pairing required; pair this device with your journal",
+                cli: text!("linux.health.syncpairingrequiredpairthisdevicewithyourjou"),
                 doctor_severity: "fail",
-                doctor_detail: "sync health: pair this device with your journal",
+                doctor_detail: text!("linux.health.synchealthpairthisdevicewithyourjournal"),
                 dbus: "pairing-required",
             },
         ),
         (
             HealthState::UpdateRequired,
             HealthSurface {
-                header_recording: "on, update required",
-                header_idle: "idle, update required",
-                sync_line: "sync: update the solstone app",
-                tooltip: "sync: update required; update the solstone app",
-                accessible_recording: "on, update required",
-                accessible_idle: "idle, update required",
+                header_recording: text!("linux.health.onupdaterequired"),
+                header_idle: text!("linux.health.idleupdaterequired"),
+                sync_line: text!("linux.health.syncupdatethesolstoneapp"),
+                tooltip: text!("linux.health.syncupdaterequiredupdatethesolstoneapp"),
+                accessible_recording: text!("linux.health.onupdaterequired"),
+                accessible_idle: text!("linux.health.idleupdaterequired"),
                 icon: "attention",
                 sni: "NeedsAttention",
-                cli: "sync: update required; update the solstone app",
+                cli: text!("linux.health.syncupdaterequiredupdatethesolstoneapp"),
                 doctor_severity: "fail",
-                doctor_detail: "sync health: update required; update the solstone app",
+                doctor_detail: text!("linux.health.synchealthupdaterequiredupdatethesolstoneapp"),
                 dbus: "update-required",
             },
         ),
         (
             HealthState::TransportUnavailable,
             HealthSurface {
-                header_recording: "on, connection unavailable (held on this device)",
-                header_idle: "idle, connection unavailable (held on this device)",
-                sync_line: "sync: connection unavailable; held on this device",
-                tooltip: "sync: connection unavailable; restart the solstone app; if this continues, pair this device again",
-                accessible_recording: "on, connection unavailable, held on this device",
-                accessible_idle: "idle, connection unavailable, held on this device",
+                header_recording: text!("linux.health.onconnectionunavailableheldonthisdevice"),
+                header_idle: text!("linux.health.idleconnectionunavailableheldonthisdevice"),
+                sync_line: text!("linux.health.syncconnectionunavailableheldonthisdevice"),
+                tooltip: text!("linux.health.syncconnectionunavailablerestartthesolstoneapp"),
+                accessible_recording: text!(
+                    "linux.health.onconnectionunavailableheldonthisdevice2"
+                ),
+                accessible_idle: text!("linux.health.idleconnectionunavailableheldonthisdevice2"),
                 icon: "offline",
                 sni: "NeedsAttention",
-                cli: "sync: connection unavailable; held on this device; restart the solstone app; if this continues, pair this device again",
+                cli: text!("linux.health.syncconnectionunavailableheldonthisdevicerest"),
                 doctor_severity: "fail",
-                doctor_detail: "sync health: connection unavailable; restart the solstone app; if this continues, pair this device again",
+                doctor_detail: text!("linux.health.synchealthconnectionunavailablerestartthesolst"),
                 dbus: "transport-unavailable",
             },
         ),
         (
             HealthState::Offline,
             HealthSurface {
-                header_recording: "on, offline (held on this device)",
-                header_idle: "idle, offline (held on this device)",
-                sync_line: "sync: offline; will retry",
-                tooltip: "sync: offline; held on this device; will retry",
-                accessible_recording: "on, offline, held on this device",
-                accessible_idle: "idle, offline, held on this device",
+                header_recording: text!("linux.health.onofflineheldonthisdevice"),
+                header_idle: text!("linux.health.idleofflineheldonthisdevice"),
+                sync_line: text!("linux.health.syncofflinewillretry"),
+                tooltip: text!("linux.health.syncofflineheldonthisdevicewillretry"),
+                accessible_recording: text!("linux.health.onofflineheldonthisdevice2"),
+                accessible_idle: text!("linux.health.idleofflineheldonthisdevice2"),
                 icon: "offline",
                 sni: "Active",
-                cli: "sync: offline; held on this device; will retry",
+                cli: text!("linux.health.syncofflineheldonthisdevicewillretry"),
                 doctor_severity: "warn",
-                doctor_detail: "sync health: offline; held on this device; will retry",
+                doctor_detail: text!("linux.health.synchealthofflineheldonthisdevicewillretry"),
                 dbus: "offline",
             },
         ),
         (
             HealthState::ListenerReady,
             HealthSurface {
-                header_recording: "on, confirming with your journal",
-                header_idle: "idle, confirming with your journal",
-                sync_line: "sync: confirming with your journal",
-                tooltip: "sync: wait while this device confirms with your journal",
-                accessible_recording: "on, confirming with your journal",
-                accessible_idle: "idle, confirming with your journal",
+                header_recording: text!("linux.health.onconfirmingwithyourjournal"),
+                header_idle: text!("linux.health.idleconfirmingwithyourjournal"),
+                sync_line: text!("linux.health.syncconfirmingwithyourjournal"),
+                tooltip: text!("linux.health.syncwaitwhilethisdeviceconfirmswithyourjourn"),
+                accessible_recording: text!("linux.health.onconfirmingwithyourjournal"),
+                accessible_idle: text!("linux.health.idleconfirmingwithyourjournal"),
                 icon: "connecting",
                 sni: "Active",
-                cli: "sync: wait while this device confirms with your journal",
+                cli: text!("linux.health.syncwaitwhilethisdeviceconfirmswithyourjourn"),
                 doctor_severity: "warn",
-                doctor_detail: "sync health: wait while this device confirms with your journal",
+                doctor_detail: text!("linux.health.synchealthwaitwhilethisdeviceconfirmswithyou"),
                 dbus: "listener-ready",
             },
         ),
         (
             HealthState::NotReported,
             HealthSurface {
-                header_recording: "on, no status",
-                header_idle: "idle, no status",
-                sync_line: "sync: no status",
-                tooltip: "sync: no status from the solstone app right now",
-                accessible_recording: "on, no status",
-                accessible_idle: "idle, no status",
+                header_recording: text!("linux.health.onnostatus"),
+                header_idle: text!("linux.health.idlenostatus"),
+                sync_line: text!("linux.health.syncnostatus"),
+                tooltip: text!("linux.health.syncnostatusfromthesolstoneapprightnow"),
+                accessible_recording: text!("linux.health.onnostatus"),
+                accessible_idle: text!("linux.health.idlenostatus"),
                 icon: "offline",
                 sni: "Active",
-                cli: "sync: no status; the solstone app is not running, or has no status yet",
+                cli: text!("linux.health.syncnostatusthesolstoneappisnotrunningorha"),
                 doctor_severity: "warn",
-                doctor_detail: "the solstone app is not running, or has no status yet",
+                doctor_detail: text!("linux.health.thesolstoneappisnotrunningorhasnostatusyet"),
                 dbus: "not-reported",
             },
         ),
         (
             HealthState::Connecting,
             HealthSurface {
-                header_recording: "on, connecting",
-                header_idle: "idle, connecting",
-                sync_line: "sync: connecting",
-                tooltip: "sync: wait while this device connects to your journal",
-                accessible_recording: "on, connecting",
-                accessible_idle: "idle, connecting",
+                header_recording: text!("linux.health.onconnecting"),
+                header_idle: text!("linux.health.idleconnecting"),
+                sync_line: text!("linux.health.syncconnecting"),
+                tooltip: text!("linux.health.syncwaitwhilethisdeviceconnectstoyourjournal"),
+                accessible_recording: text!("linux.health.onconnecting"),
+                accessible_idle: text!("linux.health.idleconnecting"),
                 icon: "connecting",
                 sni: "Active",
-                cli: "sync: connecting; wait while this device connects to your journal",
+                cli: text!("linux.health.syncconnectingwaitwhilethisdeviceconnectstoy"),
                 doctor_severity: "warn",
-                doctor_detail: "sync health: connecting; wait while this device connects to your journal",
+                doctor_detail: text!("linux.health.synchealthconnectingwaitwhilethisdeviceconnec"),
                 dbus: "connecting",
             },
         ),
         (
             HealthState::Syncing,
             HealthSurface {
-                header_recording: "on, syncing",
-                header_idle: "idle, syncing",
-                sync_line: "sync: {progress}",
-                tooltip: "sync: {progress}",
-                accessible_recording: "on, syncing",
-                accessible_idle: "idle, syncing",
+                header_recording: text!("linux.health.onsyncing"),
+                header_idle: text!("linux.health.idlesyncing"),
+                sync_line: "",
+                tooltip: "",
+                accessible_recording: text!("linux.health.onsyncing"),
+                accessible_idle: text!("linux.health.idlesyncing"),
                 icon: "healthy",
                 sni: "Active",
-                cli: "sync: syncing; not confirmed by your journal yet",
+                cli: text!("linux.health.syncsyncingyourjournalisreceivingnotconfirmed"),
                 doctor_severity: "ok",
-                doctor_detail: "sync health: syncing; not confirmed by your journal yet",
+                doctor_detail: text!("linux.health.synchealthyourjournalisreceivingnotconfirmed"),
                 dbus: "syncing",
             },
         ),
         (
             HealthState::Connected,
             HealthSurface {
-                header_recording: "on, connected",
-                header_idle: "idle, connected",
-                sync_line: "sync: up to date",
-                tooltip: "sync: up to date",
-                accessible_recording: "on, sync up to date",
-                accessible_idle: "idle, sync up to date",
+                header_recording: text!("linux.health.onconnected"),
+                header_idle: text!("linux.health.idleconnected"),
+                sync_line: text!("linux.health.syncuptodate"),
+                tooltip: text!("linux.health.syncuptodate"),
+                accessible_recording: text!("linux.health.onsyncuptodate"),
+                accessible_idle: text!("linux.health.idlesyncuptodate"),
                 icon: "healthy",
                 sni: "Active",
-                cli: "sync: connected; up to date",
+                cli: text!("linux.health.syncconnecteduptodate"),
                 doctor_severity: "ok",
-                doctor_detail: "sync health: up to date at {sync_ts}",
+                doctor_detail: "",
                 dbus: "connected",
             },
         ),
@@ -436,7 +439,7 @@ fn format_age(seconds: Option<f64>) -> String {
 
 fn format_ts(timestamp: Option<f64>) -> String {
     let Some(timestamp) = timestamp else {
-        return "unknown".to_owned();
+        return text!("linux.shared.health.unknown").to_owned();
     };
     let seconds = timestamp.floor() as i64;
     let nanos = ((timestamp - timestamp.floor()) * 1e9) as u32;
@@ -447,9 +450,10 @@ fn format_ts(timestamp: Option<f64>) -> String {
                 .format("%Y-%m-%d %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|| "unknown".to_owned())
+        .unwrap_or_else(|| text!("linux.shared.health.unknown").to_owned())
 }
 
+#[cfg(test)]
 fn fill(template: &str, values: &HashMap<&str, String>) -> String {
     let mut result = String::with_capacity(template.len());
     let mut rest = template;
@@ -511,7 +515,7 @@ pub(crate) fn apply_import_health(health: &mut SyncHealth, facts: &SyncFacts) {
             health.icon = "attention".to_owned();
             health.sni_status = "NeedsAttention".to_owned();
         }
-        health.pending_display = "pending unconfirmed".to_owned();
+        health.pending_display = text!("linux.health.pendingunconfirmed").to_owned();
     }
 }
 
@@ -580,33 +584,42 @@ pub(crate) fn health_for_state(state: HealthState, facts: &SyncFacts, now: f64) 
         .get(&state)
         .expect("every health state must have a surface");
     let progress = if facts.progress.trim().is_empty() {
-        "syncing..."
+        text!("linux.health.syncingfallback")
     } else {
         facts.progress.trim()
     };
-    let values = HashMap::from([
-        ("progress", progress.to_owned()),
-        ("sync_ts", format_ts(facts.last_successful_sync)),
-    ]);
+
     let mut health = SyncHealth {
         import_held: false,
         state,
-        header_recording: fill(surface.header_recording, &values),
-        header_idle: fill(surface.header_idle, &values),
-        sync_line: fill(surface.sync_line, &values),
-        tooltip: fill(surface.tooltip, &values),
-        accessible_recording: fill(surface.accessible_recording, &values),
-        accessible_idle: fill(surface.accessible_idle, &values),
+        header_recording: surface.header_recording.to_owned(),
+        header_idle: surface.header_idle.to_owned(),
+        sync_line: if state == HealthState::Syncing {
+            message!("linux.health.syncprogress", "progress" => progress)
+        } else {
+            surface.sync_line.to_owned()
+        },
+        tooltip: if state == HealthState::Syncing {
+            message!("linux.health.syncprogress", "progress" => progress)
+        } else {
+            surface.tooltip.to_owned()
+        },
+        accessible_recording: surface.accessible_recording.to_owned(),
+        accessible_idle: surface.accessible_idle.to_owned(),
         icon: surface.icon.to_owned(),
         sni_status: surface.sni.to_owned(),
-        cli: fill(surface.cli, &values),
+        cli: surface.cli.to_owned(),
         doctor_severity: surface.doctor_severity.to_owned(),
-        doctor_detail: fill(surface.doctor_detail, &values),
+        doctor_detail: if state == HealthState::Connected {
+            message!("linux.health.uptodateat", "timestamp" => format_ts(facts.last_successful_sync))
+        } else {
+            surface.doctor_detail.to_owned()
+        },
         dbus: surface.dbus.to_owned(),
         pending_display: if state == HealthState::Connected {
-            "0 pending"
+            text!("linux.health.n0pending")
         } else {
-            "pending unconfirmed"
+            text!("linux.health.pendingunconfirmed")
         }
         .to_owned(),
         last_success_age: facts.last_successful_sync.map(|value| now - value),
@@ -703,9 +716,12 @@ impl Presenter {
     }
 }
 
-const UNKNOWN_JOURNAL_RESET_LINE: &str =
-    "if you recently reset your journal, pair this device again.";
-const UNKNOWN_JOURNAL_RELAY_LINE: &str = "this is less certain than a direct connection.";
+fn unknown_journal_reset_line() -> &'static str {
+    text!("linux.synchealth.ifyourecentlyresetjournal")
+}
+fn unknown_journal_relay_line() -> &'static str {
+    text!("linux.synchealth.thisislesscertainthan")
+}
 
 fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) {
     if link.unknown_journals.is_empty() {
@@ -723,15 +739,15 @@ fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) 
             .get(index)
             .and_then(|m| m.as_deref());
         let what_answered = if let Some(spoken) = sighting_spoken {
-            format!("{spoken}  ({})", crate::copy::UNKNOWN_JOURNAL_CLAIMED)
+            message!("linux.health.markclaim", "spoken" => spoken, "claim" => crate::copy::unknown_journal_claimed())
         } else {
-            crate::copy::UNKNOWN_JOURNAL_NO_IDENTITY.to_owned()
+            crate::copy::unknown_journal_no_identity().to_owned()
         };
 
         let your_journal = if let Some(paired) = paired_spoken {
-            format!("your journal:   {paired}")
+            message!("linux.health.journalmark", "paired" => paired)
         } else {
-            crate::journal_mark::MARK_UNAVAILABLE_LINE.to_owned()
+            crate::journal_mark::mark_unavailable_line().to_owned()
         };
         // Nothing to act on or weigh when nothing was claimed.
         let footer = |line: &str| {
@@ -745,17 +761,15 @@ fn apply_unknown_journal_overlay(health: &mut SyncHealth, link: &LinkFactState) 
         let (header, footer) = if let Some(address) = &sighting.address {
             (
                 unknown_journal_seen_at(address),
-                footer(UNKNOWN_JOURNAL_RESET_LINE),
+                footer(unknown_journal_reset_line()),
             )
         } else {
             (
-                UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY.to_owned(),
-                footer(UNKNOWN_JOURNAL_RELAY_LINE),
+                unknown_journal_seen_through_relay().to_owned(),
+                footer(unknown_journal_relay_line()),
             )
         };
-        detail_blocks.push(format!(
-            "{header}:\n  what answered:  {what_answered}\n  {your_journal}{footer}"
-        ));
+        detail_blocks.push(message!("linux.health.sighting", "header" => header, "answer" => what_answered, "paired" => your_journal, "footer" => footer));
         tooltip_lines.push(header);
     }
 
@@ -1522,7 +1536,8 @@ mod tests {
     #[test]
     fn every_health_state_has_complete_surface() {
         assert_eq!(SURFACE_BY_STATE.len(), 13);
-        for surface in SURFACE_BY_STATE.values() {
+        for state in SURFACE_BY_STATE.keys() {
+            let surface = health_for_state(*state, &SyncFacts::default(), 0.0);
             assert!(!surface.header_recording.is_empty());
             assert!(!surface.header_idle.is_empty());
             assert!(!surface.sync_line.is_empty());
@@ -1530,7 +1545,7 @@ mod tests {
             assert!(!surface.accessible_recording.is_empty());
             assert!(!surface.accessible_idle.is_empty());
             assert!(!surface.icon.is_empty());
-            assert!(!surface.sni.is_empty());
+            assert!(!surface.sni_status.is_empty());
             assert!(!surface.cli.is_empty());
             assert!(!surface.doctor_severity.is_empty());
             assert!(!surface.doctor_detail.is_empty());
@@ -1924,7 +1939,7 @@ mod tests {
             "{}:
   what answered:  blue, purple · liquefy·smock  (claimed, not verified)
   your journal:   pink, cyan · distrust·chokehold
-  {UNKNOWN_JOURNAL_RESET_LINE}",
+  if you recently reset your journal, pair this device again.",
             unknown_journal_seen_at("192.168.1.50:5015")
         );
 
@@ -1965,15 +1980,13 @@ mod tests {
                 .contains("unknown journal seen through the relay")
         );
 
-        let expected_block = format!(
-            "{UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY}:
+        let expected_block = "unknown journal seen through the relay:
   what answered:  blue, purple · liquefy·smock  (claimed, not verified)
   your journal:   pink, cyan · distrust·chokehold
-  {UNKNOWN_JOURNAL_RELAY_LINE}"
-        );
+  this is less certain than a direct connection.";
 
-        assert!(health.cli.ends_with(&expected_block));
-        assert!(health.doctor_detail.ends_with(&expected_block));
+        assert!(health.cli.ends_with(expected_block));
+        assert!(health.doctor_detail.ends_with(expected_block));
     }
 
     #[test]

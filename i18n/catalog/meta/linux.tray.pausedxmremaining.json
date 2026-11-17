@@ -1,0 +1,27 @@
+{
+  "description": "Heading in the panel menu while paused.",
+  "context": "Heading in the panel menu while paused.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 110,
+  "source_revision": "d8bb257c75f9b59169ab7fa8cf1f6e7759526839d7916ebd1e06f1e3ce439d97",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

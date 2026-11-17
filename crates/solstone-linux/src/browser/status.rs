@@ -6,6 +6,7 @@
 
 use super::custody::{self, Layout};
 use serde::{Deserialize, Serialize};
+use solstone_i18n::{message, text};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -15,16 +16,18 @@ const RUNNING_FILE: &str = "status.json";
 
 /// Where an owner gets the solstone extension, by the browsers each store page
 /// serves. Edge installs from the Chrome Web Store item.
-pub const STORE_LINKS: &[(&str, &str)] = &[
-    (
-        "Chrome or Edge",
-        "https://chromewebstore.google.com/detail/solstone/eibbeeoifjoabddfmgeggnageolkcnim",
-    ),
-    (
-        "Firefox",
-        "https://addons.mozilla.org/firefox/addon/solstone/",
-    ),
-];
+fn store_links() -> [(&'static str, &'static str); 2] {
+    [
+        (
+            text!("linux.browser.status.chromeedge"),
+            "https://chromewebstore.google.com/detail/solstone/eibbeeoifjoabddfmgeggnageolkcnim",
+        ),
+        (
+            "Firefox",
+            "https://addons.mozilla.org/firefox/addon/solstone/",
+        ),
+    ]
+}
 /// The running app rewrites its status when it changes, and at least every
 /// [`RUNNING_HEARTBEAT_MS`]. Older than this, the host is down.
 pub const RUNNING_STALE_MS: i64 = 30_000;
@@ -85,9 +88,9 @@ fn read_running(layout: &Layout, now_ms: i64) -> Option<Running> {
 
 fn size(bytes: u64) -> String {
     if bytes < 1024 * 1024 {
-        format!("{:.0} KB", (bytes as f64 / 1024.0).ceil())
+        message!("linux.browser.status.n0kb", "value1" => format!("{:.0}", (bytes as f64 / 1024.0).ceil()))
     } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        message!("linux.browser.status.n1mb", "value1" => format!("{:.1}", bytes as f64 / (1024.0 * 1024.0)))
     }
 }
 
@@ -111,39 +114,30 @@ pub fn status_lines(base_dir: &Path, now_ms: i64) -> Vec<String> {
             browsers.sort();
             browsers.dedup();
             if browsers.is_empty() {
-                lines.push("browser: no browser connected".to_owned());
-                for (served, url) in STORE_LINKS {
-                    lines.push(format!(
-                        "        if you haven't yet, add the solstone extension to {served}: {url}"
-                    ));
+                lines.push(text!("linux.status.browsernobrowserconnected").to_owned());
+                for (served, url) in store_links() {
+                    lines.push(message!("linux.browser.status.ifyouhaventyet", "served" => served, "url" => url));
                 }
             } else {
                 let names: Vec<&str> = browsers.iter().map(|b| brand_name(b)).collect();
-                lines.push(format!("browser: {} connected", names.join(", ")));
+                lines.push(
+                    message!("linux.browser.status.browserconnected", "value1" => names.join(", ")),
+                );
             }
             if running.full {
-                lines.push(
-                    "        the room for browser pages on this computer is full, so no new pages are taken in until some go into your journal"
-                        .to_owned(),
-                );
+                lines.push(text!("linux.status.theroomforbrowserpagesonthis").to_owned());
             } else if running.capture == "paused" {
-                lines.push("        paused, so no new pages are taken in".to_owned());
+                lines.push(text!("linux.status.pausedsononewpagesaretaken").to_owned());
             }
             if running.held_bytes > 0 {
-                lines.push(format!(
-                    "        {} of browser pages on this computer, waiting to go into your journal",
-                    size(running.held_bytes)
-                ));
+                lines.push(message!("linux.browser.status.browserpagesthiscomputerwaiting", "value1" => size(running.held_bytes)));
             }
         }
         None => {
             let held = custody::held_bytes(&layout);
-            lines.push("browser: the solstone app is not running".to_owned());
+            lines.push(text!("linux.status.browserthesolstoneappisnotrunning").to_owned());
             if held > 0 {
-                lines.push(format!(
-                    "        {} of browser pages on this computer, waiting to go into your journal",
-                    size(held)
-                ));
+                lines.push(message!("linux.browser.status.browserpagesthiscomputerwaiting", "value1" => size(held)));
             }
         }
     }
@@ -236,43 +230,29 @@ pub fn doctor_lines(home: &Path, binary: &Path, installs: &BrowserInstalls) -> V
         .map(|(browser, _)| *browser)
         .collect();
     if missing.is_empty() {
-        lines.push(
-            "ok    browser registration          chrome, chromium, edge and firefox".to_owned(),
-        );
+        lines.push(text!("linux.doctor.okbrowserregistrationchromechromiumedgeandfir").to_owned());
     } else {
-        lines.push(format!(
-            "warn  browser registration          missing or out of date for {}; start the solstone app to write them again",
-            missing.join(", ")
-        ));
+        lines.push(message!("linux.doctor.warnbrowserregistrationmissingoroutofdatefor", "value1" => missing.join(", ")));
     }
     if installs.firefox_snap {
         lines.push(match installs.firefox_snap_decision {
             SnapDecision::NotAsked => {
-                "ok    firefox (snap)                asks you once to let it start the solstone app".to_owned()
+                text!("linux.doctor.okfirefoxsnapasksyouoncetoletitstarttheso").to_owned()
             }
             SnapDecision::Unknown => {
-                "warn  firefox (snap)                asks you once to let it start the solstone app; doctor couldn't read what you answered".to_owned()
+                text!("linux.doctor.warnfirefoxsnapasksyouoncetoletitstartthe").to_owned()
             }
             SnapDecision::Allowed => {
-                "ok    firefox (snap)                allowed to start the solstone app".to_owned()
+                text!("linux.doctor.okfirefoxsnapallowedtostartthesolstoneapp").to_owned()
             }
-            SnapDecision::Refused => format!(
-                "warn  firefox (snap)                you told your desktop not to let firefox start the solstone app, so nothing is taken in from it. to be asked again, run:\n      gdbus {} --method org.freedesktop.impl.portal.PermissionStore.DeletePermission {PERMISSION_TABLE} {} {SNAP_FIREFOX}",
-                PERMISSION_STORE.join(" "),
-                native_browser_frame::PROD_HOST
-            ),
+            SnapDecision::Refused => message!("linux.doctor.warnfirefoxsnapyoutoldyourdesktopnottoletf", "value1" => PERMISSION_STORE.join(" "), "PERMISSION-TABLE" => PERMISSION_TABLE, "value2" => native_browser_frame::PROD_HOST, "SNAP-FIREFOX" => SNAP_FIREFOX),
         });
     }
     if installs.chromium_snap {
-        lines.push(
-            "warn  chromium (snap)               can't reach the solstone app; a snap of chromium has no way to start it. use chrome, edge or firefox"
-                .to_owned(),
-        );
+        lines.push(text!("linux.doctor.warnchromiumsnapcantreachthesolstoneappasn").to_owned());
     }
     for id in &installs.flatpak_chromium_family {
-        lines.push(format!(
-            "warn  {id:<28}  can't reach the solstone app from inside a flatpak; use chrome, edge or firefox installed outside flatpak"
-        ));
+        lines.push(message!("linux.doctor.warnxcantreachthesolstoneappfrominsideafl", "id" => format!("{:<28}", id)));
     }
     lines
 }
@@ -317,13 +297,13 @@ mod tests {
         none.held_bytes = 0;
         write_running(&layout, &none).unwrap();
         let lines = status_lines(temp.path(), 1_005_000);
-        assert_eq!(lines.len(), 1 + STORE_LINKS.len());
+        assert_eq!(lines.len(), 1 + store_links().len());
         assert!(
             lines
                 .iter()
                 .any(|line| line.ends_with("https://addons.mozilla.org/firefox/addon/solstone/"))
         );
-        for (line, (_, url)) in lines[1..].iter().zip(STORE_LINKS) {
+        for (line, (_, url)) in lines[1..].iter().zip(store_links()) {
             assert!(line.ends_with(url));
         }
         // A status file the app stopped refreshing is not a running app.

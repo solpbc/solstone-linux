@@ -1,0 +1,22 @@
+{
+  "description": "Presentation from the takeover runner component.",
+  "context": "Presentation from the takeover runner component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "error",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 38,
+  "source_revision": "582efa701c54a2f997a9ab4c0e0c71b5cf7a86c0d3fe364beb5e5a71022aec7b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

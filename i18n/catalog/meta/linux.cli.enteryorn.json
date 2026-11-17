@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the cli component.",
+  "context": "Presentation from the cli component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 13,
+  "source_revision": "3adec24a1671f7823d371b40bba2ba91691054f7837c3c972a06143ba0585e80",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "accepted-input",
+      "value": "y"
+    },
+    {
+      "name": "literal2",
+      "kind": "accepted-input",
+      "value": "n"
+    }
+  ]
+}

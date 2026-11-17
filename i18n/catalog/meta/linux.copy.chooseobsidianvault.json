@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.ui.chooseyourobsidianvault, windows.obsidian.chooseobsidianvault.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 26,
+  "source_revision": "bd2fb8c96979cd01bb7dab7620e7b3488f3b20edb45d791f72b61e044cf45379",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "Obsidian"
+    }
+  ]
+}

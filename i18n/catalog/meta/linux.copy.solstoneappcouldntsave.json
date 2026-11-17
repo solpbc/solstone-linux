@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.solstoneappcouldntsaveits.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 97,
+  "source_revision": "7c6f062c1815a3abe91dcf8db6ecb48d00d67578ea747e08bf83b1a132b39152",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.choosefolder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 15,
+  "source_revision": "9b533da31e3d16705ae08c81a634c4ff36cb01224ab41cfc69b9baf392b0d6e5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

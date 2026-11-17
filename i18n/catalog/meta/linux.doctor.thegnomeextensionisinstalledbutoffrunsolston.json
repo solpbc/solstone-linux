@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 71,
+  "source_revision": "e908417b883164c638adaee5bb8f87b0a94765156aa88f969ec2ac802547670b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "GNOME"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "solstone-linux panel-icon"
+    }
+  ]
+}

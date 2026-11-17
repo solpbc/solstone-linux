@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 52,
+  "source_revision": "ed5517aab0d1f61d558e8036b3bcca7acffd92343741134742b63b8bf8e1ea7c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "X11"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "ximagesrc"
+    }
+  ]
+}

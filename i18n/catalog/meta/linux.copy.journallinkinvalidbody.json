@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.uicopy.copythefulllinkfromyourchatandopenitagain, windows.ui.copythefulllinkfromyourchatandopenitagain.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 52,
+  "source_revision": "d69e4ee72ff8900f4932666036a03c469ebd49f7ed63fd8440babfa6da0cacb7",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

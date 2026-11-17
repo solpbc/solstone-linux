@@ -6,6 +6,7 @@ use crate::{
     observer::{Mode, StateSnapshot},
     sync_health::SyncHealth,
 };
+use solstone_i18n::{message, text};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayStatus {
@@ -96,16 +97,18 @@ pub fn uptime(snapshot: &StateSnapshot, now: f64) -> i32 {
 
 pub fn header_label(status: TrayStatus, health: &SyncHealth, pause: i32) -> String {
     match status {
-        TrayStatus::Paused if pause > 0 => format!("paused ({}m remaining)", pause / 60),
-        TrayStatus::Paused => "paused".into(),
+        TrayStatus::Paused if pause > 0 => {
+            solstone_i18n::cardinal("linux.tray.pausedxmremaining", i64::from(pause / 60), &[])
+        }
+        TrayStatus::Paused => text!("linux.copy.paused").into(),
         TrayStatus::Waiting(SessionPresence::LoginUnavailable) => {
-            "can't check which session is in front".into()
+            text!("linux.tray.cantcheckwhichsessionisinfront").into()
         }
         status @ TrayStatus::Waiting(_) if status.needs_attention() => {
-            "can't reach your desktop".into()
+            text!("linux.tray.cantreachyourdesktop").into()
         }
-        TrayStatus::Waiting(_) => "waiting for your desktop".into(),
-        TrayStatus::Stopped => "not running".into(),
+        TrayStatus::Waiting(_) => text!("linux.tray.waitingforyourdesktop").into(),
+        TrayStatus::Stopped => text!("linux.tray.notrunning").into(),
         TrayStatus::Recording => health.header_recording.clone(),
         TrayStatus::Idle => health.header_idle.clone(),
     }
@@ -113,18 +116,24 @@ pub fn header_label(status: TrayStatus, health: &SyncHealth, pause: i32) -> Stri
 
 pub fn tooltip(status: TrayStatus, health: &SyncHealth) -> String {
     let status_text = match status {
-        TrayStatus::Recording => "on",
-        TrayStatus::Paused => "paused",
-        TrayStatus::Idle => "idle (screen inactive)",
-        TrayStatus::Waiting(SessionPresence::NotActive) => "waiting (your session isn't in front)",
-        TrayStatus::Waiting(SessionPresence::Unreachable) => "can't reach your desktop",
-        TrayStatus::Waiting(SessionPresence::LoginUnavailable) => {
-            "can't check which session is in front"
+        TrayStatus::Recording => text!("linux.copy.on"),
+        TrayStatus::Paused => text!("linux.copy.paused"),
+        TrayStatus::Idle => text!("linux.tray.idlescreeninactive"),
+        TrayStatus::Waiting(SessionPresence::NotActive) => {
+            text!("linux.tray.waitingyoursessionisntinfront")
         }
-        TrayStatus::Waiting(_) => "waiting (none of your sessions is in front)",
-        TrayStatus::Stopped => "not running",
+        TrayStatus::Waiting(SessionPresence::Unreachable) => {
+            text!("linux.tray.cantreachyourdesktop")
+        }
+        TrayStatus::Waiting(SessionPresence::LoginUnavailable) => {
+            text!("linux.tray.cantcheckwhichsessionisinfront")
+        }
+        TrayStatus::Waiting(_) => {
+            text!("linux.tray.waitingnoneofyoursessionsisinfront")
+        }
+        TrayStatus::Stopped => text!("linux.tray.notrunning"),
     };
-    format!("{status_text}\n{}", health.tooltip)
+    message!("linux.tray.tooltip", "status" => status_text, "health" => health.tooltip)
 }
 
 pub fn sni_status(status: TrayStatus, health: &SyncHealth) -> String {
@@ -178,11 +187,11 @@ pub fn build_with_open_journal(
         tooltip: tooltip(status, health),
         icon: icon_name(status, health),
         sni_status: sni_status(status, health),
-        cache: format!("cache: {} MB", snapshot.total_size_mb),
+        cache: message!("linux.tray.cachexmb", "value1" => snapshot.total_size_mb),
         resume: if pause > 0 {
-            format!("resume ({}m remaining)", pause / 60)
+            solstone_i18n::cardinal("linux.tray.resumexmremaining", i64::from(pause / 60), &[])
         } else {
-            "resume".into()
+            text!("linux.copy.resume").into()
         },
         pause_visible: status != TrayStatus::Paused,
         resume_visible: status == TrayStatus::Paused,
@@ -306,11 +315,11 @@ mod tests {
         assert_eq!(header_label(TrayStatus::Paused, &connected, 0), "paused");
         assert_eq!(
             header_label(TrayStatus::Paused, &connected, 900),
-            "paused (15m remaining)"
+            "paused (15 minutes remaining)"
         );
         assert_eq!(
             header_label(TrayStatus::Paused, &offline, 59),
-            "paused (0m remaining)"
+            "paused (0 minutes remaining)"
         );
         assert_eq!(
             header_label(TrayStatus::Stopped, &connected, 0),

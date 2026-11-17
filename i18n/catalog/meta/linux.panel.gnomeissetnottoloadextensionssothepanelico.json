@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the panel icon component.",
+  "context": "Presentation from the panel icon component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 80,
+  "source_revision": "6c1f224033f2372670ea1d4ce89df19e2a44bb644b669c8578ee47ed083beefd",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "GNOME"
+    }
+  ]
+}

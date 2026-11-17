@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the journal mark component.",
+  "context": "Presentation from the journal mark component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 55,
+  "source_revision": "075087da0dc7f0ee9cfd941695a29011dac4e3ac37a1936199014f5644052dba",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

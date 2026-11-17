@@ -1,0 +1,17 @@
+{
+  "description": "Description in the command-line help.",
+  "context": "Description in the command-line help.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 13,
+  "source_revision": "16ff87f85423492e92cc62a915b2af302d72cacbd6481f2bbca8346db8e7741b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

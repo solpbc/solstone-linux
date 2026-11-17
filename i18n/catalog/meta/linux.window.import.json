@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopimportpage.import, windows.ui.import.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 6,
+  "source_revision": "108227e44552117a92d828981cbd635ddd25dd90680552baf9b2855002ae70fa",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Description read by a Linux package manager.",
+  "context": "Description read by a Linux package manager.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 117,
+  "source_revision": "54c7d8bca1b6ad0d53bd8329fb1d14b645217bcf77af204f27ad4c97e8d07be9",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

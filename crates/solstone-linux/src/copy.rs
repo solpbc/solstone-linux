@@ -1,386 +1,827 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-pub const JOURNAL_LINK_INVALID_TITLE: &str = "this journal link isn't valid.";
-pub const JOURNAL_LINK_INVALID_BODY: &str = "copy the full link from your chat and open it again.";
+use solstone_i18n::{message, text};
 
-pub const OBSIDIAN_HEADING: &str = "Obsidian";
-pub const OBSIDIAN_EXPLAIN: &str = "the solstone app takes in the notes in one vault on this computer. all of them go into your journal, then each one as it changes. your vault stays as it is.";
-pub const OBSIDIAN_FOUND_LABEL: &str = "vaults on this computer";
-pub const OBSIDIAN_NONE_FOUND: &str =
-    "the solstone app didn't find a vault on this computer. choose its folder instead.";
-pub const OBSIDIAN_USE_THIS: &str = "use this vault";
-pub const OBSIDIAN_CHOOSE_FOLDER: &str = "choose a folder";
-pub const OBSIDIAN_CHOOSER_TITLE: &str = "choose your Obsidian vault";
-pub const OBSIDIAN_CHOOSER_ACCEPT: &str = "choose";
-pub const OBSIDIAN_CANCEL: &str = "cancel";
-pub const OBSIDIAN_REFUSED_NOT_A_VAULT: &str = "that folder isn't an Obsidian vault, so the solstone app didn't add it. choose the vault's own folder.";
-pub const OBSIDIAN_REFUSED_NAME: &str =
-    "that folder's name can't be a vault's name in your journal. rename the folder and try again.";
-pub const OBSIDIAN_WARNING_HEADING: &str = "a vault with this name is already in your journal";
-pub const OBSIDIAN_CONTINUE: &str = "continue";
-pub const OBSIDIAN_STATE_CHECKING: &str = "waiting to reach your journal";
-pub const OBSIDIAN_STATE_UPDATE: &str = "waiting for a journal update";
-pub const OBSIDIAN_DETAIL_UPDATE: &str = "your journal needs an update before it can take these notes. they're waiting on this computer.";
-pub const OBSIDIAN_VAULT_LABEL: &str = "vault";
-pub const OBSIDIAN_LAST_CHECKED: &str = "last checked";
-pub const OBSIDIAN_NOT_ON_DEVICE: &str = "not on this device";
-pub const OBSIDIAN_TOO_LARGE: &str = "too large to bring in";
-pub const OBSIDIAN_ATTENTION_VAULT: &str = "the solstone app can't read this vault. check that its folder is there and that the drive it's on is connected. nothing changes in your journal while it's out of reach.";
-pub const OBSIDIAN_ATTENTION_PART: &str = "part of this vault can't be read. check the permissions on the folders inside it. the rest of the vault keeps going into your journal.";
-pub const OBSIDIAN_ATTENTION_FILE: &str = "some notes couldn't go into your journal. the solstone app tries them again the next time it starts.";
-pub const OBSIDIAN_ATTENTION_STORAGE: &str = "the solstone app couldn't save its place for this vault. check that this computer has free space.";
-pub const OBSIDIAN_TURN_OFF: &str = "turn off";
-pub const OBSIDIAN_TURN_OFF_NOTE: &str = "turning this off stops bringing in changes. what's already in your journal stays there, and what's waiting stays on this computer until you turn it on again.";
+pub fn journal_link_invalid_title() -> &'static str {
+    text!("linux.copy.journallinkinvalidtitle")
+}
+pub fn journal_link_invalid_body() -> &'static str {
+    text!("linux.copy.journallinkinvalidbody")
+}
+
+pub fn obsidian_heading() -> &'static str {
+    text!("linux.copy.obsidian")
+}
+pub fn obsidian_explain() -> &'static str {
+    text!("linux.copy.solstoneapptakesnotesone")
+}
+pub fn obsidian_found_label() -> &'static str {
+    text!("linux.copy.vaultsthiscomputer")
+}
+pub fn obsidian_none_found() -> &'static str {
+    text!("linux.copy.solstoneappdidntfind")
+}
+pub fn obsidian_use_this() -> &'static str {
+    text!("linux.copy.usethisvault")
+}
+pub fn obsidian_choose_folder() -> &'static str {
+    text!("linux.copy.choosefolder")
+}
+pub fn obsidian_chooser_title() -> &'static str {
+    text!("linux.copy.chooseobsidianvault")
+}
+pub fn obsidian_chooser_accept() -> &'static str {
+    text!("linux.copy.choose")
+}
+pub fn obsidian_cancel() -> &'static str {
+    text!("linux.pair.cancel")
+}
+pub fn obsidian_refused_not_a_vault() -> &'static str {
+    text!("linux.copy.thatfolderisntobsidian")
+}
+pub fn obsidian_refused_name() -> &'static str {
+    text!("linux.copy.thatfoldersnamecan")
+}
+pub fn obsidian_warning_heading() -> &'static str {
+    text!("linux.copy.vaultwiththisnameis")
+}
+pub fn obsidian_continue() -> &'static str {
+    text!("linux.pair.continue")
+}
+pub fn obsidian_state_checking() -> &'static str {
+    text!("linux.copy.waitingreachjournal")
+}
+pub fn obsidian_state_update() -> &'static str {
+    text!("linux.copy.waitingjournalupdate")
+}
+pub fn obsidian_detail_update() -> &'static str {
+    text!("linux.copy.journalneedsupdatebeforeit")
+}
+pub fn obsidian_vault_label() -> &'static str {
+    text!("linux.copy.vault")
+}
+pub fn obsidian_last_checked() -> &'static str {
+    text!("linux.copy.lastchecked")
+}
+pub fn obsidian_not_on_device() -> &'static str {
+    text!("linux.copy.notthisdevice")
+}
+pub fn obsidian_too_large() -> &'static str {
+    text!("linux.copy.toolargebring")
+}
+pub fn obsidian_attention_vault() -> &'static str {
+    text!("linux.copy.solstoneappcantread")
+}
+pub fn obsidian_attention_part() -> &'static str {
+    text!("linux.copy.partthisvaultcant")
+}
+pub fn obsidian_attention_file() -> &'static str {
+    text!("linux.copy.somenotescouldntgo")
+}
+pub fn obsidian_attention_storage() -> &'static str {
+    text!("linux.copy.solstoneappcouldntsave")
+}
+pub fn obsidian_turn_off() -> &'static str {
+    text!("linux.copy.turnoff")
+}
+pub fn obsidian_turn_off_note() -> &'static str {
+    text!("linux.copy.turningthisoffstopsbringing")
+}
 
 /// Shown before the first send when the journal already has this vault's name.
 pub fn obsidian_warning_detail(vault: &str, device: Option<&str>, date: Option<&str>) -> String {
-    let from = device.map_or_else(|| "from another device".to_owned(), |d| format!("from {d}"));
-    let updated = date.map_or_else(String::new, |d| format!(", last updated {d}"));
-    format!(
-        "your journal already has a vault named {vault} {from}{updated}. if you continue, changes from both devices go into your journal."
-    )
+    match (device, date) {
+        (None, None) => message!("linux.copy.obsidianwarning", "vault" => vault),
+        (Some(device), None) => {
+            message!("linux.copy.obsidianwarningdevice", "vault" => vault, "device" => device)
+        }
+        (None, Some(date)) => {
+            message!("linux.copy.obsidianwarningdate", "vault" => vault, "date" => date)
+        }
+        (Some(device), Some(date)) => {
+            message!("linux.copy.obsidianwarningdevicedate", "vault" => vault, "device" => device, "date" => date)
+        }
+    }
 }
 
 /// How much is waiting on this computer.
 pub fn obsidian_waiting(count: &str) -> String {
-    format!("{count} waiting to sync")
+    message!("linux.copy.countwaitingsync", "count" => count)
 }
 
 /// First-sync progress.
 pub fn obsidian_progress(sent: &str, found: &str) -> String {
-    format!("{sent} of {found} notes in your journal")
+    message!("linux.copy.sentfoundnotesjournal", "sent" => sent, "found" => found)
 }
 
 /// The screenshots source's owner strings, each named for its id in the locked
 /// screenshots copy. Used as they stand.
 pub mod screenshots {
+    use super::{message, text};
+
     /// S1, D11's label.
-    pub const S1: &str = "screenshots";
+    pub fn s1() -> &'static str {
+        text!("linux.copy.s1")
+    }
     /// S4: `from {folder}`, the tile while on.
     pub fn s4(folder: &str) -> String {
-        format!("from {folder}")
+        message!("linux.copy.from", "folder" => folder)
     }
     /// S5: the tile while what the owner chose is still going in.
     pub fn s5(done: &str, total: &str) -> String {
-        format!("{done} of {total} in your journal")
+        message!("linux.copy.ofinyourjournal", "done" => done, "total" => total)
     }
     /// S6: the page, same moment.
     pub fn s6(done: &str, total: &str) -> String {
-        format!("{done} of {total} screenshots in your journal")
+        message!("linux.copy.ofscreenshotsinyourjournal", "done" => done, "total" => total)
     }
     /// S7: the how-far-back heading.
-    pub const S7: &str = "from before today";
+    pub fn s7() -> &'static str {
+        text!("linux.copy.s7")
+    }
     /// S8: the five choices, in calendar's order; the first is preselected.
-    pub const S8: [&str; 5] = [
-        "the last 30 days",
-        "the last 6 months",
-        "the last year",
-        "all of it",
-        "nothing from before today",
-    ];
+    pub fn s8() -> [&'static str; 5] {
+        [
+            text!("linux.copy.screenshotslookback76"),
+            text!("linux.copy.screenshotslookback77"),
+            text!("linux.copy.screenshotslookback78"),
+            text!("linux.copy.screenshotslookback79"),
+            text!("linux.copy.screenshotslookback80"),
+        ]
+    }
     /// S9: under the five choices.
-    pub const S9: &str = "you'll see how many screenshots there are before any come in.";
+    pub fn s9() -> &'static str {
+        text!("linux.copy.s9")
+    }
     /// S10: the confirm button.
     pub fn s10(count: u64, formatted: &str) -> String {
-        match count {
-            0 => S10_TODAY.to_owned(),
-            1 => "bring in 1 screenshot".to_owned(),
-            _ => format!("bring in {formatted} screenshots"),
+        if count == 0 {
+            return s10_today().to_owned();
         }
+        solstone_i18n::cardinal(
+            "linux.screenshots.bringcount",
+            count.min(i64::MAX as u64) as i64,
+            &[("formatted", solstone_i18n::Value::String(formatted))],
+        )
     }
     /// S10, for `nothing from before today` or a count of zero.
-    pub const S10_TODAY: &str = "start from today";
+    pub fn s10_today() -> &'static str {
+        text!("linux.copy.s10today")
+    }
     /// S10 while counting: the locked state word.
-    pub const S10_COUNTING: &str = "checking…";
+    pub fn s10_counting() -> &'static str {
+        text!("linux.copy.s10counting")
+    }
     /// S11: the tile at `ready to set up`, before the confirm.
-    pub const S11: &str = "choose how far back to start, then bring them in.";
+    pub fn s11() -> &'static str {
+        text!("linux.copy.s11")
+    }
     /// S12: the count failed, and its button.
-    pub const S12: &str = "couldn't count your screenshots.";
-    pub const S12_ACTION: &str = "try again";
+    pub fn s12() -> &'static str {
+        text!("linux.copy.s12")
+    }
+    pub fn s12_action() -> &'static str {
+        text!("linux.copy.tryagain")
+    }
     /// S14, on a computer: `the folder`.
-    pub const S14: &str =
-        "a screenshot already in your journal stays there if you delete it from the folder.";
+    pub fn s14() -> &'static str {
+        text!("linux.copy.s14")
+    }
     /// S15.
-    pub const S15: &str = "what's already in your journal stays when you pause or turn this off.";
+    pub fn s15() -> &'static str {
+        text!("linux.copy.s15")
+    }
     /// S16 under a computer's whole pause: its second sentence alone.
-    pub const S16_COMPUTER: &str = "screenshots you take while it's paused don't come in.";
+    pub fn s16_computer() -> &'static str {
+        text!("linux.copy.s16computer")
+    }
     /// S17: under the five choices when the source is turned back on.
-    pub const S17: &str = "screenshots already in your journal aren't brought in again.";
+    pub fn s17() -> &'static str {
+        text!("linux.copy.s17")
+    }
     /// S18.
-    pub const S18: &str = "last checked";
+    pub fn s18() -> &'static str {
+        text!("linux.copy.lastchecked")
+    }
     /// S19, shown only while above zero.
-    pub const S19: &str = "waiting to go to your journal";
+    pub fn s19() -> &'static str {
+        text!("linux.copy.s19")
+    }
     /// S20: the `so far` total.
     pub fn s20(count: u64, formatted: &str) -> String {
-        if count == 1 {
-            "1 screenshot".to_owned()
-        } else {
-            format!("{formatted} screenshots")
-        }
+        solstone_i18n::cardinal(
+            "linux.screenshots.total",
+            count.min(i64::MAX as u64) as i64,
+            &[("formatted", solstone_i18n::Value::String(formatted))],
+        )
     }
     /// S21 on linux: `this computer`.
-    pub const S21: &str = "waiting for a journal update. your screenshots wait on this computer.";
+    pub fn s21() -> &'static str {
+        text!("linux.copy.s21")
+    }
     /// S22.
-    pub const S22: &str = "folder";
+    pub fn s22() -> &'static str {
+        text!("linux.copy.s22")
+    }
     /// S23: the facts block, never collapsed.
-    pub const S23: &str = "only what the solstone app can tell is a screenshot comes in.";
+    pub fn s23() -> &'static str {
+        text!("linux.copy.s23")
+    }
     /// D1 on linux: `this computer`.
-    pub const D1: &str = "while this is on, the solstone app takes in the screenshots you take on this computer, and your journal keeps each one at the minute you took it.";
+    pub fn d1() -> &'static str {
+        text!("linux.copy.d1")
+    }
     /// D3: a folder the owner chose, by its own name.
     pub fn d3(folder: &str) -> String {
-        format!("other files in {folder} stay where they are.")
+        message!("linux.copy.otherfilesinstaywheretheyare", "folder" => folder)
     }
     /// D8, and its button.
-    pub const D8: &str = "couldn't find a Screenshots folder on this computer. choose the folder your screenshots save to.";
-    pub const CHOOSE_FOLDER: &str = "choose a folder…";
+    pub fn d8() -> &'static str {
+        text!("linux.copy.d8")
+    }
+    pub fn choose_folder() -> &'static str {
+        text!("linux.copy.choosefolder.v4cba918b")
+    }
     /// D8's second sentence without its period: the folder dialog's title.
-    pub const D8_PICKER_TITLE: &str = "choose the folder your screenshots save to";
+    pub fn d8_picker_title() -> &'static str {
+        text!("linux.copy.d8pickertitle")
+    }
     /// D9: the folder is gone, by its own name.
     pub fn d9(folder: &str) -> String {
-        format!("the {folder} folder isn't on this computer anymore.")
+        message!("linux.copy.thefolderisntonthiscomputer", "folder" => folder)
     }
     /// D10, in the collapsed detail.
-    pub const D10: &str = "some screenshot tools save only when you ask them to, and a screenshot that isn't saved doesn't come in.";
+    pub fn d10() -> &'static str {
+        text!("linux.copy.d10")
+    }
     /// D12: screenshots that reached the final state.
     pub fn d12(count: u64, formatted: &str) -> String {
-        if count == 1 {
-            "1 screenshot can't come in, so it stays in the folder.".to_owned()
-        } else {
-            format!("{formatted} screenshots can't come in, so they stay in the folder.")
-        }
+        solstone_i18n::cardinal(
+            "linux.screenshots.refusedcount",
+            count.min(i64::MAX as u64) as i64,
+            &[("formatted", solstone_i18n::Value::String(formatted))],
+        )
     }
     /// D13: screenshots in the folder that can't be read, and S12's button.
     pub fn d13(count: u64, formatted: &str) -> String {
-        if count == 1 {
-            "couldn't read 1 screenshot.".to_owned()
-        } else {
-            format!("couldn't read {formatted} screenshots.")
-        }
+        solstone_i18n::cardinal(
+            "linux.screenshots.unreadablecount",
+            count.min(i64::MAX as u64) as i64,
+            &[("formatted", solstone_i18n::Value::String(formatted))],
+        )
     }
     /// D15: the disclosure that holds D10.
-    pub const D15: &str = "more about this";
+    pub fn d15() -> &'static str {
+        text!("linux.copy.d15")
+    }
 }
 
-pub const WINDOW_TITLE: &str = "solstone";
-pub const NAV_STATUS: &str = "status";
-pub const NAV_JOURNAL: &str = "journal";
-pub const NAV_SETTINGS: &str = "settings";
-pub const NAV_HELP: &str = "help";
-pub const ACTION_OPEN_JOURNAL: &str = "open your journal";
-pub const STATUS_ON: &str = "on";
-pub const STATUS_ON_DETAIL: &str = "intake is running.";
-pub const STATUS_SCREEN_WAITING: &str = "screen intake is waiting";
-pub const STATUS_SCREEN_WAITING_DETAIL: &str = "audio intake can continue.";
-pub const STATUS_PAUSED: &str = "paused";
-pub const STATUS_PAUSED_DETAIL: &str = "intake is paused until you resume.";
-pub const STATUS_PAUSED_ACTIVITY_ON_DETAIL: &str =
-    "screen and audio are paused until you resume. desktop activity keeps going.";
-pub const STATUS_STARTING: &str = "starting…";
-pub const STATUS_OFF: &str = "off";
-pub const STATUS_OFF_DETAIL: &str = "intake isn't running.";
-pub const STATUS_ATTENTION: &str = "needs attention";
-pub const STATUS_UNAVAILABLE: &str = "status unavailable";
-pub const STATUS_UNAVAILABLE_DETAIL: &str =
-    "couldn't read the solstone app's status. check whether it's running, then try again.";
-pub const STATUS_CHECKING: &str = "checking status…";
-pub const STATUS_INTAKE_LABEL: &str = "intake";
-pub const STATUS_SCREEN_LABEL: &str = "screen";
-pub const STATUS_AUDIO_LABEL: &str = "audio";
-pub const STATUS_JOURNAL_LABEL: &str = "journal";
-pub const STATUS_WAITING_LABEL: &str = "waiting to sync";
-pub const STATUS_ATTENTION_LABEL: &str = "need attention";
-pub const STATUS_LAST_DELIVERY: &str = "last delivery";
-pub const STATUS_VERSION: &str = "app version";
-pub const STATUS_DETAILS: &str = "health details";
-pub const ACTION_PAUSE: &str = "pause";
-pub const ACTION_PAUSING: &str = "pausing…";
-pub const ACTION_RESUME: &str = "resume";
-pub const ACTION_RESUMING: &str = "resuming…";
-pub const ACTION_RETRY: &str = "try again";
-pub const ACTION_CHECK_STATUS: &str = "check status";
-pub const ACTION_VIEW_JOURNAL: &str = "journal details";
-pub const STATUS_PAUSE_FAILED: &str = "couldn't pause intake. try again.";
-pub const STATUS_RESUME_FAILED: &str = "couldn't resume intake. try again.";
-pub const BROWSER_OPEN_FAILED: &str =
-    "couldn't open your browser. try again, or open your journal from its usual address.";
-pub const JOURNAL_CONNECTED: &str = "connected";
-pub const JOURNAL_SYNCING: &str = "syncing to your journal…";
-pub const JOURNAL_OFFLINE: &str = "not reaching your journal right now";
-pub const JOURNAL_OFFLINE_DETAIL: &str = "anything waiting to sync stays on this computer. the solstone app will try again when your journal is reachable.";
-pub const JOURNAL_ATTENTION_DETAIL: &str = "anything waiting to sync stays on this computer. to see what to do, run: solstone-linux status";
-pub const JOURNAL_NOT_PAIRED: &str = "not paired";
-pub const LOCAL_JOURNAL_FOUND: &str = "found your journal on this computer";
-pub const LOCAL_JOURNAL_CONNECT: &str = "connect to your journal";
-pub const LOCAL_JOURNAL_CONNECTING: &str = "connecting…";
-pub const LOCAL_JOURNAL_CONNECTED_TO: &str = "connected to";
-pub const LOCAL_JOURNAL_CONNECT_FAILED: &str =
-    "couldn't verify your journal, so nothing connected. try again, or paste a pairing link.";
-pub const JOURNAL_PAIR_TITLE: &str = "pair a device";
-pub const JOURNAL_PAIR_HELP: &str = "open the network app in your journal and get a pairing link.";
-pub const JOURNAL_LINK_LABEL: &str = "pairing link";
-pub const JOURNAL_LINK_PLACEHOLDER: &str = "paste pairing link";
-pub const ACTION_PAIR: &str = "pair a device";
-pub const ACTION_PAIRING: &str = "pairing…";
-pub const PAIRING_EMPTY: &str = "paste a pairing link from your journal.";
-pub const PAIRING_BAD_LINK: &str = "that pairing link isn't one the solstone app can read. get a new pairing link from your journal and try again.";
-pub const PAIRING_EXPIRED: &str =
-    "the pairing window closed. get a new pairing link from your journal, then try again.";
-pub const PAIRING_FAILED: &str =
-    "pairing didn't go through. get a new pairing link from your journal and try again.";
-pub const PAIRING_HELD: &str = "waiting for you to confirm your journal's mark";
-pub const PAIRING_HELD_DETAIL: &str = "nothing waiting goes into your journal until you do.";
-pub const PAIRING_HELD_RUN: &str = "when you're ready, run: solstone-linux confirm";
-pub const PAIRING_REPLACEMENT_HELD_DETAIL: &str =
-    "your current pairing stays in use until you confirm this mark.";
-pub const PAIRING_QUESTION: &str = "does this match your journal?";
-pub const PAIRING_QUESTION_DETAIL: &str =
-    "your journal shows this same mark in its network app. it should match, exactly.";
-pub const PAIRING_CONFIRM: &str = "yes, this is my journal";
-pub const PAIRING_REJECT: &str = "that doesn't match";
-pub const PAIRING_CANCEL: &str = "cancel pairing";
-pub const PAIRING_CONFIRMING: &str = "confirming…";
-pub const PAIRING_SUCCESS: &str = "the solstone app can now connect to your journal.";
-pub const PAIRING_REJECTED_TITLE: &str = "not paired";
-pub const PAIRING_REJECTED_DETAIL: &str = "nothing this computer has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a new pairing link from your journal and try again, or email support@solstone.app and we'll help.";
-pub const PAIRING_REPLACEMENT_REJECTED_TITLE: &str = "new pairing cancelled";
-pub const PAIRING_REPLACEMENT_REJECTED_DETAIL: &str = "you said this mark doesn't match the one your journal shows. your current pairing stays in use. get a fresh pairing link from your journal, or email support@solstone.app and we'll help.";
-pub const PAIRING_CANCELLED: &str =
-    "pairing cancelled. get a fresh pairing link from your journal when you're ready.";
-pub const PAIRING_REPLACEMENT_CANCELLED: &str =
-    "new pairing cancelled. your current pairing stays in use.";
-pub const PAIRING_UNAVAILABLE_TITLE: &str = "couldn't verify";
-pub const PAIRING_UNAVAILABLE_DETAIL: &str = "couldn't work out that journal's mark, so there's nothing to compare. get a new pairing link from your journal, then try again.";
-pub const PAIRING_REPLACEMENT_UNAVAILABLE_DETAIL: &str = "couldn't work out this mark, so there's nothing to compare. your current pairing stays in use.";
-pub const PAIRING_MARK_UNAVAILABLE: &str = "mark unavailable";
-pub const PAIRING_NEW_LINK: &str = "get a fresh link";
-pub const PAIRING_STALE: &str = "the pairing changed while you were checking its mark. check the current mark before confirming.";
-pub const PAIRING_SAVE_FAILED: &str = "couldn't save your answer. try again.";
-pub const PAIRING_OUTCOME_UNAVAILABLE: &str =
-    "couldn't check whether pairing finished. check status before trying again.";
-pub const PAIRING_CONFIRMED_START_FAILED: &str =
-    "your journal's mark is confirmed, but the solstone app couldn't restart. try again.";
-pub const PAIRING_CONFIRMED_UNAVAILABLE: &str = "your journal's mark is confirmed, but the solstone app needs attention. check the details, then try again.";
-pub const PAIRING_CHECK_STATUS: &str = "check status";
-pub const PAIRING_CONFIRM_ACTION: &str = "confirm your journal's mark";
-pub const JOURNAL_MARK_LABEL: &str = "mark";
-pub const JOURNAL_MARK_HEADING: &str = "this is your journal";
-pub const JOURNAL_MARK_SPEECH_TEMPLATE: &str = "{tint1}, {tint2} · {word1}·{word2}";
-pub const UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY: &str = "unknown journal seen through the relay";
-pub const UNKNOWN_JOURNAL_VIEW_DETAILS: &str = "view details";
-pub const UNKNOWN_JOURNAL_HEADING: &str = "something answered instead of your journal";
-pub const UNKNOWN_JOURNAL_BODY_RELAY: &str = "something answered this computer through the relay, and it isn't the journal this computer is paired with. this is less certain than a direct connection.";
-pub const UNKNOWN_JOURNAL_WHAT_ANSWERED: &str = "what answered";
-pub const UNKNOWN_JOURNAL_YOUR_JOURNAL: &str = "your journal";
-pub const UNKNOWN_JOURNAL_CLAIMED: &str = "claimed, not verified";
-pub const UNKNOWN_JOURNAL_NO_IDENTITY: &str = "no identity presented";
-pub const UNKNOWN_JOURNAL_PAIR_AGAIN: &str = "pair again";
-pub const SETTINGS_HEADING: &str = "settings";
-pub const SETTINGS_CURSOR: &str = "draw cursor";
-pub const SETTINGS_START_PAUSED: &str = "start paused";
-pub const SETTINGS_SEGMENT: &str = "segment interval";
-pub const SETTINGS_SEGMENT_HELP: &str = "seconds";
-pub const SETTINGS_RESTART_HELP: &str = "these take effect the next time the solstone app starts.";
-pub const SETTINGS_SAVE: &str = "save settings";
-pub const SETTINGS_SAVING: &str = "saving…";
-pub const SETTINGS_SAVED: &str = "settings saved.";
-pub const SETTINGS_RESTART_NEEDED: &str = "restart needed";
-pub const SETTINGS_RESTART_DETAIL: &str =
-    "your settings are saved. restart the solstone app to use them now.";
-pub const SETTINGS_RESTART: &str = "restart the solstone app";
-pub const SETTINGS_RESTARTING: &str = "restarting…";
-pub const SETTINGS_RESTARTED: &str = "the solstone app restarted with your saved settings.";
-pub const SETTINGS_RESTART_FAILED: &str =
-    "your settings are saved, but the solstone app couldn't restart. try again.";
-pub const SETTINGS_RESTART_RECOVERY_FAILED: &str =
-    "couldn't restart the solstone app. check the details, then try again.";
-pub const SETTINGS_SAVE_FAILED: &str =
-    "couldn't save your settings. check the details, then try again.";
-pub const SETTINGS_SAVE_INCOMPLETE: &str =
-    "couldn't save all your settings. your edits are still here. try again.";
-pub const SETTINGS_SAVE_UNAVAILABLE: &str =
-    "couldn't check whether all your settings were saved. read them again before trying again.";
-pub const SETTINGS_LOAD_FAILED: &str =
-    "couldn't read your settings. try again before making changes.";
-pub const SETTINGS_SEGMENT_INVALID: &str = "enter a whole number greater than 0.";
-pub const SETTINGS_FILE: &str = "config file";
-pub const SETTINGS_CONFLICT: &str =
-    "your settings changed outside this window. read them again before saving.";
-pub const SETTINGS_RELOAD: &str = "read settings again";
-pub const ACTIVITY_WRITE_FAILED: &str = "couldn't save activity intake. try again.";
-pub const SETTINGS_ACTIVITY_SOURCE: &str = "desktop activity";
-pub const SETTINGS_ACTIVITY_THROUGH_PAUSE: &str = "keep desktop activity on while paused";
-pub const SETTINGS_ACTIVITY_THROUGH_PAUSE_HELP: &str =
-    "screen and audio still pause. desktop activity keeps going.";
-pub const SETTINGS_ACTIVITY_TITLES: &str = "window titles";
-pub const SETTINGS_ACTIVITY_URLS: &str = "web addresses (turns on desktop accessibility)";
-pub const SETTINGS_TERMINAL: &str = "terminal";
-pub const SETTINGS_TERMINAL_HELP: &str = "takes in your tmux sessions, and all of it goes into your journal. needs tmux on this computer, and works over SSH and with no desktop.";
-pub const SETTINGS_MOVE_TMUX_TITLE: &str = "move solstone for tmux in?";
-pub const SETTINGS_MOVE_TMUX_BODY: &str = "this moves solstone for tmux into this app, and it stops for good. what it still has waiting goes into your journal through this app, and anything that can't go stays on this computer. if this app isn't paired yet, it pairs with the journal solstone for tmux uses.";
-pub const SETTINGS_MOVE_TMUX_CONFIRM: &str = "move it";
-pub const SETTINGS_MOVE_TMUX_CANCEL: &str = "not now";
-pub const SETTINGS_DESKTOP_CAPTURE: &str = "screen, audio and desktop activity";
-pub const SETTINGS_DESKTOP_CAPTURE_HELP: &str =
-    "off means none of the three goes into your journal, whatever your desktop is doing.";
-pub const SETTINGS_ACTIVITY_ONLY: &str = "activity only";
-pub const SETTINGS_ACTIVITY_ONLY_HELP: &str = "desktop activity only, with screen and sound off.";
-pub const SETTINGS_ACTIVITY_PRIVATE_WINDOWS_NOTE: &str = "linux does not classify private windows.";
-pub const SETTINGS_ACTIVITY_EXCLUDE_APPS: &str = "apps left out of desktop activity";
-pub const SETTINGS_ACTIVITY_EXCLUDE_TITLES: &str = "window titles left out of desktop activity";
-pub const SETTINGS_ACTIVITY_ROUTE: &str = "activity route";
-pub const SETTINGS_ACTIVITY_EXPLAIN: &str = "desktop activity is on whenever the solstone app takes in your screen, and pausing pauses both. the solstone app takes in the app, window title, web addresses, and active or idle time you share with it, and all of it goes into your journal.";
-pub const HELP_HEADING: &str = "get help";
-pub const HELP_INTRO: &str = "need a hand? reach us. we're happy to help.";
-pub const HELP_OPEN: &str = "get help";
-pub const HELP_REPORT: &str = "report a problem";
+pub fn window_title() -> &'static str {
+    text!("linux.metadata.name")
+}
+pub fn nav_status() -> &'static str {
+    text!("linux.shared.copy.status")
+}
+pub fn nav_journal() -> &'static str {
+    text!("linux.copy.journal")
+}
+pub fn nav_settings() -> &'static str {
+    text!("linux.copy.settings")
+}
+pub fn nav_help() -> &'static str {
+    text!("linux.copy.help")
+}
+pub fn action_open_journal() -> &'static str {
+    text!("linux.copy.openyourjournal")
+}
+pub fn status_on() -> &'static str {
+    text!("linux.copy.on")
+}
+pub fn status_on_detail() -> &'static str {
+    text!("linux.copy.intakeisrunning")
+}
+pub fn status_screen_waiting() -> &'static str {
+    text!("linux.copy.screenintakeiswaiting")
+}
+pub fn status_screen_waiting_detail() -> &'static str {
+    text!("linux.copy.audiointakecancontinue")
+}
+pub fn status_paused() -> &'static str {
+    text!("linux.copy.paused")
+}
+pub fn status_paused_detail() -> &'static str {
+    text!("linux.copy.intakeispauseduntilyouresume")
+}
+pub fn status_paused_activity_on_detail() -> &'static str {
+    text!("linux.copy.screenandaudioarepauseduntilyouresumedesktop")
+}
+pub fn status_starting() -> &'static str {
+    text!("linux.copy.starting")
+}
+pub fn status_off() -> &'static str {
+    text!("linux.copy.off")
+}
+pub fn status_off_detail() -> &'static str {
+    text!("linux.copy.intakeisntrunning")
+}
+pub fn status_attention() -> &'static str {
+    text!("linux.copy.needsattention")
+}
+pub fn status_unavailable() -> &'static str {
+    text!("linux.copy.statusunavailable")
+}
+pub fn status_unavailable_detail() -> &'static str {
+    text!("linux.copy.couldntreadthesolstoneappsstatuscheckwhethe")
+}
+pub fn status_checking() -> &'static str {
+    text!("linux.copy.checkingstatus")
+}
+pub fn status_intake_label() -> &'static str {
+    text!("linux.copy.intake")
+}
+pub fn status_screen_label() -> &'static str {
+    text!("linux.copy.screen")
+}
+pub fn status_audio_label() -> &'static str {
+    text!("linux.copy.audio")
+}
+pub fn status_journal_label() -> &'static str {
+    text!("linux.copy.journal")
+}
+pub fn status_waiting_label() -> &'static str {
+    text!("linux.copy.waitingtosync")
+}
+pub fn status_attention_label() -> &'static str {
+    text!("linux.copy.needattention")
+}
+pub fn status_last_delivery() -> &'static str {
+    text!("linux.copy.lastdelivery")
+}
+pub fn status_version() -> &'static str {
+    text!("linux.copy.appversion")
+}
+pub fn status_details() -> &'static str {
+    text!("linux.copy.healthdetails")
+}
+pub fn action_pause() -> &'static str {
+    text!("linux.copy.pause")
+}
+pub fn action_pausing() -> &'static str {
+    text!("linux.copy.pausing")
+}
+pub fn action_resume() -> &'static str {
+    text!("linux.copy.resume")
+}
+pub fn action_resuming() -> &'static str {
+    text!("linux.copy.resuming")
+}
+pub fn action_retry() -> &'static str {
+    text!("linux.copy.tryagain")
+}
+pub fn action_check_status() -> &'static str {
+    text!("linux.copy.checkstatus")
+}
+pub fn action_view_journal() -> &'static str {
+    text!("linux.copy.journaldetails")
+}
+pub fn status_pause_failed() -> &'static str {
+    text!("linux.copy.couldntpauseintaketryagain")
+}
+pub fn status_resume_failed() -> &'static str {
+    text!("linux.copy.couldntresumeintaketryagain")
+}
+pub fn browser_open_failed() -> &'static str {
+    text!("linux.copy.couldntopenyourbrowsertryagainoropenyourjo")
+}
+pub fn journal_connected() -> &'static str {
+    text!("linux.shared.copy.connected")
+}
+pub fn journal_syncing() -> &'static str {
+    text!("linux.copy.syncingjournal")
+}
+pub fn journal_offline() -> &'static str {
+    text!("linux.copy.notreachingyourjournalrightnow")
+}
+pub fn journal_offline_detail() -> &'static str {
+    text!("linux.copy.anythingwaitingtosyncstaysonthiscomputerthe")
+}
+pub fn journal_attention_detail() -> &'static str {
+    text!("linux.copy.anythingwaitingsyncstaysthis")
+}
+pub fn journal_not_paired() -> &'static str {
+    text!("linux.copy.notpaired")
+}
+pub fn local_journal_found() -> &'static str {
+    text!("linux.copy.foundjournalthiscomputer")
+}
+pub fn local_journal_connect() -> &'static str {
+    text!("linux.copy.connectjournal")
+}
+pub fn local_journal_connecting() -> &'static str {
+    text!("linux.copy.connecting")
+}
+pub fn local_journal_connected_to() -> &'static str {
+    text!("linux.copy.connected")
+}
+pub fn local_journal_connect_failed() -> &'static str {
+    text!("linux.copy.couldntverifyjournalso")
+}
+pub fn journal_pair_title() -> &'static str {
+    text!("linux.copy.pairadevice")
+}
+pub fn journal_pair_help() -> &'static str {
+    text!("linux.copy.openthenetworkappinyourjournalandgetapairi")
+}
+pub fn journal_link_label() -> &'static str {
+    text!("linux.copy.pairinglink")
+}
+pub fn journal_link_placeholder() -> &'static str {
+    text!("linux.copy.pastepairinglink")
+}
+pub fn action_pair() -> &'static str {
+    text!("linux.copy.pairadevice")
+}
+pub fn action_pairing() -> &'static str {
+    text!("linux.copy.pairing")
+}
+pub fn pairing_empty() -> &'static str {
+    text!("linux.copy.pasteapairinglinkfromyourjournal")
+}
+pub fn pairing_bad_link() -> &'static str {
+    text!("linux.copy.thatpairinglinkisntonethesolstoneappcanrea")
+}
+pub fn pairing_expired() -> &'static str {
+    text!("linux.copy.thepairingwindowclosedgetanewpairinglinkfro")
+}
+pub fn pairing_failed() -> &'static str {
+    text!("linux.copy.pairingdidntgothroughgetanewpairinglinkfro")
+}
+pub fn pairing_held() -> &'static str {
+    text!("linux.copy.waitingforyoutoconfirmyourjournalsmark")
+}
+pub fn pairing_held_detail() -> &'static str {
+    text!("linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo")
+}
+pub fn pairing_held_run() -> &'static str {
+    text!("linux.pair.whenyourereadyrunsolstonelinuxconfirm")
+}
+pub fn pairing_replacement_held_detail() -> &'static str {
+    text!("linux.copy.yourcurrentpairingstaysinuseuntilyouconfirm")
+}
+pub fn pairing_question() -> &'static str {
+    text!("linux.copy.doesthismatchyourjournal")
+}
+pub fn pairing_question_detail() -> &'static str {
+    text!("linux.shared.copy.yourjournalshowsthissamemarkinitsnetworkapp")
+}
+pub fn pairing_confirm() -> &'static str {
+    text!("linux.copy.yesthisismyjournal")
+}
+pub fn pairing_reject() -> &'static str {
+    text!("linux.copy.thatdoesntmatch")
+}
+pub fn pairing_cancel() -> &'static str {
+    text!("linux.copy.cancelpairing")
+}
+pub fn pairing_confirming() -> &'static str {
+    text!("linux.copy.confirming")
+}
+pub fn pairing_success() -> &'static str {
+    text!("linux.copy.thesolstoneappcannowconnecttoyourjournal")
+}
+pub fn pairing_rejected_title() -> &'static str {
+    text!("linux.copy.notpaired")
+}
+pub fn pairing_rejected_detail() -> &'static str {
+    text!("linux.copy.nothingthiscomputerhaskept")
+}
+pub fn pairing_replacement_rejected_title() -> &'static str {
+    text!("linux.copy.newpairingcancelled")
+}
+pub fn pairing_replacement_rejected_detail() -> &'static str {
+    text!("linux.copy.yousaidthismarkdoesntmatchtheoneyourjourna2")
+}
+pub fn pairing_cancelled() -> &'static str {
+    text!("linux.copy.pairingcancelledgetafreshpairinglinkfromyour")
+}
+pub fn pairing_replacement_cancelled() -> &'static str {
+    text!("linux.copy.newpairingcancelledyourcurrentpairingstaysin")
+}
+pub fn pairing_unavailable_title() -> &'static str {
+    text!("linux.copy.couldntverify")
+}
+pub fn pairing_unavailable_detail() -> &'static str {
+    text!("linux.copy.couldntworkoutyourjournalsmarksotheresnot")
+}
+pub fn pairing_replacement_unavailable_detail() -> &'static str {
+    text!("linux.copy.couldntworkoutthismarksotheresnothingtoco")
+}
+pub fn pairing_mark_unavailable() -> &'static str {
+    text!("linux.copy.markunavailable")
+}
+pub fn pairing_new_link() -> &'static str {
+    text!("linux.copy.getafreshlink")
+}
+pub fn pairing_stale() -> &'static str {
+    text!("linux.copy.thepairingchangedwhileyouwerecheckingitsmark")
+}
+pub fn pairing_save_failed() -> &'static str {
+    text!("linux.copy.couldntsaveyouranswertryagain")
+}
+pub fn pairing_outcome_unavailable() -> &'static str {
+    text!("linux.copy.couldntcheckwhetherpairingfinishedcheckstatus")
+}
+pub fn pairing_confirmed_start_failed() -> &'static str {
+    text!("linux.copy.yourjournalsmarkisconfirmedbutthesolstoneap")
+}
+pub fn pairing_confirmed_unavailable() -> &'static str {
+    text!("linux.copy.yourjournalsmarkisconfirmedbutthesolstoneap2")
+}
+pub fn pairing_check_status() -> &'static str {
+    text!("linux.copy.checkstatus")
+}
+pub fn pairing_confirm_action() -> &'static str {
+    text!("linux.copy.confirmyourjournalsmark")
+}
+pub fn journal_mark_heading_label() -> &'static str {
+    text!("linux.copy.mark")
+}
+pub fn journal_mark_heading() -> &'static str {
+    text!("linux.copy.thisisjournal")
+}
+pub fn unknown_journal_seen_through_relay() -> &'static str {
+    text!("linux.health.unknownjournalseenthroughtherelay")
+}
+pub fn unknown_journal_view_details() -> &'static str {
+    text!("linux.copy.viewdetails")
+}
+pub fn unknown_journal_heading() -> &'static str {
+    text!("linux.copy.somethingansweredinsteadjournal")
+}
+pub fn unknown_journal_body_relay() -> &'static str {
+    text!("linux.copy.somethingansweredthiscomputerthrough")
+}
+pub fn unknown_journal_what_answered() -> &'static str {
+    text!("linux.copy.whatanswered")
+}
+pub fn unknown_journal_your_journal() -> &'static str {
+    text!("linux.copy.journal3")
+}
+pub fn unknown_journal_claimed() -> &'static str {
+    text!("linux.health.markclaimed")
+}
+pub fn unknown_journal_no_identity() -> &'static str {
+    text!("linux.health.noidentitypresented")
+}
+pub fn unknown_journal_pair_again() -> &'static str {
+    text!("linux.copy.pairagain")
+}
+pub fn settings_heading() -> &'static str {
+    text!("linux.copy.settings")
+}
+pub fn settings_cursor() -> &'static str {
+    text!("linux.copy.drawcursor")
+}
+pub fn settings_start_paused() -> &'static str {
+    text!("linux.copy.startpaused")
+}
+pub fn settings_segment() -> &'static str {
+    text!("linux.copy.segmentinterval")
+}
+pub fn settings_segment_help() -> &'static str {
+    text!("linux.copy.seconds")
+}
+pub fn settings_restart_help() -> &'static str {
+    text!("linux.copy.thesetakeeffectthenexttimethesolstoneappsta")
+}
+pub fn settings_save() -> &'static str {
+    text!("linux.copy.savesettings")
+}
+pub fn settings_saving() -> &'static str {
+    text!("linux.copy.saving")
+}
+pub fn settings_saved() -> &'static str {
+    text!("linux.copy.settingssaved")
+}
+pub fn settings_restart_needed() -> &'static str {
+    text!("linux.copy.restartneeded")
+}
+pub fn settings_restart_detail() -> &'static str {
+    text!("linux.copy.yoursettingsaresavedrestartthesolstoneappto")
+}
+pub fn settings_restart() -> &'static str {
+    text!("linux.copy.restartthesolstoneapp")
+}
+pub fn settings_restarting() -> &'static str {
+    text!("linux.copy.restarting")
+}
+pub fn settings_restarted() -> &'static str {
+    text!("linux.copy.thesolstoneapprestartedwithyoursavedsettings")
+}
+pub fn settings_restart_failed() -> &'static str {
+    text!("linux.copy.yoursettingsaresavedbutthesolstoneappcouldn")
+}
+pub fn settings_restart_recovery_failed() -> &'static str {
+    text!("linux.copy.couldntrestartthesolstoneappcheckthedetails")
+}
+pub fn settings_save_failed() -> &'static str {
+    text!("linux.copy.couldntsaveyoursettingscheckthedetailsthent")
+}
+pub fn settings_save_incomplete() -> &'static str {
+    text!("linux.copy.couldntsaveallyoursettingsyoureditsarestill")
+}
+pub fn settings_save_unavailable() -> &'static str {
+    text!("linux.copy.couldntcheckwhetherallyoursettingsweresaved")
+}
+pub fn settings_load_failed() -> &'static str {
+    text!("linux.copy.couldntreadyoursettingstryagainbeforemaking")
+}
+pub fn settings_segment_invalid() -> &'static str {
+    text!("linux.copy.enterawholenumbergreaterthan0")
+}
+pub fn settings_file() -> &'static str {
+    text!("linux.copy.configfile")
+}
+pub fn settings_conflict() -> &'static str {
+    text!("linux.copy.yoursettingschangedoutsidethiswindowreadthem")
+}
+pub fn settings_reload() -> &'static str {
+    text!("linux.copy.readsettingsagain")
+}
+pub fn activity_write_failed() -> &'static str {
+    text!("linux.copy.couldntsaveactivityintaketryagain")
+}
+pub fn settings_activity_source() -> &'static str {
+    text!("linux.copy.desktopactivity")
+}
+pub fn settings_activity_through_pause() -> &'static str {
+    text!("linux.copy.keepdesktopactivityonwhilepaused")
+}
+pub fn settings_activity_through_pause_help() -> &'static str {
+    text!("linux.copy.screenandaudiostillpausedesktopactivitykeeps")
+}
+pub fn settings_activity_titles() -> &'static str {
+    text!("linux.copy.windowtitles")
+}
+pub fn settings_activity_urls() -> &'static str {
+    text!("linux.copy.webaddressesturnsondesktopaccessibility")
+}
+pub fn settings_terminal() -> &'static str {
+    text!("linux.copy.terminal")
+}
+pub fn settings_terminal_help() -> &'static str {
+    text!("linux.copy.takestmuxsessionsallit")
+}
+pub fn settings_move_tmux_title() -> &'static str {
+    text!("linux.copy.movesolstonetmux")
+}
+pub fn settings_move_tmux_body() -> &'static str {
+    text!("linux.copy.thismovessolstonetmuxinto")
+}
+pub fn settings_move_tmux_confirm() -> &'static str {
+    text!("linux.copy.moveit")
+}
+pub fn settings_move_tmux_cancel() -> &'static str {
+    text!("linux.panel.notnow")
+}
+pub fn settings_desktop_capture() -> &'static str {
+    text!("linux.copy.screenaudiodesktopactivity")
+}
+pub fn settings_desktop_capture_help() -> &'static str {
+    text!("linux.copy.offmeansnonethreegoes")
+}
+pub fn settings_activity_only() -> &'static str {
+    text!("linux.copy.activityonly")
+}
+pub fn settings_activity_only_help() -> &'static str {
+    text!("linux.copy.settingsactivityonlyhelp")
+}
+pub fn settings_activity_private_windows_note() -> &'static str {
+    text!("linux.copy.linuxdoesnotclassifyprivatewindows")
+}
+pub fn settings_activity_exclude_apps() -> &'static str {
+    text!("linux.copy.appsleftoutofdesktopactivity")
+}
+pub fn settings_activity_exclude_titles() -> &'static str {
+    text!("linux.copy.windowtitlesleftoutofdesktopactivity")
+}
+pub fn settings_activity_route() -> &'static str {
+    text!("linux.copy.activityroute")
+}
+pub fn settings_activity_explain() -> &'static str {
+    text!("linux.copy.desktopactivityisonwheneverthesolstoneapptak")
+}
+pub fn help_heading() -> &'static str {
+    text!("linux.copy.gethelp")
+}
+pub fn help_intro() -> &'static str {
+    text!("linux.copy.needahandreachahumanwerehappytohelp")
+}
+pub fn help_open() -> &'static str {
+    text!("linux.copy.gethelp")
+}
+pub fn help_report() -> &'static str {
+    text!("linux.copy.helpreport")
+}
 pub const HELP_EMAIL: &str = "support@solstone.app";
 
 /// The help page's actions, in the order they are shown.
 pub fn help_action_keys() -> [CopyKey; 3] {
     [CopyKey::HelpOpen, CopyKey::HelpReport, CopyKey::HelpEmail]
 }
-pub const LOGS_TITLE: &str = "recent logs";
-pub const LOGS_INTRO: &str = "read the solstone app's recent logs before saving a copy for a support report. nothing is sent from here.";
-pub const LOGS_READ: &str = "read recent logs";
-pub const LOGS_READING: &str = "reading logs…";
-pub const LOGS_READY: &str = "read the logs below, then choose whether to save a copy.";
-pub const LOGS_PARTIAL: &str =
-    "available logs are shown below. check the notes for gaps before saving a copy.";
-pub const LOGS_EMPTY: &str = "no recent logs are available yet. try again after using the app.";
-pub const LOGS_MISSING: &str = "no log files are available yet. try again after using the app.";
-pub const LOGS_UNREADABLE: &str = "couldn't read the log files. try again.";
-pub const LOGS_READ_FAILED: &str = "couldn't read the logs. try again.";
-pub const LOGS_SAVE: &str = "save a copy…";
-pub const LOGS_SAVE_HELP: &str = "saving writes exactly the preview above.";
-pub const LOGS_SAVING: &str = "saving copy…";
-pub const LOGS_SAVED: &str = "copy saved.";
-pub const LOGS_SAVE_FAILED: &str = "couldn't save the copy. try saving to another folder.";
+pub fn logs_title() -> &'static str {
+    text!("linux.copy.recentlogs")
+}
+pub fn logs_intro() -> &'static str {
+    text!("linux.copy.readthesolstoneappsrecentlogsbeforesavinga")
+}
+pub fn logs_read() -> &'static str {
+    text!("linux.copy.readrecentlogs")
+}
+pub fn logs_reading() -> &'static str {
+    text!("linux.copy.readinglogs")
+}
+pub fn logs_ready() -> &'static str {
+    text!("linux.copy.readthelogsbelowthenchoosewhethertosaveaco")
+}
+pub fn logs_partial() -> &'static str {
+    text!("linux.copy.availablelogsareshownbelowcheckthenotesforg")
+}
+pub fn logs_empty() -> &'static str {
+    text!("linux.copy.norecentlogsareavailableyettryagainafterusi")
+}
+pub fn logs_missing() -> &'static str {
+    text!("linux.copy.nologfilesareavailableyettryagainafterusing")
+}
+pub fn logs_unreadable() -> &'static str {
+    text!("linux.copy.couldntreadthelogfilestryagain")
+}
+pub fn logs_read_failed() -> &'static str {
+    text!("linux.copy.couldntreadthelogstryagain")
+}
+pub fn logs_save() -> &'static str {
+    text!("linux.copy.saveacopy")
+}
+pub fn logs_save_help() -> &'static str {
+    text!("linux.copy.savingwritesexactlythepreviewabove")
+}
+pub fn logs_saving() -> &'static str {
+    text!("linux.copy.savingcopy")
+}
+pub fn logs_saved() -> &'static str {
+    text!("linux.copy.copysaved")
+}
+pub fn logs_save_failed() -> &'static str {
+    text!("linux.copy.couldntsavethecopytrysavingtoanotherfolder")
+}
 pub const LOGS_FILENAME: &str = "solstone-logs.txt";
-pub const ABOUT_HEADING: &str = "about solstone";
-pub const ABOUT_MADE_BY: &str = "made by sol pbc.";
-pub const QUIT: &str = "quit solstone";
-pub const QUIT_FAILED: &str = "couldn't stop the solstone app. try again.";
-pub const UPDATES_JOURNAL_VERSION: &str = "journal version";
-pub const UPDATES_HOW: &str =
-    "the app doesn't update itself. to update, run the solstone installer again with --upgrade.";
-pub const ACTION_START: &str = "start the solstone app";
-pub const ACTION_STARTING: &str = "starting…";
-pub const STATUS_START_DISCLOSURE: &str = "this starts the solstone app now and at sign-in. opening this window alone doesn't start intake.";
-pub const STATUS_START_WAITING: &str = "waiting for the solstone app to answer. if your desktop asks what to share, make your choice there.";
-pub const STATUS_START_UNAVAILABLE: &str =
-    "the solstone app hasn't answered yet. check for a desktop sharing prompt, then check status.";
-pub const STATUS_START_FAILED: &str =
-    "couldn't start the solstone app. check the details, then try again.";
-pub const LAUNCH_FAILURE_TITLE: &str = "couldn't open the solstone window";
-pub const LAUNCH_RUNTIME_UNAVAILABLE_TEMPLATE: &str = "the window needs GTK 4.6 or newer. couldn't load its desktop libraries. open {path} for details.";
-pub const LAUNCH_FAILED_TEMPLATE: &str = "the window couldn't start. open {path} for details.";
-pub const LAUNCH_FAILED_WITHOUT_DIAGNOSTIC: &str =
-    "the window couldn't start. try opening it again.";
-pub const LAUNCH_RETAINED_DIAGNOSTIC_TEMPLATE: &str =
-    "couldn't open the solstone window. open {path} for details.";
+pub fn about_heading() -> &'static str {
+    text!("linux.copy.aboutheading")
+}
+pub fn about_made_by() -> &'static str {
+    text!("linux.copy.aboutmadeby")
+}
+pub fn quit() -> &'static str {
+    text!("linux.copy.quit")
+}
+pub fn quit_failed() -> &'static str {
+    text!("linux.copy.quitfailed")
+}
+pub fn updates_journal_version() -> &'static str {
+    text!("linux.copy.updatesjournalversion")
+}
+pub fn updates_how() -> &'static str {
+    text!("linux.copy.updateshow")
+}
+pub fn action_start() -> &'static str {
+    text!("linux.copy.startthesolstoneapp")
+}
+pub fn action_starting() -> &'static str {
+    text!("linux.copy.starting")
+}
+pub fn status_start_disclosure() -> &'static str {
+    text!("linux.copy.thisstartsthesolstoneappnowandatsigninopen")
+}
+pub fn status_start_waiting() -> &'static str {
+    text!("linux.copy.waitingforthesolstoneapptoanswerifyourdeskt")
+}
+pub fn status_start_unavailable() -> &'static str {
+    text!("linux.copy.thesolstoneapphasntansweredyetcheckforades")
+}
+pub fn status_start_failed() -> &'static str {
+    text!("linux.copy.couldntstartthesolstoneappcheckthedetailsth")
+}
+pub fn launch_failure_title() -> &'static str {
+    text!("linux.copy.couldntopenthesolstonewindow")
+}
+pub fn launch_failed_without_diagnostic() -> &'static str {
+    text!("linux.copy.thewindowcouldntstarttryopeningitagain")
+}
 
-pub const NOT_YET: &str = "not yet";
+pub fn not_yet() -> &'static str {
+    text!("linux.copy.notyet")
+}
 
 pub enum PluralKey {
     Attention,
@@ -388,13 +829,15 @@ pub enum PluralKey {
 }
 
 pub fn plural_copy(key: PluralKey, count: usize, formatted_count: &str) -> String {
-    let template = match (key, count == 1) {
-        (PluralKey::Attention, true) => "{count} needs attention",
-        (PluralKey::Attention, false) => "{count} need attention",
-        (PluralKey::OmittedBytes, true) => "\n[omitted {count} byte]\n",
-        (PluralKey::OmittedBytes, false) => "\n[omitted {count} bytes]\n",
+    let id = match key {
+        PluralKey::Attention => "linux.copy.attentioncount",
+        PluralKey::OmittedBytes => "linux.copy.omittedbytes",
     };
-    template.replace("{count}", formatted_count)
+    solstone_i18n::cardinal(
+        id,
+        count.min(i64::MAX as usize) as i64,
+        &[("formatted", solstone_i18n::Value::String(formatted_count))],
+    )
 }
 
 #[cfg(test)]
@@ -416,12 +859,16 @@ pub enum ValueKey {
     Version,
 }
 pub fn value_copy(key: ValueKey, value: &str) -> String {
-    let template = match key {
-        ValueKey::Waiting => "waiting to sync: {value}",
-        ValueKey::LastDelivery => "last delivery: {value}",
-        ValueKey::Version => "app version: {value}",
+    let id = match key {
+        ValueKey::Waiting => "linux.copy.waitingvalue",
+        ValueKey::LastDelivery => "linux.copy.lastdeliveryvalue",
+        ValueKey::Version => "linux.copy.versionvalue",
     };
-    template.replace("{value}", value)
+    solstone_i18n::render(
+        solstone_i18n::locale(),
+        id,
+        &[("value", solstone_i18n::Value::String(value))],
+    )
 }
 
 pub fn journal_mark_speech(tint1: &str, tint2: &str, word1: &str, word2: &str) -> String {
@@ -433,27 +880,23 @@ pub fn journal_mark_label(word1: &str, word2: &str) -> String {
 }
 
 pub fn unknown_journal_seen_at(address: &str) -> String {
-    format!("unknown journal seen at {address}")
+    message!("linux.health.unknownjournalseenatx", "address" => address)
 }
 
 pub fn unknown_journal_body_direct(address: &str) -> String {
-    format!(
-        "something answered this computer at {address}, and it isn't the journal this computer is paired with. this could be another device now using that address, or your journal, if its identity was reset. if the mark under \"what answered\" matches the one your journal shows now, pair this computer again."
-    )
+    message!("linux.copy.somethingansweredthiscomputerat", "address" => address)
 }
 
 pub fn launch_runtime_unavailable(path: &str) -> String {
-    format!(
-        "the window needs GTK 4.6 or newer. couldn't load its desktop libraries. open {path} for details."
-    )
+    message!("linux.copy.thewindowneedsgtk46ornewercouldntloadits", "path" => path)
 }
 
 pub fn launch_failed(path: &str) -> String {
-    format!("the window couldn't start. open {path} for details.")
+    message!("linux.copy.thewindowcouldntstartopenxfordetails", "path" => path)
 }
 
 pub fn launch_retained_diagnostic(path: &str) -> String {
-    format!("couldn't open the solstone window. open {path} for details.")
+    message!("linux.copy.couldntopenthesolstonewindowopenxfordetails", "path" => path)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -649,205 +1092,223 @@ pub enum CopyKey {
 impl CopyKey {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::WindowTitle => WINDOW_TITLE,
-            Self::NavStatus => NAV_STATUS,
-            Self::NavJournal => NAV_JOURNAL,
-            Self::NavSettings => NAV_SETTINGS,
-            Self::NavHelp => NAV_HELP,
-            Self::ActionOpenJournal => ACTION_OPEN_JOURNAL,
-            Self::StatusOn => STATUS_ON,
-            Self::StatusOnDetail => STATUS_ON_DETAIL,
-            Self::StatusScreenWaiting => STATUS_SCREEN_WAITING,
-            Self::StatusScreenWaitingDetail => STATUS_SCREEN_WAITING_DETAIL,
-            Self::StatusPaused => STATUS_PAUSED,
-            Self::StatusPausedDetail => STATUS_PAUSED_DETAIL,
-            Self::StatusPausedActivityOnDetail => STATUS_PAUSED_ACTIVITY_ON_DETAIL,
-            Self::StatusStarting => STATUS_STARTING,
-            Self::StatusOff => STATUS_OFF,
-            Self::StatusOffDetail => STATUS_OFF_DETAIL,
-            Self::StatusAttention => STATUS_ATTENTION,
-            Self::StatusUnavailable => STATUS_UNAVAILABLE,
-            Self::StatusUnavailableDetail => STATUS_UNAVAILABLE_DETAIL,
-            Self::StatusChecking => STATUS_CHECKING,
-            Self::StatusIntakeLabel => STATUS_INTAKE_LABEL,
-            Self::StatusScreenLabel => STATUS_SCREEN_LABEL,
-            Self::StatusAudioLabel => STATUS_AUDIO_LABEL,
-            Self::StatusJournalLabel => STATUS_JOURNAL_LABEL,
-            Self::StatusWaitingLabel => STATUS_WAITING_LABEL,
-            Self::StatusAttentionLabel => STATUS_ATTENTION_LABEL,
-            Self::StatusLastDelivery => STATUS_LAST_DELIVERY,
-            Self::StatusVersion => STATUS_VERSION,
-            Self::StatusDetails => STATUS_DETAILS,
-            Self::ActionPause => ACTION_PAUSE,
-            Self::ActionPausing => ACTION_PAUSING,
-            Self::ActionResume => ACTION_RESUME,
-            Self::ActionResuming => ACTION_RESUMING,
-            Self::ActionRetry => ACTION_RETRY,
-            Self::ActionCheckStatus => ACTION_CHECK_STATUS,
-            Self::ActionViewJournal => ACTION_VIEW_JOURNAL,
-            Self::StatusPauseFailed => STATUS_PAUSE_FAILED,
-            Self::StatusResumeFailed => STATUS_RESUME_FAILED,
+            Self::WindowTitle => window_title(),
+            Self::NavStatus => nav_status(),
+            Self::NavJournal => nav_journal(),
+            Self::NavSettings => nav_settings(),
+            Self::NavHelp => nav_help(),
+            Self::ActionOpenJournal => action_open_journal(),
+            Self::StatusOn => status_on(),
+            Self::StatusOnDetail => status_on_detail(),
+            Self::StatusScreenWaiting => status_screen_waiting(),
+            Self::StatusScreenWaitingDetail => status_screen_waiting_detail(),
+            Self::StatusPaused => status_paused(),
+            Self::StatusPausedDetail => status_paused_detail(),
+            Self::StatusPausedActivityOnDetail => status_paused_activity_on_detail(),
+            Self::StatusStarting => status_starting(),
+            Self::StatusOff => status_off(),
+            Self::StatusOffDetail => status_off_detail(),
+            Self::StatusAttention => status_attention(),
+            Self::StatusUnavailable => status_unavailable(),
+            Self::StatusUnavailableDetail => status_unavailable_detail(),
+            Self::StatusChecking => status_checking(),
+            Self::StatusIntakeLabel => status_intake_label(),
+            Self::StatusScreenLabel => status_screen_label(),
+            Self::StatusAudioLabel => status_audio_label(),
+            Self::StatusJournalLabel => status_journal_label(),
+            Self::StatusWaitingLabel => status_waiting_label(),
+            Self::StatusAttentionLabel => status_attention_label(),
+            Self::StatusLastDelivery => status_last_delivery(),
+            Self::StatusVersion => status_version(),
+            Self::StatusDetails => status_details(),
+            Self::ActionPause => action_pause(),
+            Self::ActionPausing => action_pausing(),
+            Self::ActionResume => action_resume(),
+            Self::ActionResuming => action_resuming(),
+            Self::ActionRetry => action_retry(),
+            Self::ActionCheckStatus => action_check_status(),
+            Self::ActionViewJournal => action_view_journal(),
+            Self::StatusPauseFailed => status_pause_failed(),
+            Self::StatusResumeFailed => status_resume_failed(),
             Self::StatusPauseUnavailable => {
-                "couldn't check whether intake paused. check status before trying again."
+                text!("linux.copy.couldntcheckwhetherintakepausedcheckstatusbe")
             }
             Self::StatusResumeUnavailable => {
-                "couldn't check whether intake resumed. check status before trying again."
+                text!("linux.copy.couldntcheckwhetherintakeresumedcheckstatusb")
             }
-            Self::BrowserOpenFailed => BROWSER_OPEN_FAILED,
-            Self::JournalConnected => JOURNAL_CONNECTED,
-            Self::JournalSyncing => JOURNAL_SYNCING,
-            Self::JournalOffline => JOURNAL_OFFLINE,
-            Self::JournalOfflineDetail => JOURNAL_OFFLINE_DETAIL,
-            Self::JournalAttentionDetail => JOURNAL_ATTENTION_DETAIL,
-            Self::JournalNotPaired => JOURNAL_NOT_PAIRED,
-            Self::JournalPairTitle => JOURNAL_PAIR_TITLE,
-            Self::JournalPairHelp => JOURNAL_PAIR_HELP,
-            Self::LocalJournalFound => LOCAL_JOURNAL_FOUND,
-            Self::LocalJournalConnect => LOCAL_JOURNAL_CONNECT,
-            Self::LocalJournalConnecting => LOCAL_JOURNAL_CONNECTING,
-            Self::LocalJournalConnectedTo => LOCAL_JOURNAL_CONNECTED_TO,
-            Self::LocalJournalConnectFailed => LOCAL_JOURNAL_CONNECT_FAILED,
-            Self::JournalLinkLabel => JOURNAL_LINK_LABEL,
-            Self::JournalLinkPlaceholder => JOURNAL_LINK_PLACEHOLDER,
-            Self::ActionPair => ACTION_PAIR,
-            Self::ActionPairing => ACTION_PAIRING,
-            Self::PairingEmpty => PAIRING_EMPTY,
-            Self::PairingBadLink => PAIRING_BAD_LINK,
-            Self::PairingExpired => PAIRING_EXPIRED,
-            Self::PairingFailed => PAIRING_FAILED,
-            Self::PairingHeld => PAIRING_HELD,
-            Self::PairingHeldDetail => PAIRING_HELD_DETAIL,
-            Self::PairingHeldRun => PAIRING_HELD_RUN,
-            Self::PairingReplacementHeldDetail => PAIRING_REPLACEMENT_HELD_DETAIL,
-            Self::PairingQuestion => PAIRING_QUESTION,
-            Self::PairingQuestionDetail => PAIRING_QUESTION_DETAIL,
-            Self::PairingConfirm => PAIRING_CONFIRM,
-            Self::PairingReject => PAIRING_REJECT,
-            Self::PairingCancel => PAIRING_CANCEL,
-            Self::PairingConfirming => PAIRING_CONFIRMING,
-            Self::PairingSuccess => PAIRING_SUCCESS,
-            Self::PairingRejectedTitle => PAIRING_REJECTED_TITLE,
-            Self::PairingRejectedDetail => PAIRING_REJECTED_DETAIL,
-            Self::PairingReplacementRejectedTitle => PAIRING_REPLACEMENT_REJECTED_TITLE,
-            Self::PairingReplacementRejectedDetail => PAIRING_REPLACEMENT_REJECTED_DETAIL,
-            Self::PairingCancelled => PAIRING_CANCELLED,
-            Self::PairingReplacementCancelled => PAIRING_REPLACEMENT_CANCELLED,
-            Self::PairingUnavailableTitle => PAIRING_UNAVAILABLE_TITLE,
-            Self::PairingUnavailableDetail => PAIRING_UNAVAILABLE_DETAIL,
-            Self::PairingReplacementUnavailableDetail => PAIRING_REPLACEMENT_UNAVAILABLE_DETAIL,
-            Self::PairingMarkUnavailable => PAIRING_MARK_UNAVAILABLE,
-            Self::PairingNewLink => PAIRING_NEW_LINK,
-            Self::PairingStale => PAIRING_STALE,
-            Self::PairingSaveFailed => PAIRING_SAVE_FAILED,
-            Self::PairingOutcomeUnavailable => PAIRING_OUTCOME_UNAVAILABLE,
-            Self::PairingConfirmedStartFailed => PAIRING_CONFIRMED_START_FAILED,
-            Self::PairingConfirmedUnavailable => PAIRING_CONFIRMED_UNAVAILABLE,
-            Self::PairingCheckStatus => PAIRING_CHECK_STATUS,
-            Self::PairingConfirmAction => PAIRING_CONFIRM_ACTION,
-            Self::JournalMarkLabel => JOURNAL_MARK_LABEL,
-            Self::JournalMarkHeading => JOURNAL_MARK_HEADING,
-            Self::SettingsHeading => SETTINGS_HEADING,
-            Self::SettingsCursor => SETTINGS_CURSOR,
-            Self::SettingsStartPaused => SETTINGS_START_PAUSED,
-            Self::SettingsSegment => SETTINGS_SEGMENT,
-            Self::SettingsSegmentHelp => SETTINGS_SEGMENT_HELP,
-            Self::SettingsRestartHelp => SETTINGS_RESTART_HELP,
-            Self::SettingsSave => SETTINGS_SAVE,
-            Self::SettingsSaving => SETTINGS_SAVING,
-            Self::SettingsSaved => SETTINGS_SAVED,
-            Self::SettingsRestartNeeded => SETTINGS_RESTART_NEEDED,
-            Self::SettingsRestartDetail => SETTINGS_RESTART_DETAIL,
-            Self::SettingsRestart => SETTINGS_RESTART,
-            Self::SettingsRestarting => SETTINGS_RESTARTING,
-            Self::SettingsRestarted => SETTINGS_RESTARTED,
-            Self::SettingsRestartFailed => SETTINGS_RESTART_FAILED,
-            Self::SettingsRestartRecoveryFailed => SETTINGS_RESTART_RECOVERY_FAILED,
-            Self::SettingsSaveFailed => SETTINGS_SAVE_FAILED,
-            Self::SettingsSaveIncomplete => SETTINGS_SAVE_INCOMPLETE,
-            Self::SettingsSaveUnavailable => SETTINGS_SAVE_UNAVAILABLE,
-            Self::SettingsLoadFailed => SETTINGS_LOAD_FAILED,
-            Self::SettingsSegmentInvalid => SETTINGS_SEGMENT_INVALID,
-            Self::SettingsFile => SETTINGS_FILE,
-            Self::SettingsConflict => SETTINGS_CONFLICT,
-            Self::SettingsReload => SETTINGS_RELOAD,
-            Self::ActivityWriteFailed => ACTIVITY_WRITE_FAILED,
-            Self::SettingsActivitySource => SETTINGS_ACTIVITY_SOURCE,
-            Self::SettingsActivityThroughPause => SETTINGS_ACTIVITY_THROUGH_PAUSE,
-            Self::SettingsActivityThroughPauseHelp => SETTINGS_ACTIVITY_THROUGH_PAUSE_HELP,
-            Self::SettingsActivityTitles => SETTINGS_ACTIVITY_TITLES,
-            Self::SettingsActivityUrls => SETTINGS_ACTIVITY_URLS,
-            Self::SettingsTerminal => SETTINGS_TERMINAL,
-            Self::SettingsTerminalHelp => SETTINGS_TERMINAL_HELP,
-            Self::SettingsMoveTmuxTitle => SETTINGS_MOVE_TMUX_TITLE,
-            Self::SettingsMoveTmuxBody => SETTINGS_MOVE_TMUX_BODY,
-            Self::SettingsMoveTmuxConfirm => SETTINGS_MOVE_TMUX_CONFIRM,
-            Self::SettingsMoveTmuxCancel => SETTINGS_MOVE_TMUX_CANCEL,
-            Self::SettingsDesktopCapture => SETTINGS_DESKTOP_CAPTURE,
-            Self::SettingsDesktopCaptureHelp => SETTINGS_DESKTOP_CAPTURE_HELP,
-            Self::SettingsActivityOnly => SETTINGS_ACTIVITY_ONLY,
-            Self::SettingsActivityOnlyHelp => SETTINGS_ACTIVITY_ONLY_HELP,
-            Self::SettingsActivityPrivateWindowsNote => SETTINGS_ACTIVITY_PRIVATE_WINDOWS_NOTE,
-            Self::SettingsActivityExcludeApps => SETTINGS_ACTIVITY_EXCLUDE_APPS,
-            Self::SettingsActivityExcludeTitles => SETTINGS_ACTIVITY_EXCLUDE_TITLES,
-            Self::SettingsActivityRoute => SETTINGS_ACTIVITY_ROUTE,
-            Self::SettingsActivityExplain => SETTINGS_ACTIVITY_EXPLAIN,
-            Self::HelpHeading => HELP_HEADING,
-            Self::HelpIntro => HELP_INTRO,
-            Self::HelpOpen => HELP_OPEN,
-            Self::HelpReport => HELP_REPORT,
+            Self::BrowserOpenFailed => browser_open_failed(),
+            Self::JournalConnected => journal_connected(),
+            Self::JournalSyncing => journal_syncing(),
+            Self::JournalOffline => journal_offline(),
+            Self::JournalOfflineDetail => journal_offline_detail(),
+            Self::JournalAttentionDetail => journal_attention_detail(),
+            Self::JournalNotPaired => journal_not_paired(),
+            Self::JournalPairTitle => journal_pair_title(),
+            Self::JournalPairHelp => journal_pair_help(),
+            Self::LocalJournalFound => local_journal_found(),
+            Self::LocalJournalConnect => local_journal_connect(),
+            Self::LocalJournalConnecting => local_journal_connecting(),
+            Self::LocalJournalConnectedTo => local_journal_connected_to(),
+            Self::LocalJournalConnectFailed => local_journal_connect_failed(),
+            Self::JournalLinkLabel => journal_link_label(),
+            Self::JournalLinkPlaceholder => journal_link_placeholder(),
+            Self::ActionPair => action_pair(),
+            Self::ActionPairing => action_pairing(),
+            Self::PairingEmpty => pairing_empty(),
+            Self::PairingBadLink => pairing_bad_link(),
+            Self::PairingExpired => pairing_expired(),
+            Self::PairingFailed => pairing_failed(),
+            Self::PairingHeld => pairing_held(),
+            Self::PairingHeldDetail => pairing_held_detail(),
+            Self::PairingHeldRun => pairing_held_run(),
+            Self::PairingReplacementHeldDetail => pairing_replacement_held_detail(),
+            Self::PairingQuestion => pairing_question(),
+            Self::PairingQuestionDetail => pairing_question_detail(),
+            Self::PairingConfirm => pairing_confirm(),
+            Self::PairingReject => pairing_reject(),
+            Self::PairingCancel => pairing_cancel(),
+            Self::PairingConfirming => pairing_confirming(),
+            Self::PairingSuccess => pairing_success(),
+            Self::PairingRejectedTitle => pairing_rejected_title(),
+            Self::PairingRejectedDetail => pairing_rejected_detail(),
+            Self::PairingReplacementRejectedTitle => pairing_replacement_rejected_title(),
+            Self::PairingReplacementRejectedDetail => pairing_replacement_rejected_detail(),
+            Self::PairingCancelled => pairing_cancelled(),
+            Self::PairingReplacementCancelled => pairing_replacement_cancelled(),
+            Self::PairingUnavailableTitle => pairing_unavailable_title(),
+            Self::PairingUnavailableDetail => pairing_unavailable_detail(),
+            Self::PairingReplacementUnavailableDetail => pairing_replacement_unavailable_detail(),
+            Self::PairingMarkUnavailable => pairing_mark_unavailable(),
+            Self::PairingNewLink => pairing_new_link(),
+            Self::PairingStale => pairing_stale(),
+            Self::PairingSaveFailed => pairing_save_failed(),
+            Self::PairingOutcomeUnavailable => pairing_outcome_unavailable(),
+            Self::PairingConfirmedStartFailed => pairing_confirmed_start_failed(),
+            Self::PairingConfirmedUnavailable => pairing_confirmed_unavailable(),
+            Self::PairingCheckStatus => pairing_check_status(),
+            Self::PairingConfirmAction => pairing_confirm_action(),
+            Self::JournalMarkLabel => journal_mark_heading_label(),
+            Self::JournalMarkHeading => journal_mark_heading(),
+            Self::SettingsHeading => settings_heading(),
+            Self::SettingsCursor => settings_cursor(),
+            Self::SettingsStartPaused => settings_start_paused(),
+            Self::SettingsSegment => settings_segment(),
+            Self::SettingsSegmentHelp => settings_segment_help(),
+            Self::SettingsRestartHelp => settings_restart_help(),
+            Self::SettingsSave => settings_save(),
+            Self::SettingsSaving => settings_saving(),
+            Self::SettingsSaved => settings_saved(),
+            Self::SettingsRestartNeeded => settings_restart_needed(),
+            Self::SettingsRestartDetail => settings_restart_detail(),
+            Self::SettingsRestart => settings_restart(),
+            Self::SettingsRestarting => settings_restarting(),
+            Self::SettingsRestarted => settings_restarted(),
+            Self::SettingsRestartFailed => settings_restart_failed(),
+            Self::SettingsRestartRecoveryFailed => settings_restart_recovery_failed(),
+            Self::SettingsSaveFailed => settings_save_failed(),
+            Self::SettingsSaveIncomplete => settings_save_incomplete(),
+            Self::SettingsSaveUnavailable => settings_save_unavailable(),
+            Self::SettingsLoadFailed => settings_load_failed(),
+            Self::SettingsSegmentInvalid => settings_segment_invalid(),
+            Self::SettingsFile => settings_file(),
+            Self::SettingsConflict => settings_conflict(),
+            Self::SettingsReload => settings_reload(),
+            Self::ActivityWriteFailed => activity_write_failed(),
+            Self::SettingsActivitySource => settings_activity_source(),
+            Self::SettingsActivityThroughPause => settings_activity_through_pause(),
+            Self::SettingsActivityThroughPauseHelp => settings_activity_through_pause_help(),
+            Self::SettingsActivityTitles => settings_activity_titles(),
+            Self::SettingsActivityUrls => settings_activity_urls(),
+            Self::SettingsTerminal => settings_terminal(),
+            Self::SettingsTerminalHelp => settings_terminal_help(),
+            Self::SettingsMoveTmuxTitle => settings_move_tmux_title(),
+            Self::SettingsMoveTmuxBody => settings_move_tmux_body(),
+            Self::SettingsMoveTmuxConfirm => settings_move_tmux_confirm(),
+            Self::SettingsMoveTmuxCancel => settings_move_tmux_cancel(),
+            Self::SettingsDesktopCapture => settings_desktop_capture(),
+            Self::SettingsDesktopCaptureHelp => settings_desktop_capture_help(),
+            Self::SettingsActivityOnly => settings_activity_only(),
+            Self::SettingsActivityOnlyHelp => settings_activity_only_help(),
+            Self::SettingsActivityPrivateWindowsNote => settings_activity_private_windows_note(),
+            Self::SettingsActivityExcludeApps => settings_activity_exclude_apps(),
+            Self::SettingsActivityExcludeTitles => settings_activity_exclude_titles(),
+            Self::SettingsActivityRoute => settings_activity_route(),
+            Self::SettingsActivityExplain => settings_activity_explain(),
+            Self::HelpHeading => help_heading(),
+            Self::HelpIntro => help_intro(),
+            Self::HelpOpen => help_open(),
+            Self::HelpReport => help_report(),
             Self::HelpEmail => HELP_EMAIL,
-            Self::LogsTitle => LOGS_TITLE,
-            Self::LogsIntro => LOGS_INTRO,
-            Self::LogsRead => LOGS_READ,
-            Self::LogsReading => LOGS_READING,
-            Self::LogsReady => LOGS_READY,
-            Self::LogsPartial => LOGS_PARTIAL,
-            Self::LogsEmpty => LOGS_EMPTY,
-            Self::LogsMissing => LOGS_MISSING,
-            Self::LogsUnreadable => LOGS_UNREADABLE,
-            Self::LogsReadFailed => LOGS_READ_FAILED,
-            Self::LogsSave => LOGS_SAVE,
-            Self::LogsSaveHelp => LOGS_SAVE_HELP,
-            Self::LogsSaving => LOGS_SAVING,
-            Self::LogsSaved => LOGS_SAVED,
-            Self::LogsSaveFailed => LOGS_SAVE_FAILED,
+            Self::LogsTitle => logs_title(),
+            Self::LogsIntro => logs_intro(),
+            Self::LogsRead => logs_read(),
+            Self::LogsReading => logs_reading(),
+            Self::LogsReady => logs_ready(),
+            Self::LogsPartial => logs_partial(),
+            Self::LogsEmpty => logs_empty(),
+            Self::LogsMissing => logs_missing(),
+            Self::LogsUnreadable => logs_unreadable(),
+            Self::LogsReadFailed => logs_read_failed(),
+            Self::LogsSave => logs_save(),
+            Self::LogsSaveHelp => logs_save_help(),
+            Self::LogsSaving => logs_saving(),
+            Self::LogsSaved => logs_saved(),
+            Self::LogsSaveFailed => logs_save_failed(),
             Self::LogsFilename => LOGS_FILENAME,
-            Self::LogsGap => "\n[the log preview was limited; more log text may be available]\n",
-            Self::MarkGenericFirst => "your",
-            Self::MarkGenericSecond => "journal",
-            Self::MarkGenericSpeech => "your journal, not set up yet",
-            Self::MarkUnavailableFirst => "mark",
-            Self::MarkUnavailableSecond => "unavailable",
-            Self::MarkUnavailableSpeech => "your journal's mark, unavailable right now",
-            Self::MarkNotPresentedFirst => "not",
-            Self::MarkNotPresentedSecond => "presented",
-            Self::UnknownJournalSeenThroughRelay => UNKNOWN_JOURNAL_SEEN_THROUGH_RELAY,
-            Self::UnknownJournalViewDetails => UNKNOWN_JOURNAL_VIEW_DETAILS,
-            Self::UnknownJournalHeading => UNKNOWN_JOURNAL_HEADING,
-            Self::UnknownJournalBodyRelay => UNKNOWN_JOURNAL_BODY_RELAY,
-            Self::UnknownJournalWhatAnswered => UNKNOWN_JOURNAL_WHAT_ANSWERED,
-            Self::UnknownJournalYourJournal => UNKNOWN_JOURNAL_YOUR_JOURNAL,
-            Self::UnknownJournalClaimed => UNKNOWN_JOURNAL_CLAIMED,
-            Self::UnknownJournalNoIdentity => UNKNOWN_JOURNAL_NO_IDENTITY,
-            Self::UnknownJournalPairAgain => UNKNOWN_JOURNAL_PAIR_AGAIN,
-            Self::HelpLinkFailed => {
-                "couldn't open that link. visit support.solstone.app or email support@solstone.app."
+            Self::LogsGap => {
+                text!("linux.copy.thelogpreviewwaslimitedmorelogtextmaybeava")
             }
-            Self::ActionStart => ACTION_START,
-            Self::ActionStarting => ACTION_STARTING,
-            Self::StatusStartDisclosure => STATUS_START_DISCLOSURE,
-            Self::StatusStartWaiting => STATUS_START_WAITING,
-            Self::StatusStartUnavailable => STATUS_START_UNAVAILABLE,
-            Self::StatusStartFailed => STATUS_START_FAILED,
-            Self::LaunchFailureTitle => LAUNCH_FAILURE_TITLE,
-            Self::LaunchFailedWithoutDiagnostic => LAUNCH_FAILED_WITHOUT_DIAGNOSTIC,
+            Self::MarkGenericFirst => text!("linux.copy.your"),
+            Self::MarkGenericSecond => text!("linux.copy.journal"),
+            Self::MarkGenericSpeech => text!("linux.copy.yourjournalnotsetupyet"),
+            Self::MarkUnavailableFirst => text!("linux.copy.mark"),
+            Self::MarkUnavailableSecond => text!("linux.copy.unavailable"),
+            Self::MarkUnavailableSpeech => {
+                text!("linux.copy.yourjournalsmarkunavailablerightnow")
+            }
+            Self::MarkNotPresentedFirst => text!("linux.copy.not"),
+            Self::MarkNotPresentedSecond => text!("linux.copy.presented"),
+            Self::UnknownJournalSeenThroughRelay => unknown_journal_seen_through_relay(),
+            Self::UnknownJournalViewDetails => unknown_journal_view_details(),
+            Self::UnknownJournalHeading => unknown_journal_heading(),
+            Self::UnknownJournalBodyRelay => unknown_journal_body_relay(),
+            Self::UnknownJournalWhatAnswered => unknown_journal_what_answered(),
+            Self::UnknownJournalYourJournal => unknown_journal_your_journal(),
+            Self::UnknownJournalClaimed => unknown_journal_claimed(),
+            Self::UnknownJournalNoIdentity => unknown_journal_no_identity(),
+            Self::UnknownJournalPairAgain => unknown_journal_pair_again(),
+            Self::HelpLinkFailed => {
+                text!("linux.copy.couldntopenthatlinkvisitsupportsolstoneappo")
+            }
+            Self::ActionStart => action_start(),
+            Self::ActionStarting => action_starting(),
+            Self::StatusStartDisclosure => status_start_disclosure(),
+            Self::StatusStartWaiting => status_start_waiting(),
+            Self::StatusStartUnavailable => status_start_unavailable(),
+            Self::StatusStartFailed => status_start_failed(),
+            Self::LaunchFailureTitle => launch_failure_title(),
+            Self::LaunchFailedWithoutDiagnostic => launch_failed_without_diagnostic(),
         }
     }
 }
-pub const JOURNAL_SETUP_ACTION: &str = "set up a journal on this computer";
-pub const JOURNAL_SETUP_PREPARING: &str = "preparing your journal…";
-pub const JOURNAL_SETUP_IN_BROWSER: &str = "finish setup in your browser.";
-pub const JOURNAL_SETUP_NOT_INSTALLED: &str = "the journal isn't installed on this computer yet.";
-pub const JOURNAL_SETUP_INSTALL: &str = "install the journal";
-pub const JOURNAL_SETUP_FAILED: &str = "couldn't prepare your journal. run solstone journal setup in a terminal to see what needs attention.";
-pub const JOURNAL_SETUP_OPEN_FAILED: &str = "your journal is prepared, but the browser didn't open. run solstone journal open /init in a terminal to finish setup.";
+pub fn journal_setup_action() -> &'static str {
+    text!("linux.copy.journalsetupaction")
+}
+pub fn journal_setup_preparing() -> &'static str {
+    text!("linux.copy.journalsetuppreparing")
+}
+pub fn journal_setup_in_browser() -> &'static str {
+    text!("linux.copy.journalsetupinbrowser")
+}
+pub fn journal_setup_not_installed() -> &'static str {
+    text!("linux.copy.journalsetupnotinstalled")
+}
+pub fn journal_setup_install() -> &'static str {
+    text!("linux.copy.journalsetupinstall")
+}
+pub fn journal_setup_failed() -> &'static str {
+    text!("linux.copy.journalsetupfailed")
+}
+pub fn journal_setup_open_failed() -> &'static str {
+    text!("linux.copy.journalsetupopenfailed")
+}

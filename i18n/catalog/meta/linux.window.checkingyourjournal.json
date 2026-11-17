@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopimportpage.checkingyourjournal, windows.ui.checkingyourjournal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 22,
+  "source_revision": "c7b7e7959cf0949d151c6889308ca94938a17d2421c5a1912b1ba2080dc0dbd5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

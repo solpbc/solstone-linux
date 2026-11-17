@@ -2,6 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use crate::session_env::{Output, Runner};
+use solstone_i18n::{message, text};
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -14,16 +15,7 @@ use std::{
 const UNIT_TEMPLATE: &str = include_str!("solstone-linux.service.in");
 const FALLBACK_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(15);
-const DESKTOP_ENTRY: &str = "[Desktop Entry]\n\
-Version=1.2\n\
-Type=Application\n\
-Name=solstone app\n\
-Comment=the solstone app takes in what you share with it, and all of it goes into your journal\n\
-Exec=/bin/sh -c 'systemctl --user import-environment DISPLAY XAUTHORITY XDG_SESSION_TYPE 2>/dev/null; systemctl --user start solstone-linux.service'\n\
-Icon=solstone-observer\n\
-StartupNotify=false\n\
-X-GNOME-Autostart-enabled=true\n\
-Hidden=false\n";
+const DESKTOP_ENTRY: &str = include_str!("../../../i18n/generated/autostart.desktop");
 
 pub struct ServicePaths {
     pub home: PathBuf,
@@ -56,7 +48,7 @@ impl ServicePaths {
         let executable = current_executable()?;
         let binary = executable
             .parent()
-            .ok_or_else(|| io::Error::other("missing executable directory"))?
+            .ok_or_else(|| io::Error::other(text!("linux.cli.missingexecutabledirectory")))?
             .join("solstone-linux");
         Self::from_environment(env::var_os("HOME"), binary, env::var("PATH").ok())
     }
@@ -78,7 +70,7 @@ impl ServicePaths {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
-                    "HOME is not set; cannot locate user service files",
+                    text!("linux.service.homeisnotsetcannotlocateuserservicefiles"),
                 )
             })?;
         Ok(Self { home, binary, path })
@@ -95,7 +87,9 @@ impl ServicePaths {
 fn service_path(binary: &Path, raw: Option<&str>) -> io::Result<String> {
     let binary_dir = binary
         .parent()
-        .ok_or_else(|| io::Error::other("current executable has no parent directory"))?
+        .ok_or_else(|| {
+            io::Error::other(text!("linux.service.currentexecutablehasnoparentdirectory"))
+        })?
         .to_string_lossy();
     let raw = raw
         .filter(|value| !value.is_empty())
@@ -109,9 +103,12 @@ fn service_path(binary: &Path, raw: Option<&str>) -> io::Result<String> {
 }
 
 fn systemctl(runner: &dyn Runner, args: &[&str]) -> io::Result<Output> {
-    let program = runner
-        .which("systemctl")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "systemctl not found"))?;
+    let program = runner.which("systemctl").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            text!("linux.service.systemctlnotfound"),
+        )
+    })?;
     runner.run(&program, args, SYSTEMCTL_TIMEOUT, &HashMap::new())
 }
 
@@ -121,7 +118,7 @@ pub fn stop_for_window(runner: &dyn Runner) -> io::Result<()> {
     if result.success {
         Ok(())
     } else {
-        Err(io::Error::other("systemctl stop failed"))
+        Err(io::Error::other(text!("linux.service.systemctlstopfailed")))
     }
 }
 
@@ -136,13 +133,15 @@ fn systemctl_nonfatal(
         Ok(_) => {
             let _ = writeln!(
                 output,
-                "Warning: systemctl {operation} failed; run 'systemctl --user {operation}' to inspect the error"
+                "{}",
+                message!("linux.service.warningsystemctlxfailedrunsystemctluserxtoi", "operation" => operation)
             );
         }
         Err(error) => {
             let _ = writeln!(
                 output,
-                "Warning: systemctl {operation} failed: {error}; run 'systemctl --user {operation}' after systemd is available"
+                "{}",
+                message!("linux.service.warningsystemctlxfailedxrunsystemctluserxaf", "operation" => operation, "error" => error)
             );
         }
     }
@@ -169,14 +168,18 @@ fn remove_graphical_enablement(paths: &ServicePaths, output: &mut dyn io::Write)
         .join("solstone-linux.service");
     match fs::remove_file(&link) {
         Ok(()) => {
-            let _ = writeln!(output, "Removed {}", link.display());
+            let _ = writeln!(
+                output,
+                "{}",
+                message!("linux.service.removed", "value1" => link.display())
+            );
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
             let _ = writeln!(
                 output,
-                "Warning: could not remove {}: {error}",
-                link.display()
+                "{}",
+                message!("linux.service.warningcouldnotremoveerror", "value1" => link.display(), "error" => error)
             );
         }
     }
@@ -186,27 +189,45 @@ fn write_service_files(paths: &ServicePaths, output: &mut dyn io::Write) -> bool
     let path = match service_path(&paths.binary, paths.path.as_deref()) {
         Ok(path) => path,
         Err(error) => {
-            let _ = writeln!(output, "Error: {error}");
+            let _ = writeln!(output, "{}", message!("linux.cli.errorx", "error" => error));
             return false;
         }
     };
     let unit = UNIT_TEMPLATE
         .replace("{BINARY}", &paths.binary.to_string_lossy())
-        .replace("{PATH}", &path);
+        .replace("{PATH}", &path)
+        .replace(
+            "{DESCRIPTION}",
+            &text!("linux.metadata.service")
+                .replace('%', "%%")
+                .replace(['\n', '\r', '\0'], " "),
+        );
     let unit_path = paths.unit();
     let desktop_path = paths.desktop();
     let write_result = (|| -> io::Result<()> {
         fs::create_dir_all(unit_path.parent().unwrap_or(Path::new(".")))?;
         fs::write(&unit_path, unit)?;
-        writeln!(output, "Wrote {}", unit_path.display())?;
+        writeln!(
+            output,
+            "{}",
+            message!("linux.service.wrotex", "value1" => unit_path.display())
+        )?;
         fs::create_dir_all(desktop_path.parent().unwrap_or(Path::new(".")))?;
         // Icon matches tray.rs::KsniTray::id(); no native icon files are installed.
         fs::write(&desktop_path, DESKTOP_ENTRY)?;
-        writeln!(output, "Wrote {}", desktop_path.display())?;
+        writeln!(
+            output,
+            "{}",
+            message!("linux.service.wrotex", "value1" => desktop_path.display())
+        )?;
         Ok(())
     })();
     if let Err(error) = write_result {
-        let _ = writeln!(output, "Error writing service files: {error}");
+        let _ = writeln!(
+            output,
+            "{}",
+            message!("linux.service.errorwritingservicefilesx", "error" => error)
+        );
         return false;
     }
     if crate::browser::ENABLED
@@ -218,7 +239,8 @@ fn write_service_files(paths: &ServicePaths, output: &mut dyn io::Write) -> bool
     {
         let _ = writeln!(
             output,
-            "Warning: could not write every browser registration: {error}"
+            "{}",
+            message!("linux.service.warningcouldnotwriteeverybrowserregistrationx", "error" => error)
         );
     }
     remove_graphical_enablement(paths, output);
@@ -290,7 +312,11 @@ pub fn uninstall(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io:
         if let Err(error) = fs::remove_file(&path)
             && error.kind() != io::ErrorKind::NotFound
         {
-            let _ = writeln!(output, "Error removing {}: {error}", path.display());
+            let _ = writeln!(
+                output,
+                "{}",
+                message!("linux.service.errorremovingxx", "value1" => path.display(), "error" => error)
+            );
             return 1;
         }
     }
@@ -299,7 +325,8 @@ pub fn uninstall(paths: &ServicePaths, runner: &dyn Runner, output: &mut dyn io:
     {
         let _ = writeln!(
             output,
-            "Warning: could not remove every browser registration: {error}"
+            "{}",
+            message!("linux.service.warningcouldnotremoveeverybrowserregistration", "error" => error)
         );
     }
     systemctl_nonfatal(
@@ -401,14 +428,16 @@ pub fn start_for_window(
                     let _ = writeln!(output, "{}", out.stdout);
                     let _ = writeln!(
                         output,
-                        "Warning: systemctl start failed; run 'systemctl --user start solstone-linux.service' to inspect the error"
+                        "{}",
+                        text!("linux.service.warningsystemctlstartfailedrunsystemctluserst")
                     );
                     WindowStart::Failed
                 }
                 Err(error) => {
                     let _ = writeln!(
                         output,
-                        "Warning: systemctl start failed: {error}; run 'systemctl --user start solstone-linux.service' after systemd is available"
+                        "{}",
+                        message!("linux.service.warningsystemctlstartfailedxrunsystemctluser", "error" => error)
                     );
                     WindowStart::Uncertain
                 }
@@ -433,14 +462,16 @@ pub fn start_for_window(
                     let _ = writeln!(output, "{}", out.stdout);
                     let _ = writeln!(
                         output,
-                        "Warning: systemctl enable --now failed; run 'systemctl --user enable --now solstone-linux.service' to inspect the error"
+                        "{}",
+                        text!("linux.service.warningsystemctlenablenowfailedrunsystemctlus")
                     );
                     WindowStart::Failed
                 }
                 Err(error) => {
                     let _ = writeln!(
                         output,
-                        "Warning: systemctl enable --now failed: {error}; run 'systemctl --user enable --now solstone-linux.service' after systemd is available"
+                        "{}",
+                        message!("linux.service.warningsystemctlenablenowfailedxrunsystemctl", "error" => error)
                     );
                     WindowStart::Uncertain
                 }
@@ -472,13 +503,17 @@ pub fn restart_matching_pid_guarded(
             Ok(out) => {
                 let _ = writeln!(
                     output,
-                    "systemctl could not restart solstone-linux.service:\n{}",
-                    out.stdout
+                    "{}",
+                    message!("linux.service.systemctlcouldnotrestartsolstonelinuxservicex", "value1" => out.stdout)
                 );
                 MatchingRestart::Failed
             }
             Err(error) => {
-                let _ = writeln!(output, "Service restart failed: {error}");
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    message!("linux.service.servicerestartfailedx", "error" => error)
+                );
                 MatchingRestart::Uncertain
             }
         },
@@ -498,13 +533,15 @@ pub fn user_service_pid(runner: &dyn Runner) -> io::Result<u32> {
         ],
     )?;
     if !out.success {
-        return Err(io::Error::other("service PID unavailable"));
+        return Err(io::Error::other(text!(
+            "linux.service.servicepidunavailable"
+        )));
     }
     out.stdout
         .lines()
         .find_map(|line| line.strip_prefix("MainPID="))
         .and_then(|pid| pid.trim().parse().ok())
-        .ok_or_else(|| io::Error::other("invalid service PID"))
+        .ok_or_else(|| io::Error::other(text!("linux.service.invalidservicepid")))
 }
 
 #[cfg(test)]

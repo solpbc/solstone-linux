@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.pairingdidntgothroughgeta.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 82,
+  "source_revision": "e4e9301e7fe4919159354190f14caa151de06a6891de43db0321cbd03721d3df",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

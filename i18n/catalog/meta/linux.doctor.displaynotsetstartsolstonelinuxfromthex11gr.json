@@ -1,0 +1,33 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 68,
+  "source_revision": "2424b0139bebd1ec978d22f4b0294dd56028fbf62a5dbcddea7a4c5afba00cfc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "DISPLAY"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "solstone-linux"
+    },
+    {
+      "name": "literal3",
+      "kind": "command",
+      "value": "X11"
+    }
+  ]
+}

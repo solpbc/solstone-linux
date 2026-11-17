@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 31,
+  "source_revision": "1419883957196d6f5f4e0d598e5e4b5e575d1461bce76a8c4aeeb211975aea1c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "X11"
+    }
+  ]
+}

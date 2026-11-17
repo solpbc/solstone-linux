@@ -1,0 +1,63 @@
+{
+  "description": "Description in the command-line help.",
+  "context": "Description in the command-line help.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 172,
+  "source_revision": "582a184abaa039d4a82b161db15656d4bfd35107c785fafee8400af71b763efb",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "\n\n"
+    },
+    {
+      "name": "ws2",
+      "kind": "whitespace",
+      "value": "\n  "
+    },
+    {
+      "name": "ws3",
+      "kind": "whitespace",
+      "value": "  "
+    },
+    {
+      "name": "ws4",
+      "kind": "whitespace",
+      "value": "\n  "
+    },
+    {
+      "name": "ws5",
+      "kind": "whitespace",
+      "value": "  "
+    },
+    {
+      "name": "ws6",
+      "kind": "whitespace",
+      "value": "\n  "
+    },
+    {
+      "name": "ws7",
+      "kind": "whitespace",
+      "value": "  "
+    },
+    {
+      "name": "ws8",
+      "kind": "whitespace",
+      "value": "\n  "
+    },
+    {
+      "name": "ws9",
+      "kind": "whitespace",
+      "value": "  "
+    }
+  ]
+}

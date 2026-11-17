@@ -1,0 +1,23 @@
+{
+  "description": "Description in the command-line help.",
+  "context": "Description in the command-line help.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 57,
+  "source_revision": "fc5c955b051ad88e184fdc8fa7f9833273eb20ce88e1c1bef14db9fec2801824",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "command0",
+      "kind": "command",
+      "value": "tmux"
+    }
+  ]
+}

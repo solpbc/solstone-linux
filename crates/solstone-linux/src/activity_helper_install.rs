@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use solstone_i18n::{message, text};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -56,7 +57,11 @@ fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
 
 pub fn run_install_activity_helpers(output: &mut dyn Write, errors: &mut dyn Write) -> i32 {
     let Some(source) = source_dir() else {
-        let _ = writeln!(errors, "error: activity helper assets directory not found");
+        let _ = writeln!(
+            errors,
+            "{}",
+            text!("linux.panel.erroractivityhelperassetsdirectorynotfound")
+        );
         return 1;
     };
 
@@ -70,7 +75,11 @@ pub fn run_install_activity_helpers(output: &mut dyn Write, errors: &mut dyn Wri
 
     if gnome_src.is_dir() {
         if let Err(err) = copy_tree(&gnome_src, &gnome_dst) {
-            let _ = writeln!(errors, "error: failed to copy GNOME activity helper: {err}");
+            let _ = writeln!(
+                errors,
+                "{}",
+                message!("linux.panel.errorfailedtocopygnomeactivityhelperx", "err" => err)
+            );
             return 1;
         }
         copied_any = true;
@@ -78,7 +87,11 @@ pub fn run_install_activity_helpers(output: &mut dyn Write, errors: &mut dyn Wri
 
     if kwin_src.is_dir() {
         if let Err(err) = copy_tree(&kwin_src, &kwin_dst) {
-            let _ = writeln!(errors, "error: failed to copy KWin activity helper: {err}");
+            let _ = writeln!(
+                errors,
+                "{}",
+                message!("linux.panel.errorfailedtocopykwinactivityhelperx", "err" => err)
+            );
             return 1;
         }
         copied_any = true;
@@ -87,18 +100,21 @@ pub fn run_install_activity_helpers(output: &mut dyn Write, errors: &mut dyn Wri
     if !copied_any {
         let _ = writeln!(
             errors,
-            "error: no activity helper assets found in {source:?}"
+            "{}",
+            message!("linux.panel.errornoactivityhelperassetsfoundinx", "source" => format!("{:?}", source))
         );
         return 1;
     }
 
     let _ = writeln!(
         output,
-        "installed activity helper assets to user data directories."
+        "{}",
+        text!("linux.panel.installedactivityhelperassetstouserdatadirect")
     );
     let _ = writeln!(
         output,
-        "note: you must explicitly enable the extension or script in your desktop session."
+        "{}",
+        text!("linux.panel.noteyoumustexplicitlyenabletheextensionorscr")
     );
     0
 }

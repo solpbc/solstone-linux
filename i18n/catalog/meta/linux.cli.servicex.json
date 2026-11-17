@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the cli component.",
+  "context": "Presentation from the cli component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 21,
+  "source_revision": "7571b3cf3f6f3bfc6849ed1bb1e9318493fb82da8021fd1121506fd965a5abe6",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "\n"
+    }
+  ]
+}

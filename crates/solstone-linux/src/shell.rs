@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use solstone_i18n::text;
 use std::{
     future::Future,
     sync::{Arc, Mutex, mpsc::Sender},
@@ -501,12 +502,15 @@ async fn present_panel_icon_offer(connection: &Connection, config: &Config) {
     use crate::panel_icon::{OFFER_ACTION_DISMISS, OFFER_ACTION_LATER, OFFER_ACTION_SET_UP};
 
     let handle = match notify_rust::Notification::new()
-        .appname("solstone")
-        .summary(crate::panel_icon::OFFER_SUMMARY)
-        .body(crate::panel_icon::OFFER_BODY)
-        .action(OFFER_ACTION_SET_UP, crate::panel_icon::OFFER_LABEL_SET_UP)
-        .action(OFFER_ACTION_LATER, crate::panel_icon::OFFER_LABEL_LATER)
-        .action(OFFER_ACTION_DISMISS, crate::panel_icon::OFFER_LABEL_DISMISS)
+        .appname(text!("linux.metadata.name"))
+        .summary(crate::panel_icon::offer_summary())
+        .body(crate::panel_icon::offer_body())
+        .action(OFFER_ACTION_SET_UP, crate::panel_icon::offer_label_set_up())
+        .action(OFFER_ACTION_LATER, crate::panel_icon::offer_label_later())
+        .action(
+            OFFER_ACTION_DISMISS,
+            crate::panel_icon::offer_label_dismiss(),
+        )
         .timeout(notify_rust::Timeout::Never)
         .show_async()
         .await
@@ -539,8 +543,8 @@ async fn present_panel_icon_offer(connection: &Connection, config: &Config) {
             let outcome = crate::panel_icon::set_up(connection, readiness).await;
             if let Some(body) = crate::panel_icon::offer_result_body(&outcome)
                 && let Err(error) = notify_rust::Notification::new()
-                    .appname("solstone")
-                    .summary(crate::panel_icon::OFFER_SUMMARY)
+                    .appname(text!("linux.metadata.name"))
+                    .summary(crate::panel_icon::offer_summary())
                     .body(&body)
                     .show_async()
                     .await

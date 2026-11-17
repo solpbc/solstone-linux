@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.settings.pairinglink.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 12,
+  "source_revision": "b42839d232a0383ca48bc748ea3db184d478bb0a06065b89c592cf94ecb25a21",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

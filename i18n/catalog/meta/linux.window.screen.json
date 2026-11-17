@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.setupscreenframe.screen, windows.ui.screen.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 6,
+  "source_revision": "f6702f70ff7b2220f024bedf51578531ec8e258bd867d46c90eaefbee8aed882",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

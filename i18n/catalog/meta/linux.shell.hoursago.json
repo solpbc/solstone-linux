@@ -1,0 +1,31 @@
+{
+  "description": "How long ago a source last took something in.",
+  "context": "How long ago a source last took something in.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "display",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 22,
+  "source_revision": "2b77d49fc0dc1027d59b0f5b47cd1891743c659dbc1553b02a29ef089c85c8c5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

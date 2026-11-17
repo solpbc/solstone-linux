@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 100,
+  "source_revision": "e211c15f614b891410516acf963f49ed3ae26875064e2a0e8be29c4809b04662",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "solstone journal setup"
+    }
+  ]
+}

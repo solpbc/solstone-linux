@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.journalmarkgeneric.unavailable, macos.diagnostics.unavailable, windows.ui.unavailable, windows.ui.unavailableword.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 11,
+  "source_revision": "d7d6eca0ae3dc604cbe3adf1139a4860a3314a82068e6f82289272ebbf93af1e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

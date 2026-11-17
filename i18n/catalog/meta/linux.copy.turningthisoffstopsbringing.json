@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.turningoffstopsbringingchangeswhat.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 157,
+  "source_revision": "55ba4dc07e32c9830a053f93b6dfbf376bbc6161fea315198cd182febc9bfeda",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

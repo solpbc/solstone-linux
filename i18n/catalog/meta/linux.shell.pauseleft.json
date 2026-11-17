@@ -1,0 +1,22 @@
+{
+  "description": "Shown in the desktop or panel source status.",
+  "context": "Shown in the desktop or panel source status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "minutes",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 29,
+  "source_revision": "675863f7684256fce4177f19c51b50e8086c337f1f8c537e401fdd59b17c667a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

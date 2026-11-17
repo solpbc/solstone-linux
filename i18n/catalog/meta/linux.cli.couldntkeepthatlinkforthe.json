@@ -1,0 +1,22 @@
+{
+  "description": "Presentation from the cli component.",
+  "context": "Presentation from the cli component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "error",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 50,
+  "source_revision": "b8dadf9fa5c5a9530e456e483139db68ed06493ce67337ce8daec9a172f747a5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

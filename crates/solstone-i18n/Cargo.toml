@@ -1,0 +1,16 @@
+[package]
+name = "solstone-i18n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fluent-bundle = "0.16"
+fluent-langneg = "0.13"
+unic-langid = "0.9"
+tracing.workspace = true

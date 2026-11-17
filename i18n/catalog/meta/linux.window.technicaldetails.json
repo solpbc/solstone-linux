@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktop.shared.copy.technicaldetails, windows.desktop.shared.copy.technicaldetails.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 17,
+  "source_revision": "c3189d69bac6ca72656625cc4d48917defe4b86752e031b227e8455a8a230659",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

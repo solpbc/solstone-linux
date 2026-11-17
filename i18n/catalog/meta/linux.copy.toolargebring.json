@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.toolargebring.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 21,
+  "source_revision": "c40dd64e406b6016db0b15a065af408a8d52816774d7fd5cc0c25327de9f3baa",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

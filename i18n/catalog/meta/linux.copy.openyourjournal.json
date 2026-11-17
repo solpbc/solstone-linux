@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktop.shared.copy.setupopenyourjournal, windows.desktop.shared.copy.setupopenyourjournal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 17,
+  "source_revision": "53eb791a3a6e5cacfb9ca3525170989f5f15ad4d1fbbc7ce2128d3dd92a48dc8",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

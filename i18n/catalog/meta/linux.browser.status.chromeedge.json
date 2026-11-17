@@ -1,0 +1,17 @@
+{
+  "description": "Browsers served by the Chrome Web Store link.",
+  "context": "Browsers served by the Chrome Web Store link.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 14,
+  "source_revision": "dc454bce859e35665a89443e195a66b685f90284fd6692fe30c8bcf5b5e1f164",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

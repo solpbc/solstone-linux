@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.waitingreachjournal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 29,
+  "source_revision": "ccab097937c41d2d1bef482f5eb63e9203d7b2f637a31ea083327e4bd2390578",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

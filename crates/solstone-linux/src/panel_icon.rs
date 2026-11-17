@@ -13,6 +13,7 @@
 //! extension, so it cannot distinguish "wait" from "offer to fix". The settle window in
 //! [`OfferGate`] is what separates them.
 
+use solstone_i18n::{message, text};
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use zbus::{Connection, zvariant::OwnedValue};
@@ -193,14 +194,24 @@ impl OfferGate {
 // voice pass can read the whole surface at once.
 
 /// The notification summary, matching the app's existing notification.
-pub const OFFER_SUMMARY: &str = "solstone app";
-pub const OFFER_BODY: &str = "GNOME needs one extension before the panel icon can appear. that icon is where pause and resume live.";
+pub fn offer_summary() -> &'static str {
+    text!("linux.panel.solstoneapp")
+}
+pub fn offer_body() -> &'static str {
+    text!("linux.panel.gnomeneedsoneextensionbeforethepaneliconcan")
+}
 pub const OFFER_ACTION_SET_UP: &str = "set-up";
-pub const OFFER_LABEL_SET_UP: &str = "set it up";
+pub fn offer_label_set_up() -> &'static str {
+    text!("linux.panel.setitup")
+}
 pub const OFFER_ACTION_LATER: &str = "later";
-pub const OFFER_LABEL_LATER: &str = "not now";
+pub fn offer_label_later() -> &'static str {
+    text!("linux.panel.notnow")
+}
 pub const OFFER_ACTION_DISMISS: &str = "dismiss";
-pub const OFFER_LABEL_DISMISS: &str = "don't ask again";
+pub fn offer_label_dismiss() -> &'static str {
+    text!("linux.panel.dontaskagain")
+}
 
 /// What the owner is told after accepting the offer, or nothing at all.
 ///
@@ -209,19 +220,19 @@ pub const OFFER_LABEL_DISMISS: &str = "don't ask again";
 pub fn offer_result_body(outcome: &SetupOutcome) -> Option<String> {
     match outcome {
         SetupOutcome::Installed => {
-            Some("the panel icon is ready. pause and resume are in the panel now.".into())
+            Some(text!("linux.panel.thepaneliconisreadypauseandresumeareinthe").into())
         }
-        SetupOutcome::AcceptedNotYetRunning => Some(
-            "GNOME took the extension but the panel icon has not appeared. run solstone-linux doctor to see where it got to."
-                .into(),
-        ),
+        SetupOutcome::AcceptedNotYetRunning => {
+            Some(text!("linux.panel.gnometooktheextensionbutthepaneliconhasnot").into())
+        }
         // ⛔ The reason is carried, never dropped for a "run it again to find out": we
         // already know why, and re-running would only raise GNOME's dialog a second time.
-        SetupOutcome::Failed(reason) => Some(format!("the panel icon is not set up: {reason}")),
-        SetupOutcome::NeedsRelogin => Some(
-            "the panel icon extension is installed. log out and back in, then run solstone-linux panel-icon again."
-                .into(),
-        ),
+        SetupOutcome::Failed(reason) => {
+            Some(message!("linux.panel.thepaneliconisnotsetupx", "reason" => reason))
+        }
+        SetupOutcome::NeedsRelogin => {
+            Some(text!("linux.panel.thepaneliconextensionisinstalledlogoutandba").into())
+        }
         SetupOutcome::Cancelled | SetupOutcome::AlreadyActive | SetupOutcome::NothingToSetUp => {
             None
         }
@@ -259,7 +270,9 @@ pub fn install_reply_outcome(reply: &str) -> SetupOutcome {
     match reply {
         "successful" => SetupOutcome::Installed,
         "cancelled" => SetupOutcome::Cancelled,
-        other => SetupOutcome::Failed(format!("GNOME gave an answer we do not know: {other}")),
+        other => SetupOutcome::Failed(
+            message!("linux.panel.gnomegaveananswerwedonotknowx", "other" => other),
+        ),
     }
 }
 
@@ -269,12 +282,12 @@ pub fn install_reply_outcome(reply: &str) -> SetupOutcome {
 /// yes or no, and the raw name means nothing to the person reading it.
 pub fn install_error_reason(error_name: &str, fallback: &str) -> String {
     match error_name.rsplit('.').next().unwrap_or_default() {
-        "NotAllowed" => "this desktop does not allow extensions to be installed".into(),
+        "NotAllowed" => text!("linux.panel.thisdesktopdoesnotallowextensionstobeinstall").into(),
         "InfoDownloadFailed" | "DownloadFailed" => {
-            "the extension could not be downloaded; check the network connection".into()
+            text!("linux.panel.theextensioncouldnotbedownloadedcheckthenetw").into()
         }
-        "ExtractFailed" => "the downloaded extension could not be unpacked".into(),
-        "EnableFailed" => "GNOME installed the extension but could not turn it on".into(),
+        "ExtractFailed" => text!("linux.panel.thedownloadedextensioncouldnotbeunpacked").into(),
+        "EnableFailed" => text!("linux.panel.gnomeinstalledtheextensionbutcouldnotturnit").into(),
         _ => fallback.to_owned(),
     }
 }
@@ -316,24 +329,28 @@ pub fn extension_state_from_info(info: &HashMap<String, OwnedValue>) -> Extensio
 /// What `solstone-linux panel-icon` prints before it touches anything.
 pub fn command_preamble(readiness: PanelIconReadiness) -> &'static str {
     match readiness {
-        PanelIconReadiness::Available => "the panel icon is already available on this desktop.",
+        PanelIconReadiness::Available => {
+            text!("linux.panel.thepaneliconisalreadyavailableonthisdesktop")
+        }
         PanelIconReadiness::ExtensionActiveNoHost => {
-            "the GNOME extension is already on. if the panel icon is still missing, log out and back in."
+            text!("linux.panel.thegnomeextensionisalreadyonifthepanelicon")
         }
         PanelIconReadiness::NotApplicable => {
-            "nothing here can set up a panel icon on this desktop."
+            text!("linux.panel.nothingherecansetupapanelicononthisdesktop")
         }
         // The probe has already run by the time this prints, so it cannot say
         // "checking".
-        PanelIconReadiness::Unknown => "could not reach this desktop to find out what it needs.",
+        PanelIconReadiness::Unknown => {
+            text!("linux.panel.couldnotreachthisdesktoptofindoutwhatitnee")
+        }
         PanelIconReadiness::ExtensionOff => {
-            "the GNOME extension is installed but turned off. turning it on now."
+            text!("linux.panel.thegnomeextensionisinstalledbutturnedoffturn")
         }
         PanelIconReadiness::ExtensionNeedsRelogin => {
-            "the panel icon extension is installed, but GNOME has not picked it up yet."
+            text!("linux.panel.thepaneliconextensionisinstalledbutgnomehas")
         }
         PanelIconReadiness::ExtensionMissing => {
-            "GNOME will ask you to confirm. accept it to add the panel icon extension."
+            text!("linux.panel.gnomewillaskyoutoconfirmacceptittoaddthep")
         }
     }
 }
@@ -343,28 +360,33 @@ pub fn command_preamble(readiness: PanelIconReadiness) -> &'static str {
 /// A cancel is not an error: the owner was asked and said no.
 pub fn command_result(outcome: &SetupOutcome) -> (String, i32) {
     match outcome {
-        SetupOutcome::Installed => ("done. the panel icon is in your panel now.".into(), 0),
-        SetupOutcome::AlreadyActive => ("nothing to do.".into(), 0),
+        SetupOutcome::Installed => (
+            text!("linux.panel.donethepaneliconisinyourpanelnow").into(),
+            0,
+        ),
+        SetupOutcome::AlreadyActive => (text!("linux.panel.nothingtodo").into(), 0),
         // ⛔ Not "then the panel icon will be there": a package install lands the
         // extension INITIALIZED, so the state after a relogin is installed-but-off and
         // one more run of this command is what finishes it.
         SetupOutcome::NeedsRelogin => (
-            "log out and back in, then run this again.".into(),
+            text!("linux.panel.logoutandbackinthenrunthisagain").into(),
             0,
         ),
-        SetupOutcome::NothingToSetUp => ("nothing to set up here.".into(), 0),
+        SetupOutcome::NothingToSetUp => (text!("linux.panel.nothingtosetuphere").into(), 0),
         SetupOutcome::Cancelled => (
-            "no change. you can run this again any time.".into(),
+            text!("linux.panel.nochangeyoucanrunthisagainanytime").into(),
             0,
         ),
         SetupOutcome::AcceptedNotYetRunning => (
-            "GNOME took the extension but the panel icon has not appeared yet. give it a moment, then run: solstone-linux doctor"
-                .into(),
+            text!("linux.panel.gnometooktheextensionbutthepaneliconhasnot2").into(),
             1,
         ),
         // ⛔ Not "GNOME did not add the extension": three of the reasons that reach
         // here are not an install and one of them is our own probe failing.
-        SetupOutcome::Failed(reason) => (format!("the panel icon is not set up: {reason}"), 1),
+        SetupOutcome::Failed(reason) => (
+            message!("linux.panel.thepaneliconisnotsetupx", "reason" => reason),
+            1,
+        ),
     }
 }
 
@@ -386,27 +408,25 @@ pub enum ControlOutcome {
 pub fn control_result(outcome: &ControlOutcome) -> (String, i32) {
     match outcome {
         ControlOutcome::Paused(None) => (
-            "paused. run solstone-linux resume when you want it back.".into(),
+            text!("linux.panel.pausedrunsolstonelinuxresumewhenyouwantitba").into(),
             0,
         ),
         // ⚠ `minute(s)` rather than a bare plural: `--minutes 1` is a valid input and
         // "1 minutes" is the kind of thing an owner notices. Matches the crate's own
         // idiom ("{} incomplete segment(s)").
         ControlOutcome::Paused(Some(minutes)) => (
-            format!("paused for {minutes} minute(s). run solstone-linux resume to end it sooner."),
+            message!("linux.panel.pausedforxminutesrunsolstonelinuxresumetoe", "minutes" => minutes),
             0,
         ),
-        ControlOutcome::Resumed => ("resumed.".into(), 0),
+        ControlOutcome::Resumed => (text!("linux.panelicon.resumed").into(), 0),
         // ⛔ No "check it with: solstone-linux status" — that command only reports
         // running state when systemctl is on PATH, so the pointer would promise an
         // answer it may not print.
-        ControlOutcome::NotRunning => (
-            "the solstone app is not running, so there is nothing to pause or resume.".into(),
+        ControlOutcome::NotRunning => (text!("linux.panel.notrunning").into(), 1),
+        ControlOutcome::Failed(reason) => (
+            message!("linux.panel.couldnotreachthesolstoneappx", "reason" => reason),
             1,
         ),
-        ControlOutcome::Failed(reason) => {
-            (format!("could not reach the solstone app: {reason}"), 1)
-        }
     }
 }
 
@@ -609,7 +629,7 @@ pub async fn set_up(connection: &Connection, readiness: PanelIconReadiness) -> S
         PanelIconReadiness::NotApplicable => return SetupOutcome::NothingToSetUp,
         PanelIconReadiness::Unknown => {
             return SetupOutcome::Failed(
-                "could not reach the desktop to check what it needs".into(),
+                text!("linux.panel.couldnotreachthedesktoptocheckwhatitneeds").into(),
             );
         }
         PanelIconReadiness::ExtensionNeedsRelogin => return SetupOutcome::NeedsRelogin,
@@ -617,8 +637,7 @@ pub async fn set_up(connection: &Connection, readiness: PanelIconReadiness) -> S
     }
     if user_extensions_enabled(connection).await == Some(false) {
         return SetupOutcome::Failed(
-            "GNOME is set not to load extensions, so the panel icon cannot come back this way"
-                .into(),
+            text!("linux.panel.gnomeissetnottoloadextensionssothepanelico").into(),
         );
     }
     let attempted = if readiness == PanelIconReadiness::ExtensionOff {
@@ -685,12 +704,14 @@ async fn enable(connection: &Connection) -> SetupOutcome {
             Ok(true) => return SetupOutcome::Installed,
             Ok(false) => {
                 tracing::warn!(uuid, "GNOME refused to enable the extension");
-                return SetupOutcome::Failed("GNOME would not turn the extension on".into());
+                return SetupOutcome::Failed(
+                    text!("linux.panel.gnomewouldnotturntheextensionon").into(),
+                );
             }
             Err(error) => return SetupOutcome::Failed(error.to_string()),
         }
     }
-    SetupOutcome::Failed("no installed appindicator extension to turn on".into())
+    SetupOutcome::Failed(text!("linux.panel.noinstalledappindicatorextensiontoturnon").into())
 }
 
 #[cfg(test)]
@@ -1022,7 +1043,7 @@ mod tests {
     fn no_owner_facing_string_carries_a_raw_extension_uuid() {
         // A uuid is not something the owner can act on; it belongs in the log.
         let strings = [
-            OFFER_BODY.to_owned(),
+            offer_body().to_owned(),
             command_preamble(PanelIconReadiness::ExtensionOff).to_owned(),
             command_preamble(PanelIconReadiness::ExtensionMissing).to_owned(),
             command_preamble(PanelIconReadiness::Unknown).to_owned(),

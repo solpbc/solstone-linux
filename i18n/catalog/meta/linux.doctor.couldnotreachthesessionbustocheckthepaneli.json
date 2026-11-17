@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 55,
+  "source_revision": "f1b5fa949735b06ce0a49d1b5c52879d8bdfa5716b5421488496764c03369a9f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

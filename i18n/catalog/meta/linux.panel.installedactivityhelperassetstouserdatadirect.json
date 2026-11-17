@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the activity helper install component.",
+  "context": "Presentation from the activity helper install component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 58,
+  "source_revision": "e9f624fe3408caf48c60472d12ebb4628167ca878a0fbce5e697852fff1956c6",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

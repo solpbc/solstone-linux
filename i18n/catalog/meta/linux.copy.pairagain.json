@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktopshellmodel.pairagain, windows.ui.pairagain, windows.pill.refused.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 10,
+  "source_revision": "5f600fd084ecae678ff2e974738ae6a3ff615c69396ea291ec89fd1b478462f6",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

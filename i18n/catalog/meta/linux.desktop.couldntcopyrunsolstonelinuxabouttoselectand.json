@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the desktop component component.",
+  "context": "Presentation from the desktop component component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 75,
+  "source_revision": "22b0db6a9a64dd9540d81925d51c081a7dac0e8fdf88b3e3608eeb6c1609d452",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "solstone-linux"
+    }
+  ]
+}

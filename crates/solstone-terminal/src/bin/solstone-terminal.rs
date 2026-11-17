@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+use solstone_i18n::{message, text};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
@@ -113,7 +114,9 @@ async fn cmd_run(spool: PathBuf, tmux: PathBuf, settings: Option<PathBuf>) {
     {
         Ok(signal) => signal,
         Err(err) => {
-            write_stderr_line(&format!("could not install the SIGTERM handler: {err}"));
+            write_stderr_line(
+                &message!("linux.bin.solstoneterminal.couldnotinstallsigtermhandler", "err" => err),
+            );
             std::process::exit(1);
         }
     };
@@ -121,7 +124,9 @@ async fn cmd_run(spool: PathBuf, tmux: PathBuf, settings: Option<PathBuf>) {
     {
         Ok(signal) => signal,
         Err(err) => {
-            write_stderr_line(&format!("could not install the SIGINT handler: {err}"));
+            write_stderr_line(
+                &message!("linux.bin.solstoneterminal.couldnotinstallsiginthandler", "err" => err),
+            );
             std::process::exit(1);
         }
     };
@@ -170,11 +175,15 @@ async fn cmd_run(spool: PathBuf, tmux: PathBuf, settings: Option<PathBuf>) {
     let mut handle = match start_engine(config).await {
         Ok(handle) => handle,
         Err(EngineError::AlreadyRunning(path)) => {
-            write_stderr_line(&format!("{}: still running", path.display()));
+            write_stderr_line(
+                &message!("linux.bin.solstoneterminal.stillrunning", "value1" => path.display()),
+            );
             std::process::exit(75);
         }
         Err(EngineError::ExecutableMustBeAbsolute(path)) => {
-            write_stderr_line(&format!("{}: executable must be absolute", path.display()));
+            write_stderr_line(
+                &message!("linux.bin.solstoneterminal.executablemustbeabsolute", "value1" => path.display()),
+            );
             std::process::exit(1);
         }
         Err(err) => {
@@ -234,10 +243,10 @@ async fn cmd_run(spool: PathBuf, tmux: PathBuf, settings: Option<PathBuf>) {
                                 let _ = handle.set_sync_activity(activity).await;
                             }
                             Some(Command::Stop) => break RunEnd::Stop,
-                            None => write_stderr_line("malformed command"),
+                            None => write_stderr_line(text!("linux.terminal.malformedcommand")),
                         }
                     }
-                    Some(StdinLine::NotUtf8) => write_stderr_line("malformed command"),
+                    Some(StdinLine::NotUtf8) => write_stderr_line(text!("linux.terminal.malformedcommand")),
                     None => break RunEnd::Stop,
                 }
             }
@@ -295,7 +304,9 @@ async fn cmd_legacy(from: PathBuf, legacy_config: Option<PathBuf>) {
     let guard = match solstone_terminal::open_legacy(&from) {
         Ok(guard) => guard,
         Err(LegacyError::StillRunning(path)) => {
-            write_stderr_line(&format!("{}: still running", path.display()));
+            write_stderr_line(
+                &message!("linux.bin.solstoneterminal.stillrunning", "value1" => path.display()),
+            );
             std::process::exit(75);
         }
         Err(err) => {
@@ -305,7 +316,9 @@ async fn cmd_legacy(from: PathBuf, legacy_config: Option<PathBuf>) {
     };
 
     if guard.lock().is_none() {
-        write_stderr_line(&format!("{}: nothing here", from.display()));
+        write_stderr_line(
+            &message!("linux.bin.solstoneterminal.nothinghere", "value1" => from.display()),
+        );
         write_stdout_json(&json!({
             "event": "done",
             "segments": 0,

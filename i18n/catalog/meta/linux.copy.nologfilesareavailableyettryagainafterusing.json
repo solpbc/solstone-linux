@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.logs.nologfilesareavailableyettry.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 62,
+  "source_revision": "923b03f9d96bf7f4c2492a54641f805e28899349c4d0a8f1e19bfe330ffede12",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

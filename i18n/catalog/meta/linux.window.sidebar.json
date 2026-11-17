@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopshellchrome.sidebar.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 7,
+  "source_revision": "fed81d4953f2498fcc4df28b29d7265063391b6775361b3b39bc743ea9b5853b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

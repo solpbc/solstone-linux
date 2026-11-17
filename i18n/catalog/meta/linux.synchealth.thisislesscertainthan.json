@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the sync health component.",
+  "context": "Presentation from the sync health component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 46,
+  "source_revision": "63694981295553d5cb39bb518d4b48e0d1250b8c07c03646368e95758c98902b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

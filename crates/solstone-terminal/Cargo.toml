@@ -19,6 +19,7 @@ full-tests = []
 workspace = true
 
 [dependencies]
+solstone-i18n = { version = "2.0.45", path = "../solstone-i18n" }
 clap = { workspace = true }
 jiff = { version = "0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 rustix = { version = "1", features = ["fs", "process", "system"] }

@@ -45,6 +45,7 @@ pub mod serialize;
 pub mod storage;
 pub mod tmux;
 
+use solstone_i18n::message;
 use std::fmt;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -113,7 +114,7 @@ impl Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "warning: {}", self.message())
+        formatter.write_str(&message!("linux.terminal.warning", "detail" => self.message()))
     }
 }
 

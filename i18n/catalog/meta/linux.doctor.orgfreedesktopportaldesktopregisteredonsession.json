@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 56,
+  "source_revision": "f4fea8eeae463073a637b8382d9f588dac86be76aba8f8981750feba3febd541",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "org.freedesktop.portal.Desktop"
+    }
+  ]
+}

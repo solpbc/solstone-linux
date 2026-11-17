@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the panel icon component.",
+  "context": "Presentation from the panel icon component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 52,
+  "source_revision": "5ab8cad4aa858c67af905fb0beb328ee6544ac274d13c601cb746ae62198c30c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

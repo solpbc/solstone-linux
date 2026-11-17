@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.screenshot.checking, windows.ui.checking, windows.ui.checkingword.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 9,
+  "source_revision": "83b64f0c6dd04c120aa94a05a8730e94e84e78ae40e51a28cebcd4943e53b278",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

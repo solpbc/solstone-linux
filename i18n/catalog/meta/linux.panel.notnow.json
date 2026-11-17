@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Review the disclosure before publishing a translation. Same English as macos.desktop.shared.copy.deferchoice, windows.desktop.shared.copy.deferchoice.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 7,
+  "source_revision": "13ce3043ce9102483422d8a3979481f6c06cc4cbd2a2430cfae05f13a1e7fc32",
+  "risk": "consent",
+  "auto_merge": false,
+  "protected_slots": []
+}

@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the control component.",
+  "context": "Presentation from the control component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 84,
+  "source_revision": "845e2ebf7fe0853e2444f9c3d00ac995fc4ba296aebc6c3d60e63728032b0619",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "tmux"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktop.shared.copy.settingslogexportsave, windows.desktop.shared.copy.settingslogexportsave.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 12,
+  "source_revision": "2dcee12d74c02c98d48ee4f44dc76ebc8920536463d3c48cdc7e7ee925400e33",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

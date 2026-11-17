@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktopshellmodel.audio, windows.ui.audio.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 5,
+  "source_revision": "929cb175f5d80d0063f1a0bdd273a7c58de76cd63ced85efe22565b9c6b1938f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

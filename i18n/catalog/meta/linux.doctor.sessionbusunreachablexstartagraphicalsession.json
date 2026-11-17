@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "error",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 105,
+  "source_revision": "d6d4a8f77ac7f38ac580294367cfba7febef73ba0f3df9a4192f53ec0cdf31bc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "xdg-desktop-portal"
+    }
+  ]
+}

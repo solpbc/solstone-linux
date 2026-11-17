@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopsource.lasttakenin, windows.ui.lasttakenin.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 13,
+  "source_revision": "6a5679bb1aa24b027e11e7f13eccc45ce52465cb84c65db986bb74c5e77e617d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the desktop component component.",
+  "context": "Presentation from the desktop component component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 39,
+  "source_revision": "c7353a96c7734803a3d85362963c6805601a0b8a8d6343532e7f1a242a2d2a64",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

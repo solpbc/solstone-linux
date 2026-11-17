@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the service component.",
+  "context": "Presentation from the service component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "error",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 137,
+  "source_revision": "bba0dae67805327f411ac39674a7e1fac3c986fdf0c5dc28e2fc3e5198f4e21e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "systemctl --user enable --now solstone-linux.service"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.ui.paused, windows.ui.pausedxa7a9dc5b, windows.ui.pausedword.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 6,
+  "source_revision": "bd7388c578d50e4a0746e9b352b91bca48827551ef442e581a74a8feea5bf9a4",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

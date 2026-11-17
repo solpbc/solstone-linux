@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the status component.",
+  "context": "Presentation from the status component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 29,
+  "source_revision": "d16181614a17088f48b60fa4e7df9eef3176ce8f36b52bc39326a791b4d40418",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

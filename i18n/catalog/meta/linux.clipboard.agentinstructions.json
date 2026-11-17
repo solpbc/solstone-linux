@@ -1,0 +1,52 @@
+{
+  "description": "Text copied by the tray action for sharing local setup details with an agent.",
+  "context": "Text copied by the tray action for sharing local setup details with an agent.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "config_path",
+      "type": "string"
+    },
+    {
+      "name": "captures_dir",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 239,
+  "source_revision": "c3f49ce833ad79c0e40a238fff05c8b2bac58df59b58c0fab203861a90b174ee",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "repo",
+      "kind": "command",
+      "value": "solstone-linux"
+    },
+    {
+      "name": "repository",
+      "kind": "url",
+      "value": "https://github.com/solpbc/solstone-linux"
+    },
+    {
+      "name": "install",
+      "kind": "url",
+      "value": "https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md"
+    },
+    {
+      "name": "logs",
+      "kind": "command",
+      "value": "journalctl --user -u solstone-linux -f"
+    },
+    {
+      "name": "service",
+      "kind": "command",
+      "value": "systemctl --user status solstone-linux"
+    }
+  ]
+}

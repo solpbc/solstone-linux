@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the state component.",
+  "context": "Presentation from the state component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 14,
+  "source_revision": "d7ad993dda548ad4598cbf216e4858f57546617fe4c0e2e394dd24c46ef56425",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "tmux"
+    }
+  ]
+}

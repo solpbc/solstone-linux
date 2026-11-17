@@ -1,0 +1,27 @@
+{
+  "description": "Action in the panel menu to end a timed pause.",
+  "context": "Action in the panel menu to end a timed pause.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 110,
+  "source_revision": "9bfc6100549d4be0247165959a5efbcbf39c53a353a629f701935d5f2a6733ee",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

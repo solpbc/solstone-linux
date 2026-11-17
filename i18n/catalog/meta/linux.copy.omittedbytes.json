@@ -1,0 +1,37 @@
+{
+  "description": "Log preview placeholder for omitted bytes.",
+  "context": "Log preview placeholder for omitted bytes.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "formatted",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 136,
+  "source_revision": "8443c0ffc56b7a1dde893efca484291e38d295bb0441bd99c8a344e75a2d4a5b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "break",
+      "kind": "whitespace",
+      "value": "\n"
+    }
+  ],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

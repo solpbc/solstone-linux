@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktop.shared.copy.setupjournalcardheading, windows.desktop.shared.copy.setupjournalcardheading.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 12,
+  "source_revision": "f190cff975cfb762322a318d36eb1568178fe94bcd17fdfc8777816d4470dfbf",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

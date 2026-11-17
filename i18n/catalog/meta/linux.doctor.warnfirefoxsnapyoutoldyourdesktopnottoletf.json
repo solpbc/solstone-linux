@@ -1,0 +1,55 @@
+{
+  "description": "Presentation from the status component.",
+  "context": "Presentation from the status component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    },
+    {
+      "name": "PERMISSION-TABLE",
+      "type": "string"
+    },
+    {
+      "name": "value2",
+      "type": "string"
+    },
+    {
+      "name": "SNAP-FIREFOX",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 302,
+  "source_revision": "29786739074f12af645720ce8b03027810ab600f08d4250f650ac73391378856",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "  "
+    },
+    {
+      "name": "ws2",
+      "kind": "whitespace",
+      "value": "                "
+    },
+    {
+      "name": "ws3",
+      "kind": "whitespace",
+      "value": "\n      "
+    },
+    {
+      "name": "literal4",
+      "kind": "command",
+      "value": "org.freedesktop.impl.portal.PermissionStore.DeletePermission"
+    }
+  ]
+}

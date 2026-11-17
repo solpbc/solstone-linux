@@ -2,6 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use gtk::{gio, glib, prelude::*};
+use solstone_i18n::{message, text};
 use solstone_linux::{
     dbus_client::ControlClient,
     import::{ImportDocument, ImportRow, RemoveConfirmation},
@@ -70,7 +71,7 @@ pub fn drop_paths(value: &glib::Value) -> Option<Vec<String>> {
 impl ImportPage {
     pub fn new() -> Self {
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let choose = gtk::Button::with_label("choose files…");
+        let choose = gtk::Button::with_label(text!("linux.window.choosefiles"));
         choose.add_css_class("sol-action");
         choose.set_halign(gtk::Align::Start);
         let addition = label("");
@@ -81,24 +82,24 @@ impl ImportPage {
         error.add_css_class("sol-attn");
         error.set_visible(false);
         let notice = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        notice.append(&label(
-            "something you were adding didn't finish saving. add it again.",
-        ));
-        let dismiss = gtk::Button::with_label("ok");
+        notice.append(&label(text!(
+            "linux.window.somethingyouwereaddingdidntfinish"
+        )));
+        let dismiss = gtk::Button::with_label(text!("linux.window.ok"));
         dismiss.set_halign(gtk::Align::Start);
         notice.append(&dismiss);
         notice.set_visible(false);
-        let recent = label("checking your journal.");
+        let recent = label(text!("linux.window.checkingyourjournal"));
         let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
         widget.append(&choose);
         widget.append(&addition);
         widget.append(&intake_refused);
         widget.append(&error);
         widget.append(&notice);
-        let recent_heading = section("recent");
+        let recent_heading = section(text!("linux.window.recent"));
         widget.append(&recent_heading);
         widget.append(&recent);
-        let device_heading = section("on this device");
+        let device_heading = section(text!("linux.window.onthisdevice"));
         widget.append(&device_heading);
         widget.append(&rows);
         let page = Self {
@@ -125,15 +126,15 @@ impl ImportPage {
                 return;
             };
             let chooser = gtk::FileChooserNative::new(
-                Some("choose files…"),
+                Some(text!("linux.window.choosefiles")),
                 Some(&window),
                 gtk::FileChooserAction::Open,
-                Some("choose files…"),
-                Some("cancel"),
+                Some(text!("linux.window.choosefiles")),
+                Some(text!("linux.window.cancel")),
             );
             chooser.set_select_multiple(true);
             let filter = gtk::FileFilter::new();
-            filter.set_name(Some("files"));
+            filter.set_name(Some(text!("linux.window.files")));
             for mime in [
                 "application/pdf",
                 "audio/*",
@@ -177,7 +178,7 @@ impl ImportPage {
                     Err(_) => false,
                 };
                 if !success {
-                    page.fail(solstone_linux::import::STEP_ERROR);
+                    page.fail(solstone_linux::import::step_error());
                 } else {
                     page.clear_step();
                 }
@@ -188,7 +189,7 @@ impl ImportPage {
 
     fn fail(&self, text: &str) {
         self.error.set_text(if self.store_down.get() {
-            solstone_linux::import::STORE_ERROR
+            solstone_linux::import::store_error()
         } else {
             text
         });
@@ -212,7 +213,7 @@ impl ImportPage {
 
     pub fn add(&self, paths: Vec<String>) {
         if self.store_down.get() {
-            self.fail(solstone_linux::import::STORE_ERROR);
+            self.fail(solstone_linux::import::store_error());
             return;
         }
         if paths.is_empty() {
@@ -231,7 +232,7 @@ impl ImportPage {
                 Err(_) => false,
             };
             if !success {
-                page.fail(solstone_linux::import::STEP_ERROR);
+                page.fail(solstone_linux::import::step_error());
             }
             if success {
                 page.clear_step();
@@ -274,7 +275,7 @@ impl ImportPage {
         self.device_heading.set_visible(!document.store_error);
         self.rows.set_visible(!document.store_error);
         if document.store_error {
-            self.fail(solstone_linux::import::STORE_ERROR);
+            self.fail(solstone_linux::import::store_error());
         }
         self.recent.set_text(&document.recent);
         while let Some(child) = self.rows.first_child() {
@@ -285,12 +286,14 @@ impl ImportPage {
             let name = label(&row.name);
             name.add_css_class("sol-ink");
             box_.append(&name);
-            let reason = label(row.reason.as_deref().unwrap_or(&row.state));
+            let reason = label(solstone_linux::import::display_import_status(
+                row.reason.as_deref().unwrap_or(&row.state),
+            ));
             box_.append(&reason);
             if row.can_remove || row.can_retry {
                 let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 if row.can_retry {
-                    let retry = gtk::Button::with_label("try now");
+                    let retry = gtk::Button::with_label(text!("linux.window.trynow"));
                     actions.append(&retry);
                     let page = self.clone();
                     let id = row.id.clone();
@@ -310,7 +313,7 @@ impl ImportPage {
                                 Err(_) => false,
                             };
                             if !success {
-                                page.fail(solstone_linux::import::STEP_ERROR);
+                                page.fail(solstone_linux::import::step_error());
                             }
                             if success {
                                 page.clear_step();
@@ -319,7 +322,7 @@ impl ImportPage {
                         });
                     });
                 }
-                let remove = gtk::Button::with_label("remove");
+                let remove = gtk::Button::with_label(text!("linux.window.remove"));
                 remove.set_sensitive(row.can_remove);
                 actions.append(&remove);
                 let page = self.clone();
@@ -336,7 +339,7 @@ impl ImportPage {
         let page = self.clone();
         glib::MainContext::default().spawn_local(async move {
             let Ok(client) = ControlClient::session().await else {
-                page.fail(solstone_linux::import::STEP_ERROR);
+                page.fail(solstone_linux::import::step_error());
                 return;
             };
             let confirmation = client
@@ -347,7 +350,7 @@ impl ImportPage {
             match confirmation {
                 Some(Some(confirmation)) => page.present_remove(Rc::new(client), confirmation),
                 Some(None) => page.reload(&client).await,
-                None => page.fail(solstone_linux::import::STEP_ERROR),
+                None => page.fail(solstone_linux::import::step_error()),
             }
         });
     }
@@ -359,13 +362,13 @@ impl ImportPage {
         let dialog = gtk::MessageDialog::builder()
             .transient_for(&window)
             .modal(true)
-            .text(format!("remove {}?", confirmation.row.name))
+            .text(message!("linux.window.remove.vf022f0fa", "value1" => confirmation.row.name))
             .secondary_text(warning(&confirmation.row))
             .build();
-        dialog.add_button("cancel", gtk::ResponseType::Cancel);
-        dialog.add_button("remove", gtk::ResponseType::Accept);
+        dialog.add_button(text!("linux.window.cancel"), gtk::ResponseType::Cancel);
+        dialog.add_button(text!("linux.window.remove"), gtk::ResponseType::Accept);
         dialog.set_default_response(gtk::ResponseType::Cancel);
-        let error = label(solstone_linux::import::REMOVE_ERROR);
+        let error = label(solstone_linux::import::remove_error());
         error.add_css_class("sol-attn");
         error.set_visible(false);
         dialog.content_area().append(&error);
@@ -409,11 +412,11 @@ impl ImportPage {
 
 fn warning(row: &ImportRow) -> &'static str {
     if row.missing {
-        "the copy is already gone, so this only clears it from here."
+        text!("linux.window.thecopyisalreadygonesothis")
     } else if row.may_have_saved {
-        "this removes the copy on this device. your journal may still bring in the copy it already has."
+        text!("linux.window.thisremovesthecopyonthisdevice")
     } else {
-        "this removes the copy on this device, so it won't reach your journal."
+        text!("linux.window.thisremovesthecopyonthisdevice.v558a0c4f")
     }
 }
 

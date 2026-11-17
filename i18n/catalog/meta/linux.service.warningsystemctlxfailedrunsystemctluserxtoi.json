@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the service component.",
+  "context": "Presentation from the service component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "operation",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 100,
+  "source_revision": "63191a3fc23bb4e1c26454d72828409bc5f086dffc2f0539312493b1a10b4480",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "systemctl --user"
+    }
+  ]
+}

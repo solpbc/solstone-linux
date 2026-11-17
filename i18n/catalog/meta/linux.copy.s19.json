@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.screenshot.waitingtogoto, windows.ui.waitingtogotoyourjournal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 29,
+  "source_revision": "364835adb846e149608d4ca75b3e6f5f7f974e57b68f83f933140c8abc06667a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

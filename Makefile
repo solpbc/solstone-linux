@@ -128,7 +128,7 @@ brand-sync:
 	@echo "brand: synced from $(BRAND_DIR)"
 
 test: rust-preflight
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal -p solstone-vault -p solstone-folder-sync
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal -p solstone-vault -p solstone-folder-sync -p solstone-i18n
 
 check-observer-contract: rust-preflight
 	@echo "Client-ingest contract bundle: 14.0.0"
@@ -187,12 +187,16 @@ check-rust-release-manifest: rust-preflight
 shellcheck:
 	shellcheck $(SHELLCHECK_SCRIPTS)
 
-ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-audit-signed-packet
+.PHONY: check-i18n
+check-i18n:
+	python3 scripts/i18n.py --check
+
+ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-audit-signed-packet check-i18n
 	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."
 	@echo "This gate does not run target-package validation or the release FLAC soak."
 	$(CARGO) fmt --check
 	$(CARGO) clippy $(CARGO_LOCKED) --all-targets -- -D warnings
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal -p solstone-vault -p solstone-folder-sync
+	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux -p solstone-linux-window -p solstone-terminal -p solstone-vault -p solstone-folder-sync -p solstone-i18n
 	$(MAKE) shellcheck
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 

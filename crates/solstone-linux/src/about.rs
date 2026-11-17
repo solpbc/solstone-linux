@@ -2,6 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use serde::{Deserialize, Serialize};
+use solstone_i18n::{message, text};
 
 use crate::config::Config;
 
@@ -52,6 +53,60 @@ pub fn render_line(
         line.push_str(normalize_arch(arch));
     }
     line
+}
+
+fn display_line(
+    name: &str,
+    version: &str,
+    build: Option<&str>,
+    os: &str,
+    os_version: &str,
+    arch: &str,
+) -> String {
+    let version = version.trim_start_matches('v');
+    let arch = (!arch.is_empty()).then(|| normalize_arch(arch));
+    let os = (!os.is_empty()).then_some(os);
+    let os_version = os.and((!os_version.is_empty()).then_some(os_version));
+    let build = build.filter(|value| !value.is_empty());
+    match (build, os, os_version, arch) {
+        (None, None, None, None) => {
+            message!("linux.about.version", "name" => name, "version" => version)
+        }
+        (None, None, None, Some(arch)) => {
+            message!("linux.about.versionarch", "name" => name, "version" => version, "arch" => arch)
+        }
+        (None, Some(os), None, None) => {
+            message!("linux.about.versionos", "name" => name, "version" => version, "os" => os)
+        }
+        (None, Some(os), None, Some(arch)) => {
+            message!("linux.about.versionosarch", "name" => name, "version" => version, "os" => os, "arch" => arch)
+        }
+        (None, Some(os), Some(os_version), None) => {
+            message!("linux.about.versionosversion", "name" => name, "version" => version, "os" => os, "osversion" => os_version)
+        }
+        (None, Some(os), Some(os_version), Some(arch)) => {
+            message!("linux.about.versionosversionarch", "name" => name, "version" => version, "os" => os, "osversion" => os_version, "arch" => arch)
+        }
+        (Some(build), None, None, None) => {
+            message!("linux.about.versionbuild", "name" => name, "version" => version, "build" => build)
+        }
+        (Some(build), None, None, Some(arch)) => {
+            message!("linux.about.versionbuildarch", "name" => name, "version" => version, "build" => build, "arch" => arch)
+        }
+        (Some(build), Some(os), None, None) => {
+            message!("linux.about.versionbuildos", "name" => name, "version" => version, "build" => build, "os" => os)
+        }
+        (Some(build), Some(os), None, Some(arch)) => {
+            message!("linux.about.versionbuildosarch", "name" => name, "version" => version, "build" => build, "os" => os, "arch" => arch)
+        }
+        (Some(build), Some(os), Some(os_version), None) => {
+            message!("linux.about.versionbuildosversion", "name" => name, "version" => version, "build" => build, "os" => os, "osversion" => os_version)
+        }
+        (Some(build), Some(os), Some(os_version), Some(arch)) => {
+            message!("linux.about.versionbuildosversionarch", "name" => name, "version" => version, "build" => build, "os" => os, "osversion" => os_version, "arch" => arch)
+        }
+        (_, None, Some(_), _) => unreachable!("an OS version requires an OS name"),
+    }
 }
 
 impl About {
@@ -166,35 +221,56 @@ impl AboutBlock {
         current: bool,
         now: u64,
     ) -> Self {
-        let (journal_line, journal_version, journal_current, journal_seen_at) = match saved {
-            Some(saved)
-                if crate::private_link::sanitize_journal_version(&saved.version).is_some() =>
-            {
-                let facts = saved.about.as_ref().filter(|facts| {
-                    facts.valid()
-                        && facts.version.trim_start_matches('v')
-                            == saved.version.trim_start_matches('v')
-                });
-                let line = facts
-                    .map(|facts| facts.about.clone())
-                    .unwrap_or_else(|| render_line("journal", &saved.version, None, "", "", ""));
-                let seen = (saved.observed_at.is_finite()
-                    && saved.observed_at >= 0.0
-                    && saved.observed_at < u64::MAX as f64)
-                    .then_some(saved.observed_at as u64);
-                let version = saved.version.trim_start_matches('v').to_owned();
-                (line, Some(version), current, seen)
+        let (journal_line, shown_line, journal_version, journal_current, journal_seen_at) =
+            match saved {
+                Some(saved)
+                    if crate::private_link::sanitize_journal_version(&saved.version).is_some() =>
+                {
+                    let facts = saved.about.as_ref().filter(|facts| {
+                        facts.valid()
+                            && facts.version.trim_start_matches('v')
+                                == saved.version.trim_start_matches('v')
+                    });
+                    let line = facts.map(|facts| facts.about.clone()).unwrap_or_else(|| {
+                        render_line("journal", &saved.version, None, "", "", "")
+                    });
+                    let seen = (saved.observed_at.is_finite()
+                        && saved.observed_at >= 0.0
+                        && saved.observed_at < u64::MAX as f64)
+                        .then_some(saved.observed_at as u64);
+                    let version = saved.version.trim_start_matches('v').to_owned();
+                    let journal = text!("linux.about.journal");
+                    let shown = facts.map_or_else(
+                        || display_line(journal, &version, None, "", "", ""),
+                        |facts| {
+                            display_line(
+                                journal,
+                                &version,
+                                facts.build.as_deref(),
+                                &facts.os,
+                                &facts.os_version,
+                                &facts.arch,
+                            )
+                        },
+                    );
+                    (line, shown, Some(version), current, seen)
+                }
+                _ => (
+                    solstone_i18n::render("en-US", "linux.about.unknown", &[]),
+                    text!("linux.about.unknown").into(),
+                    None,
+                    false,
+                    None,
+                ),
+            };
+        let displayed = match journal_seen_at {
+            Some(seen) if !journal_current => {
+                message!("linux.about.lastseen", "journal" => shown_line, "age" => age(now.saturating_sub(seen)))
             }
-            _ => ("journal unknown".into(), None, false, None),
+            _ => shown_line,
         };
-        let mut displayed = journal_line.clone();
-        if !journal_current && let Some(seen) = journal_seen_at {
-            displayed.push_str(SEPARATOR);
-            displayed.push_str("last seen ");
-            displayed.push_str(&age(now.saturating_sub(seen)));
-        }
-        let own = render_line(
-            "linux desktop app",
+        let own = display_line(
+            text!("linux.about.app"),
             env!("CARGO_PKG_VERSION"),
             None,
             &host.os,
@@ -202,7 +278,7 @@ impl AboutBlock {
             &host.arch,
         );
         Self {
-            text: format!("{own}\n{displayed}"),
+            text: message!("linux.about.block", "app" => own, "journal" => displayed),
             host,
             journal_line,
             journal_version,
@@ -254,13 +330,20 @@ impl AboutBlock {
 }
 
 fn age(seconds: u64) -> String {
-    let (value, unit) = match seconds {
-        0..60 => return "just now".into(),
-        60..3600 => (seconds / 60, "minute"),
-        3600..86400 => (seconds / 3600, "hour"),
-        _ => (seconds / 86400, "day"),
+    let (value, message) = match seconds {
+        0..60 => return text!("linux.about.now").into(),
+        60..3600 => (seconds / 60, "linux.about.ageminute"),
+        3600..86400 => (seconds / 3600, "linux.about.agehour"),
+        _ => (seconds / 86400, "linux.about.ageday"),
     };
-    format!("{value} {unit}{} ago", if value == 1 { "" } else { "s" })
+    solstone_i18n::cardinal(
+        message,
+        value as i64,
+        &[(
+            "formatted",
+            solstone_i18n::Value::String(&value.to_string()),
+        )],
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

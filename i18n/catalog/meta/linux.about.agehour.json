@@ -1,0 +1,31 @@
+{
+  "description": "Age of the last observed journal version.",
+  "context": "Age of the last observed journal version.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "formatted",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 84,
+  "source_revision": "d96059a6b6215378b391f0fa8193b166fc71381131d7128ab10723aab361aa5c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

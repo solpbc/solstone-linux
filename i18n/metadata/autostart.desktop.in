@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.2
+Type=Application
+@NAMES@
+@COMMENTS@
+Exec=/bin/sh -c 'systemctl --user import-environment DISPLAY XAUTHORITY XDG_SESSION_TYPE LANGUAGE LC_ALL LC_MESSAGES LANG 2>/dev/null; systemctl --user start solstone-linux.service'
+Icon=solstone-observer
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+Hidden=false

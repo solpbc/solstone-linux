@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.ui.claimednotverified, windows.ui.claimednotverified.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 21,
+  "source_revision": "8a20bfce626e15efa316031bf8f8e5a5d590431b5d135fc3d56385937d874bcc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

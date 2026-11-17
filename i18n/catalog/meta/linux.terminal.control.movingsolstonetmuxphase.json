@@ -1,0 +1,33 @@
+{
+  "description": "Presentation from the control component.",
+  "context": "Presentation from the control component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "phase",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 41,
+  "source_revision": "3fa554832a9f8383fa7208c0edbc459491d0ed65411f3d6ef52a0cce9c616e9c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "  "
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "tmux"
+    }
+  ]
+}

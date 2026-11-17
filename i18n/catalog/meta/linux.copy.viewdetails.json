@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.ui.viewdetails, windows.ui.viewdetails.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 12,
+  "source_revision": "be7afc21274527bfee987d63deefe0a61b610927ca5e56abc658d7382ef92982",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

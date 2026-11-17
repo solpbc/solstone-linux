@@ -10,8 +10,6 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub const AGENT_INSTRUCTIONS: &str = "solstone app for linux (repo: solstone-linux)\nSource: https://github.com/solpbc/solstone-linux\nRead INSTALL.md at https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md for setup and architecture.\nConfig: {config_path}\nSegments: {captures_dir}\nLogs: journalctl --user -u solstone-linux -f\nService: systemctl --user status solstone-linux";
-
 fn invoke(program: &str, args: &[&str], text: &str) -> io::Result<bool> {
     let mut child = Command::new(program)
         .args(args)
@@ -63,9 +61,11 @@ pub fn is_wayland(
 }
 
 pub fn agent_instructions(config_path: &str, captures_dir: &str) -> String {
-    AGENT_INSTRUCTIONS
-        .replace("{config_path}", config_path)
-        .replace("{captures_dir}", captures_dir)
+    solstone_i18n::message!(
+        "linux.clipboard.agentinstructions",
+        "config_path" => config_path,
+        "captures_dir" => captures_dir,
+    )
 }
 
 // Python clipboard provenance (1/1):

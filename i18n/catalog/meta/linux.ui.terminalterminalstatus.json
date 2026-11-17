@@ -1,0 +1,22 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "terminal-status",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 30,
+  "source_revision": "ce2257b19484cc7cfa4863debde1a4621f2a5af3183e6f82b3e53db22989c49a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

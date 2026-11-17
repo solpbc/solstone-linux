@@ -1,0 +1,33 @@
+{
+  "description": "Presentation from the service component.",
+  "context": "Presentation from the service component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 63,
+  "source_revision": "9ef215848f8b032284647764b9593c9ca96709727e0de1b2bfb8a1d2e84ffd48",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "solstone-linux"
+    },
+    {
+      "name": "ws2",
+      "kind": "whitespace",
+      "value": "\n"
+    }
+  ]
+}

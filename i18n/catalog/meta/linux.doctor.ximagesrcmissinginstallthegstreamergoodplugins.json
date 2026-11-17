@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 61,
+  "source_revision": "38bd29991c18cb9bd637fbbd7d4929f4d5ebb35941a250b9d9036536ceec0071",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "ximagesrc"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "GStreamer"
+    }
+  ]
+}

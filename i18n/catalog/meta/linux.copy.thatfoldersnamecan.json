@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.thatfoldersnamecant.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 92,
+  "source_revision": "d43715128fd055eab4a40179f20159acfe47278f7ad4145786b20feb7549cc9f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

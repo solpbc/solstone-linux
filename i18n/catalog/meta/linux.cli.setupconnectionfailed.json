@@ -1,0 +1,17 @@
+{
+  "description": "Shows the outcome of a command-line action.",
+  "context": "Shows the outcome of a command-line action.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 65,
+  "source_revision": "9f1536bf768b45874542a0cf9461d34e45ea072bdb8d1217f56426c3852e3b80",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

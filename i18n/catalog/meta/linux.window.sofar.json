@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopsource.sofar, windows.ui.sofar.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 6,
+  "source_revision": "60116d5214b82e4e83135129d4ea5b06dda2d8ed07008d0c33125e8c49e9d61b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

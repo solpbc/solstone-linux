@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 8,
+  "source_revision": "94a1f4a42f31d1fe616806b0dbd8c77f8c0f21497ac64e5a9c48df398a87c752",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

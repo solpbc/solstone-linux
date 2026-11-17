@@ -1,0 +1,32 @@
+{
+  "description": "Technical detail when another journal answered this computer.",
+  "context": "Technical detail when another journal answered this computer.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "spoken",
+      "type": "string"
+    },
+    {
+      "name": "claim",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 25,
+  "source_revision": "c1a5f7f2443324eccee6cc510a28f6de2957f47d36b2b32d70d68aa38bac0e1c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "  "
+    }
+  ]
+}

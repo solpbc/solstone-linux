@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the activity helper install component.",
+  "context": "Presentation from the activity helper install component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "err",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 52,
+  "source_revision": "1ea15757ea58cab980b2eee85e179f0c4a2d79b209e398226992ed3d491fdcab",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "KWin"
+    }
+  ]
+}

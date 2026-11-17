@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use solstone_i18n::{message, text};
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
@@ -31,41 +32,92 @@ pub(crate) const ANSWER_LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const JOURNAL_MARK_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 pub(crate) const UNVERIFIED_FILENAME: &str = "pairing-unverified";
-pub(crate) const HELD_BOTH_SENTENCES: &str = "waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.";
-pub(crate) const HELD_FIRST_SENTENCE: &str = "waiting for you to confirm your journal's mark";
-pub(crate) const RUN_LINE: &str = "when you're ready, run: solstone-linux confirm";
-pub(crate) const SUCCESS_LINE: &str = "the solstone app can now connect to your journal.";
-pub(crate) const NOT_PAIRED: &str = "not paired.";
+pub(crate) fn held_both_sentences() -> &'static str {
+    text!("linux.shared.pair.waitingforyoutoconfirmyourjournalsmarknothi")
+}
+pub(crate) fn held_first_sentence() -> &'static str {
+    text!("linux.copy.waitingforyoutoconfirmyourjournalsmark")
+}
+pub(crate) fn run_line() -> &'static str {
+    text!("linux.pair.whenyourereadyrunsolstonelinuxconfirm")
+}
+pub(crate) fn success_line() -> &'static str {
+    text!("linux.copy.thesolstoneappcannowconnecttoyourjournal")
+}
+pub(crate) fn not_paired() -> &'static str {
+    text!("linux.shared.pair.notpaired")
+}
 // `confirm` can end a pairing that was already sending, so these say nothing about
 // what reached that journal.
-pub(crate) const CONFIRM_MISMATCH_BODY: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and pair again, or email support@solstone.app and we'll help.";
-pub(crate) const CONFIRM_CANCEL_LINE: &str = "pairing cancelled. get a fresh pairing link from your journal and pair again when you're ready.";
-pub(crate) const CONFIRM_MARK_MISMATCH_LINE: &str = "the mark words you gave don't match the journal's mark, so this computer isn't paired. check the words, get a fresh pairing link from your journal and pair again.";
-pub(crate) const MISMATCH_BODY: &str = "you said this mark doesn't match the one your journal shows, so this computer isn't paired, and nothing it has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and run setup again, or email support@solstone.app and we'll help.";
-pub(crate) const CANCEL_LINE: &str = "pairing cancelled. nothing this computer has kept went to that journal through this link. get a fresh pairing link from your journal and run setup again when you're ready.";
-pub(crate) const MARK_WORDS_WRONG_LINE: &str =
-    "the mark words you gave don't match the journal's mark.";
-pub(crate) const PAIRING_KEPT_LINE: &str = "not changed. your current pairing stays in use. nothing this computer has kept went to that journal through this link.";
-pub(crate) const PAIRING_KEPT_STOPPED_LINE: &str =
-    "pairing cancelled. your current pairing stays in use.";
-pub(crate) const SETUP_BAD_LINK_LINE: &str = "setup failed: the pairing link was not valid.";
-pub(crate) const LINK_PROMPT: &str =
-    "paste the pairing link from your journal, then press enter:\n";
-pub(crate) const JOURNAL_ROW_NOT_PAIRED: &str = "journal: not paired";
-pub(crate) const JOURNAL_ROW_WAITING: &str = "journal: your journal";
-pub(crate) const MARK_UNAVAILABLE_LINE: &str = "your journal's mark: unavailable right now";
-pub(crate) const CONFIRM_DONE: &str = "your journal's mark is already confirmed. nothing to do.";
-pub(crate) const CONFIRM_UNPAIRED: &str =
-    "not paired. get a fresh pairing link from your journal and pair this computer.";
-pub(crate) const COULDNT_VERIFY: &str = "couldn't verify.";
-pub(crate) const SETUP_NO_TERMINAL: &str = "setup can't ask you about your journal's mark here. run it in a terminal, or give the mark's two words with --mark \"word word\".";
-pub(crate) const CONFIRM_NO_TERMINAL: &str = "confirm can't ask you about your journal's mark here. run it in a terminal, or give the mark's two words with --mark \"word word\".";
-pub(crate) const MARK_USAGE: &str =
-    "give the two words of your journal's mark, like --mark \"bramble quokka\".";
-pub(crate) const MARK_MISMATCH_LINE: &str = "the mark words you gave don't match the journal's mark, so this computer isn't paired, and nothing it has kept went to that journal through this link. check the words, get a fresh pairing link from your journal and run setup again.";
-pub(crate) const SETUP_UNVERIFIABLE_LINE: &str = "this computer couldn't work out the journal's mark, so the words you gave can't be matched. this computer isn't paired, and nothing it has kept went to that journal through this link. get a fresh pairing link from your journal and run setup in a terminal to decide for yourself.";
-pub(crate) const CONFIRM_UNVERIFIABLE_LINE: &str = "this computer couldn't work out the journal's mark, so the words you gave can't be matched. waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do. run solstone-linux confirm in a terminal to decide for yourself.";
-pub(crate) const MARK_HELP: &str = "the two words of the mark your journal's network app shows. needed when there's no terminal to ask you on.";
+pub(crate) fn confirm_mismatch_body() -> &'static str {
+    text!("linux.journalmark.yousaidthismarkdoesn")
+}
+pub(crate) fn confirm_cancel_line() -> &'static str {
+    text!("linux.journalmark.pairingcancelledgetfreshpairing")
+}
+pub(crate) fn confirm_mark_mismatch_line() -> &'static str {
+    text!("linux.journalmark.markwordsyougavedon")
+}
+pub(crate) fn mismatch_body() -> &'static str {
+    text!("linux.pair.yousaidthismarkdoesntmatchtheoneyourjourna")
+}
+pub(crate) fn cancel_line() -> &'static str {
+    text!("linux.pair.pairingcancellednothingthiscomputerhaskeptwen")
+}
+pub(crate) fn mark_words_wrong_line() -> &'static str {
+    text!("linux.journalmark.markwordsyougavedon2")
+}
+pub(crate) fn pairing_kept_line() -> &'static str {
+    text!("linux.journalmark.notchangedcurrentpairingstays")
+}
+pub(crate) fn pairing_kept_stopped_line() -> &'static str {
+    text!("linux.journalmark.pairingcancelledcurrentpairingstays")
+}
+pub(crate) fn setup_bad_link_line() -> &'static str {
+    text!("linux.journalmark.setupfailedpairinglinkwas")
+}
+pub(crate) fn link_prompt() -> &'static str {
+    text!("linux.journalmark.pastepairinglinkfromjournal")
+}
+pub(crate) fn journal_row_not_paired() -> &'static str {
+    text!("linux.journalmark.journalnotpaired")
+}
+pub(crate) fn journal_row_waiting() -> &'static str {
+    text!("linux.journalmark.journaljournal")
+}
+pub(crate) fn mark_unavailable_line() -> &'static str {
+    text!("linux.journalmark.journalsmarkunavailableright")
+}
+pub(crate) fn confirm_done() -> &'static str {
+    text!("linux.shared.pair.yourjournalsmarkisalreadyconfirmednothingto")
+}
+pub(crate) fn confirm_unpaired() -> &'static str {
+    text!("linux.journalmark.notpairedgetfreshpairing")
+}
+pub(crate) fn couldnt_verify() -> &'static str {
+    text!("linux.shared.pair.couldntverify")
+}
+pub(crate) fn setup_no_terminal() -> &'static str {
+    text!("linux.shared.pair.setupcantaskyouaboutyourjournalsmarkherer")
+}
+pub(crate) fn confirm_no_terminal() -> &'static str {
+    text!("linux.shared.pair.confirmcantaskyouaboutyourjournalsmarkhere")
+}
+pub(crate) fn mark_usage() -> &'static str {
+    text!("linux.shared.pair.givethetwowordsofyourjournalsmarklikemark")
+}
+pub(crate) fn mark_mismatch_line() -> &'static str {
+    text!("linux.pair.themarkwordsyougavedontmatchthejournalsma")
+}
+pub(crate) fn setup_unverifiable_line() -> &'static str {
+    text!("linux.pair.thiscomputercouldntworkoutthejournalsmarks")
+}
+pub(crate) fn confirm_unverifiable_line() -> &'static str {
+    text!("linux.pair.thiscomputercouldntworkoutthejournalsmarks2")
+}
+pub(crate) fn mark_help() -> &'static str {
+    text!("linux.shared.pair.thetwowordsofthemarkyourjournalsnetworkapp")
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -450,17 +502,17 @@ pub(crate) fn journal_status_row(config_root: &Path) -> String {
         // A held pairing with no readable CA has no mark to wait on.
         return match load_credential(config_root) {
             Ok(Some(credential)) if pinned_ca_jid(&credential).is_none() => {
-                MARK_UNAVAILABLE_LINE.to_owned()
+                mark_unavailable_line().to_owned()
             }
-            _ => JOURNAL_ROW_WAITING.to_owned(),
+            _ => journal_row_waiting().to_owned(),
         };
     }
     match load_credential(config_root) {
-        Ok(None) => JOURNAL_ROW_NOT_PAIRED.to_owned(),
+        Ok(None) => journal_row_not_paired().to_owned(),
         Ok(Some(credential)) => crate::mark_cache::render_spec(&mark_jid(&credential))
-            .map(|spec| format!("journal: {}·{}", spec.words[0], spec.words[1]))
-            .unwrap_or_else(|| MARK_UNAVAILABLE_LINE.to_owned()),
-        Err(_) => MARK_UNAVAILABLE_LINE.to_owned(),
+            .map(|spec| message!("linux.journalmark.journal", "value1" => spec.words[0], "value2" => spec.words[1]))
+            .unwrap_or_else(|| mark_unavailable_line().to_owned()),
+        Err(_) => mark_unavailable_line().to_owned(),
     }
 }
 
@@ -489,7 +541,7 @@ impl<R: Read, W: Write> Read for TerminalLinkInput<R, W> {
             return Ok(0);
         }
         if let Some(mut terminal) = self.prompt_to.take() {
-            let _ = terminal.write_all(LINK_PROMPT.as_bytes());
+            let _ = terminal.write_all(link_prompt().as_bytes());
             let _ = terminal.flush();
         }
         let read = self.input.read(&mut buffer[..1])?;
@@ -596,16 +648,13 @@ pub(crate) async fn ask_terminal_question<Fd: AsFd>(
     let spoken = format_spoken_mark(&mark_jid(credential));
     let (initial_prompt, ask_line, is_identified) = match spoken {
         Some(spoken) => (
-            format!(
-                "one more step: check your journal's mark.\n\n  your journal's mark: {spoken}\n\nyour journal shows this same mark in its network app. it should match, exactly.\ndoes this match your journal? type yes or no:\n"
-            ),
-            "does this match your journal? type yes or no:\n",
+            message!("linux.pair.onemorestepcheckyourjournalsmarkyourjournal", "spoken" => spoken),
+            text!("linux.shared.pair.doesthismatchyourjournaltypeyesorno"),
             true,
         ),
         None => (
-            "one more step: check your journal's mark.\n\n  your journal's mark: unavailable right now\n\ncouldn't verify.\nthis computer couldn't work out your journal's mark, so there's nothing to compare. continue only if you're sure the link came from your journal.\ntype continue to pair anyway, or cancel to stop:\n"
-                .to_string(),
-            "type continue to pair anyway, or cancel to stop:\n",
+            text!("linux.pair.onemorestepcheckyourjournalsmarkyourjournal2").to_string(),
+            text!("linux.shared.pair.typecontinuetopairanywayorcanceltostop"),
             false,
         ),
     };
@@ -824,7 +873,7 @@ mod tests {
             .unwrap();
         assert_eq!(line, b"link-one\n");
         assert_eq!(typed.position(), 9, "reads nothing past the newline");
-        assert_eq!(prompted, LINK_PROMPT.as_bytes());
+        assert_eq!(prompted, link_prompt().as_bytes());
     }
 
     #[test]
@@ -832,7 +881,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         fs::create_dir_all(root).unwrap();
-        assert_eq!(journal_status_row(root), JOURNAL_ROW_NOT_PAIRED);
+        assert_eq!(journal_status_row(root), journal_row_not_paired());
 
         let jid = "01234567-89ab-cdef-0123-456789abcdef";
         let mut cred = sample_credential(jid, "cert-pem");
@@ -840,7 +889,7 @@ mod tests {
         let id = compute_pairing_id(&cred.client_cert_pem);
 
         write_pairing_answer(root, "").unwrap();
-        assert_eq!(journal_status_row(root), JOURNAL_ROW_WAITING);
+        assert_eq!(journal_status_row(root), journal_row_waiting());
 
         write_pairing_answer(root, &id).unwrap();
         let spec = spl_core::mark::mark_from_jid(&cred.instance_id)
@@ -848,14 +897,14 @@ mod tests {
             .to_render_spec();
         let row = journal_status_row(root);
         assert!(row.contains(&spec.words[0]) && row.contains(&spec.words[1]));
-        assert_ne!(row, JOURNAL_ROW_WAITING);
+        assert_ne!(row, journal_row_waiting());
 
         cred.instance_id = "invalid-jid".into();
         cred.ca_chain_pem = Vec::new();
         crate::private_link::persist_credential(root, &cred).unwrap();
-        assert_eq!(journal_status_row(root), MARK_UNAVAILABLE_LINE);
+        assert_eq!(journal_status_row(root), mark_unavailable_line());
         write_pairing_answer(root, &id).unwrap();
-        assert_eq!(journal_status_row(root), MARK_UNAVAILABLE_LINE);
+        assert_eq!(journal_status_row(root), mark_unavailable_line());
     }
 
     #[test]
@@ -1222,9 +1271,9 @@ mod tests {
         );
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(!out_str.contains(NOT_PAIRED));
-        assert!(!out_str.contains(MISMATCH_BODY));
-        assert!(!out_str.contains(CANCEL_LINE));
+        assert!(!out_str.contains(not_paired()));
+        assert!(!out_str.contains(mismatch_body()));
+        assert!(!out_str.contains(cancel_line()));
         let err_str = String::from_utf8(err).unwrap();
         assert!(err_str.starts_with("Error:"));
 
@@ -1255,7 +1304,7 @@ mod tests {
         assert_eq!(status, 5);
         let out_str = String::from_utf8(out).unwrap();
         assert!(!out_str.contains("couldn't verify."));
-        assert!(out_str.contains(CONFIRM_UNVERIFIABLE_LINE));
+        assert!(out_str.contains(confirm_unverifiable_line()));
         assert!(root.join("credentials.json").exists());
     }
 
@@ -1285,7 +1334,7 @@ mod tests {
 
         assert_eq!(status, 1);
         let out_str = String::from_utf8(out).unwrap();
-        assert_eq!(out_str, format!("{}\n", CONFIRM_NO_TERMINAL));
+        assert_eq!(out_str, format!("{}\n", confirm_no_terminal()));
         assert_eq!(
             fs::read(root.join("credentials.json")).unwrap(),
             cred_bytes_before
@@ -1315,7 +1364,7 @@ mod tests {
         assert_eq!(status, 1);
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("{}\n", CONFIRM_UNPAIRED)
+            format!("{}\n", confirm_unpaired())
         );
 
         let cred = sample_credential("01234567-89ab-cdef-0123-456789abcdef", "cert-pem");
@@ -1336,7 +1385,7 @@ mod tests {
         assert_eq!(status, 0);
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("{}\n", CONFIRM_DONE)
+            format!("{}\n", confirm_done())
         );
     }
 
@@ -1453,9 +1502,9 @@ mod tests {
         );
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(!out_str.contains(NOT_PAIRED));
-        assert!(!out_str.contains(MISMATCH_BODY));
-        assert!(!out_str.contains(CANCEL_LINE));
+        assert!(!out_str.contains(not_paired()));
+        assert!(!out_str.contains(mismatch_body()));
+        assert!(!out_str.contains(cancel_line()));
         let err_str = String::from_utf8(err).unwrap();
         assert!(err_str.starts_with("Error:"));
 
@@ -1497,9 +1546,9 @@ mod tests {
         assert_eq!(status, 1);
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(!out_str.contains(NOT_PAIRED));
-        assert!(!out_str.contains(MISMATCH_BODY));
-        assert!(!out_str.contains(CANCEL_LINE));
+        assert!(!out_str.contains(not_paired()));
+        assert!(!out_str.contains(mismatch_body()));
+        assert!(!out_str.contains(cancel_line()));
         let err_str = String::from_utf8(err).unwrap();
         assert!(err_str.starts_with("Error:"));
 
@@ -1568,7 +1617,7 @@ mod tests {
         assert!(root.join("credentials.json").exists());
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(!out_str.contains(CANCEL_LINE));
+        assert!(!out_str.contains(cancel_line()));
         let err_str = String::from_utf8(err).unwrap();
         assert!(err_str.starts_with("Error:"));
     }
@@ -1620,8 +1669,8 @@ mod tests {
         assert!(root.join("credentials.json").exists());
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(!out_str.contains(NOT_PAIRED));
-        assert!(!out_str.contains(MARK_MISMATCH_LINE));
+        assert!(!out_str.contains(not_paired()));
+        assert!(!out_str.contains(mark_mismatch_line()));
         let err_str = String::from_utf8(err).unwrap();
         assert!(err_str.starts_with("Error:"));
 
@@ -1702,7 +1751,7 @@ mod tests {
             .await;
             assert_eq!(status, 1);
             let out_str = String::from_utf8(out).unwrap();
-            assert!(out_str.contains(crate::journal_mark::MARK_MISMATCH_LINE));
+            assert!(out_str.contains(crate::journal_mark::mark_mismatch_line()));
         }
 
         // 3. Move space off A/B boundary
@@ -1730,7 +1779,7 @@ mod tests {
             .await;
             assert_eq!(status, 1);
             let out_str = String::from_utf8(out).unwrap();
-            assert!(out_str.contains(crate::journal_mark::MARK_MISMATCH_LINE));
+            assert!(out_str.contains(crate::journal_mark::mark_mismatch_line()));
         }
     }
 

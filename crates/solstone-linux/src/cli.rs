@@ -18,6 +18,7 @@ use crate::{
     sync_health::{ProcessEpoch, SyncFacts, derive_health, load_facts_with_liveness, save_facts},
 };
 use clap::{Parser, Subcommand};
+use solstone_i18n::{message, text};
 use spl_transport::credential::Credential;
 use std::{
     collections::HashMap,
@@ -32,7 +33,7 @@ use std::{
 #[derive(Debug, Parser)]
 #[command(
     name = "solstone-linux",
-    about = "the solstone app for linux takes in what you share with it, and all of it goes into your journal. part of solstone.",
+    about = text!("linux.cli.thesolstoneappforlinuxtakesinwhatyousharew"),
     version
 )]
 pub struct Args {
@@ -44,66 +45,66 @@ pub struct Args {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 enum Commands {
-    #[command(about = "start the solstone app")]
+    #[command(about = text!("linux.copy.startthesolstoneapp"))]
     Run {
-        #[arg(long, help = "Segment duration in seconds (default: 300)")]
+        #[arg(long, help = text!("linux.cli.segmentdurationinsecondsdefault300"))]
         interval: Option<i64>,
     },
     #[command(
-        about = "pair this device with your journal",
-        long_about = "pair this device with your journal.\n\nExit codes:\n  0  paired and confirmed, or already confirmed\n  1  not paired, nothing changed, or no terminal\n  2  usage error\n  5  held"
+        about = text!("linux.cli.pairthisdevicewithyourjournal"),
+        long_about = text!("linux.cli.pairthisdevicewithyourjournalexitcodes0pair")
     )]
     Setup {
-        #[arg(long, help = crate::journal_mark::MARK_HELP)]
+        #[arg(long, help = crate::journal_mark::mark_help())]
         mark: Option<String>,
-        #[arg(long, help = "Stream name (defaults to hostname-derived)")]
+        #[arg(long, help = text!("linux.cli.streamnamedefaultstohostnamederived"))]
         stream_name: Option<String>,
     },
     #[command(
-        about = "confirm your journal's mark",
-        long_about = "confirm your journal's mark.\n\nExit codes:\n  0  paired and confirmed, or already confirmed\n  1  not paired, nothing changed, or no terminal\n  2  usage error\n  5  held"
+        about = text!("linux.copy.confirmyourjournalsmark"),
+        long_about = text!("linux.cli.confirmyourjournalsmarkexitcodes0pairedand")
     )]
     Confirm {
-        #[arg(long, help = crate::journal_mark::MARK_HELP)]
+        #[arg(long, help = crate::journal_mark::mark_help())]
         mark: Option<String>,
     },
-    #[command(about = "Verify install prerequisites")]
+    #[command(about = text!("linux.cli.verifyinstallprerequisites"))]
     Doctor,
-    #[command(about = "edit settings")]
+    #[command(about = text!("linux.cli.editsettings"))]
     Settings,
-    #[command(name = "install-service", about = "Install systemd user service")]
+    #[command(name = "install-service", about = text!("linux.cli.installsystemduserservice"))]
     InstallService,
-    #[command(name = "uninstall-service", about = "Uninstall systemd user service")]
+    #[command(name = "uninstall-service", about = text!("linux.cli.uninstallsystemduserservice"))]
     UninstallService,
-    #[command(about = "show status")]
+    #[command(about = text!("linux.cli.showstatus"))]
     Status,
-    #[command(about = "show your app and journal versions")]
+    #[command(about = text!("linux.cli.showyourappandjournalversions"))]
     About,
     #[command(
         name = "panel-icon",
-        about = "set up the GNOME panel icon, where pause and resume live"
+        about = text!("linux.cli.setupthegnomepaneliconwherepauseandresumel")
     )]
     PanelIcon,
     #[command(
         name = "activity-helpers",
-        about = "install GNOME and KWin activity helper assets"
+        about = text!("linux.cli.installgnomeandkwinactivityhelperassets")
     )]
     ActivityHelpers,
-    #[command(about = "pause intake")]
+    #[command(about = text!("linux.cli.pauseintake"))]
     Pause {
         #[arg(
             long,
-            help = "How many minutes to pause for (default: until you resume)"
+            help = text!("linux.cli.howmanyminutestopausefordefaultuntilyouresu")
         )]
         minutes: Option<u64>,
     },
-    #[command(about = "resume intake")]
+    #[command(about = text!("linux.cli.resumeintake"))]
     Resume,
-    #[command(about = "terminal: on, off or status", subcommand)]
+    #[command(about = text!("linux.cli.terminaloffstatus"), subcommand)]
     Terminal(TerminalAction),
     #[command(
         name = "desktop-capture",
-        about = "screen, audio and desktop activity: on or off"
+        about = text!("linux.cli.screenaudiodesktopactivityoff")
     )]
     DesktopCapture {
         #[arg(value_enum)]
@@ -112,25 +113,25 @@ enum Commands {
     #[cfg(feature = "browser")]
     #[command(
         name = "discard-browser-pages",
-        about = "discard waiting browser pages"
+        about = text!("linux.cli.discardwaitingbrowserpages")
     )]
     DiscardBrowserPages,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 enum TerminalAction {
-    #[command(about = "show whether terminal is on and what it is doing")]
+    #[command(about = text!("linux.cli.showwhetherterminaliswhat"))]
     Status,
-    #[command(about = "turn terminal on")]
+    #[command(about = text!("linux.cli.turnterminal"))]
     On,
-    #[command(about = "turn terminal off")]
+    #[command(about = text!("linux.cli.turnterminaloff"))]
     Off,
     #[command(
         name = "adopt-tmux",
-        about = "move an existing solstone for tmux into this app"
+        about = text!("linux.cli.moveexistingsolstonetmuxinto")
     )]
     AdoptTmux {
-        #[arg(long, help = "agree without being asked")]
+        #[arg(long, help = text!("linux.cli.agreewithoutbeingasked"))]
         yes: bool,
     },
 }
@@ -170,10 +171,15 @@ impl Runner for SystemRunner {
             64 * 1024,
         )?;
         if output.timed_out {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "command timed out"));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                text!("linux.cli.commandtimedout"),
+            ));
         }
         if output.truncated {
-            return Err(io::Error::other("command output exceeded its bound"));
+            return Err(io::Error::other(text!(
+                "linux.cli.commandoutputexceededitsbound"
+            )));
         }
         Ok(Output {
             success: output.status.success(),
@@ -313,7 +319,10 @@ fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
         .and_then(crate::pending_link::clicked_link)
         && let Err(error) = crate::pending_link::store(&crate::pending_link::default_path(), &link)
     {
-        eprintln!("couldn't keep that link for the window: {error}");
+        eprintln!(
+            "{}",
+            message!("linux.cli.couldntkeepthatlinkforthe", "error" => error)
+        );
     }
     let Ok(current) = crate::service::current_executable() else {
         return launch_window(false, false);
@@ -352,12 +361,15 @@ fn launch_window(in_scope: bool, settings: bool) -> i32 {
         {
             Ok(status) if status.success() => 0,
             Ok(status) if status.code() == Some(80) => 1,
-            Ok(status) => handle_window_failure(&format!("window scope exited: {status}"), false),
+            Ok(status) => handle_window_failure(
+                &message!("linux.cli.windowscopeexitedx", "status" => status),
+                false,
+            ),
             Err(error) => handle_window_failure(&error.to_string(), false),
         };
     }
     let Some(parent) = current.parent() else {
-        return handle_window_failure("missing executable directory", false);
+        return handle_window_failure(text!("linux.cli.missingexecutabledirectory"), false);
     };
     let result = crate::bounded_process::run(
         Command::new(parent.join("solstone-linux-window"))
@@ -398,15 +410,15 @@ fn handle_window_failure(stderr_str: &str, runtime_unavailable: bool) -> i32 {
         WindowLaunchNotice::Runtime { path } => crate::copy::launch_runtime_unavailable(&path),
         WindowLaunchNotice::Failed { path } => crate::copy::launch_failed(&path),
         WindowLaunchNotice::FailedWithoutDiagnostic => {
-            crate::copy::LAUNCH_FAILED_WITHOUT_DIAGNOSTIC.to_string()
+            crate::copy::launch_failed_without_diagnostic().to_string()
         }
         WindowLaunchNotice::Retained { path } => crate::copy::launch_retained_diagnostic(&path),
         WindowLaunchNotice::Silent => String::new(),
     };
 
     let notif_res = notify_rust::Notification::new()
-        .appname("solstone")
-        .summary(crate::copy::LAUNCH_FAILURE_TITLE)
+        .appname(text!("linux.metadata.name"))
+        .summary(crate::copy::launch_failure_title())
         .body(&body)
         .show();
 
@@ -573,7 +585,7 @@ pub fn run() -> i32 {
         Commands::InstallService => match crate::service::ServicePaths::production() {
             Ok(paths) => crate::service::install(&paths, &SystemRunner, &mut io::stdout()),
             Err(error) => {
-                eprintln!("Error: {error}");
+                eprintln!("{}", message!("linux.cli.errorx", "error" => error));
                 1
             }
         },
@@ -584,7 +596,7 @@ pub fn run() -> i32 {
         Commands::UninstallService => match crate::service::ServicePaths::production() {
             Ok(paths) => crate::service::uninstall(&paths, &SystemRunner, &mut io::stdout()),
             Err(error) => {
-                eprintln!("Error: {error}");
+                eprintln!("{}", message!("linux.cli.errorx", "error" => error));
                 1
             }
         },
@@ -614,7 +626,10 @@ fn cmd_control(control: Control, output: &mut dyn Write, errors: &mut dyn Write)
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = write_line(errors, format!("could not start: {error}"));
+            let _ = write_line(
+                errors,
+                message!("linux.cli.couldnotstartx", "error" => error),
+            );
             return 1;
         }
     };
@@ -651,7 +666,10 @@ fn cmd_panel_icon(output: &mut dyn Write, errors: &mut dyn Write) -> i32 {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = write_line(errors, format!("could not start: {error}"));
+            let _ = write_line(
+                errors,
+                message!("linux.cli.couldnotstartx", "error" => error),
+            );
             return 1;
         }
     };
@@ -661,7 +679,7 @@ fn cmd_panel_icon(output: &mut dyn Write, errors: &mut dyn Write) -> i32 {
             Err(error) => {
                 let _ = write_line(
                     errors,
-                    format!("no session bus, so there is no desktop to set up: {error}"),
+                    message!("linux.cli.nosessionbussothereisnodesktoptosetupx", "error" => error),
                 );
                 return 1;
             }
@@ -737,7 +755,7 @@ fn cmd_setup(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = write_line(errors, format!("setup failed: {error}"));
+            let _ = write_line(errors, message!("linux.cli.setupfailedx", "error" => error));
             return 1;
         }
     };
@@ -770,7 +788,7 @@ fn cmd_confirm(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = write_line(errors, format!("Error: {error}"));
+            let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
             return 1;
         }
     };
@@ -799,7 +817,7 @@ pub(crate) fn reload_same_pairing(
         }
         None => Err(PrivateStateError::Io {
             operation: PrivateIoOperation::Read,
-            source: io::Error::new(io::ErrorKind::NotFound, "credential absent"),
+            source: io::Error::new(io::ErrorKind::NotFound, text!("linux.cli.credentialabsent")),
         }),
     }
 }
@@ -828,7 +846,7 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
         match crate::journal_mark::parse_mark_words(mark_str) {
             Some(words) => Some(words),
             None => {
-                let _ = write_line(output, crate::journal_mark::MARK_USAGE);
+                let _ = write_line(output, crate::journal_mark::mark_usage());
                 return 2;
             }
         }
@@ -839,76 +857,77 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
     let answer_lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
         Ok(lock) => lock,
         Err(error) => {
-            let _ = write_line(errors, format!("Error: {error}"));
+            let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
             return 1;
         }
     };
 
     if let Err(error) = crate::journal_mark::grandfather_answer_file(config_root) {
-        let _ = write_line(errors, format!("Error: {error}"));
+        let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
         return 1;
     }
 
     let credential = match load_credential(config_root) {
         Ok(Some(cred)) => cred,
         Ok(None) => {
-            let _ = write_line(output, crate::journal_mark::CONFIRM_UNPAIRED);
+            let _ = write_line(output, crate::journal_mark::confirm_unpaired());
             return 1;
         }
         Err(error) => {
-            let _ = write_line(errors, format!("Error: {error}"));
+            let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
             return 1;
         }
     };
 
     let pairing_id = crate::private_link::compute_pairing_id(&credential.client_cert_pem);
     if crate::journal_mark::is_pairing_confirmed(config_root, &pairing_id) {
-        let _ = write_line(output, crate::journal_mark::CONFIRM_DONE);
+        let _ = write_line(output, crate::journal_mark::confirm_done());
         return 0;
     }
 
     if mark_words.is_none() && terminal_fd.is_none() {
-        let _ = write_line(output, crate::journal_mark::CONFIRM_NO_TERMINAL);
+        let _ = write_line(output, crate::journal_mark::confirm_no_terminal());
         return 1;
     }
 
     if let Some(words) = mark_words {
         match crate::journal_mark::compare_mark_to_credential(&credential, &words) {
             Err(()) => {
-                let _ = write_line(output, crate::journal_mark::CONFIRM_UNVERIFIABLE_LINE);
+                let _ = write_line(output, crate::journal_mark::confirm_unverifiable_line());
                 5
             }
             Ok(true) => {
                 if let Err(error) = reload_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
+                    let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                     return 1;
                 }
                 if let Err(error) =
                     crate::journal_mark::write_pairing_answer(config_root, &pairing_id)
                 {
-                    let _ = write_line(errors, format!("Error: {error}"));
+                    let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                     return 1;
                 }
-                let _ = write_line(output, crate::journal_mark::SUCCESS_LINE);
+                let _ = write_line(output, crate::journal_mark::success_line());
                 0
             }
             Ok(false) => {
                 drop(answer_lock);
                 crate::journal_mark::retire_client_registration(&credential).await;
-                let _reacquired_lock =
-                    match crate::journal_mark::AnswerLock::acquire(config_root).await {
-                        Ok(lock) => lock,
-                        Err(error) => {
-                            let _ = write_line(errors, format!("Error: {error}"));
-                            return 1;
-                        }
-                    };
+                let _reacquired_lock = match crate::journal_mark::AnswerLock::acquire(config_root)
+                    .await
+                {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
+                        return 1;
+                    }
+                };
                 if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
+                    let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                     return 1;
                 }
-                let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
-                let _ = write_line(output, crate::journal_mark::CONFIRM_MARK_MISMATCH_LINE);
+                let _ = write_line(output, crate::journal_mark::not_paired());
+                let _ = write_line(output, crate::journal_mark::confirm_mark_mismatch_line());
                 1
             }
         }
@@ -921,21 +940,21 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 let _lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
                     Ok(lock) => lock,
                     Err(error) => {
-                        let _ = write_line(errors, format!("Error: {error}"));
+                        let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                         return 1;
                     }
                 };
                 if let Err(error) = reload_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
+                    let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                     return 1;
                 }
                 if let Err(error) =
                     crate::journal_mark::write_pairing_answer(config_root, &pairing_id)
                 {
-                    let _ = write_line(errors, format!("Error: {error}"));
+                    let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                     return 1;
                 }
-                let _ = write_line(output, crate::journal_mark::SUCCESS_LINE);
+                let _ = write_line(output, crate::journal_mark::success_line());
                 0
             }
             crate::journal_mark::QuestionOutcome::No => {
@@ -943,16 +962,16 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 let _lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
                     Ok(lock) => lock,
                     Err(error) => {
-                        let _ = write_line(errors, format!("Error: {error}"));
+                        let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                         return 1;
                     }
                 };
                 if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
+                    let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                     return 1;
                 }
-                let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
-                let _ = write_line(output, crate::journal_mark::CONFIRM_MISMATCH_BODY);
+                let _ = write_line(output, crate::journal_mark::not_paired());
+                let _ = write_line(output, crate::journal_mark::confirm_mismatch_body());
                 1
             }
             crate::journal_mark::QuestionOutcome::Cancel => {
@@ -960,20 +979,20 @@ pub(crate) async fn confirm_async<Fd: std::os::fd::AsFd>(
                 let _lock = match crate::journal_mark::AnswerLock::acquire(config_root).await {
                     Ok(lock) => lock,
                     Err(error) => {
-                        let _ = write_line(errors, format!("Error: {error}"));
+                        let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                         return 1;
                     }
                 };
                 if let Err(error) = drop_same_pairing(config_root, &pairing_id) {
-                    let _ = write_line(errors, format!("Error: {error}"));
+                    let _ = write_line(errors, message!("linux.cli.errorx", "error" => error));
                     return 1;
                 }
-                let _ = write_line(output, crate::journal_mark::CONFIRM_CANCEL_LINE);
+                let _ = write_line(output, crate::journal_mark::confirm_cancel_line());
                 1
             }
             crate::journal_mark::QuestionOutcome::WalkedAway => {
-                let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
-                let _ = write_line(output, crate::journal_mark::RUN_LINE);
+                let _ = write_line(output, crate::journal_mark::held_both_sentences());
+                let _ = write_line(output, crate::journal_mark::run_line());
                 5
             }
         }
@@ -987,75 +1006,69 @@ pub(crate) fn render_setup_result(
 ) -> i32 {
     match result {
         Ok(crate::private_link::SetupOutcome::Confirmed) => {
-            let _ = write_line(output, crate::journal_mark::SUCCESS_LINE);
+            let _ = write_line(output, crate::journal_mark::success_line());
             0
         }
         Ok(crate::private_link::SetupOutcome::MarkUsage) => {
-            let _ = write_line(output, crate::journal_mark::MARK_USAGE);
+            let _ = write_line(output, crate::journal_mark::mark_usage());
             2
         }
         Ok(crate::private_link::SetupOutcome::NoTerminal) => {
-            let _ = write_line(output, crate::journal_mark::SETUP_NO_TERMINAL);
+            let _ = write_line(output, crate::journal_mark::setup_no_terminal());
             1
         }
         Ok(crate::private_link::SetupOutcome::TerminalNo) => {
-            let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
-            let _ = write_line(output, crate::journal_mark::MISMATCH_BODY);
+            let _ = write_line(output, crate::journal_mark::not_paired());
+            let _ = write_line(output, crate::journal_mark::mismatch_body());
             1
         }
         Ok(crate::private_link::SetupOutcome::TerminalCancel) => {
-            let _ = write_line(output, crate::journal_mark::CANCEL_LINE);
+            let _ = write_line(output, crate::journal_mark::cancel_line());
             1
         }
         Ok(crate::private_link::SetupOutcome::MarkMismatch) => {
-            let _ = write_line(output, crate::journal_mark::NOT_PAIRED);
-            let _ = write_line(output, crate::journal_mark::MARK_MISMATCH_LINE);
+            let _ = write_line(output, crate::journal_mark::not_paired());
+            let _ = write_line(output, crate::journal_mark::mark_mismatch_line());
             1
         }
         Ok(crate::private_link::SetupOutcome::SetupUnverifiable) => {
-            let _ = write_line(output, crate::journal_mark::COULDNT_VERIFY);
-            let _ = write_line(output, crate::journal_mark::SETUP_UNVERIFIABLE_LINE);
+            let _ = write_line(output, crate::journal_mark::couldnt_verify());
+            let _ = write_line(output, crate::journal_mark::setup_unverifiable_line());
             1
         }
         Ok(crate::private_link::SetupOutcome::WalkedAwayHeld) => {
-            let _ = write_line(output, crate::journal_mark::HELD_BOTH_SENTENCES);
-            let _ = write_line(output, crate::journal_mark::RUN_LINE);
+            let _ = write_line(output, crate::journal_mark::held_both_sentences());
+            let _ = write_line(output, crate::journal_mark::run_line());
             5
         }
         Ok(crate::private_link::SetupOutcome::ReplacementRefused) => {
-            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
+            let _ = write_line(output, crate::journal_mark::pairing_kept_line());
             1
         }
         Ok(crate::private_link::SetupOutcome::ReplacementWordsWrong) => {
-            let _ = write_line(output, crate::journal_mark::MARK_WORDS_WRONG_LINE);
-            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
+            let _ = write_line(output, crate::journal_mark::mark_words_wrong_line());
+            let _ = write_line(output, crate::journal_mark::pairing_kept_line());
             1
         }
         Ok(crate::private_link::SetupOutcome::ReplacementUnverifiable) => {
-            let _ = write_line(output, crate::journal_mark::COULDNT_VERIFY);
-            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_LINE);
+            let _ = write_line(output, crate::journal_mark::couldnt_verify());
+            let _ = write_line(output, crate::journal_mark::pairing_kept_line());
             1
         }
         Ok(crate::private_link::SetupOutcome::ReplacementStopped) => {
-            let _ = write_line(output, crate::journal_mark::PAIRING_KEPT_STOPPED_LINE);
+            let _ = write_line(output, crate::journal_mark::pairing_kept_stopped_line());
             1
         }
         Err(PrivateStateError::PairInputInvalid) => {
-            let _ = write_line(errors, crate::journal_mark::SETUP_BAD_LINK_LINE);
+            let _ = write_line(errors, crate::journal_mark::setup_bad_link_line());
             1
         }
         Err(PrivateStateError::PairingFailed) => {
-            let _ = write_line(
-                errors,
-                "setup failed: the solstone app could not connect to your journal.",
-            );
+            let _ = write_line(errors, text!("linux.cli.setupconnectionfailed"));
             1
         }
         Err(PrivateStateError::LockContended) => {
-            let _ = write_line(
-                errors,
-                "setup could not start because the solstone app is running. stop the solstone app first and try again. no input was consumed; app state, config, and private state are unchanged.",
-            );
+            let _ = write_line(errors, text!("linux.cli.setupappalreadyrunning"));
             1
         }
         Err(
@@ -1064,19 +1077,19 @@ pub(crate) fn render_setup_result(
                 ..
             },
         ) => {
-            let _ = write_line(errors, format!("setup failed: {error}"));
+            let _ = write_line(errors, message!("linux.cli.setupfailedx", "error" => error));
             1
         }
         Err(error @ (PrivateStateError::Io { .. } | PrivateStateError::InvalidTarget { .. })) => {
+            let _ = write_line(errors, text!("linux.cli.setupconfigfailed"));
             let _ = write_line(
                 errors,
-                "setup failed before pairing because the solstone app could not safely update its config.",
+                message!("linux.cli.configupdateerrorx", "error" => error),
             );
-            let _ = write_line(errors, format!("config update error: {error}"));
             1
         }
         Err(error) => {
-            let _ = write_line(errors, format!("setup failed: {error}"));
+            let _ = write_line(errors, message!("linux.cli.setupfailedx", "error" => error));
             1
         }
     }
@@ -1129,12 +1142,12 @@ impl PromptIo for ConsolePrompt {
 
 fn prompt_bool(io: &mut dyn PromptIo, label: &str, current: bool) -> io::Result<Option<bool>> {
     loop {
-        let value = io.read_line(&format!("{label} [{}]: ", if current { "y" } else { "n" }))?;
+        let value = io.read_line(&message!("linux.cli.settingsboolprompt", "label" => label, "answer" => if current { "y" } else { "n" }))?;
         match value.trim().to_lowercase().as_str() {
             "" => return Ok(None),
             "y" | "yes" => return Ok(Some(true)),
             "n" | "no" => return Ok(Some(false)),
-            _ => io.write_line("Enter y or n.")?,
+            _ => io.write_line(text!("linux.cli.enteryorn"))?,
         }
     }
 }
@@ -1145,7 +1158,9 @@ fn prompt_positive_int(
     current: i64,
 ) -> io::Result<Option<i64>> {
     loop {
-        let value = io.read_line(&format!("{label} [{current}]: "))?;
+        let value = io.read_line(
+            &message!("linux.cli.settingsintprompt", "label" => label, "current" => current),
+        )?;
         if value.trim().is_empty() {
             return Ok(None);
         }
@@ -1154,7 +1169,7 @@ fn prompt_positive_int(
         {
             return Ok(Some(value));
         }
-        io.write_line("Enter a positive integer.")?;
+        io.write_line(text!("linux.cli.enterapositiveinteger"))?;
     }
 }
 
@@ -1163,32 +1178,42 @@ fn cmd_settings(paths: ConfigPaths, prompt: &mut dyn PromptIo) -> i32 {
     let mut config = loaded.config;
     let mut explicit = SettingsExplicit::NONE;
     let result = (|| -> io::Result<()> {
-        if let Some(cursor) = prompt_bool(prompt, "Draw cursor", config.draw_cursor)? {
+        if let Some(cursor) =
+            prompt_bool(prompt, text!("linux.cli.drawcursor"), config.draw_cursor)?
+        {
             config.draw_cursor = cursor;
             explicit.draw_cursor = true;
         }
-        if let Some(paused) = prompt_bool(prompt, "Start paused", config.start_paused)? {
+        if let Some(paused) =
+            prompt_bool(prompt, text!("linux.cli.startpaused"), config.start_paused)?
+        {
             config.start_paused = paused;
             explicit.start_paused = true;
         }
-        if let Some(interval) =
-            prompt_positive_int(prompt, "Segment interval seconds", config.segment_interval)?
-        {
+        if let Some(interval) = prompt_positive_int(
+            prompt,
+            text!("linux.cli.segmentintervalseconds"),
+            config.segment_interval,
+        )? {
             config.segment_interval = interval;
             explicit.segment_interval = true;
         }
         save_settings_explicit(&config, explicit)?;
-        prompt.write_line(&format!(
-            "\nSettings saved to {}",
-            config.config_path().display()
-        ))?;
+        prompt.write_line(
+            &message!("linux.cli.settingssavedtox", "value1" => config.config_path().display()),
+        )?;
         // Config is read once at startup and never re-read, so a running sol keeps the
         // old values. Saying only "saved" invites the owner to believe otherwise.
-        prompt.write_line("These take effect the next time the solstone app starts.")?;
+        prompt.write_line(text!(
+            "linux.cli.thesetakeeffectthenexttimethesolstoneappsta"
+        ))?;
         prompt.write_line("  systemctl --user restart solstone-linux")
     })();
     if let Err(error) = result {
-        eprintln!("Error editing settings: {error}");
+        eprintln!(
+            "{}",
+            message!("linux.cli.erroreditingsettingsx", "error" => error)
+        );
         1
     } else {
         0
@@ -1230,7 +1255,7 @@ fn cmd_discard_browser_pages(
         Err(error) => {
             let _ = write_line(
                 errors,
-                format!("could not discard the browser pages: {error}"),
+                message!("linux.cli.couldnotdiscardthebrowserpagesx", "error" => error),
             );
             1
         }
@@ -1262,7 +1287,7 @@ fn discard_browser_pages_at(
             if length > 4096 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "discard reply too large",
+                    text!("linux.cli.discardreplytoolarge"),
                 ));
             }
             let mut body = vec![0; length];
@@ -1272,14 +1297,16 @@ fn discard_browser_pages_at(
             if reply["type"] != "local_discard_result" {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "invalid discard reply",
+                    text!("linux.cli.invaliddiscardreply"),
                 ));
             }
             if reply["ok"] == true {
                 Ok(())
             } else {
                 Err(io::Error::other(
-                    reply["error"].as_str().unwrap_or("discard failed"),
+                    reply["error"]
+                        .as_str()
+                        .unwrap_or_else(|| text!("linux.cli.discardfailed")),
                 ))
             }
         }
@@ -1290,7 +1317,7 @@ fn discard_browser_pages_at(
         }
         Err(Connect::Untrusted) => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "browser endpoint is not trusted",
+            text!("linux.cli.browserendpointisnottrusted"),
         )),
     }
 }
@@ -1299,7 +1326,7 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
     let loaded = load_config(paths);
     let config = loaded.config;
     let stream = if config.stream.is_empty() {
-        "(not set)"
+        text!("linux.cli.notset")
     } else {
         &config.stream
     };
@@ -1333,47 +1360,50 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                         if is_current {
                             escape_display_version(&entry.version)
                         } else {
-                            format!("{} (last known)", escape_display_version(&entry.version))
+                            message!("linux.shared.cli.versionlastknown", "value1" => escape_display_version(&entry.version))
                         }
                     }
-                    _ => "unknown".to_owned(),
+                    _ => text!("linux.shared.health.unknown").to_owned(),
                 }
             }
-            _ => "unknown".to_owned(),
+            _ => text!("linux.shared.health.unknown").to_owned(),
         };
         (
             crate::journal_mark::journal_status_row(&config.config_dir),
-            Some(format!("journal version: {version_str}")),
+            Some(message!("linux.cli.journalversionx", "version-str" => version_str)),
         )
     } else {
-        (crate::journal_mark::JOURNAL_ROW_NOT_PAIRED.to_owned(), None)
+        (
+            crate::journal_mark::journal_row_not_paired().to_owned(),
+            None,
+        )
     };
     let mut render = || -> io::Result<()> {
         write_line(
             output,
-            format!("config: {}", config.config_path().display()),
+            message!("linux.cli.configx", "value1" => config.config_path().display()),
         )?;
         write_line(output, &link_line)?;
         if let Some(line) = &version_line {
             write_line(output, line)?;
         }
-        write_line(output, format!("stream: {stream}"))?;
+        write_line(output, message!("linux.cli.streamx", "stream" => stream))?;
         write_line(output, "")?;
         let captures = config.captures_dir();
         if captures.exists() {
             let stats = compute_status_capture_stats(&captures);
-            write_line(output, format!("cache:  {}", captures.display()))?;
             write_line(
                 output,
-                format!(
-                    "        {} segments across {} day(s), {:.1} MB",
-                    stats.segment_count, stats.day_count, stats.size_mb
-                ),
+                message!("linux.cli.cachex", "value1" => captures.display()),
+            )?;
+            write_line(
+                output,
+                message!("linux.cli.xsegmentsacrossxdaysxmb", "value1" => stats.segment_count, "value2" => stats.day_count, "value3" => format!("{:.1}", stats.size_mb)),
             )?;
             if stats.incomplete_count != 0 {
                 write_line(
                     output,
-                    format!("        {} incomplete segment(s)", stats.incomplete_count),
+                    message!("linux.cli.xincompletesegments", "value1" => stats.incomplete_count),
                 )?;
             }
             let now = SystemTime::now()
@@ -1386,7 +1416,7 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
         } else {
             write_line(
                 output,
-                format!("cache:  {} (not created yet)", captures.display()),
+                message!("linux.cli.cachexnotcreatedyet", "value1" => captures.display()),
             )?;
         }
         let now = SystemTime::now()
@@ -1424,7 +1454,10 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 &HashMap::new(),
             )
         {
-            write_line(output, format!("\nservice: {}", result.stdout.trim()))?;
+            write_line(
+                output,
+                message!("linux.cli.servicex", "value1" => result.stdout.trim()),
+            )?;
         }
         Ok(())
     };
@@ -1456,7 +1489,7 @@ fn cmd_run(interval: Option<i64>) -> i32 {
         match stream_name(Some(&host), None, None) {
             Ok(stream) => config.stream = stream,
             Err(error) => {
-                eprintln!("Error: {error}");
+                eprintln!("{}", message!("linux.cli.errorx", "error" => error));
                 return 1;
             }
         }
@@ -1495,15 +1528,17 @@ fn cmd_run(interval: Option<i64>) -> i32 {
 
 fn run_preparation_error_guidance(error: &PrivateStateError) -> &'static str {
     match error {
-        PrivateStateError::LockContended => "Linked private state is already in use",
+        PrivateStateError::LockContended => {
+            text!("linux.cli.linkedprivatestateisalreadyinuse")
+        }
         PrivateStateError::CaptureRootInUse => {
-            "Another copy of the solstone app is already running for this login, so this one did not start. Stop the other copy, then try again."
+            text!("linux.cli.anothercopyofthesolstoneappisalreadyrunning")
         }
         PrivateStateError::HealthInitializationFailed => {
-            "Startup could not continue because the solstone app could not clear the sync status from the previous run. Make sure the solstone app can write its local data, then try again."
+            text!("linux.cli.startupcouldnotcontinuebecausethesolstoneapp")
         }
         _ => {
-            "Startup could not continue because the solstone app could not safely prepare its local data. Make sure the solstone app can write its local data, then try again."
+            text!("linux.cli.startupcouldnotcontinuebecausethesolstoneapp2")
         }
     }
 }
@@ -1874,7 +1909,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(errors).unwrap(),
-            format!("{}\n", crate::journal_mark::SETUP_BAD_LINK_LINE)
+            format!("{}\n", crate::journal_mark::setup_bad_link_line())
         );
         assert!(input.position() > 0);
         assert!(input.position() <= 4097);
@@ -2620,7 +2655,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains(crate::journal_mark::MARK_UNAVAILABLE_LINE)
+                .contains(crate::journal_mark::mark_unavailable_line())
         );
     }
 
@@ -2636,7 +2671,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains(crate::journal_mark::JOURNAL_ROW_NOT_PAIRED));
+        assert!(out.contains(crate::journal_mark::journal_row_not_paired()));
     }
 
     #[test]
@@ -2657,7 +2692,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains(crate::journal_mark::MARK_UNAVAILABLE_LINE));
+        assert!(out.contains(crate::journal_mark::mark_unavailable_line()));
         for sentinel in [
             "STATUS-URL-SENTINEL",
             "STATUS-KEY-SENTINEL",
@@ -2687,7 +2722,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(cmd_status(paths(&t), &StatusRunner(None), &mut out), 0);
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains(crate::journal_mark::JOURNAL_ROW_NOT_PAIRED));
+        assert!(out_str.contains(crate::journal_mark::journal_row_not_paired()));
         assert!(!out_str.contains("journal version:"));
 
         // Set up credential
@@ -2928,7 +2963,7 @@ mod tests {
         let out_str = String::from_utf8(out).unwrap();
         assert_eq!(
             out_str,
-            format!("{}\n", crate::journal_mark::SUCCESS_LINE),
+            format!("{}\n", crate::journal_mark::success_line()),
             "setup success output should match exact success line: {out_str}"
         );
         assert!(!out_str.contains("Paste the pair link"));
@@ -2992,8 +3027,8 @@ mod tests {
         assert!(!config.config_dir.join("credentials.json").exists());
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains(crate::journal_mark::NOT_PAIRED));
-        assert!(out_str.contains(crate::journal_mark::MISMATCH_BODY));
+        assert!(out_str.contains(crate::journal_mark::not_paired()));
+        assert!(out_str.contains(crate::journal_mark::mismatch_body()));
 
         let hex = spl_core::ca::sha256_hex(peer.client_der());
         let requests = peer.requests();
@@ -3065,7 +3100,7 @@ mod tests {
         assert!(!config.config_dir.join("credentials.json").exists());
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains(crate::journal_mark::CANCEL_LINE));
+        assert!(out_str.contains(crate::journal_mark::cancel_line()));
 
         let hex = spl_core::ca::sha256_hex(peer.client_der());
         let requests = peer.requests();
@@ -3129,8 +3164,8 @@ mod tests {
         assert!(!config.config_dir.join("credentials.json").exists());
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains(crate::journal_mark::NOT_PAIRED));
-        assert!(out_str.contains(crate::journal_mark::MARK_MISMATCH_LINE));
+        assert!(out_str.contains(crate::journal_mark::not_paired()));
+        assert!(out_str.contains(crate::journal_mark::mark_mismatch_line()));
 
         let hex = spl_core::ca::sha256_hex(peer.client_der());
         let requests = peer.requests();
@@ -3197,7 +3232,7 @@ mod tests {
 
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.contains("couldn't verify."));
-        assert!(out_str.contains(crate::journal_mark::SETUP_UNVERIFIABLE_LINE));
+        assert!(out_str.contains(crate::journal_mark::setup_unverifiable_line()));
 
         let hex = spl_core::ca::sha256_hex(peer.client_der());
         let requests = peer.requests();
@@ -3236,24 +3271,24 @@ mod tests {
         }
 
         use crate::journal_mark::{
-            COULDNT_VERIFY, MARK_WORDS_WRONG_LINE, PAIRING_KEPT_LINE, PAIRING_KEPT_STOPPED_LINE,
+            couldnt_verify, mark_words_wrong_line, pairing_kept_line, pairing_kept_stopped_line,
         };
         // (typed answer, given mark words, new link's mark readable, expected lines)
         type RefusalCase<'a> = (&'a [u8], Option<&'a str>, bool, &'a [&'a str]);
         let cases: [RefusalCase; 4] = [
-            (b"no\n", None, true, &[PAIRING_KEPT_LINE]),
-            (b"cancel\n", None, false, &[PAIRING_KEPT_STOPPED_LINE]),
+            (b"no\n", None, true, &[pairing_kept_line()]),
+            (b"cancel\n", None, false, &[pairing_kept_stopped_line()]),
             (
                 b"",
                 Some("wrong words"),
                 true,
-                &[MARK_WORDS_WRONG_LINE, PAIRING_KEPT_LINE],
+                &[mark_words_wrong_line(), pairing_kept_line()],
             ),
             (
                 b"",
                 Some("wrong words"),
                 false,
-                &[COULDNT_VERIFY, PAIRING_KEPT_LINE],
+                &[couldnt_verify(), pairing_kept_line()],
             ),
         ];
         for (answer, mark, readable, expected) in cases {
@@ -3380,7 +3415,7 @@ mod tests {
         ));
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains(crate::journal_mark::PAIRING_KEPT_STOPPED_LINE));
+        assert!(out_str.contains(crate::journal_mark::pairing_kept_stopped_line()));
 
         let hex = spl_core::ca::sha256_hex(peer_y.client_der());
         let requests = peer_y.requests();
@@ -3454,8 +3489,8 @@ mod tests {
         assert_ne!(answer.confirmed, id_y);
 
         let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.contains(crate::journal_mark::HELD_BOTH_SENTENCES));
-        assert!(out_str.contains(crate::journal_mark::RUN_LINE));
+        assert!(out_str.contains(crate::journal_mark::held_both_sentences()));
+        assert!(out_str.contains(crate::journal_mark::run_line()));
     }
 
     #[tokio::test]
@@ -3756,11 +3791,11 @@ mod tests {
         let out_str = String::from_utf8(out).unwrap();
         assert_eq!(
             out_str
-                .matches(crate::journal_mark::HELD_BOTH_SENTENCES)
+                .matches(crate::journal_mark::held_both_sentences())
                 .count(),
             1
         );
-        assert_eq!(out_str.matches(crate::journal_mark::RUN_LINE).count(), 1);
+        assert_eq!(out_str.matches(crate::journal_mark::run_line()).count(), 1);
 
         // Absent answer file: those strings are absent
         let _ = fs::remove_file(
@@ -3774,11 +3809,11 @@ mod tests {
         let out_str2 = String::from_utf8(out2).unwrap();
         assert_eq!(
             out_str2
-                .matches(crate::journal_mark::HELD_BOTH_SENTENCES)
+                .matches(crate::journal_mark::held_both_sentences())
                 .count(),
             0
         );
-        assert_eq!(out_str2.matches(crate::journal_mark::RUN_LINE).count(), 0);
+        assert_eq!(out_str2.matches(crate::journal_mark::run_line()).count(), 0);
     }
 
     #[tokio::test]
@@ -3850,7 +3885,7 @@ mod tests {
                 config_bytes_before
             );
             let out_str = String::from_utf8(out).unwrap();
-            assert_eq!(out_str.trim(), crate::journal_mark::SETUP_NO_TERMINAL);
+            assert_eq!(out_str.trim(), crate::journal_mark::setup_no_terminal());
         }
 
         // 2. --mark with 1 word, 3 words, and "": exit 2, reads 0, pair calls 0, stdout MARK_USAGE
@@ -3889,7 +3924,7 @@ mod tests {
                 config_bytes_before
             );
             let out_str = String::from_utf8(out).unwrap();
-            assert_eq!(out_str.trim(), crate::journal_mark::MARK_USAGE);
+            assert_eq!(out_str.trim(), crate::journal_mark::mark_usage());
         }
 
         // 3. Repeated flag: clap returns ArgumentConflict with exit code 2
@@ -3960,7 +3995,7 @@ mod tests {
         let out_str1 = String::from_utf8(out1).unwrap();
         assert_eq!(
             out_str1
-                .matches(crate::journal_mark::HELD_BOTH_SENTENCES)
+                .matches(crate::journal_mark::held_both_sentences())
                 .count(),
             1
         );
@@ -3970,7 +4005,7 @@ mod tests {
         assert!(
             doctor_res1
                 .detail
-                .contains(crate::journal_mark::HELD_BOTH_SENTENCES)
+                .contains(crate::journal_mark::held_both_sentences())
         );
 
         // 2. Facts journal_mark_held: true, answer names this credential's id
@@ -3985,14 +4020,14 @@ mod tests {
         let status2 = cmd_status(paths.clone(), &StatusRunner(None), &mut out2);
         assert_eq!(status2, 0);
         let out_str2 = String::from_utf8(out2).unwrap();
-        assert!(!out_str2.contains(crate::journal_mark::HELD_BOTH_SENTENCES));
+        assert!(!out_str2.contains(crate::journal_mark::held_both_sentences()));
 
         let mut doctor2 = crate::doctor::RealDoctor::with_paths(&StatusRunner(None), paths.clone());
         let doctor_res2 = doctor2.sync_health();
         assert!(
             !doctor_res2
                 .detail
-                .contains(crate::journal_mark::HELD_BOTH_SENTENCES)
+                .contains(crate::journal_mark::held_both_sentences())
         );
 
         // 3. Facts journal_mark_held: true, credential bytes are not a credential
@@ -4001,14 +4036,14 @@ mod tests {
         let status3 = cmd_status(paths.clone(), &StatusRunner(None), &mut out3);
         assert_eq!(status3, 0);
         let out_str3 = String::from_utf8(out3).unwrap();
-        assert!(out_str3.contains(crate::journal_mark::HELD_BOTH_SENTENCES));
+        assert!(out_str3.contains(crate::journal_mark::held_both_sentences()));
 
         let mut doctor3 = crate::doctor::RealDoctor::with_paths(&StatusRunner(None), paths.clone());
         let doctor_res3 = doctor3.sync_health();
         assert!(
             doctor_res3
                 .detail
-                .contains(crate::journal_mark::HELD_BOTH_SENTENCES)
+                .contains(crate::journal_mark::held_both_sentences())
         );
 
         // 4. Facts private_state_invalid: true, carrier_proven: true, journal_version_observed: true, and disk held
@@ -4031,7 +4066,7 @@ mod tests {
         assert!(out_str4.contains(
             "sync: pairing unsafe; repair this device's pairing and restart the solstone app"
         ));
-        assert!(!out_str4.contains(crate::journal_mark::HELD_FIRST_SENTENCE));
+        assert!(!out_str4.contains(crate::journal_mark::held_first_sentence()));
 
         let mut doctor4 = crate::doctor::RealDoctor::with_paths(&StatusRunner(None), paths.clone());
         let doctor_res4 = doctor4.sync_health();
@@ -4039,7 +4074,7 @@ mod tests {
         assert!(
             !doctor_res4
                 .detail
-                .contains(crate::journal_mark::HELD_FIRST_SENTENCE)
+                .contains(crate::journal_mark::held_first_sentence())
         );
 
         let re_read = crate::sync_health::load_facts_with_liveness(

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.solstoneappdidntfindvault.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 81,
+  "source_revision": "b58e440dd027d9afdbde920381fe48fd4ce10c7d3a6b1283d80d13f9492178ae",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

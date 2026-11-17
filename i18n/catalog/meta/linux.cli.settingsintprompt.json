@@ -1,0 +1,32 @@
+{
+  "description": "Interactive settings prompt, including the current value.",
+  "context": "Interactive settings prompt, including the current value.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "label",
+      "type": "string"
+    },
+    {
+      "name": "current",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 27,
+  "source_revision": "2b887218177bc07921140b12d46b354d22dbfc74e480533205582d68f150a121",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": " "
+    }
+  ]
+}

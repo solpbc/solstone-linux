@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.ui.browsers, windows.ui.browsers.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 8,
+  "source_revision": "952595408ff71064c307af1e8d11ef67ec4024e6e1cf5055e98ae8f57f66e0be",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

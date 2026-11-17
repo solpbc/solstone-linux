@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the journal mark component.",
+  "context": "Presentation from the journal mark component. Review the disclosure before publishing a translation.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 257,
+  "source_revision": "bbc37c4647c2b003d527c8124d061a18c4466802e644397527a14d6ba25e47cc",
+  "risk": "consent",
+  "auto_merge": false,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "solstone-linux confirm"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopimportpage.somethingyouwereaddingdidntfinishsavingaddita, windows.ui.somethingyouwereaddingdidntfinishsavingadditagai.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 61,
+  "source_revision": "dfc221838695e852d3111d51823151e73b38348437a254bddb821acddb4b8ad3",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

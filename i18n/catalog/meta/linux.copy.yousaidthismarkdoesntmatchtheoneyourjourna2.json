@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 185,
+  "source_revision": "f2aa1a64d42254accb4b47369c7d5a5da826cea87dc4fa45aac8c566a7b44039",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "support@solstone.app"
+    }
+  ]
+}

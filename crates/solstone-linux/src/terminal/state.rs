@@ -5,6 +5,7 @@
 //! the window. Only the daemon writes it; a reader that finds no daemon running
 //! says so instead of trusting what the last daemon left.
 
+use solstone_i18n::{message, text};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -68,17 +69,18 @@ impl TerminalState {
     /// One owner-readable line for the engine's state.
     pub fn engine_line(&self) -> String {
         match self.state {
-            EngineState::Off => "terminal is off".to_owned(),
+            EngineState::Off => text!("linux.state.terminalisoff").to_owned(),
             EngineState::Paused => "paused".to_owned(),
             EngineState::Running => "running".to_owned(),
-            EngineState::TmuxNotFound => "tmux not found".to_owned(),
+            EngineState::TmuxNotFound => text!("linux.state.tmuxnotfound").to_owned(),
             EngineState::WaitingForTmuxApp => {
-                "waiting: solstone for tmux is still installed. turn terminal on in the app, or run `solstone-linux terminal on`, to move it over"
-                    .to_owned()
+                text!("linux.state.waitingsolstonefortmuxisstillinstalled").to_owned()
             }
             EngineState::Restarting => match &self.error {
-                Some(error) => format!("stopped by an error, restarting: {error}"),
-                None => "stopped by an error, restarting".to_owned(),
+                Some(error) => {
+                    message!("linux.terminal.state.stoppedbyerrorrestartingerror", "error" => error)
+                }
+                None => text!("linux.state.stoppedbyanerrorrestarting").to_owned(),
             },
         }
     }

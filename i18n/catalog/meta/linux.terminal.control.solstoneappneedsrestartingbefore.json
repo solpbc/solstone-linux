@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the control component.",
+  "context": "Presentation from the control component. Review the disclosure before publishing a translation.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 74,
+  "source_revision": "890c8e4c2ae2b33fb3e79062c9bebee12e5f2ec275698856b627686a3397a7b2",
+  "risk": "consent",
+  "auto_merge": false,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "tmux"
+    }
+  ]
+}

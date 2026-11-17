@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.screenshot.allofit, windows.ui.allofit.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 9,
+  "source_revision": "01a1a1ba15574a69cb9c8193cbc8f50faf189faae94ed5c28064d7bbe0d4fd3f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

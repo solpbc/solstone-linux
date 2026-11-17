@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use solstone_i18n::{message, text};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
@@ -153,10 +154,10 @@ fn build_deferred_pages(window: &gtk::ApplicationWindow) {
                     .transient_for(&link_window)
                     .modal(true)
                     .message_type(gtk::MessageType::Warning)
-                    .text(solstone_linux::copy::JOURNAL_LINK_INVALID_TITLE)
-                    .secondary_text(solstone_linux::copy::JOURNAL_LINK_INVALID_BODY)
+                    .text(solstone_linux::copy::journal_link_invalid_title())
+                    .secondary_text(solstone_linux::copy::journal_link_invalid_body())
                     .build();
-                notice.add_button("close", gtk::ResponseType::Close);
+                notice.add_button(text!("linux.window.close"), gtk::ResponseType::Close);
                 notice.connect_response(|dialog, _| dialog.close());
                 notice.present();
             }
@@ -798,7 +799,7 @@ fn create_status_page(
             if let Some(d) = &c.document.last_delivery {
                 let at_str = match d.at {
                     Some(at) => format_timestamp(at),
-                    None => solstone_linux::copy::NOT_YET.to_string(),
+                    None => solstone_linux::copy::not_yet().to_string(),
                 };
                 delivery_label.set_text(&solstone_linux::copy::value_copy(
                     solstone_linux::copy::ValueKey::LastDelivery,
@@ -810,7 +811,9 @@ fn create_status_page(
             }
 
             let terminal_status = &c.document.settings.terminal_status;
-            terminal_label.set_text(&format!("terminal: {terminal_status}"));
+            terminal_label.set_text(
+                &message!("linux.ui.terminalterminalstatus", "terminal-status" => terminal_status),
+            );
             terminal_label.set_visible(c.document.settings.terminal && !terminal_status.is_empty());
 
             if let Some(v) = &c.document.daemon_version {
@@ -976,7 +979,7 @@ fn create_journal_page(
 
     let setup_running = Rc::new(Cell::new(false));
     let setup_outcome = Rc::new(Cell::new(None::<crate::journal_setup::Outcome>));
-    let setup_button = gtk::Button::with_label(solstone_linux::copy::JOURNAL_SETUP_ACTION);
+    let setup_button = gtk::Button::with_label(solstone_linux::copy::journal_setup_action());
     setup_button.set_halign(gtk::Align::Center);
     setup_button.set_visible(false);
     let setup_notice = gtk::Label::new(None);
@@ -984,7 +987,7 @@ fn create_journal_page(
     setup_notice.set_visible(false);
     let setup_install = gtk::LinkButton::with_label(
         "https://solstone.app/install#linux",
-        solstone_linux::copy::JOURNAL_SETUP_INSTALL,
+        solstone_linux::copy::journal_setup_install(),
     );
     setup_install.set_halign(gtk::Align::Center);
     setup_install.set_visible(false);
@@ -1368,22 +1371,22 @@ fn create_journal_page(
             setup_button.set_visible(can_setup);
             setup_button.set_sensitive(!setup_running.get());
             setup_button.set_label(if setup_running.get() {
-                solstone_linux::copy::JOURNAL_SETUP_PREPARING
+                solstone_linux::copy::journal_setup_preparing()
             } else {
-                solstone_linux::copy::JOURNAL_SETUP_ACTION
+                solstone_linux::copy::journal_setup_action()
             });
             let notice = match setup_outcome.get() {
                 Some(crate::journal_setup::Outcome::Opened) => {
-                    solstone_linux::copy::JOURNAL_SETUP_IN_BROWSER
+                    solstone_linux::copy::journal_setup_in_browser()
                 }
                 Some(crate::journal_setup::Outcome::NotInstalled) => {
-                    solstone_linux::copy::JOURNAL_SETUP_NOT_INSTALLED
+                    solstone_linux::copy::journal_setup_not_installed()
                 }
                 Some(crate::journal_setup::Outcome::SetupFailed) => {
-                    solstone_linux::copy::JOURNAL_SETUP_FAILED
+                    solstone_linux::copy::journal_setup_failed()
                 }
                 Some(crate::journal_setup::Outcome::OpenFailed) => {
-                    solstone_linux::copy::JOURNAL_SETUP_OPEN_FAILED
+                    solstone_linux::copy::journal_setup_open_failed()
                 }
                 None => "",
             };
@@ -1554,7 +1557,7 @@ fn activity_route_line(
     let idle = status
         .map(|item| item.idle.as_str())
         .unwrap_or("unavailable");
-    format!("{route}; foreground {foreground}; title {title}; url {url}; idle {idle}")
+    message!("linux.window.foregroundtitleurlidle", "route" => route, "foreground" => foreground, "title" => title, "url" => url, "idle" => idle)
 }
 
 fn create_settings_page(
@@ -2361,19 +2364,19 @@ fn create_obsidian_section(
     changed: Changed,
 ) -> (gtk::Box, Rc<dyn Fn()>) {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let heading = crate::deck::section_label(solstone_linux::copy::OBSIDIAN_VAULT_LABEL);
+    let heading = crate::deck::section_label(solstone_linux::copy::obsidian_vault_label());
     heading.add_css_class("sol-rule");
     section.append(&heading);
 
     // Turning it on.
     let off_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let found_label = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_FOUND_LABEL));
+    let found_label = obsidian_line(Some(solstone_linux::copy::obsidian_found_label()));
     off_box.append(&found_label);
     let found_list = gtk::Box::new(gtk::Orientation::Vertical, 4);
     off_box.append(&found_list);
-    let none_found = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_NONE_FOUND));
+    let none_found = obsidian_line(Some(solstone_linux::copy::obsidian_none_found()));
     off_box.append(&none_found);
-    let choose_button = help_button(solstone_linux::copy::OBSIDIAN_CHOOSE_FOLDER);
+    let choose_button = help_button(solstone_linux::copy::obsidian_choose_folder());
     off_box.append(&choose_button);
     let refusal_label = obsidian_line(None);
     refusal_label.set_visible(false);
@@ -2382,15 +2385,15 @@ fn create_obsidian_section(
 
     // The warning before the first send.
     let warning_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let warning_heading = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_WARNING_HEADING));
+    let warning_heading = obsidian_line(Some(solstone_linux::copy::obsidian_warning_heading()));
     warning_heading.remove_css_class("sol-faint");
     warning_heading.add_css_class("sol-ink");
     warning_box.append(&warning_heading);
     let warning_detail = obsidian_line(None);
     warning_box.append(&warning_detail);
     let warning_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let continue_button = help_button(solstone_linux::copy::OBSIDIAN_CONTINUE);
-    let cancel_button = help_button(solstone_linux::copy::OBSIDIAN_CANCEL);
+    let continue_button = help_button(solstone_linux::copy::obsidian_continue());
+    let cancel_button = help_button(solstone_linux::copy::obsidian_cancel());
     warning_actions.append(&continue_button);
     warning_actions.append(&cancel_button);
     warning_box.append(&warning_actions);
@@ -2416,9 +2419,9 @@ fn create_obsidian_section(
     on_box.append(&not_on_device_label);
     let too_large_label = obsidian_line(None);
     on_box.append(&too_large_label);
-    let turn_off_note = obsidian_line(Some(solstone_linux::copy::OBSIDIAN_TURN_OFF_NOTE));
+    let turn_off_note = obsidian_line(Some(solstone_linux::copy::obsidian_turn_off_note()));
     on_box.append(&turn_off_note);
-    let turn_off_button = help_button(solstone_linux::copy::OBSIDIAN_TURN_OFF);
+    let turn_off_button = help_button(solstone_linux::copy::obsidian_turn_off());
     on_box.append(&turn_off_button);
     section.append(&on_box);
 
@@ -2431,11 +2434,11 @@ fn create_obsidian_section(
         let chooser = Rc::clone(&chooser);
         choose_button.connect_clicked(move |button| {
             let dialog = gtk::FileChooserNative::new(
-                Some(solstone_linux::copy::OBSIDIAN_CHOOSER_TITLE),
+                Some(solstone_linux::copy::obsidian_chooser_title()),
                 button.root().and_downcast::<gtk::Window>().as_ref(),
                 gtk::FileChooserAction::SelectFolder,
-                Some(solstone_linux::copy::OBSIDIAN_CHOOSER_ACCEPT),
-                Some(solstone_linux::copy::OBSIDIAN_CANCEL),
+                Some(solstone_linux::copy::obsidian_chooser_accept()),
+                Some(solstone_linux::copy::obsidian_cancel()),
             );
             let controller = Rc::clone(&controller);
             let changed = Rc::clone(&changed);
@@ -2535,7 +2538,7 @@ fn create_obsidian_section(
                     name.set_xalign(0.0);
                     name.set_hexpand(true);
                     name.set_wrap(true);
-                    let use_button = help_button(solstone_linux::copy::OBSIDIAN_USE_THIS);
+                    let use_button = help_button(solstone_linux::copy::obsidian_use_this());
                     use_button.set_valign(gtk::Align::Center);
                     let controller = Rc::clone(&controller);
                     let changed = Rc::clone(&changed);
@@ -2604,7 +2607,7 @@ fn create_obsidian_section(
                 Some(ms) => {
                     last_checked_label.set_text(&format!(
                         "{}: {}",
-                        solstone_linux::copy::OBSIDIAN_LAST_CHECKED,
+                        solstone_linux::copy::obsidian_last_checked(),
                         format_timestamp(ms as f64 / 1000.0)
                     ));
                     last_checked_label.set_visible(true);
@@ -2616,13 +2619,13 @@ fn create_obsidian_section(
             )));
             not_on_device_label.set_text(&format!(
                 "{}: {}",
-                solstone_linux::copy::OBSIDIAN_NOT_ON_DEVICE,
+                solstone_linux::copy::obsidian_not_on_device(),
                 format_note_count(status.not_on_device)
             ));
             not_on_device_label.set_visible(status.not_on_device > 0);
             too_large_label.set_text(&format!(
                 "{}: {}",
-                solstone_linux::copy::OBSIDIAN_TOO_LARGE,
+                solstone_linux::copy::obsidian_too_large(),
                 format_note_count(status.too_large)
             ));
             too_large_label.set_visible(status.too_large > 0);
@@ -2670,7 +2673,7 @@ fn create_help_page(
     scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
-    let title = gtk::Label::new(Some("help"));
+    let title = gtk::Label::new(Some(text!("linux.window.help")));
     title.add_css_class("sol-name");
     title.add_css_class("sol-display");
     title.add_css_class("sol-ink");
@@ -2808,14 +2811,14 @@ fn create_help_page(
     save_help.set_max_width_chars(-1);
 
     // Linux with no panel menu has nowhere else for about and quit.
-    let about_title = crate::deck::section_label(solstone_linux::copy::ABOUT_HEADING);
+    let about_title = crate::deck::section_label(solstone_linux::copy::about_heading());
     about_title.add_css_class("sol-rule");
     let (version_row, version) = crate::deck::fact_row(CopyKey::StatusVersion.as_str());
     version.set_text(env!("CARGO_PKG_VERSION"));
-    let made_by = crate::deck::note_label(Some(solstone_linux::copy::ABOUT_MADE_BY));
+    let made_by = crate::deck::note_label(Some(solstone_linux::copy::about_made_by()));
     let quit_row = gtk::Box::new(gtk::Orientation::Vertical, 8);
     quit_row.set_margin_top(8);
-    let quit_button = help_button(solstone_linux::copy::QUIT);
+    let quit_button = help_button(solstone_linux::copy::quit());
     let quit_error = help_status_line();
     quit_row.append(&quit_button);
     quit_row.append(&quit_error);
@@ -2841,7 +2844,7 @@ fn create_help_page(
                         None => window.close(),
                     }
                 } else {
-                    quit_error.set_text(solstone_linux::copy::QUIT_FAILED);
+                    quit_error.set_text(solstone_linux::copy::quit_failed());
                     button.set_sensitive(true);
                 }
             });

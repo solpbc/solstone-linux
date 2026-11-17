@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktop.shared.copy.journalmarkconfirmbutton, windows.desktop.shared.copy.journalmarkconfirmbutton.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 23,
+  "source_revision": "8be4545a9199b8d689b8f95326146a61da0a248962dd8436829981fd6348be59",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

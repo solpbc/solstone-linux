@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopimportpage.remove, windows.ui.removex7e5608ab.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 6,
+  "source_revision": "d257dacfdc4ab27815b38826a31678bbb77e1a516b0c365afa7277a9515652a1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

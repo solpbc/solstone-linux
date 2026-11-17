@@ -5,6 +5,7 @@
 //! service can take its whole stop timeout, and nothing here may stall the thread
 //! that feeds the systemd watchdog.
 
+use solstone_i18n::message;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -214,7 +215,7 @@ fn apply_settings(parts: &RunnerParts, working: &TakeoverState) -> bool {
         if let Err(error) = set_guided_field(&parts.paths, "terminal_settings", settings.clone()) {
             note_failure(
                 parts,
-                format!("could not save the terminal settings: {error}"),
+                message!("linux.terminal.takeoverrunner.couldnotsaveterminalsettings", "error" => error),
             );
             return false;
         }
@@ -226,7 +227,10 @@ fn apply_settings(parts: &RunnerParts, working: &TakeoverState) -> bool {
 fn settle_terminal(parts: &RunnerParts, working: &TakeoverState) -> bool {
     if working.service_was_on || working.owner_turned_on {
         if let Err(error) = set_guided_field(&parts.paths, "terminal", Value::Bool(true)) {
-            note_failure(parts, format!("could not turn terminal on: {error}"));
+            note_failure(
+                parts,
+                message!("linux.terminal.takeoverrunner.couldnotturnterminalerror", "error" => error),
+            );
             return false;
         }
         parts.live.terminal(true);

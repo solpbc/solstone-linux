@@ -1,0 +1,22 @@
+{
+  "description": "Shown by the terminal capture helper.",
+  "context": "Shown by the terminal capture helper.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 25,
+  "source_revision": "e21ccf3f746efdb65599b5b1b66814cd856f1bcdc578dad57b12328b2b223b45",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

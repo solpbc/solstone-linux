@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the takeover component.",
+  "context": "Presentation from the takeover component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 73,
+  "source_revision": "7bb911dc8465c2242e4c58e6920a60a146256253ff38ba4fe03183cd69ddcd60",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "tmux"
+    }
+  ]
+}

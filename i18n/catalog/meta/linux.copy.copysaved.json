@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.logs.copysaved.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 11,
+  "source_revision": "cc8a64b0485a3e7d1c8fb4dfb7d622c127488a487d01ef43485e89eef119710a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

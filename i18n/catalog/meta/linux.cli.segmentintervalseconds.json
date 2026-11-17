@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the cli component.",
+  "context": "Presentation from the cli component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 24,
+  "source_revision": "9de886a256fed0bce57c7b21dd254285ad717c586410e9abfa4910d6bfa327b3",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

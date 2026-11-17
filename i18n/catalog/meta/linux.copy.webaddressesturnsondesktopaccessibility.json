@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Review the disclosure before publishing a translation.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 46,
+  "source_revision": "78b64c11c911ded258481a3f5ad0e4336521088f292b241949458a01b2d1b948",
+  "risk": "consent",
+  "auto_merge": false,
+  "protected_slots": []
+}

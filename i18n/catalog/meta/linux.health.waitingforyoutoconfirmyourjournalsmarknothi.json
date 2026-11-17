@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the sync health component.",
+  "context": "Presentation from the sync health component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 147,
+  "source_revision": "3520fdc333d3d60942beb8f90e860257315753a0af0e6f29736a225a663a2376",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "\n"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "solstone-linux confirm"
+    }
+  ]
+}

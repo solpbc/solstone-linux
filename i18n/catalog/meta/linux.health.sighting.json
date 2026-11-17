@@ -1,0 +1,50 @@
+{
+  "description": "Technical detail when another journal answered this computer.",
+  "context": "Technical detail when another journal answered this computer.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "header",
+      "type": "string"
+    },
+    {
+      "name": "answer",
+      "type": "string"
+    },
+    {
+      "name": "paired",
+      "type": "string"
+    },
+    {
+      "name": "footer",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 67,
+  "source_revision": "6634df2996949b9903bbd46e6ded8e3945e30ffd97b7219cec172262957d281c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "\n  "
+    },
+    {
+      "name": "ws2",
+      "kind": "whitespace",
+      "value": "  "
+    },
+    {
+      "name": "ws3",
+      "kind": "whitespace",
+      "value": "\n  "
+    }
+  ]
+}

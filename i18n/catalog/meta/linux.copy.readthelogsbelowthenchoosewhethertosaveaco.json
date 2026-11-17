@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.logs.readthelogsbelowthenchoosewhether.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 56,
+  "source_revision": "98e5f6f38420fe9c17d0ca1b926408ae59d8883a04e65beca4a56f2735a39793",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

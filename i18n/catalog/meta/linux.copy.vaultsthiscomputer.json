@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.vaultscomputer.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 23,
+  "source_revision": "7c5457e75ad46abea92a1f62aabfa3fabf83ce19bf6729368464baf55955024e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

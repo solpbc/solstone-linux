@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as windows.ui.status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 6,
+  "source_revision": "c9b3aa7f82cce943e5304d5d48675306aeac0ac762c7c85783fa6584eedd123d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

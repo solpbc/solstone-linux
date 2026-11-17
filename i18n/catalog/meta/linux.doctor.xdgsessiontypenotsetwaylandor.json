@@ -1,0 +1,33 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 49,
+  "source_revision": "2685f659532074d22435179a62a08392637109505741cfc60a5624875f10cbd8",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "XDG_SESSION_TYPE"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "Wayland"
+    },
+    {
+      "name": "literal3",
+      "kind": "command",
+      "value": "X11"
+    }
+  ]
+}

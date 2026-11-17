@@ -1,0 +1,1749 @@
+m6c696e75782e61626f75742e616765646179 = { $i18nCategory ->
+    [one] { $formatted } day ago
+   *[other] { $formatted } days ago
+}
+
+m6c696e75782e61626f75742e616765686f7572 = { $i18nCategory ->
+    [one] { $formatted } hour ago
+   *[other] { $formatted } hours ago
+}
+
+m6c696e75782e61626f75742e6167656d696e757465 = { $i18nCategory ->
+    [one] { $formatted } minute ago
+   *[other] { $formatted } minutes ago
+}
+
+m6c696e75782e61626f75742e617070 = linux desktop app
+
+m6c696e75782e61626f75742e626c6f636b = { $app }{ "\u000a" }{ $journal }
+
+m6c696e75782e61626f75742e6a6f75726e616c = journal
+
+m6c696e75782e61626f75742e6c6173747365656e = { $journal } · last seen { $age }
+
+m6c696e75782e61626f75742e6e6f77 = just now
+
+m6c696e75782e61626f75742e756e6b6e6f776e = journal unknown
+
+m6c696e75782e61626f75742e76657273696f6e = { $name } { $version }
+
+m6c696e75782e61626f75742e76657273696f6e61726368 = { $name } { $version } · { $arch }
+
+m6c696e75782e61626f75742e76657273696f6e6275696c64 = { $name } { $version } ({ $build })
+
+m6c696e75782e61626f75742e76657273696f6e6275696c6461726368 = { $name } { $version } ({ $build }) · { $arch }
+
+m6c696e75782e61626f75742e76657273696f6e6275696c646f73 = { $name } { $version } ({ $build }) · { $os }
+
+m6c696e75782e61626f75742e76657273696f6e6275696c646f7361726368 = { $name } { $version } ({ $build }) · { $os } · { $arch }
+
+m6c696e75782e61626f75742e76657273696f6e6275696c646f7376657273696f6e = { $name } { $version } ({ $build }) · { $os } { $osversion }
+
+m6c696e75782e61626f75742e76657273696f6e6275696c646f7376657273696f6e61726368 = { $name } { $version } ({ $build }) · { $os } { $osversion } · { $arch }
+
+m6c696e75782e61626f75742e76657273696f6e6f73 = { $name } { $version } · { $os }
+
+m6c696e75782e61626f75742e76657273696f6e6f7361726368 = { $name } { $version } · { $os } · { $arch }
+
+m6c696e75782e61626f75742e76657273696f6e6f7376657273696f6e = { $name } { $version } · { $os } { $osversion }
+
+m6c696e75782e61626f75742e76657273696f6e6f7376657273696f6e61726368 = { $name } { $version } · { $os } { $osversion } · { $arch }
+
+m6c696e75782e62696e2e736f6c73746f6e657465726d696e616c2e636f756c646e6f74696e7374616c6c736967696e7468616e646c6572 = could not install the { "SIGINT" } handler: { $err }
+
+m6c696e75782e62696e2e736f6c73746f6e657465726d696e616c2e636f756c646e6f74696e7374616c6c7369677465726d68616e646c6572 = could not install the { "SIGTERM" } handler: { $err }
+
+m6c696e75782e62696e2e736f6c73746f6e657465726d696e616c2e65786563757461626c656d75737462656162736f6c757465 = { $value1 }: executable must be absolute
+
+m6c696e75782e62696e2e736f6c73746f6e657465726d696e616c2e6e6f7468696e6768657265 = { $value1 }: nothing here
+
+m6c696e75782e62696e2e736f6c73746f6e657465726d696e616c2e7374696c6c72756e6e696e67 = { $value1 }: still running
+
+m6c696e75782e62726f777365722e7374617475732e62726f77736572636f6e6e6563746564 = browser: { $value1 } connected
+
+m6c696e75782e62726f777365722e7374617475732e62726f77736572706167657374686973636f6d707574657277616974696e67 = { "        " }{ $value1 } of browser pages on this computer, waiting to go into your journal
+
+m6c696e75782e62726f777365722e7374617475732e6368726f6d6565646765 = Chrome or Edge
+
+m6c696e75782e62726f777365722e7374617475732e6966796f75686176656e74796574 = { "        " }if you haven't yet, add the solstone extension to { $served }: { $url }
+
+m6c696e75782e62726f777365722e7374617475732e6e306b62 = { $value1 } KB
+
+m6c696e75782e62726f777365722e7374617475732e6e316d62 = { $value1 } MB
+
+m6c696e75782e636c692e6167726565776974686f75746265696e6761736b6564 = agree without being asked
+
+m6c696e75782e636c692e616e6f74686572636f70796f66746865736f6c73746f6e656170706973616c726561647972756e6e696e67 = Another copy of the solstone app is already running for this login, so this one did not start. Stop the other copy, then try again.
+
+m6c696e75782e636c692e62726f77736572656e64706f696e7469736e6f7474727573746564 = browser endpoint is not trusted
+
+m6c696e75782e636c692e636163686578 = cache:{ "  " }{ $value1 }
+
+m6c696e75782e636c692e6361636865786e6f7463726561746564796574 = cache:{ "  " }{ $value1 } (not created yet)
+
+m6c696e75782e636c692e636f6d6d616e646f75747075746578636565646564697473626f756e64 = command output exceeded its bound
+
+m6c696e75782e636c692e636f6d6d616e6474696d65646f7574 = command timed out
+
+m6c696e75782e636c692e636f6e6669677570646174656572726f7278 = config update error: { $error }
+
+m6c696e75782e636c692e636f6e66696778 = config: { $value1 }
+
+m6c696e75782e636c692e636f6e6669726d796f75726a6f75726e616c736d61726b65786974636f64657330706169726564616e64 = confirm your journal's mark.{ "\u000a\u000a" }Exit codes:{ "\u000a  " }0{ "  " }paired and confirmed, or already confirmed{ "\u000a  " }1{ "  " }not paired, nothing changed, or no terminal{ "\u000a  " }2{ "  " }usage error{ "\u000a  " }5{ "  " }held
+
+m6c696e75782e636c692e636f756c646e6f746469736361726474686562726f77736572706167657378 = could not discard the browser pages: { $error }
+
+m6c696e75782e636c692e636f756c646e6f74737461727478 = could not start: { $error }
+
+m6c696e75782e636c692e636f756c646e746b656570746861746c696e6b666f72746865 = couldn't keep that link for the window: { $error }
+
+m6c696e75782e636c692e63726564656e7469616c616273656e74 = credential absent
+
+m6c696e75782e636c692e646973636172646661696c6564 = discard failed
+
+m6c696e75782e636c692e646973636172647265706c79746f6f6c61726765 = discard reply too large
+
+m6c696e75782e636c692e6469736361726477616974696e6762726f777365727061676573 = discard waiting browser pages
+
+m6c696e75782e636c692e64726177637572736f72 = Draw cursor
+
+m6c696e75782e636c692e6564697473657474696e6773 = edit settings
+
+m6c696e75782e636c692e656e74657261706f736974697665696e7465676572 = Enter a positive integer.
+
+m6c696e75782e636c692e656e746572796f726e = Enter { "y" } or { "n" }.
+
+m6c696e75782e636c692e6572726f7265646974696e6773657474696e677378 = Error editing settings: { $error }
+
+m6c696e75782e636c692e6572726f7278 = Error: { $error }
+
+m6c696e75782e636c692e686f776d616e796d696e75746573746f7061757365666f7264656661756c74756e74696c796f7572657375 = How many minutes to pause for (default: until you resume)
+
+m6c696e75782e636c692e696e7374616c6c676e6f6d65616e646b77696e616374697669747968656c706572617373657473 = install { "GNOME" } and { "KWin" } activity helper assets
+
+m6c696e75782e636c692e696e7374616c6c73797374656d647573657273657276696365 = Install systemd user service
+
+m6c696e75782e636c692e696e76616c6964646973636172647265706c79 = invalid discard reply
+
+m6c696e75782e636c692e6a6f75726e616c76657273696f6e78 = journal version: { $version-str }
+
+m6c696e75782e636c692e6c696e6b65647072697661746573746174656973616c7265616479696e757365 = Linked private state is already in use
+
+m6c696e75782e636c692e6d697373696e6765786563757461626c656469726563746f7279 = missing executable directory
+
+m6c696e75782e636c692e6d6f76656578697374696e67736f6c73746f6e65746d7578696e746f = move an existing solstone for { "tmux" } into this app
+
+m6c696e75782e636c692e6e6f73657373696f6e627573736f746865726569736e6f6465736b746f70746f736574757078 = no session bus, so there is no desktop to set up: { $error }
+
+m6c696e75782e636c692e6e6f74736574 = (not set)
+
+m6c696e75782e636c692e706169727468697364657669636577697468796f75726a6f75726e616c = pair this device with your journal
+
+m6c696e75782e636c692e706169727468697364657669636577697468796f75726a6f75726e616c65786974636f6465733070616972 = pair this device with your journal.{ "\u000a\u000a" }Exit codes:{ "\u000a  " }0{ "  " }paired and confirmed, or already confirmed{ "\u000a  " }1{ "  " }not paired, nothing changed, or no terminal{ "\u000a  " }2{ "  " }usage error{ "\u000a  " }5{ "  " }held
+
+m6c696e75782e636c692e7061757365696e74616b65 = pause intake
+
+m6c696e75782e636c692e726573756d65696e74616b65 = resume intake
+
+m6c696e75782e636c692e73637265656e617564696f6465736b746f7061637469766974796f6666 = screen, audio and desktop activity: on or off
+
+m6c696e75782e636c692e7365676d656e746475726174696f6e696e7365636f6e647364656661756c74333030 = Segment duration in seconds (default: 300)
+
+m6c696e75782e636c692e7365676d656e74696e74657276616c7365636f6e6473 = Segment interval seconds
+
+m6c696e75782e636c692e7365727669636578 = { "\u000a" }service: { $value1 }
+
+m6c696e75782e636c692e73657474696e6773626f6f6c70726f6d7074 = { $label } [{ $answer }]:{ " " }
+
+m6c696e75782e636c692e73657474696e6773696e7470726f6d7074 = { $label } [{ $current }]:{ " " }
+
+m6c696e75782e636c692e73657474696e67737361766564746f78 = { "\u000a" }Settings saved to { $value1 }
+
+m6c696e75782e636c692e7365747570617070616c726561647972756e6e696e67 = setup could not start because the solstone app is running. stop the solstone app first and try again. no input was consumed; app state, config, and private state are unchanged.
+
+m6c696e75782e636c692e7365747570636f6e6669676661696c6564 = setup failed before pairing because the solstone app could not safely update its config.
+
+m6c696e75782e636c692e7365747570636f6e6e656374696f6e6661696c6564 = setup failed: the solstone app could not connect to your journal.
+
+m6c696e75782e636c692e73657475706661696c656478 = setup failed: { $error }
+
+m6c696e75782e636c692e7365747570746865676e6f6d6570616e656c69636f6e77686572657061757365616e64726573756d656c = set up the { "GNOME" } panel icon, where pause and resume live
+
+m6c696e75782e636c692e73686f77737461747573 = show status
+
+m6c696e75782e636c692e73686f77776865746865727465726d696e616c697377686174 = show whether terminal is on and what it is doing
+
+m6c696e75782e636c692e73686f77796f7572617070616e646a6f75726e616c76657273696f6e73 = show your app and journal versions
+
+m6c696e75782e636c692e7374617274706175736564 = Start paused
+
+m6c696e75782e636c692e73746172747570636f756c646e6f74636f6e74696e756562656361757365746865736f6c73746f6e65617070 = Startup could not continue because the solstone app could not clear the sync status from the previous run. Make sure the solstone app can write its local data, then try again.
+
+m6c696e75782e636c692e73746172747570636f756c646e6f74636f6e74696e756562656361757365746865736f6c73746f6e6561707032 = Startup could not continue because the solstone app could not safely prepare its local data. Make sure the solstone app can write its local data, then try again.
+
+m6c696e75782e636c692e73747265616d6e616d6564656661756c7473746f686f73746e616d6564657269766564 = Stream name (defaults to hostname-derived)
+
+m6c696e75782e636c692e73747265616d78 = stream: { $stream }
+
+m6c696e75782e636c692e7465726d696e616c6f6666737461747573 = terminal: { "on, off" } or status
+
+m6c696e75782e636c692e746865736574616b656566666563747468656e65787474696d65746865736f6c73746f6e65617070737461 = These take effect the next time the solstone app starts.
+
+m6c696e75782e636c692e746865736f6c73746f6e65617070666f726c696e757874616b6573696e77686174796f75736861726577 = the solstone app for linux takes in what you share with it, and all of it goes into your journal. part of solstone.
+
+m6c696e75782e636c692e7475726e7465726d696e616c = turn terminal on
+
+m6c696e75782e636c692e7475726e7465726d696e616c6f6666 = turn terminal off
+
+m6c696e75782e636c692e756e696e7374616c6c73797374656d647573657273657276696365 = Uninstall systemd user service
+
+m6c696e75782e636c692e766572696679696e7374616c6c70726572657175697369746573 = Verify install prerequisites
+
+m6c696e75782e636c692e77696e646f7773636f706565786974656478 = window scope exited: { $status }
+
+m6c696e75782e636c692e78696e636f6d706c6574657365676d656e7473 = { "        " }{ $value1 } incomplete segment(s)
+
+m6c696e75782e636c692e787365676d656e74736163726f73737864617973786d62 = { "        " }{ $value1 } segments across { $value2 } day(s), { $value3 } MB
+
+m6c696e75782e636c6970626f6172642e6167656e74696e737472756374696f6e73 = solstone app for linux (repo: { "solstone-linux" }){ "\u000a" }Source: { "https://github.com/solpbc/solstone-linux" }{ "\u000a" }Read INSTALL.md at { "https://github.com/solpbc/solstone-linux/blob/main/INSTALL.md" } for setup and architecture.{ "\u000a" }Config: { $config_path }{ "\u000a" }Segments: { $captures_dir }{ "\u000a" }Logs: { "journalctl --user -u solstone-linux -f" }{ "\u000a" }Service: { "systemctl --user status solstone-linux" }
+
+m6c696e75782e636f6e74726f6c2e73637265656e616e64617564696f6e656564796f75726465736b746f7073657373696f6e = screen and audio: need your desktop session, and none is running
+
+m6c696e75782e636f6e74726f6c2e736f6c73746f6e65666f72746d75786861646265656e73746f70706564736f = { "  " }solstone for { "tmux" } had been stopped, so terminal stays off
+
+m6c696e75782e636f6e74726f6c2e7465726d696e616c686973746f7279636f6e74696e756564 = { "  " }terminal history: continued
+
+m6c696e75782e636f6e74726f6c2e7465726d696e616c686973746f7279636f6e74696e756564756e6465727468656f6c6470616972696e67 = { "  " }terminal history: continued, under the old pairing
+
+m6c696e75782e636f6e74726f6c2e746865736f6c73746f6e656170706469646e6f74616e73776572696e = the solstone app did not answer in time; try again in a moment.
+
+m6c696e75782e636f6e74726f6c2e746865736f6c73746f6e6561707069736e7472756e6e696e67 = { "  " }the solstone app isn't running
+
+m6c696e75782e636f6e74726f6c2e746865736f6c73746f6e6561707069736e7472756e6e696e677374617274 = the solstone app isn't running; start it and try again.
+
+m6c696e75782e636f6e74726f6c2e746865736f6c73746f6e6561707069737374617274696e67747279616761696e = the solstone app is starting; try again in a moment
+
+m6c696e75782e636f6e74726f6c2e746869736e65656473617474656e74696f6e706c65617365636f6e74616374737570706f7274 = { "  " }this needs attention: please contact support
+
+m6c696e75782e636f70792e61626f757468656164696e67 = about solstone
+
+m6c696e75782e636f70792e61626f75746d6164656279 = made by { "sol pbc" }.
+
+m6c696e75782e636f70792e61637469766974796f6e6c79 = activity only
+
+m6c696e75782e636f70792e6163746976697479726f757465 = activity route
+
+m6c696e75782e636f70792e616e797468696e6777616974696e6773796e63737461797374686973 = anything waiting to sync stays on this computer. to see what to do, run: { "solstone-linux status" }
+
+m6c696e75782e636f70792e616e797468696e6777616974696e67746f73796e6373746179736f6e74686973636f6d7075746572746865 = anything waiting to sync stays on this computer. the solstone app will try again when your journal is reachable.
+
+m6c696e75782e636f70792e617070736c6566746f75746f666465736b746f706163746976697479 = apps left out of desktop activity
+
+m6c696e75782e636f70792e61707076657273696f6e = app version
+
+m6c696e75782e636f70792e617474656e74696f6e636f756e74 = { $i18nCategory ->
+    [one] { $formatted } needs attention
+   *[other] { $formatted } need attention
+}
+
+m6c696e75782e636f70792e617564696f = audio
+
+m6c696e75782e636f70792e617564696f696e74616b6563616e636f6e74696e7565 = audio intake can continue.
+
+m6c696e75782e636f70792e617661696c61626c656c6f677361726573686f776e62656c6f77636865636b7468656e6f746573666f7267 = available logs are shown below. check the notes for gaps before saving a copy.
+
+m6c696e75782e636f70792e63616e63656c70616972696e67 = cancel pairing
+
+m6c696e75782e636f70792e636865636b696e67737461747573 = checking status…
+
+m6c696e75782e636f70792e636865636b737461747573 = check status
+
+m6c696e75782e636f70792e63686f6f7365 = choose
+
+m6c696e75782e636f70792e63686f6f7365666f6c646572 = choose a folder
+
+m6c696e75782e636f70792e63686f6f7365666f6c6465722e763463626139313862 = choose a folder…
+
+m6c696e75782e636f70792e63686f6f73656f6273696469616e7661756c74 = choose your { "Obsidian" } vault
+
+m6c696e75782e636f70792e636f6e66696766696c65 = config file
+
+m6c696e75782e636f70792e636f6e6669726d696e67 = confirming…
+
+m6c696e75782e636f70792e636f6e6669726d796f75726a6f75726e616c736d61726b = confirm your journal's mark
+
+m6c696e75782e636f70792e636f6e6e6563746564 = connected to
+
+m6c696e75782e636f70792e636f6e6e656374696e67 = connecting…
+
+m6c696e75782e636f70792e636f6e6e6563746a6f75726e616c = connect to your journal
+
+m6c696e75782e636f70792e636f70797361766564 = copy saved.
+
+m6c696e75782e636f70792e636f756c646e74636865636b77686574686572616c6c796f757273657474696e6773776572657361766564 = couldn't check whether all your settings were saved. read them again before trying again.
+
+m6c696e75782e636f70792e636f756c646e74636865636b77686574686572696e74616b65706175736564636865636b7374617475736265 = couldn't check whether intake paused. check status before trying again.
+
+m6c696e75782e636f70792e636f756c646e74636865636b77686574686572696e74616b65726573756d6564636865636b73746174757362 = couldn't check whether intake resumed. check status before trying again.
+
+m6c696e75782e636f70792e636f756c646e74636865636b7768657468657270616972696e6766696e6973686564636865636b737461747573 = couldn't check whether pairing finished. check status before trying again.
+
+m6c696e75782e636f70792e636f756c646e746f70656e746861746c696e6b7669736974737570706f7274736f6c73746f6e656170706f = couldn't open that link. visit { "support.solstone.app" } or email { "support@solstone.app" }.
+
+m6c696e75782e636f70792e636f756c646e746f70656e746865736f6c73746f6e6577696e646f77 = couldn't open the solstone window
+
+m6c696e75782e636f70792e636f756c646e746f70656e746865736f6c73746f6e6577696e646f776f70656e78666f7264657461696c73 = couldn't open the solstone window. open { $path } for details.
+
+m6c696e75782e636f70792e636f756c646e746f70656e796f757262726f77736572747279616761696e6f726f70656e796f75726a6f = couldn't open your browser. try again, or open your journal from its usual address.
+
+m6c696e75782e636f70792e636f756c646e747061757365696e74616b65747279616761696e = couldn't pause intake. try again.
+
+m6c696e75782e636f70792e636f756c646e74726561647468656c6f6766696c6573747279616761696e = couldn't read the log files. try again.
+
+m6c696e75782e636f70792e636f756c646e74726561647468656c6f6773747279616761696e = couldn't read the logs. try again.
+
+m6c696e75782e636f70792e636f756c646e7472656164746865736f6c73746f6e6561707073737461747573636865636b776865746865 = couldn't read the solstone app's status. check whether it's running, then try again.
+
+m6c696e75782e636f70792e636f756c646e7472656164796f757273657474696e6773747279616761696e6265666f72656d616b696e67 = couldn't read your settings. try again before making changes.
+
+m6c696e75782e636f70792e636f756c646e7472657374617274746865736f6c73746f6e65617070636865636b74686564657461696c73 = couldn't restart the solstone app. check the details, then try again.
+
+m6c696e75782e636f70792e636f756c646e74726573756d65696e74616b65747279616761696e = couldn't resume intake. try again.
+
+m6c696e75782e636f70792e636f756c646e74736176656163746976697479696e74616b65747279616761696e = couldn't save activity intake. try again.
+
+m6c696e75782e636f70792e636f756c646e7473617665616c6c796f757273657474696e6773796f757265646974736172657374696c6c = couldn't save all your settings. your edits are still here. try again.
+
+m6c696e75782e636f70792e636f756c646e7473617665746865636f7079747279736176696e67746f616e6f74686572666f6c646572 = couldn't save the copy. try saving to another folder.
+
+m6c696e75782e636f70792e636f756c646e7473617665796f7572616e73776572747279616761696e = couldn't save your answer. try again.
+
+m6c696e75782e636f70792e636f756c646e7473617665796f757273657474696e6773636865636b74686564657461696c737468656e74 = couldn't save your settings. check the details, then try again.
+
+m6c696e75782e636f70792e636f756c646e747374617274746865736f6c73746f6e65617070636865636b74686564657461696c737468 = couldn't start the solstone app. check the details, then try again.
+
+m6c696e75782e636f70792e636f756c646e74766572696679 = couldn't verify
+
+m6c696e75782e636f70792e636f756c646e747665726966796a6f75726e616c736f = couldn't verify your journal, so nothing connected. try again, or paste a pairing link.
+
+m6c696e75782e636f70792e636f756c646e74776f726b6f7574746869736d61726b736f7468657265736e6f7468696e67746f636f = couldn't work out this mark, so there's nothing to compare. your current pairing stays in use.
+
+m6c696e75782e636f70792e636f756c646e74776f726b6f7574796f75726a6f75726e616c736d61726b736f7468657265736e6f74 = couldn't work out that journal's mark, so there's nothing to compare. get a new pairing link from your journal, then try again.
+
+m6c696e75782e636f70792e636f756e7477616974696e6773796e63 = { $count } waiting to sync
+
+m6c696e75782e636f70792e6431 = while this is on, the solstone app takes in the screenshots you take on this computer, and your journal keeps each one at the minute you took it.
+
+m6c696e75782e636f70792e643130 = some screenshot tools save only when you ask them to, and a screenshot that isn't saved doesn't come in.
+
+m6c696e75782e636f70792e643135 = more about this
+
+m6c696e75782e636f70792e6438 = couldn't find a Screenshots folder on this computer. choose the folder your screenshots save to.
+
+m6c696e75782e636f70792e64387069636b65727469746c65 = choose the folder your screenshots save to
+
+m6c696e75782e636f70792e6465736b746f706163746976697479 = desktop activity
+
+m6c696e75782e636f70792e6465736b746f70616374697669747969736f6e7768656e65766572746865736f6c73746f6e6561707074616b = desktop activity is on whenever the solstone app takes in your screen, and pausing pauses both. the solstone app takes in the app, window title, web addresses, and active or idle time you share with it, and all of it goes into your journal.
+
+m6c696e75782e636f70792e646f6573746869736d61746368796f75726a6f75726e616c = does this match your journal?
+
+m6c696e75782e636f70792e64726177637572736f72 = draw cursor
+
+m6c696e75782e636f70792e656e7465726177686f6c656e756d626572677265617465727468616e30 = enter a whole number greater than 0.
+
+m6c696e75782e636f70792e666f756e646a6f75726e616c74686973636f6d7075746572 = found your journal on this computer
+
+m6c696e75782e636f70792e66726f6d = from { $folder }
+
+m6c696e75782e636f70792e6765746166726573686c696e6b = get a fresh link
+
+m6c696e75782e636f70792e67657468656c70 = get help
+
+m6c696e75782e636f70792e6865616c746864657461696c73 = health details
+
+m6c696e75782e636f70792e68656c70 = help
+
+m6c696e75782e636f70792e68656c707265706f7274 = report a problem
+
+m6c696e75782e636f70792e696e74616b65 = intake
+
+m6c696e75782e636f70792e696e74616b6569736e7472756e6e696e67 = intake isn't running.
+
+m6c696e75782e636f70792e696e74616b656973706175736564756e74696c796f75726573756d65 = intake is paused until you resume.
+
+m6c696e75782e636f70792e696e74616b65697372756e6e696e67 = intake is running.
+
+m6c696e75782e636f70792e6a6f75726e616c = journal
+
+m6c696e75782e636f70792e6a6f75726e616c33 = your journal
+
+m6c696e75782e636f70792e6a6f75726e616c64657461696c73 = journal details
+
+m6c696e75782e636f70792e6a6f75726e616c6c696e6b696e76616c6964626f6479 = copy the full link from your chat and open it again.
+
+m6c696e75782e636f70792e6a6f75726e616c6c696e6b696e76616c69647469746c65 = this journal link isn't valid.
+
+m6c696e75782e636f70792e6a6f75726e616c6e656564737570646174656265666f72656974 = your journal needs an update before it can take these notes. they're waiting on this computer.
+
+m6c696e75782e636f70792e6a6f75726e616c7365747570616374696f6e = set up a journal on this computer
+
+m6c696e75782e636f70792e6a6f75726e616c73657475706661696c6564 = couldn't prepare your journal. run { "solstone journal setup" } in a terminal to see what needs attention.
+
+m6c696e75782e636f70792e6a6f75726e616c7365747570696e62726f77736572 = finish setup in your browser.
+
+m6c696e75782e636f70792e6a6f75726e616c7365747570696e7374616c6c = install the journal
+
+m6c696e75782e636f70792e6a6f75726e616c73657475706e6f74696e7374616c6c6564 = the journal isn't installed on this computer yet.
+
+m6c696e75782e636f70792e6a6f75726e616c73657475706f70656e6661696c6564 = your journal is prepared, but the browser didn't open. run { "solstone journal open /init" } in a terminal to finish setup.
+
+m6c696e75782e636f70792e6a6f75726e616c7365747570707265706172696e67 = preparing your journal…
+
+m6c696e75782e636f70792e6b6565706465736b746f7061637469766974796f6e7768696c65706175736564 = keep desktop activity on while paused
+
+m6c696e75782e636f70792e6c617374636865636b6564 = last checked
+
+m6c696e75782e636f70792e6c61737464656c6976657279 = last delivery
+
+m6c696e75782e636f70792e6c61737464656c697665727976616c7565 = last delivery: { $value }
+
+m6c696e75782e636f70792e6c696e7578646f65736e6f74636c6173736966797072697661746577696e646f7773 = linux does not classify private windows.
+
+m6c696e75782e636f70792e6d61726b = mark
+
+m6c696e75782e636f70792e6d61726b756e617661696c61626c65 = mark unavailable
+
+m6c696e75782e636f70792e6d6f76656974 = move it
+
+m6c696e75782e636f70792e6d6f7665736f6c73746f6e65746d7578 = move solstone for { "tmux" } in?
+
+m6c696e75782e636f70792e6e6565646168616e6472656163686168756d616e776572656861707079746f68656c70 = need a hand? reach us. we're happy to help.
+
+m6c696e75782e636f70792e6e656564617474656e74696f6e = need attention
+
+m6c696e75782e636f70792e6e65656473617474656e74696f6e = needs attention
+
+m6c696e75782e636f70792e6e657770616972696e6763616e63656c6c6564 = new pairing cancelled
+
+m6c696e75782e636f70792e6e657770616972696e6763616e63656c6c6564796f757263757272656e7470616972696e677374617973696e = new pairing cancelled. your current pairing stays in use.
+
+m6c696e75782e636f70792e6e6f6c6f6766696c6573617265617661696c61626c65796574747279616761696e61667465727573696e67 = no log files are available yet. try again after using the app.
+
+m6c696e75782e636f70792e6e6f726563656e746c6f6773617265617661696c61626c65796574747279616761696e6166746572757369 = no recent logs are available yet. try again after using the app.
+
+m6c696e75782e636f70792e6e6f74 = not
+
+m6c696e75782e636f70792e6e6f7468696e6774686973636f6d70757465726861736b657074 = nothing this computer has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a new pairing link from your journal and try again, or email { "support@solstone.app" } and we'll help.
+
+m6c696e75782e636f70792e6e6f7468696e6777616974696e67676f6573696e746f796f75726a6f75726e616c756e74696c796f75646f = nothing waiting goes into your journal until you do.
+
+m6c696e75782e636f70792e6e6f74706169726564 = not paired
+
+m6c696e75782e636f70792e6e6f747265616368696e67796f75726a6f75726e616c72696768746e6f77 = not reaching your journal right now
+
+m6c696e75782e636f70792e6e6f7474686973646576696365 = not on this device
+
+m6c696e75782e636f70792e6e6f74796574 = not yet
+
+m6c696e75782e636f70792e6f6273696469616e = { "Obsidian" }
+
+m6c696e75782e636f70792e6f6273696469616e7761726e696e67 = your journal already has a vault named { $vault } from another device. if you continue, changes from both devices go into your journal.
+
+m6c696e75782e636f70792e6f6273696469616e7761726e696e6764617465 = your journal already has a vault named { $vault } from another device, last updated { $date }. if you continue, changes from both devices go into your journal.
+
+m6c696e75782e636f70792e6f6273696469616e7761726e696e67646576696365 = your journal already has a vault named { $vault } from { $device }. if you continue, changes from both devices go into your journal.
+
+m6c696e75782e636f70792e6f6273696469616e7761726e696e6764657669636564617465 = your journal already has a vault named { $vault } from { $device }, last updated { $date }. if you continue, changes from both devices go into your journal.
+
+m6c696e75782e636f70792e6f6666 = off
+
+m6c696e75782e636f70792e6f66666d65616e736e6f6e657468726565676f6573 = off means none of the three goes into your journal, whatever your desktop is doing.
+
+m6c696e75782e636f70792e6f66696e796f75726a6f75726e616c = { $done } of { $total } in your journal
+
+m6c696e75782e636f70792e6f6673637265656e73686f7473696e796f75726a6f75726e616c = { $done } of { $total } screenshots in your journal
+
+m6c696e75782e636f70792e6f6d69747465646279746573 = { $i18nCategory ->
+    [one] { "\u000a" }[omitted { $formatted } byte]{ "\u000a" }
+   *[other] { "\u000a" }[omitted { $formatted } bytes]{ "\u000a" }
+}
+
+m6c696e75782e636f70792e6f6e = on
+
+m6c696e75782e636f70792e6f70656e7468656e6574776f726b617070696e796f75726a6f75726e616c616e64676574617061697269 = open the network app in your journal and get a pairing link.
+
+m6c696e75782e636f70792e6f70656e796f75726a6f75726e616c = open your journal
+
+m6c696e75782e636f70792e6f7468657266696c6573696e73746179776865726574686579617265 = other files in { $folder } stay where they are.
+
+m6c696e75782e636f70792e7061697261646576696365 = pair a device
+
+m6c696e75782e636f70792e70616972616761696e = pair again
+
+m6c696e75782e636f70792e70616972696e67 = pairing…
+
+m6c696e75782e636f70792e70616972696e6763616e63656c6c656467657461667265736870616972696e676c696e6b66726f6d796f7572 = pairing cancelled. get a fresh pairing link from your journal when you're ready.
+
+m6c696e75782e636f70792e70616972696e676469646e74676f7468726f756768676574616e657770616972696e676c696e6b66726f = pairing didn't go through. get a new pairing link from your journal and try again.
+
+m6c696e75782e636f70792e70616972696e676c696e6b = pairing link
+
+m6c696e75782e636f70792e70617274746869737661756c7463616e74 = part of this vault can't be read. check the permissions on the folders inside it. the rest of the vault keeps going into your journal.
+
+m6c696e75782e636f70792e70617374656170616972696e676c696e6b66726f6d796f75726a6f75726e616c = paste a pairing link from your journal.
+
+m6c696e75782e636f70792e706173746570616972696e676c696e6b = paste pairing link
+
+m6c696e75782e636f70792e7061757365 = pause
+
+m6c696e75782e636f70792e706175736564 = paused
+
+m6c696e75782e636f70792e70617573696e67 = pausing…
+
+m6c696e75782e636f70792e70726573656e746564 = presented
+
+m6c696e75782e636f70792e71756974 = quit solstone
+
+m6c696e75782e636f70792e717569746661696c6564 = couldn't stop the solstone app. try again.
+
+m6c696e75782e636f70792e72656164696e676c6f6773 = reading logs…
+
+m6c696e75782e636f70792e72656164726563656e746c6f6773 = read recent logs
+
+m6c696e75782e636f70792e7265616473657474696e6773616761696e = read settings again
+
+m6c696e75782e636f70792e726561647468656c6f677362656c6f777468656e63686f6f736577686574686572746f7361766561636f = read the logs below, then choose whether to save a copy.
+
+m6c696e75782e636f70792e72656164746865736f6c73746f6e6561707073726563656e746c6f67736265666f7265736176696e6761 = read the solstone app's recent logs before saving a copy for a support report. nothing is sent from here.
+
+m6c696e75782e636f70792e726563656e746c6f6773 = recent logs
+
+m6c696e75782e636f70792e72657374617274696e67 = restarting…
+
+m6c696e75782e636f70792e726573746172746e6565646564 = restart needed
+
+m6c696e75782e636f70792e72657374617274746865736f6c73746f6e65617070 = restart the solstone app
+
+m6c696e75782e636f70792e726573756d65 = resume
+
+m6c696e75782e636f70792e726573756d696e67 = resuming…
+
+m6c696e75782e636f70792e7331 = screenshots
+
+m6c696e75782e636f70792e733130636f756e74696e67 = checking…
+
+m6c696e75782e636f70792e733130746f646179 = start from today
+
+m6c696e75782e636f70792e733131 = choose how far back to start, then bring them in.
+
+m6c696e75782e636f70792e733132 = couldn't count your screenshots.
+
+m6c696e75782e636f70792e733134 = a screenshot already in your journal stays there if you delete it from the folder.
+
+m6c696e75782e636f70792e733135 = what's already in your journal stays when you pause or turn this off.
+
+m6c696e75782e636f70792e733136636f6d7075746572 = screenshots you take while it's paused don't come in.
+
+m6c696e75782e636f70792e733137 = screenshots already in your journal aren't brought in again.
+
+m6c696e75782e636f70792e733139 = waiting to go to your journal
+
+m6c696e75782e636f70792e733231 = waiting for a journal update. your screenshots wait on this computer.
+
+m6c696e75782e636f70792e733232 = folder
+
+m6c696e75782e636f70792e733233 = only what the solstone app can tell is a screenshot comes in.
+
+m6c696e75782e636f70792e7337 = from before today
+
+m6c696e75782e636f70792e7339 = you'll see how many screenshots there are before any come in.
+
+m6c696e75782e636f70792e7361766561636f7079 = save a copy…
+
+m6c696e75782e636f70792e7361766573657474696e6773 = save settings
+
+m6c696e75782e636f70792e736176696e67 = saving…
+
+m6c696e75782e636f70792e736176696e67636f7079 = saving copy…
+
+m6c696e75782e636f70792e736176696e6777726974657365786163746c797468657072657669657761626f7665 = saving writes exactly the preview above.
+
+m6c696e75782e636f70792e73637265656e = screen
+
+m6c696e75782e636f70792e73637265656e616e64617564696f617265706175736564756e74696c796f75726573756d656465736b746f70 = screen and audio are paused until you resume. desktop activity keeps going.
+
+m6c696e75782e636f70792e73637265656e616e64617564696f7374696c6c70617573656465736b746f7061637469766974796b65657073 = screen and audio still pause. desktop activity keeps going.
+
+m6c696e75782e636f70792e73637265656e617564696f6465736b746f706163746976697479 = screen, audio and desktop activity
+
+m6c696e75782e636f70792e73637265656e696e74616b65697377616974696e67 = screen intake is waiting
+
+m6c696e75782e636f70792e73637265656e73686f74736c6f6f6b6261636b3736 = the last 30 days
+
+m6c696e75782e636f70792e73637265656e73686f74736c6f6f6b6261636b3737 = the last 6 months
+
+m6c696e75782e636f70792e73637265656e73686f74736c6f6f6b6261636b3738 = the last year
+
+m6c696e75782e636f70792e73637265656e73686f74736c6f6f6b6261636b3739 = all of it
+
+m6c696e75782e636f70792e73637265656e73686f74736c6f6f6b6261636b3830 = nothing from before today
+
+m6c696e75782e636f70792e7365636f6e6473 = seconds
+
+m6c696e75782e636f70792e7365676d656e74696e74657276616c = segment interval
+
+m6c696e75782e636f70792e73656e74666f756e646e6f7465736a6f75726e616c = { $sent } of { $found } notes in your journal
+
+m6c696e75782e636f70792e73657474696e6773 = settings
+
+m6c696e75782e636f70792e73657474696e677361637469766974796f6e6c7968656c70 = desktop activity only, with screen and sound off.
+
+m6c696e75782e636f70792e73657474696e67737361766564 = settings saved.
+
+m6c696e75782e636f70792e736f6c73746f6e6561707063616e7472656164 = the solstone app can't read this vault. check that its folder is there and that the drive it's on is connected. nothing changes in your journal while it's out of reach.
+
+m6c696e75782e636f70792e736f6c73746f6e65617070636f756c646e7473617665 = the solstone app couldn't save its place for this vault. check that this computer has free space.
+
+m6c696e75782e636f70792e736f6c73746f6e656170706469646e7466696e64 = the solstone app didn't find a vault on this computer. choose its folder instead.
+
+m6c696e75782e636f70792e736f6c73746f6e6561707074616b65736e6f7465736f6e65 = the solstone app takes in the notes in one vault on this computer. all of them go into your journal, then each one as it changes. your vault stays as it is.
+
+m6c696e75782e636f70792e736f6d656e6f746573636f756c646e74676f = some notes couldn't go into your journal. the solstone app tries them again the next time it starts.
+
+m6c696e75782e636f70792e736f6d657468696e67616e737765726564696e73746561646a6f75726e616c = something answered instead of your journal
+
+m6c696e75782e636f70792e736f6d657468696e67616e73776572656474686973636f6d70757465726174 = something answered this computer at { $address }, and it isn't the journal this computer is paired with. this could be another device now using that address, or your journal, if its identity was reset. if the mark under "what answered" matches the one your journal shows now, pair this computer again.
+
+m6c696e75782e636f70792e736f6d657468696e67616e73776572656474686973636f6d70757465727468726f756768 = something answered this computer through the relay, and it isn't the journal this computer is paired with. this is less certain than a direct connection.
+
+m6c696e75782e636f70792e7374617274696e67 = starting…
+
+m6c696e75782e636f70792e7374617274706175736564 = start paused
+
+m6c696e75782e636f70792e7374617274746865736f6c73746f6e65617070 = start the solstone app
+
+m6c696e75782e636f70792e737461747573756e617661696c61626c65 = status unavailable
+
+m6c696e75782e636f70792e73796e63696e676a6f75726e616c = syncing to your journal…
+
+m6c696e75782e636f70792e74616b6573746d757873657373696f6e73616c6c6974 = takes in your { "tmux" } sessions, and all of it goes into your journal. needs { "tmux" } on this computer, and works over { "SSH" } and with no desktop.
+
+m6c696e75782e636f70792e7465726d696e616c = terminal
+
+m6c696e75782e636f70792e74686174646f65736e746d61746368 = that doesn't match
+
+m6c696e75782e636f70792e74686174666f6c64657269736e746f6273696469616e = that folder isn't an { "Obsidian" } vault, so the solstone app didn't add it. choose the vault's own folder.
+
+m6c696e75782e636f70792e74686174666f6c646572736e616d6563616e = that folder's name can't be a vault's name in your journal. rename the folder and try again.
+
+m6c696e75782e636f70792e7468617470616972696e676c696e6b69736e746f6e65746865736f6c73746f6e6561707063616e726561 = that pairing link isn't one the solstone app can read. get a new pairing link from your journal and try again.
+
+m6c696e75782e636f70792e746865666f6c64657269736e746f6e74686973636f6d7075746572 = the { $folder } folder isn't on this computer anymore.
+
+m6c696e75782e636f70792e7468656c6f67707265766965777761736c696d697465646d6f72656c6f67746578746d61796265617661 = { "\u000a" }[the log preview was limited; more log text may be available]{ "\u000a" }
+
+m6c696e75782e636f70792e74686570616972696e676368616e6765647768696c65796f7577657265636865636b696e676974736d61726b = the pairing changed while you were checking its mark. check the current mark before confirming.
+
+m6c696e75782e636f70792e74686570616972696e6777696e646f77636c6f736564676574616e657770616972696e676c696e6b66726f = the pairing window closed. get a new pairing link from your journal, then try again.
+
+m6c696e75782e636f70792e746865736574616b656566666563747468656e65787474696d65746865736f6c73746f6e65617070737461 = these take effect the next time the solstone app starts.
+
+m6c696e75782e636f70792e746865736f6c73746f6e6561707063616e6e6f77636f6e6e656374746f796f75726a6f75726e616c = the solstone app can now connect to your journal.
+
+m6c696e75782e636f70792e746865736f6c73746f6e656170706861736e74616e737765726564796574636865636b666f7261646573 = the solstone app hasn't answered yet. check for a desktop sharing prompt, then check status.
+
+m6c696e75782e636f70792e746865736f6c73746f6e6561707072657374617274656477697468796f7572736176656473657474696e6773 = the solstone app restarted with your saved settings.
+
+m6c696e75782e636f70792e74686577696e646f77636f756c646e7473746172746f70656e78666f7264657461696c73 = the window couldn't start. open { $path } for details.
+
+m6c696e75782e636f70792e74686577696e646f77636f756c646e7473746172747472796f70656e696e676974616761696e = the window couldn't start. try opening it again.
+
+m6c696e75782e636f70792e74686577696e646f776e6565647367746b34366f726e65776572636f756c646e746c6f6164697473 = the window needs { "GTK" } 4.6 or newer. couldn't load its desktop libraries. open { $path } for details.
+
+m6c696e75782e636f70792e7468697369736a6f75726e616c = this is your journal
+
+m6c696e75782e636f70792e746869736d6f766573736f6c73746f6e65746d7578696e746f = this moves solstone for { "tmux" } into this app, and it stops for good. what it still has waiting goes into your journal through this app, and anything that can't go stays on this computer. if this app isn't paired yet, it pairs with the journal solstone for { "tmux" } uses.
+
+m6c696e75782e636f70792e74686973737461727473746865736f6c73746f6e656170706e6f77616e6461747369676e696e6f70656e = this starts the solstone app now and at sign-in. opening this window alone doesn't start intake.
+
+m6c696e75782e636f70792e746f6f6c617267656272696e67 = too large to bring in
+
+m6c696e75782e636f70792e747279616761696e = try again
+
+m6c696e75782e636f70792e7475726e696e67746869736f666673746f70736272696e67696e67 = turning this off stops bringing in changes. what's already in your journal stays there, and what's waiting stays on this computer until you turn it on again.
+
+m6c696e75782e636f70792e7475726e6f6666 = turn off
+
+m6c696e75782e636f70792e756e617661696c61626c65 = unavailable
+
+m6c696e75782e636f70792e75706461746573686f77 = the app doesn't update itself. to update, run the solstone installer again with --upgrade.
+
+m6c696e75782e636f70792e757064617465736a6f75726e616c76657273696f6e = journal version
+
+m6c696e75782e636f70792e757365746869737661756c74 = use this vault
+
+m6c696e75782e636f70792e7661756c74 = vault
+
+m6c696e75782e636f70792e7661756c747374686973636f6d7075746572 = vaults on this computer
+
+m6c696e75782e636f70792e7661756c7477697468746869736e616d656973 = a vault with this name is already in your journal
+
+m6c696e75782e636f70792e76657273696f6e76616c7565 = app version: { $value }
+
+m6c696e75782e636f70792e7669657764657461696c73 = view details
+
+m6c696e75782e636f70792e77616974696e67666f72746865736f6c73746f6e65617070746f616e737765726966796f75726465736b74 = waiting for the solstone app to answer. if your desktop asks what to share, make your choice there.
+
+m6c696e75782e636f70792e77616974696e67666f72796f75746f636f6e6669726d796f75726a6f75726e616c736d61726b = waiting for you to confirm your journal's mark
+
+m6c696e75782e636f70792e77616974696e676a6f75726e616c757064617465 = waiting for a journal update
+
+m6c696e75782e636f70792e77616974696e6772656163686a6f75726e616c = waiting to reach your journal
+
+m6c696e75782e636f70792e77616974696e67746f73796e63 = waiting to sync
+
+m6c696e75782e636f70792e77616974696e6776616c7565 = waiting to sync: { $value }
+
+m6c696e75782e636f70792e7765626164647265737365737475726e736f6e6465736b746f706163636573736962696c697479 = web addresses (turns on desktop accessibility)
+
+m6c696e75782e636f70792e77686174616e737765726564 = what answered
+
+m6c696e75782e636f70792e77696e646f777469746c6573 = window titles
+
+m6c696e75782e636f70792e77696e646f777469746c65736c6566746f75746f666465736b746f706163746976697479 = window titles left out of desktop activity
+
+m6c696e75782e636f70792e7965737468697369736d796a6f75726e616c = yes, this is my journal
+
+m6c696e75782e636f70792e796f7572 = your
+
+m6c696e75782e636f70792e796f757263757272656e7470616972696e677374617973696e757365756e74696c796f75636f6e6669726d = your current pairing stays in use until you confirm this mark.
+
+m6c696e75782e636f70792e796f75726a6f75726e616c6e6f747365747570796574 = your journal, not set up yet
+
+m6c696e75782e636f70792e796f75726a6f75726e616c736d61726b6973636f6e6669726d6564627574746865736f6c73746f6e656170 = your journal's mark is confirmed, but the solstone app couldn't restart. try again.
+
+m6c696e75782e636f70792e796f75726a6f75726e616c736d61726b6973636f6e6669726d6564627574746865736f6c73746f6e65617032 = your journal's mark is confirmed, but the solstone app needs attention. check the details, then try again.
+
+m6c696e75782e636f70792e796f75726a6f75726e616c736d61726b756e617661696c61626c6572696768746e6f77 = your journal's mark, unavailable right now
+
+m6c696e75782e636f70792e796f757273657474696e67736172657361766564627574746865736f6c73746f6e65617070636f756c646e = your settings are saved, but the solstone app couldn't restart. try again.
+
+m6c696e75782e636f70792e796f757273657474696e6773617265736176656472657374617274746865736f6c73746f6e65617070746f = your settings are saved. restart the solstone app to use them now.
+
+m6c696e75782e636f70792e796f757273657474696e67736368616e6765646f7574736964657468697377696e646f77726561647468656d = your settings changed outside this window. read them again before saving.
+
+m6c696e75782e636f70792e796f7573616964746869736d61726b646f65736e746d617463687468656f6e65796f75726a6f75726e6132 = you said this mark doesn't match the one your journal shows. your current pairing stays in use. get a fresh pairing link from your journal, or email { "support@solstone.app" } and we'll help.
+
+m6c696e75782e6465736b746f702e636c6970626f617264636f6d6d616e64657869746564756e7375636365737366756c6c79 = clipboard command exited unsuccessfully
+
+m6c696e75782e6465736b746f702e636f756c646e6f746f70656e796f75726a6f75726e616c77616974666f72746865736f6c73746f6e656170 = Could not open your journal. Wait for the solstone app to reconnect, then try again.
+
+m6c696e75782e6465736b746f702e636f756c646e74636f707972756e736f6c73746f6e656c696e757861626f7574746f73656c656374616e64 = couldn't copy. run `{ "solstone-linux" } about` to select and copy your versions.
+
+m6c696e75782e6465736b746f702e636f756c646e74636f7079776974686f757478696e7374616c6c69746f7272756e736f6c73746f6e656c = couldn't copy without { $value1 }. install it, or run `{ "solstone-linux" } about` to select and copy your versions.
+
+m6c696e75782e6465736b746f702e6f62736572766572636f6d6d616e646d7573746265726f75746564627974686572756e6c6f6f706f776e65 = observer command must be routed by the run-loop owner
+
+m6c696e75782e646f63746f722e63616e747265616368796f75726465736b746f70786c6f676f7574616e646261636b696e746f7265 = can't reach your desktop ({ $value1 }); log out and back in to restore it
+
+m6c696e75782e646f63746f722e636f756c646e6f74726561636874686573657373696f6e627573746f636865636b74686570616e656c69 = could not reach the session bus to check the panel icon
+
+m6c696e75782e646f63746f722e636f756c646e6f74726561646c6f67696e73657373696f6e7378 = could not read login sessions: { $error }
+
+m6c696e75782e646f63746f722e636f756c646e6f74737461727474686570726f626578 = could not start the probe: { $error }
+
+m6c696e75782e646f63746f722e646973706c61796e6f747365747374617274736f6c73746f6e656c696e757866726f6d7468657831316772 = { "DISPLAY" } not set; start { "solstone-linux" } from the { "X11" } graphical session
+
+m6c696e75782e646f63746f722e646f63746f7239636865636b73786661696c6564787761726e696e6773 = { "\u000a" }doctor: 9 checks, { $failures } failed, { $warnings } warnings
+
+m6c696e75782e646f63746f722e666f6c6c6f77696e6773657373696f6e787761796c616e64 = following session { $session } (wayland)
+
+m6c696e75782e646f63746f722e666f6c6c6f77696e6773657373696f6e787831316f6e78 = following session { $session } (x11 on { $display })
+
+m6c696e75782e646f63746f722e676e6f6d656e65656473616e657874656e73696f6e72756e736f6c73746f6e656c696e757870616e656c6963 = { "GNOME" } needs an extension; run { "solstone-linux panel-icon" }
+
+m6c696e75782e646f63746f722e6773747265616d6572656c656d656e7473786d697373696e67696e7374616c6c746865706970657769726561 = { "GStreamer" } element(s) { $value1 } missing; install the { "PipeWire" } and good/base plugin packages
+
+m6c696e75782e646f63746f722e6773747265616d6572696e697469616c697a6174696f6e6661696c656478696e7374616c6c6773747265616d6572 = { "GStreamer" } initialization failed: { $error }; install { "GStreamer" } 1.x
+
+m6c696e75782e646f63746f722e6c6162656c2e6465736b746f7073657373696f6e = desktop session
+
+m6c696e75782e646f63746f722e6c6162656c2e6661696c = fail
+
+m6c696e75782e646f63746f722e6c6162656c2e6773747265616d6572 = gstreamer
+
+m6c696e75782e646f63746f722e6c6162656c2e6e61 = n/a
+
+m6c696e75782e646f63746f722e6c6162656c2e6f6b = ok
+
+m6c696e75782e646f63746f722e6c6162656c2e70616e656c69636f6e = panel icon
+
+m6c696e75782e646f63746f722e6c6162656c2e706f7274616c = xdg-desktop-portal
+
+m6c696e75782e646f63746f722e6c6162656c2e70756c7365 = pipewire (pulse)
+
+m6c696e75782e646f63746f722e6c6162656c2e73657373696f6e74797065 = session type
+
+m6c696e75782e646f63746f722e6c6162656c2e73796e636865616c7468 = sync health
+
+m6c696e75782e646f63746f722e6c6162656c2e73797374656d6475736572 = systemd --user
+
+m6c696e75782e646f63746f722e6c6162656c2e7761726e = warn
+
+m6c696e75782e646f63746f722e6c6162656c2e78313163617074757265 = x11 capture
+
+m6c696e75782e646f63746f722e6e6f6465736b746f7073657373696f6e6f66796f7572736f6e74686973 = no desktop session of yours on this computer; screen and audio need one
+
+m6c696e75782e646f63746f722e6e6f6465736b746f7073657373696f6e6f66796f7572736f6e74686973636f6d70757465726e6f7468696e67 = no desktop session of yours on this computer; screen and audio wait until you log in here (a session you log in to remotely doesn't count)
+
+m6c696e75782e646f63746f722e6e6f746170706c696361626c656e6f676e6f6d657368656c6c6f6e74686573657373696f6e627573 = not applicable (no { "GNOME" } Shell on the session bus)
+
+m6c696e75782e646f63746f722e6e6f746170706c696361626c656e6f783131646973706c6179 = not applicable (no { "X11" } display)
+
+m6c696e75782e646f63746f722e6e6f746170706c696361626c657761796c616e6473657373696f6e = not applicable (wayland session)
+
+m6c696e75782e646f63746f722e6e6f74726567697374657265646e6f746e65656465646f6e7831317573696e6778696d616765737263 = not registered — not needed on { "X11" } (using { "ximagesrc" })
+
+m6c696e75782e646f63746f722e6f6b62726f77736572726567697374726174696f6e6368726f6d656368726f6d69756d65646765616e64666972 = ok{ "    " }browser registration{ "          " }chrome, chromium, edge and firefox
+
+m6c696e75782e646f63746f722e6f6b66697265666f78736e6170616c6c6f776564746f7374617274746865736f6c73746f6e65617070 = ok{ "    " }firefox (snap){ "                " }allowed to start the solstone app
+
+m6c696e75782e646f63746f722e6f6b66697265666f78736e617061736b73796f756f6e6365746f6c657469747374617274746865736f = ok{ "    " }firefox (snap){ "                " }asks you once to let it start the solstone app
+
+m6c696e75782e646f63746f722e6f7267667265656465736b746f70706f7274616c6465736b746f706e6f74726567697374657265646f6e = { "org.freedesktop.portal.Desktop" } not registered on session bus; install/start { "xdg-desktop-portal" }
+
+m6c696e75782e646f63746f722e6f7267667265656465736b746f70706f7274616c6465736b746f70726567697374657265646f6e73657373696f6e = { "org.freedesktop.portal.Desktop" } registered on session bus
+
+m6c696e75782e646f63746f722e7069706577697265737263767038656e63616e647765626d6d7578617661696c61626c65 = pipewiresrc, vp8enc, and webmmux available
+
+m6c696e75782e646f63746f722e70726f626570616e69636b6564696e7370656374736572766963656c6f6773616e647265747279 = probe panicked; inspect service logs and retry
+
+m6c696e75782e646f63746f722e70756c7365617564696f636f6d70617469626c65736572766572726561636861626c65 = { "PulseAudio" }-compatible server reachable
+
+m6c696e75782e646f63746f722e70756c7365617564696f636f6d70617469626c65736572766572756e726561636861626c65787374617274706970 = { "PulseAudio" }-compatible server unreachable: { $error }; start { "PipeWire" } Pulse or { "PulseAudio" }
+
+m6c696e75782e646f63746f722e73637265656e617564696f616e646465736b746f7061637469766974796172656f6666 = screen, audio and desktop activity are off
+
+m6c696e75782e646f63746f722e73657373696f6e62757370726f62656661696c65647873746172746167726170686963616c73657373696f6e = session bus probe failed: { $error }; start a graphical session and ensure { "xdg-desktop-portal" } is installed
+
+m6c696e75782e646f63746f722e73657373696f6e627573756e726561636861626c657873746172746167726170686963616c73657373696f6e = session bus unreachable: { $error }; start a graphical session and ensure { "xdg-desktop-portal" } is installed
+
+m6c696e75782e646f63746f722e73797374656d63746c757365726e6f74726561636861626c6572756e696e736964656173797374656d647573 = { "systemctl --user" } not reachable; run inside a systemd user session
+
+m6c696e75782e646f63746f722e73797374656d63746c757365726e6f74726561636861626c657872756e696e736964656173797374656d64 = { "systemctl --user" } not reachable: { $error }; run inside a systemd user session
+
+m6c696e75782e646f63746f722e746865676e6f6d65657874656e73696f6e6973696e7374616c6c65646275746f666672756e736f6c73746f6e = the { "GNOME" } extension is installed but off; run { "solstone-linux panel-icon" }
+
+m6c696e75782e646f63746f722e746865676e6f6d65657874656e73696f6e69736f6e6275746e6f70616e656c69636f6e7965746c6f67 = the { "GNOME" } extension is on but no panel icon yet; log out and back in if it stays
+
+m6c696e75782e646f63746f722e74686570616e656c69636f6e657874656e73696f6e6973696e7374616c6c65646c6f676f7574616e646261 = the panel icon extension is installed; log out and back in to finish
+
+m6c696e75782e646f63746f722e746869736465736b746f7063616e73686f7774686570616e656c69636f6e = this desktop can show the panel icon
+
+m6c696e75782e646f63746f722e74696d65646f757461667465723273636865636b746865757365726462757373657373696f6e616e64 = timed out after 2s; check the user D-Bus session and { "xdg-desktop-portal" }
+
+m6c696e75782e646f63746f722e756e7265636f676e697a656473657373696f6e74797065787761796c616e646f727831317265717569726564 = unrecognized session type '{ $value }'; { "Wayland" } or { "X11" } required
+
+m6c696e75782e646f63746f722e7761726e62726f77736572726567697374726174696f6e6d697373696e676f726f75746f6664617465666f72 = warn{ "  " }browser registration{ "          " }missing or out of date for { $value1 }; start the solstone app to write them again
+
+m6c696e75782e646f63746f722e7761726e6368726f6d69756d736e617063616e747265616368746865736f6c73746f6e6561707061736e = warn{ "  " }chromium (snap){ "               " }can't reach the solstone app; a snap of chromium has no way to start it. use chrome, edge or firefox
+
+m6c696e75782e646f63746f722e7761726e66697265666f78736e617061736b73796f756f6e6365746f6c657469747374617274746865 = warn{ "  " }firefox (snap){ "                " }asks you once to let it start the solstone app; doctor couldn't read what you answered
+
+m6c696e75782e646f63746f722e7761726e66697265666f78736e6170796f75746f6c64796f75726465736b746f706e6f74746f6c657466 = warn{ "  " }firefox (snap){ "                " }you told your desktop not to let firefox start the solstone app, so nothing is taken in from it. to be asked again, run:{ "\u000a      " }gdbus { $value1 } --method { "org.freedesktop.impl.portal.PermissionStore.DeletePermission" } { $PERMISSION-TABLE } { $value2 } { $SNAP-FIREFOX }
+
+m6c696e75782e646f63746f722e7761726e7863616e747265616368746865736f6c73746f6e6561707066726f6d696e7369646561666c = warn{ "  " }{ $id }{ "  " }can't reach the solstone app from inside a flatpak; use chrome, edge or firefox installed outside flatpak
+
+m6c696e75782e646f63746f722e7761796c616e64 = wayland
+
+m6c696e75782e646f63746f722e78313172616e6472616e6478696d616765737263617661696c61626c65 = { "X11" } RandR and { "ximagesrc" } available
+
+m6c696e75782e646f63746f722e78313172616e6472756e617661696c61626c6578636865636b646973706c6179616e647873657276657272 = { "X11" } RandR unavailable: { $error }; check { "DISPLAY" } and X server RandR support
+
+m6c696e75782e646f63746f722e7831317573696e6778696d61676573726363617074757265 = x11 (using { "ximagesrc" } capture)
+
+m6c696e75782e646f63746f722e78636865636b7468617473797374656d646c6f67696e64697372756e6e696e67 = { $value1 }; check that { "systemd-logind" } is running
+
+m6c696e75782e646f63746f722e78646773657373696f6e747970656e6f747365747761796c616e646f72 = { "XDG_SESSION_TYPE" } not set; { "Wayland" } or { "X11" } required
+
+m6c696e75782e646f63746f722e78696d6167657372636d697373696e67696e7374616c6c7468656773747265616d6572676f6f64706c7567696e73 = { "ximagesrc" } missing; install the { "GStreamer" } good plugins package
+
+m6c696e75782e646f63746f722e796f75726465736b746f7073657373696f6e69736e747468656f6e65696e66726f6e746f6674686573 = your desktop session isn't the one in front of the screen; screen and audio wait until it is
+
+m6c696e75782e6865616c74682e69646c65636f6e6669726d696e6777697468796f75726a6f75726e616c = idle, confirming with your journal
+
+m6c696e75782e6865616c74682e69646c65636f6e6e6563746564 = idle, connected
+
+m6c696e75782e6865616c74682e69646c65636f6e6e656374696e67 = idle, connecting
+
+m6c696e75782e6865616c74682e69646c65636f6e6e656374696f6e756e617661696c61626c6568656c646f6e74686973646576696365 = idle, connection unavailable (held on this device)
+
+m6c696e75782e6865616c74682e69646c65636f6e6e656374696f6e756e617661696c61626c6568656c646f6e7468697364657669636532 = idle, connection unavailable, held on this device
+
+m6c696e75782e6865616c74682e69646c656e6f737461747573 = idle, no status
+
+m6c696e75782e6865616c74682e69646c656f66666c696e6568656c646f6e74686973646576696365 = idle, offline (held on this device)
+
+m6c696e75782e6865616c74682e69646c656f66666c696e6568656c646f6e7468697364657669636532 = idle, offline, held on this device
+
+m6c696e75782e6865616c74682e69646c6570616972616761696e = idle, pair again
+
+m6c696e75782e6865616c74682e69646c6570616972696e676e6f747361766564 = idle, pairing not saved
+
+m6c696e75782e6865616c74682e69646c6570616972696e677265717569726564 = idle, pairing required
+
+m6c696e75782e6865616c74682e69646c6570616972696e67756e73616665 = idle, pairing unsafe
+
+m6c696e75782e6865616c74682e69646c6573796e63696e67 = idle, syncing
+
+m6c696e75782e6865616c74682e69646c6573796e637570746f64617465 = idle, sync up to date
+
+m6c696e75782e6865616c74682e69646c657570646174657265717569726564 = idle, update required
+
+m6c696e75782e6865616c74682e6a6f75726e616c6d61726b = your journal:{ "   " }{ $paired }
+
+m6c696e75782e6865616c74682e6d61726b636c61696d = { $spoken }{ "  " }({ $claim })
+
+m6c696e75782e6865616c74682e6d61726b636c61696d6564 = claimed, not verified
+
+m6c696e75782e6865616c74682e6e3070656e64696e67 = 0 pending
+
+m6c696e75782e6865616c74682e6e6f6964656e7469747970726573656e746564 = no identity presented
+
+m6c696e75782e6865616c74682e6f6e636f6e6669726d696e6777697468796f75726a6f75726e616c = on, confirming with your journal
+
+m6c696e75782e6865616c74682e6f6e636f6e6e6563746564 = on, connected
+
+m6c696e75782e6865616c74682e6f6e636f6e6e656374696e67 = on, connecting
+
+m6c696e75782e6865616c74682e6f6e636f6e6e656374696f6e756e617661696c61626c6568656c646f6e74686973646576696365 = on, connection unavailable (held on this device)
+
+m6c696e75782e6865616c74682e6f6e636f6e6e656374696f6e756e617661696c61626c6568656c646f6e7468697364657669636532 = on, connection unavailable, held on this device
+
+m6c696e75782e6865616c74682e6f6e6e6f737461747573 = on, no status
+
+m6c696e75782e6865616c74682e6f6e6f66666c696e6568656c646f6e74686973646576696365 = on, offline (held on this device)
+
+m6c696e75782e6865616c74682e6f6e6f66666c696e6568656c646f6e7468697364657669636532 = on, offline, held on this device
+
+m6c696e75782e6865616c74682e6f6e70616972616761696e = on, pair again
+
+m6c696e75782e6865616c74682e6f6e70616972696e676e6f747361766564 = on, pairing not saved
+
+m6c696e75782e6865616c74682e6f6e70616972696e677265717569726564 = on, pairing required
+
+m6c696e75782e6865616c74682e6f6e70616972696e67756e73616665 = on, pairing unsafe
+
+m6c696e75782e6865616c74682e6f6e73796e63696e67 = on, syncing
+
+m6c696e75782e6865616c74682e6f6e73796e637570746f64617465 = on, sync up to date
+
+m6c696e75782e6865616c74682e6f6e7570646174657265717569726564 = on, update required
+
+m6c696e75782e6865616c74682e70656e64696e67756e636f6e6669726d6564 = pending unconfirmed
+
+m6c696e75782e6865616c74682e7369676874696e67 = { $header }:{ "\u000a  " }what answered:{ "  " }{ $answer }{ "\u000a  " }{ $paired }{ $footer }
+
+m6c696e75782e6865616c74682e73796e63636f6e6669726d696e6777697468796f75726a6f75726e616c = sync: confirming with your journal
+
+m6c696e75782e6865616c74682e73796e63636f6e6e65637465647570746f64617465 = sync: connected; up to date
+
+m6c696e75782e6865616c74682e73796e63636f6e6e656374696e67 = sync: connecting
+
+m6c696e75782e6865616c74682e73796e63636f6e6e656374696e67776169747768696c6574686973646576696365636f6e6e65637473746f79 = sync: connecting; wait while this device connects to your journal
+
+m6c696e75782e6865616c74682e73796e63636f6e6e656374696f6e756e617661696c61626c6568656c646f6e74686973646576696365 = sync: connection unavailable; held on this device
+
+m6c696e75782e6865616c74682e73796e63636f6e6e656374696f6e756e617661696c61626c6568656c646f6e7468697364657669636572657374 = sync: connection unavailable; held on this device; restart the solstone app; if this continues, pair this device again
+
+m6c696e75782e6865616c74682e73796e63636f6e6e656374696f6e756e617661696c61626c6572657374617274746865736f6c73746f6e65617070 = sync: connection unavailable; restart the solstone app; if this continues, pair this device again
+
+m6c696e75782e6865616c74682e73796e636865616c7468636f6e6e656374696e67776169747768696c6574686973646576696365636f6e6e6563 = sync health: connecting; wait while this device connects to your journal
+
+m6c696e75782e6865616c74682e73796e636865616c7468636f6e6e656374696f6e756e617661696c61626c6572657374617274746865736f6c7374 = sync health: connection unavailable; restart the solstone app; if this continues, pair this device again
+
+m6c696e75782e6865616c74682e73796e636865616c74686f66666c696e6568656c646f6e7468697364657669636577696c6c7265747279 = sync health: offline; held on this device; will retry
+
+m6c696e75782e6865616c74682e73796e636865616c746870616972696e676e6f747361766564666978746869736465766963657370616972 = sync health: pairing not saved; fix this device's pairing permissions, then restart the solstone app
+
+m6c696e75782e6865616c74682e73796e636865616c746870616972696e67756e73616665726570616972746869736465766963657370616972 = sync health: pairing unsafe; repair this device's pairing and restart the solstone app
+
+m6c696e75782e6865616c74682e73796e636865616c7468706169727468697364657669636577697468796f75726a6f75726e616c = sync health: pair this device with your journal
+
+m6c696e75782e6865616c74682e73796e636865616c7468706169727468697364657669636577697468796f75726a6f75726e616c616761696e = sync health: pair this device with your journal again
+
+m6c696e75782e6865616c74682e73796e636865616c74687570646174657265717569726564757064617465746865736f6c73746f6e65617070 = sync health: update required; update the solstone app
+
+m6c696e75782e6865616c74682e73796e636865616c7468776169747768696c6574686973646576696365636f6e6669726d7377697468796f75 = sync health: wait while this device confirms with your journal
+
+m6c696e75782e6865616c74682e73796e636865616c7468796f75726a6f75726e616c6973726563656976696e676e6f74636f6e6669726d6564 = sync health: syncing; not confirmed by your journal yet
+
+m6c696e75782e6865616c74682e73796e63696e6766616c6c6261636b = syncing...
+
+m6c696e75782e6865616c74682e73796e636e6f737461747573 = sync: no status
+
+m6c696e75782e6865616c74682e73796e636e6f73746174757366726f6d746865736f6c73746f6e6561707072696768746e6f77 = sync: no status from the solstone app right now
+
+m6c696e75782e6865616c74682e73796e636e6f737461747573746865736f6c73746f6e6561707069736e6f7472756e6e696e676f726861 = sync: no status; the solstone app is not running, or has no status yet
+
+m6c696e75782e6865616c74682e73796e636f66666c696e6568656c646f6e7468697364657669636577696c6c7265747279 = sync: offline; held on this device; will retry
+
+m6c696e75782e6865616c74682e73796e636f66666c696e6577696c6c7265747279 = sync: offline; will retry
+
+m6c696e75782e6865616c74682e73796e6370616972616761696e = sync: pair again
+
+m6c696e75782e6865616c74682e73796e6370616972616761696e706169727468697364657669636577697468796f75726a6f75726e616c61 = sync: pair again; pair this device with your journal again
+
+m6c696e75782e6865616c74682e73796e6370616972696e676e6f747361766564 = sync: pairing not saved
+
+m6c696e75782e6865616c74682e73796e6370616972696e676e6f747361766564666978746869736465766963657370616972696e67706572 = sync: pairing not saved; fix this device's pairing permissions, then restart the solstone app
+
+m6c696e75782e6865616c74682e73796e6370616972696e677265717569726564 = sync: pairing required
+
+m6c696e75782e6865616c74682e73796e6370616972696e677265717569726564706169727468697364657669636577697468796f75726a6f75 = sync: pairing required; pair this device with your journal
+
+m6c696e75782e6865616c74682e73796e6370616972696e67756e73616665 = sync: pairing unsafe
+
+m6c696e75782e6865616c74682e73796e6370616972696e67756e73616665726570616972746869736465766963657370616972696e67616e64 = sync: pairing unsafe; repair this device's pairing and restart the solstone app
+
+m6c696e75782e6865616c74682e73796e63706169727468697364657669636577697468796f75726a6f75726e616c = sync: pair this device with your journal
+
+m6c696e75782e6865616c74682e73796e63706169727468697364657669636577697468796f75726a6f75726e616c616761696e = sync: pair this device with your journal again
+
+m6c696e75782e6865616c74682e73796e6370726f6772657373 = sync: { $progress }
+
+m6c696e75782e6865616c74682e73796e6373796e63696e67796f75726a6f75726e616c6973726563656976696e676e6f74636f6e6669726d6564 = sync: syncing; not confirmed by your journal yet
+
+m6c696e75782e6865616c74682e73796e637570646174657265717569726564757064617465746865736f6c73746f6e65617070 = sync: update required; update the solstone app
+
+m6c696e75782e6865616c74682e73796e63757064617465746865736f6c73746f6e65617070 = sync: update the solstone app
+
+m6c696e75782e6865616c74682e73796e637570746f64617465 = sync: up to date
+
+m6c696e75782e6865616c74682e73796e63776169747768696c6574686973646576696365636f6e6669726d7377697468796f75726a6f75726e = sync: wait while this device confirms with your journal
+
+m6c696e75782e6865616c74682e73796e63776169747768696c6574686973646576696365636f6e6e65637473746f796f75726a6f75726e616c = sync: wait while this device connects to your journal
+
+m6c696e75782e6865616c74682e746865736f6c73746f6e6561707069736e6f7472756e6e696e676f726861736e6f737461747573796574 = the solstone app is not running, or has no status yet
+
+m6c696e75782e6865616c74682e756e6b6e6f776e6a6f75726e616c7365656e617478 = unknown journal seen at { $address }
+
+m6c696e75782e6865616c74682e756e6b6e6f776e6a6f75726e616c7365656e7468726f75676874686572656c6179 = unknown journal seen through the relay
+
+m6c696e75782e6865616c74682e7570746f646174656174 = sync health: up to date at { $timestamp }
+
+m6c696e75782e6865616c74682e77616974696e67666f72796f75746f636f6e6669726d796f75726a6f75726e616c736d61726b6e6f746869 = waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.{ "\u000a" }when you're ready, run: { "solstone-linux confirm" }
+
+m6c696e75782e696d706f72742e617474656e74696f6e = needs attention
+
+m6c696e75782e696d706f72742e64656c697665726564 = in your journal.
+
+m6c696e75782e696d706f72742e6578706c616e6174696f6e = adds PDFs, audio, images and text you choose here.
+
+m6c696e75782e696d706f72742e66696c656b696e64 = your journal can't take this kind of file
+
+m6c696e75782e696d706f72742e66696c656d697373696e67 = the copy on this device is missing
+
+m6c696e75782e696d706f72742e66696c656e6f7472656164 = this couldn't be read. add it again
+
+m6c696e75782e696d706f72742e66696c65746f6f6c61726765 = it's larger than your journal takes
+
+m6c696e75782e696d706f72742e68656c64 = not going to your journal right now. each one says why.
+
+m6c696e75782e696d706f72742e6a6f75726e616c7265667573616c = your journal couldn't accept this.
+
+m6c696e75782e696d706f72742e6e616d65647265667573616c = { $name }: { $reason }
+
+m6c696e75782e696d706f72742e6e6f726f6f6d = there isn't enough room on this device
+
+m6c696e75782e696d706f72742e6e6f7468696e677761737361766564 = nothing was saved on this device.
+
+m6c696e75782e696d706f72742e6e6f7468696e67796574 = nothing yet.
+
+m6c696e75782e696d706f72742e70616972616761696e = your journal stopped accepting this device. imports wait here until you pair again.
+
+m6c696e75782e696d706f72742e72656d6f76656572726f72 = couldn't remove this. try again.
+
+m6c696e75782e696d706f72742e7361766564 = saved on this device: { $count }
+
+m6c696e75782e696d706f72742e736176696e67 = saving on this device: { $saved } of { $total }
+
+m6c696e75782e696d706f72742e73656e64696e67 = sending
+
+m6c696e75782e696d706f72742e73656e64696e67746f6a6f75726e616c = sending to your journal.
+
+m6c696e75782e696d706f72742e737465706572726f72 = this step couldn't finish. try again.
+
+m6c696e75782e696d706f72742e73746f72656572726f72 = couldn't read imports on this device. nothing has been removed. restart the solstone app to try again.
+
+m6c696e75782e696d706f72742e77616974666f726a6f75726e616c = imports wait on this device until you connect a journal.
+
+m6c696e75782e696d706f72742e77616974666f726d61726b = imports wait until you confirm your journal's mark.
+
+m6c696e75782e696d706f72742e77616974666f72757064617465 = imports wait until your journal is updated.
+
+m6c696e75782e696d706f72742e77616974696e67 = waiting
+
+m6c696e75782e696d706f72742e77616974696e67666f726a6f75726e616c = waiting to go to your journal.
+
+m6c696e75782e6a6f75726e616c6d61726b2e6a6f75726e616c = journal: { $value1 }·{ $value2 }
+
+m6c696e75782e6a6f75726e616c6d61726b2e6a6f75726e616c6a6f75726e616c = journal: your journal
+
+m6c696e75782e6a6f75726e616c6d61726b2e6a6f75726e616c6e6f74706169726564 = journal: not paired
+
+m6c696e75782e6a6f75726e616c6d61726b2e6a6f75726e616c736d61726b756e617661696c61626c657269676874 = your journal's mark: unavailable right now
+
+m6c696e75782e6a6f75726e616c6d61726b2e6d61726b776f726473796f7567617665646f6e = the mark words you gave don't match the journal's mark, so this computer isn't paired. check the words, get a fresh pairing link from your journal and pair again.
+
+m6c696e75782e6a6f75726e616c6d61726b2e6d61726b776f726473796f7567617665646f6e32 = the mark words you gave don't match the journal's mark.
+
+m6c696e75782e6a6f75726e616c6d61726b2e6e6f746368616e67656463757272656e7470616972696e677374617973 = not changed. your current pairing stays in use. nothing this computer has kept went to that journal through this link.
+
+m6c696e75782e6a6f75726e616c6d61726b2e6e6f74706169726564676574667265736870616972696e67 = not paired. get a fresh pairing link from your journal and pair this computer.
+
+m6c696e75782e6a6f75726e616c6d61726b2e70616972696e6763616e63656c6c656463757272656e7470616972696e677374617973 = pairing cancelled. your current pairing stays in use.
+
+m6c696e75782e6a6f75726e616c6d61726b2e70616972696e6763616e63656c6c6564676574667265736870616972696e67 = pairing cancelled. get a fresh pairing link from your journal and pair again when you're ready.
+
+m6c696e75782e6a6f75726e616c6d61726b2e706173746570616972696e676c696e6b66726f6d6a6f75726e616c = paste the pairing link from your journal, then press enter:{ "\u000a" }
+
+m6c696e75782e6a6f75726e616c6d61726b2e73657475706661696c656470616972696e676c696e6b776173 = setup failed: the pairing link was not valid.
+
+m6c696e75782e6a6f75726e616c6d61726b2e796f7573616964746869736d61726b646f65736e = you said this mark doesn't match the one your journal shows, so this computer isn't paired. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and pair again, or email { "support@solstone.app" } and we'll help.
+
+m6c696e75782e6d657461646174612e6175746f7374617274636f6d6d656e74 = the solstone app takes in what you share with it, and all of it goes into your journal
+
+m6c696e75782e6d657461646174612e6175746f73746172746e616d65 = solstone app
+
+m6c696e75782e6d657461646174612e676e6f6d656465736372697074696f6e = desktop activity helper for { "solstone-linux" }
+
+m6c696e75782e6d657461646174612e676e6f6d656e616d65 = solstone activity helper
+
+m6c696e75782e6d657461646174612e6b77696e6465736372697074696f6e = KWin activity helper for { "solstone-linux" }
+
+m6c696e75782e6d657461646174612e6b77696e6e616d65 = solstone activity helper
+
+m6c696e75782e6d657461646174612e6e616d65 = solstone
+
+m6c696e75782e6d657461646174612e7061636b6167656465736372697074696f6e = the solstone app for linux. it takes in the screen and audio you share with it, and all of it goes into your journal.
+
+m6c696e75782e6d657461646174612e7061636b61676573756d6d617279 = the solstone app for linux: what you share goes into your journal
+
+m6c696e75782e6d657461646174612e73657276696365 = solstone app for linux
+
+m6c696e75782e6e6f74696669636174696f6e2e636f70696564 = copied
+
+m6c696e75782e706169722e63616e63656c = cancel
+
+m6c696e75782e706169722e636f6e74696e7565 = continue
+
+m6c696e75782e706169722e6f6e656d6f726573746570636865636b796f75726a6f75726e616c736d61726b796f75726a6f75726e616c = one more step: check your journal's mark.{ "\u000a" }{ "\u000a  " }your journal's mark: { $spoken }{ "\u000a" }{ "\u000a" }your journal shows this same mark in its network app. it should match, exactly.{ "\u000a" }does this match your journal? type { "yes" } or { "no" }:{ "\u000a" }
+
+m6c696e75782e706169722e6f6e656d6f726573746570636865636b796f75726a6f75726e616c736d61726b796f75726a6f75726e616c32 = one more step: check your journal's mark.{ "\u000a" }{ "\u000a  " }your journal's mark: unavailable right now{ "\u000a" }{ "\u000a" }couldn't verify.{ "\u000a" }this computer couldn't work out your journal's mark, so there's nothing to compare. { "continue" } only if you're sure the link came from your journal.{ "\u000a" }type { "continue" } to pair anyway, or { "cancel" } to stop:{ "\u000a" }
+
+m6c696e75782e706169722e70616972696e6763616e63656c6c65646e6f7468696e6774686973636f6d70757465726861736b65707477656e = pairing cancelled. nothing this computer has kept went to that journal through this link. get a fresh pairing link from your journal and run setup again when you're ready.
+
+m6c696e75782e706169722e7468656d61726b776f726473796f7567617665646f6e746d617463687468656a6f75726e616c736d61 = the mark words you gave don't match the journal's mark, so this computer isn't paired, and nothing it has kept went to that journal through this link. check the words, get a fresh pairing link from your journal and run setup again.
+
+m6c696e75782e706169722e74686973636f6d7075746572636f756c646e74776f726b6f75747468656a6f75726e616c736d61726b73 = this computer couldn't work out the journal's mark, so the words you gave can't be matched. this computer isn't paired, and nothing it has kept went to that journal through this link. get a fresh pairing link from your journal and run setup in a terminal to decide for yourself.
+
+m6c696e75782e706169722e74686973636f6d7075746572636f756c646e74776f726b6f75747468656a6f75726e616c736d61726b7332 = this computer couldn't work out the journal's mark, so the words you gave can't be matched. waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do. run { "solstone-linux confirm" } in a terminal to decide for yourself.
+
+m6c696e75782e706169722e7768656e796f757265726561647972756e736f6c73746f6e656c696e7578636f6e6669726d = when you're ready, run: { "solstone-linux confirm" }
+
+m6c696e75782e706169722e796f7573616964746869736d61726b646f65736e746d617463687468656f6e65796f75726a6f75726e61 = you said this mark doesn't match the one your journal shows, so this computer isn't paired, and nothing it has kept went to that journal through this link. you may have pasted the wrong link, or something isn't right. get a fresh pairing link from your journal and run setup again, or email { "support@solstone.app" } and we'll help.
+
+m6c696e75782e70616e656c2e636f756c646e6f7472656163687468656465736b746f70746f636865636b7768617469746e65656473 = could not reach the desktop to check what it needs
+
+m6c696e75782e70616e656c2e636f756c646e6f747265616368746865736f6c73746f6e6561707078 = could not reach the solstone app: { $reason }
+
+m6c696e75782e70616e656c2e636f756c646e6f747265616368746869736465736b746f70746f66696e646f75747768617469746e6565 = could not reach this desktop to find out what it needs.
+
+m6c696e75782e70616e656c2e646f6e6574686570616e656c69636f6e6973696e796f757270616e656c6e6f77 = done. the panel icon is in your panel now.
+
+m6c696e75782e70616e656c2e646f6e7461736b616761696e = don't ask again
+
+m6c696e75782e70616e656c2e6572726f72616374697669747968656c7065726173736574736469726563746f72796e6f74666f756e64 = error: activity helper assets directory not found
+
+m6c696e75782e70616e656c2e6572726f726661696c6564746f636f7079676e6f6d65616374697669747968656c70657278 = error: failed to copy { "GNOME" } activity helper: { $err }
+
+m6c696e75782e70616e656c2e6572726f726661696c6564746f636f70796b77696e616374697669747968656c70657278 = error: failed to copy { "KWin" } activity helper: { $err }
+
+m6c696e75782e70616e656c2e6572726f726e6f616374697669747968656c706572617373657473666f756e64696e78 = error: no activity helper assets found in { $source }
+
+m6c696e75782e70616e656c2e676e6f6d6567617665616e616e737765727765646f6e6f746b6e6f7778 = { "GNOME" } gave an answer we do not know: { $other }
+
+m6c696e75782e70616e656c2e676e6f6d65696e7374616c6c6564746865657874656e73696f6e627574636f756c646e6f747475726e6974 = { "GNOME" } installed the extension but could not turn it on
+
+m6c696e75782e70616e656c2e676e6f6d6569737365746e6f74746f6c6f6164657874656e73696f6e73736f74686570616e656c69636f = { "GNOME" } is set not to load extensions, so the panel icon cannot come back this way
+
+m6c696e75782e70616e656c2e676e6f6d656e656564736f6e65657874656e73696f6e6265666f726574686570616e656c69636f6e63616e = { "GNOME" } needs one extension before the panel icon can appear. that icon is where pause and resume live.
+
+m6c696e75782e70616e656c2e676e6f6d65746f6f6b746865657874656e73696f6e62757474686570616e656c69636f6e6861736e6f74 = { "GNOME" } took the extension but the panel icon has not appeared. run { "solstone-linux" } doctor to see where it got to.
+
+m6c696e75782e70616e656c2e676e6f6d65746f6f6b746865657874656e73696f6e62757474686570616e656c69636f6e6861736e6f7432 = { "GNOME" } took the extension but the panel icon has not appeared yet. give it a moment, then run: { "solstone-linux" } doctor
+
+m6c696e75782e70616e656c2e676e6f6d6577696c6c61736b796f75746f636f6e6669726d6163636570746974746f61646474686570 = { "GNOME" } will ask you to confirm. accept it to add the panel icon extension.
+
+m6c696e75782e70616e656c2e676e6f6d65776f756c646e6f747475726e746865657874656e73696f6e6f6e = { "GNOME" } would not turn the extension on
+
+m6c696e75782e70616e656c2e696e7374616c6c6564616374697669747968656c706572617373657473746f7573657264617461646972656374 = installed activity helper assets to user data directories.
+
+m6c696e75782e70616e656c2e6c6f676f7574616e646261636b696e7468656e72756e74686973616761696e = log out and back in, then run this again.
+
+m6c696e75782e70616e656c2e6e6f6368616e6765796f7563616e72756e74686973616761696e616e7974696d65 = no change. you can run this again any time.
+
+m6c696e75782e70616e656c2e6e6f696e7374616c6c6564617070696e64696361746f72657874656e73696f6e746f7475726e6f6e = no installed appindicator extension to turn on
+
+m6c696e75782e70616e656c2e6e6f7465796f756d7573746578706c696369746c79656e61626c65746865657874656e73696f6e6f72736372 = note: you must explicitly enable the extension or script in your desktop session.
+
+m6c696e75782e70616e656c2e6e6f7468696e676865726563616e73657475706170616e656c69636f6e6f6e746869736465736b746f70 = nothing here can set up a panel icon on this desktop.
+
+m6c696e75782e70616e656c2e6e6f7468696e67746f646f = nothing to do.
+
+m6c696e75782e70616e656c2e6e6f7468696e67746f736574757068657265 = nothing to set up here.
+
+m6c696e75782e70616e656c2e6e6f746e6f77 = not now
+
+m6c696e75782e70616e656c2e6e6f7472756e6e696e67 = the solstone app is not running, so there is nothing to pause or resume.
+
+m6c696e75782e70616e656c2e706175736564666f72786d696e7574657372756e736f6c73746f6e656c696e7578726573756d65746f65 = paused for { $minutes } minute(s). run { "solstone-linux" } resume to end it sooner.
+
+m6c696e75782e70616e656c2e70617573656472756e736f6c73746f6e656c696e7578726573756d657768656e796f7577616e7469746261 = paused. run { "solstone-linux" } resume when you want it back.
+
+m6c696e75782e70616e656c2e73657469747570 = set it up
+
+m6c696e75782e70616e656c2e736f6c73746f6e65617070 = solstone app
+
+m6c696e75782e70616e656c2e746865646f776e6c6f61646564657874656e73696f6e636f756c646e6f746265756e7061636b6564 = the downloaded extension could not be unpacked
+
+m6c696e75782e70616e656c2e746865657874656e73696f6e636f756c646e6f746265646f776e6c6f61646564636865636b7468656e657477 = the extension could not be downloaded; check the network connection
+
+m6c696e75782e70616e656c2e746865676e6f6d65657874656e73696f6e6973616c72656164796f6e696674686570616e656c69636f6e = the { "GNOME" } extension is already on. if the panel icon is still missing, log out and back in.
+
+m6c696e75782e70616e656c2e746865676e6f6d65657874656e73696f6e6973696e7374616c6c65646275747475726e65646f66667475726e = the { "GNOME" } extension is installed but turned off. turning it on now.
+
+m6c696e75782e70616e656c2e74686570616e656c69636f6e657874656e73696f6e6973696e7374616c6c6564627574676e6f6d65686173 = the panel icon extension is installed, but { "GNOME" } has not picked it up yet.
+
+m6c696e75782e70616e656c2e74686570616e656c69636f6e657874656e73696f6e6973696e7374616c6c65646c6f676f7574616e646261 = the panel icon extension is installed. log out and back in, then run { "solstone-linux panel-icon" } again.
+
+m6c696e75782e70616e656c2e74686570616e656c69636f6e6973616c7265616479617661696c61626c656f6e746869736465736b746f70 = the panel icon is already available on this desktop.
+
+m6c696e75782e70616e656c2e74686570616e656c69636f6e69736e6f74736574757078 = the panel icon is not set up: { $reason }
+
+m6c696e75782e70616e656c2e74686570616e656c69636f6e697372656164797061757365616e64726573756d65617265696e746865 = the panel icon is ready. pause and resume are in the panel now.
+
+m6c696e75782e70616e656c2e746865736f6c73746f6e6561707069736e6f7472756e6e696e67736f746865726569736e6f7468696e67 = the solstone app is not running, so there is nothing to pause or resume.
+
+m6c696e75782e70616e656c2e746869736465736b746f70646f65736e6f74616c6c6f77657874656e73696f6e73746f6265696e7374616c6c = this desktop does not allow extensions to be installed
+
+m6c696e75782e70616e656c69636f6e2e726573756d6564 = resumed.
+
+m6c696e75782e73637265656e73686f74732e6272696e67636f756e74 = { $i18nCategory ->
+    [one] bring in 1 screenshot
+   *[other] bring in { $formatted } screenshots
+}
+
+m6c696e75782e73637265656e73686f74732e72656675736564636f756e74 = { $i18nCategory ->
+    [one] 1 screenshot can't come in, so it stays in the folder.
+   *[other] { $formatted } screenshots can't come in, so they stay in the folder.
+}
+
+m6c696e75782e73637265656e73686f74732e746f74616c = { $i18nCategory ->
+    [one] 1 screenshot
+   *[other] { $formatted } screenshots
+}
+
+m6c696e75782e73637265656e73686f74732e756e7265616461626c65636f756e74 = { $i18nCategory ->
+    [one] couldn't read 1 screenshot.
+   *[other] couldn't read { $formatted } screenshots.
+}
+
+m6c696e75782e736572766963652e63757272656e7465786563757461626c656861736e6f706172656e746469726563746f7279 = current executable has no parent directory
+
+m6c696e75782e736572766963652e6572726f7272656d6f76696e677878 = Error removing { $value1 }: { $error }
+
+m6c696e75782e736572766963652e6572726f7277726974696e677365727669636566696c657378 = Error writing service files: { $error }
+
+m6c696e75782e736572766963652e686f6d6569736e6f7473657463616e6e6f746c6f63617465757365727365727669636566696c6573 = HOME is not set; cannot locate user service files
+
+m6c696e75782e736572766963652e696e76616c696473657276696365706964 = invalid service PID
+
+m6c696e75782e736572766963652e72656d6f766564 = Removed { $value1 }
+
+m6c696e75782e736572766963652e73657276696365706964756e617661696c61626c65 = service PID unavailable
+
+m6c696e75782e736572766963652e73657276696365726573746172746661696c656478 = Service restart failed: { $error }
+
+m6c696e75782e736572766963652e73797374656d63746c636f756c646e6f7472657374617274736f6c73746f6e656c696e75787365727669636578 = systemctl could not restart { "solstone-linux" }.service:{ "\u000a" }{ $value1 }
+
+m6c696e75782e736572766963652e73797374656d63746c6e6f74666f756e64 = systemctl not found
+
+m6c696e75782e736572766963652e73797374656d63746c73746f706661696c6564 = systemctl stop failed
+
+m6c696e75782e736572766963652e7761726e696e67636f756c646e6f7472656d6f76656572726f72 = Warning: could not remove { $value1 }: { $error }
+
+m6c696e75782e736572766963652e7761726e696e67636f756c646e6f7472656d6f7665657665727962726f77736572726567697374726174696f6e = Warning: could not remove every browser registration: { $error }
+
+m6c696e75782e736572766963652e7761726e696e67636f756c646e6f747772697465657665727962726f77736572726567697374726174696f6e78 = Warning: could not write every browser registration: { $error }
+
+m6c696e75782e736572766963652e7761726e696e6773797374656d63746c656e61626c656e6f776661696c656472756e73797374656d63746c7573 = Warning: systemctl enable --now failed; run '{ "systemctl --user enable --now solstone-linux.service" }' to inspect the error
+
+m6c696e75782e736572766963652e7761726e696e6773797374656d63746c656e61626c656e6f776661696c65647872756e73797374656d63746c = Warning: systemctl enable --now failed: { $error }; run '{ "systemctl --user enable --now solstone-linux.service" }' after systemd is available
+
+m6c696e75782e736572766963652e7761726e696e6773797374656d63746c73746172746661696c656472756e73797374656d63746c757365727374 = Warning: systemctl start failed; run '{ "systemctl --user start solstone-linux.service" }' to inspect the error
+
+m6c696e75782e736572766963652e7761726e696e6773797374656d63746c73746172746661696c65647872756e73797374656d63746c75736572 = Warning: systemctl start failed: { $error }; run '{ "systemctl --user start solstone-linux.service" }' after systemd is available
+
+m6c696e75782e736572766963652e7761726e696e6773797374656d63746c786661696c656472756e73797374656d63746c7573657278746f69 = Warning: systemctl { $operation } failed; run '{ "systemctl --user" } { $operation }' to inspect the error
+
+m6c696e75782e736572766963652e7761726e696e6773797374656d63746c786661696c65647872756e73797374656d63746c75736572786166 = Warning: systemctl { $operation } failed: { $error }; run '{ "systemctl --user" } { $operation }' after systemd is available
+
+m6c696e75782e736572766963652e77726f746578 = Wrote { $value1 }
+
+m6c696e75782e7368617265642e636c692e76657273696f6e6c6173746b6e6f776e = { $value1 } (last known)
+
+m6c696e75782e7368617265642e636f70792e636f6e6e6563746564 = connected
+
+m6c696e75782e7368617265642e636f70792e737461747573 = status
+
+m6c696e75782e7368617265642e636f70792e796f75726a6f75726e616c73686f77737468697373616d656d61726b696e6974736e6574776f726b617070 = your journal shows this same mark in its network app. it should match, exactly.
+
+m6c696e75782e7368617265642e6865616c74682e756e6b6e6f776e = unknown
+
+m6c696e75782e7368617265642e706169722e636f6e6669726d63616e7461736b796f7561626f7574796f75726a6f75726e616c736d61726b68657265 = confirm can't ask you about your journal's mark here. run it in a terminal, or give the mark's two words with --mark "word word".
+
+m6c696e75782e7368617265642e706169722e636f756c646e74766572696679 = couldn't verify.
+
+m6c696e75782e7368617265642e706169722e646f6573746869736d61746368796f75726a6f75726e616c747970657965736f726e6f = does this match your journal? type { "yes" } or { "no" }:{ "\u000a" }
+
+m6c696e75782e7368617265642e706169722e6769766574686574776f776f7264736f66796f75726a6f75726e616c736d61726b6c696b656d61726b = give the two words of your journal's mark, like { "--mark \"bramble quokka\"" }.
+
+m6c696e75782e7368617265642e706169722e6e6f74706169726564 = not paired.
+
+m6c696e75782e7368617265642e706169722e736574757063616e7461736b796f7561626f7574796f75726a6f75726e616c736d61726b6865726572 = setup can't ask you about your journal's mark here. run it in a terminal, or give the mark's two words with --mark "word word".
+
+m6c696e75782e7368617265642e706169722e74686574776f776f7264736f667468656d61726b796f75726a6f75726e616c736e6574776f726b617070 = the two words of the mark your journal's network app shows. needed when there's no terminal to ask you on.
+
+m6c696e75782e7368617265642e706169722e74797065636f6e74696e7565746f70616972616e797761796f7263616e63656c746f73746f70 = type { "continue" } to pair anyway, or { "cancel" } to stop:{ "\u000a" }
+
+m6c696e75782e7368617265642e706169722e77616974696e67666f72796f75746f636f6e6669726d796f75726a6f75726e616c736d61726b6e6f746869 = waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.
+
+m6c696e75782e7368617265642e706169722e796f75726a6f75726e616c736d61726b6973616c7265616479636f6e6669726d65646e6f7468696e67746f = your journal's mark is already confirmed. nothing to do.
+
+m6c696e75782e7368617265642e747261792e6f66666c696e65 = offline
+
+m6c696e75782e7368656c6c2e61637469766974797374696c6c6f6e = activity is still on.
+
+m6c696e75782e7368656c6c2e61667465726e6f6f6e = good afternoon
+
+m6c696e75782e7368656c6c2e616d6f756e7473696e6365 = { $total }, since { $date }
+
+m6c696e75782e7368656c6c2e617474656e74696f6e = needs attention
+
+m6c696e75782e7368656c6c2e62726f77736572756e617661696c61626c65 = browser pages can't start right now.
+
+m6c696e75782e7368656c6c2e636865636b696e67 = checking…
+
+m6c696e75782e7368656c6c2e6576656e696e67 = good evening
+
+m6c696e75782e7368656c6c2e686f7572636f756e74 = { $i18nCategory ->
+    [one] { $display } hour
+   *[other] { $display } hours
+}
+
+m6c696e75782e7368656c6c2e686f75727361676f = { $i18nCategory ->
+    [one] { $display } hour ago
+   *[other] { $display } hours ago
+}
+
+m6c696e75782e7368656c6c2e696e74616b65756e7265616461626c65 = the record of how much has been taken in could not be read.
+
+m6c696e75782e7368656c6c2e6c6573737468616e6d696e757465 = less than a minute
+
+m6c696e75782e7368656c6c2e6c6573737468616e6d696e7574656c656674 = paused, less than a minute left
+
+m6c696e75782e7368656c6c2e6d696e757465636f756e74 = { $i18nCategory ->
+    [one] { $display } minute
+   *[other] { $display } minutes
+}
+
+m6c696e75782e7368656c6c2e6d696e7574657361676f = { $minutes } min ago
+
+m6c696e75782e7368656c6c2e6d6f6e74682e617072696c = april
+
+m6c696e75782e7368656c6c2e6d6f6e74682e617567757374 = august
+
+m6c696e75782e7368656c6c2e6d6f6e74682e646563656d626572 = december
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6665627275617279 = february
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6a616e75617279 = january
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6a756c79 = july
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6a756e65 = june
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6d61726368 = march
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6d6179 = may
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6e6f76656d626572 = november
+
+m6c696e75782e7368656c6c2e6d6f6e74682e6f63746f626572 = october
+
+m6c696e75782e7368656c6c2e6d6f6e74682e73657074656d626572 = september
+
+m6c696e75782e7368656c6c2e6d6f6e7468646179 = { $month } { $day }
+
+m6c696e75782e7368656c6c2e6d6f6e746864617979656172 = { $month } { $day }, { $year }
+
+m6c696e75782e7368656c6c2e6d6f726e696e67 = good morning
+
+m6c696e75782e7368656c6c2e6e6f7465636f756e74 = { $i18nCategory ->
+    [one] { $display } note
+   *[other] { $display } notes
+}
+
+m6c696e75782e7368656c6c2e70616765636f756e74 = { $i18nCategory ->
+    [one] { $display } page
+   *[other] { $display } pages
+}
+
+m6c696e75782e7368656c6c2e70617573656c656674 = paused, { $minutes } min left
+
+m6c696e75782e7368656c6c2e7265616479746f7365747570 = ready to set up
+
+m6c696e75782e7368656c6c2e73637265656e73686f74636f756e74 = { $i18nCategory ->
+    [one] { $display } screenshot
+   *[other] { $display } screenshots
+}
+
+m6c696e75782e7368656c6c2e73657474696e677570 = setting up
+
+m6c696e75782e7368656c6c2e7465726d696e616c756e617661696c61626c65 = terminal sessions can't start right now.
+
+m6c696e75782e7368656c6c2e74696c656e65656473617474656e74696f6e = { $source } needs attention
+
+m6c696e75782e7368656c6c2e756e74696c726573756d65 = paused until you resume
+
+m6c696e75782e7368656c6c2e77697468617564696f = with audio
+
+m6c696e75782e7368656c6c2e77697468617564696f6163746976697479 = with audio and activity
+
+m6c696e75782e7368656c6c2e796573746572646179 = yesterday
+
+m6c696e75782e73746174652e73746f707065646279616e6572726f7272657374617274696e67 = stopped by an error, restarting
+
+m6c696e75782e73746174652e7465726d696e616c69736f6666 = terminal is off
+
+m6c696e75782e73746174652e746d75786e6f74666f756e64 = { "tmux" } not found
+
+m6c696e75782e73746174652e77616974696e67736f6c73746f6e65666f72746d757869737374696c6c696e7374616c6c6564 = waiting: solstone for { "tmux" } is still installed. turn terminal on in the app, or run `{ "solstone-linux" } terminal on`, to move it over
+
+m6c696e75782e7374617475732e62726f777365726e6f62726f77736572636f6e6e6563746564 = browser: no browser connected
+
+m6c696e75782e7374617475732e62726f77736572746865736f6c73746f6e6561707069736e6f7472756e6e696e67 = browser: the solstone app is not running
+
+m6c696e75782e7374617475732e68656c64787365676d656e74736e6f7473656e74 = Held: { $value1 } segment(s) not sent
+
+m6c696e75782e7374617475732e68656c64787365676d656e74736e6f7473656e746f6c646573747864 = Held: { $value1 } segment(s) not sent, oldest { $value2 }d
+
+m6c696e75782e7374617475732e706175736564736f6e6f6e6577706167657361726574616b656e = { "        " }paused, so no new pages are taken in
+
+m6c696e75782e7374617475732e746865726f6f6d666f7262726f7773657270616765736f6e74686973 = { "        " }the room for browser pages on this computer is full, so no new pages are taken in until some go into your journal
+
+m6c696e75782e73796e632e636865636b696e676a6f75726e616c = checking journal...
+
+m6c696e75782e73796e632e636865636b696e6778 = checking { $day }...
+
+m6c696e75782e73796e632e70726f62656661696c65646e657874696e7873 = { $i18nCategory ->
+    [one] probe failed, next in { NUMBER($count, useGrouping: 0) } second
+   *[other] probe failed, next in { NUMBER($count, useGrouping: 0) } seconds
+}
+
+m6c696e75782e73796e632e70726f62696e676a6f75726e616c = probing journal...
+
+m6c696e75782e73796e632e73796e63696e67 = syncing...
+
+m6c696e75782e73796e632e75706c6f6164696e6778 = uploading { $segment-key }
+
+m6c696e75782e73796e632e7873756e74696c70726f6265 = { $i18nCategory ->
+    [one] { NUMBER($count, useGrouping: 0) } second until probe
+   *[other] { NUMBER($count, useGrouping: 0) } seconds until probe
+}
+
+m6c696e75782e73796e636865616c74682e6966796f75726563656e746c7972657365746a6f75726e616c = if you recently reset your journal, pair this device again.
+
+m6c696e75782e73796e636865616c74682e7468697369736c6573736365727461696e7468616e = this is less certain than a direct connection.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6272696e676f6c64 = bringing over what's waiting
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e636f6e6669726d6174696f6e736f6c73746f6e6561707069736e74 = { $confirmation } the solstone app isn't running; this takes effect when it starts.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e636f756c646e6f746d6f7665736f6c73746f6e65746d7578 = could not move solstone for { "tmux" } in: { $error }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e636f756c646e6f747265616368736f6c73746f6e65617070 = could not reach the solstone app: { $error }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e636f756c646e6f747265636f72646d6f7665796574 = could not record the move yet: { $error }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e636f756c646e6f7473617665746861746572726f72 = could not save that: { $error }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e636f756c646e7475736570726f626c656d = { "  " }couldn't use { $value1 }: { $problem }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e69676e6f72656473657474696e676b6579 = { "  " }ignored setting: { $key }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e69736f6666 = terminal is off.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e69736f6e = terminal is on.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6d6f72657468616e6f6e656f6c6470616972696e67 = { "  " }more than one old pairing: { $value1 }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6d6f76696e67 = moving solstone for tmux in.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6d6f76696e67736f6c73746f6e65746d75786e656564736f6b = moving solstone for { "tmux" } needs your ok. run this in a terminal, or add --yes to `terminal adopt-{ "tmux" }`.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6d6f76696e67736f6c73746f6e65746d75787068617365 = { "  " }moving solstone for { "tmux" } in: { $phase }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6e65777465726d696e616c686973746f727966726f6d68657265 = { "  " }new terminal history from here, and what's already in your journal stays ({ $reason })
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6e6f736f6c73746f6e65746d75786d6f7665 = no solstone for { "tmux" } to move in.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e6f6c647365676d656e747368656c646261636b = { "  " }{ $value1 } old segment(s) held back
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e70726f626c656d = { "  " }problem: { $value1 }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e7265636f72646d6f76696e67736f6c73746f6e65746d757863616e = the record of moving solstone for { "tmux" } can't be read: { $value1 }. please contact support, and don't delete it.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e73637265656e617564696f726573746172746170706166746572 = screen and audio: restart the app after you log in to your desktop here
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e73637265656e69736f6666 = screen, audio and desktop activity are off.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e73637265656e69736f6e = screen, audio and desktop activity are on.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e73637265656e6f6666737461747573 = screen, audio and desktop activity: off
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e7365676d656e747366726f6d736f6c73746f6e65746d7578 = { "  " }{ $value1 } segment(s) from solstone for { "tmux" } waiting to upload
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e7365676d656e747368656c64 = { "  " }{ $value1 } segment(s) held
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e7365676d656e747377616974696e6775706c6f6164 = { "  " }{ $value1 } segment(s) waiting to upload
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e656170706469646e6f74616e73776572 = the solstone app did not answer in time; try again in a moment
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e656170706469646e6f74616e7377657232 = the solstone app did not answer, so nothing changed; try again in a moment.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e6561707069737374617274696e67747279 = the solstone app is starting; try again in a moment.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e6561707069737374696c6c6d6f76696e67 = the solstone app is still moving solstone for { "tmux" } in; it finishes on its own.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e656170706e6565647372657374617274696e676265666f7265 = the solstone app needs restarting before it can move solstone for { "tmux" } in.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e65746d7578686173616c72656164796d6f766564 = solstone for { "tmux" } has already moved in.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e65746d75786861736d6f766564 = solstone for { "tmux" } has moved in.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e65746d75786861736d6f766564736f6c73746f6e65 = solstone for { "tmux" } has moved in. the solstone app finishes the rest when it starts.
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e736f6c73746f6e65746d757869737374696c6c696e7374616c6c6564 = solstone for { "tmux" } is still installed on this computer, so terminal stays off for now
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e73746f706f6c64 = stopping the old app
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e746869736d6f766573736f6c73746f6e65746d7578696e746f = this moves solstone for { "tmux" } into this app, and it stops for good. what it still has waiting goes into your journal through this app, and anything that can't go stays on this computer. if this app isn't paired yet, it pairs with the journal solstone for { "tmux" } uses. move it now? [y/N]
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e746d7578 = { "  " }{ "tmux" }: { $value1 }
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e756e66696e69736865647365676d656e747377616974696e677465726d696e616c = { "  " }{ $value1 } unfinished segment(s) waiting for terminal to run again
+
+m6c696e75782e7465726d696e616c2e636f6e74726f6c2e77616974696e67616e73776572 = { "  " }waiting: { $answer }
+
+m6c696e75782e7465726d696e616c2e6d616c666f726d6564636f6d6d616e64 = malformed command
+
+m6c696e75782e7465726d696e616c2e73746174652e73746f7070656462796572726f7272657374617274696e676572726f72 = stopped by an error, restarting: { $error }
+
+m6c696e75782e7465726d696e616c2e74616b656f7665722e636f756c646e6f7472656d6f76656572726f72 = could not remove { $value1 }: { $error }
+
+m6c696e75782e7465726d696e616c2e74616b656f7665722e69736e6f74736f6c73746f6e65746d757873657276696365 = { $value1 } is not the solstone for { "tmux" } service, so nothing was changed.
+
+m6c696e75782e7465726d696e616c2e74616b656f76657272756e6e65722e636f756c646e6f74736176657465726d696e616c73657474696e6773 = could not save the terminal settings: { $error }
+
+m6c696e75782e7465726d696e616c2e74616b656f76657272756e6e65722e636f756c646e6f747475726e7465726d696e616c6572726f72 = could not turn terminal on: { $error }
+
+m6c696e75782e7465726d696e616c2e7761726e696e67 = warning: { $detail }
+
+m6c696e75782e747261792e61626f7574736f6c73746f6e65 = about solstone
+
+m6c696e75782e747261792e6361636865786d62 = cache: { $value1 } MB
+
+m6c696e75782e747261792e63616e74636865636b776869636873657373696f6e6973696e66726f6e74 = can't check which session is in front
+
+m6c696e75782e747261792e63616e747265616368796f75726465736b746f70 = can't reach your desktop
+
+m6c696e75782e747261792e636f6e6e6563746564616c6c6361756768747570 = connected · all caught up
+
+m6c696e75782e747261792e69646c6573637265656e696e616374697665 = idle (screen inactive)
+
+m6c696e75782e747261792e6e31356d696e75746573 = 15 minutes
+
+m6c696e75782e747261792e6e31686f7572 = 1 hour
+
+m6c696e75782e747261792e6e33306d696e75746573 = 30 minutes
+
+m6c696e75782e747261792e6e6f74706169726564 = not paired
+
+m6c696e75782e747261792e6e6f7472756e6e696e67 = not running
+
+m6c696e75782e747261792e6f66666c696e6577616974696e67 = offline · { $count } waiting
+
+m6c696e75782e747261792e6f70656e6a6f75726e616c = open journal
+
+m6c696e75782e747261792e6f70656e73657474696e6773 = open settings
+
+m6c696e75782e747261792e706175736564786d72656d61696e696e67 = { $i18nCategory ->
+    [one] paused ({ NUMBER($count, useGrouping: 0) } minute remaining)
+   *[other] paused ({ NUMBER($count, useGrouping: 0) } minutes remaining)
+}
+
+m6c696e75782e747261792e71756974736f6c73746f6e65 = quit solstone
+
+m6c696e75782e747261792e726573756d65 = resume
+
+m6c696e75782e747261792e726573756d65786d72656d61696e696e67 = { $i18nCategory ->
+    [one] resume ({ NUMBER($count, useGrouping: 0) } minute remaining)
+   *[other] resume ({ NUMBER($count, useGrouping: 0) } minutes remaining)
+}
+
+m6c696e75782e747261792e73637265656e6e65656473617474656e74696f6e = screen needs attention
+
+m6c696e75782e747261792e746f6f6c746970 = { $status }{ "\u000a" }{ $health }
+
+m6c696e75782e747261792e756e74696c69726573756d65 = until I resume
+
+m6c696e75782e747261792e77616974696e67666f72796f75726465736b746f70 = waiting for your desktop
+
+m6c696e75782e747261792e77616974696e676e6f6e656f66796f757273657373696f6e736973696e66726f6e74 = waiting (none of your sessions is in front)
+
+m6c696e75782e747261792e77616974696e67796f757273657373696f6e69736e74696e66726f6e74 = waiting (your session isn't in front)
+
+m6c696e75782e75692e7465726d696e616c7465726d696e616c737461747573 = terminal: { $terminal-status }
+
+m6c696e75782e77696e646f772e6164646d6f7265 = add more
+
+m6c696e75782e77696e646f772e616c6c6361756768747570 = all caught up
+
+m6c696e75782e77696e646f772e627269676874686172626f72 = bright · harbor
+
+m6c696e75782e77696e646f772e62726f7773657273 = browsers
+
+m6c696e75782e77696e646f772e62726f7773657273627265617468 = on the sites you allow, the solstone extension takes in the page's text and rough layout, and all of it goes into your journal.
+
+m6c696e75782e77696e646f772e62726f7773657273676170 = pages come in from the solstone extension. there is no switch for it here.
+
+m6c696e75782e77696e646f772e63616e63656c = cancel
+
+m6c696e75782e77696e646f772e636865636b696e67796f75726a6f75726e616c = checking your journal.
+
+m6c696e75782e77696e646f772e63686f6f736566696c6573 = choose files…
+
+m6c696e75782e77696e646f772e636c6f7365 = close
+
+m6c696e75782e77696e646f772e636f6e6e656374616a6f75726e616c = connect a journal
+
+m6c696e75782e77696e646f772e636f6e6e6563746564 = connected
+
+m6c696e75782e77696e646f772e636f6e6e656374696f6e = connection
+
+m6c696e75782e77696e646f772e65766572797468696e67696e796f75726a6f75726e616c = everything is in your journal
+
+m6c696e75782e77696e646f772e66696c6573 = files
+
+m6c696e75782e77696e646f772e666f726567726f756e647469746c6575726c69646c65 = { $route }; foreground { $foreground }; title { $title }; url { $url }; idle { $idle }
+
+m6c696e75782e77696e646f772e676f6573616c6f6e67776974686974 = goes along with it
+
+m6c696e75782e77696e646f772e68656c70 = help
+
+m6c696e75782e77696e646f772e686f6d65 = ‹ home
+
+m6c696e75782e77696e646f772e686f6d652e766362313736343837 = home
+
+m6c696e75782e77696e646f772e696d706f7274 = import
+
+m6c696e75782e77696e646f772e6b6570746f6e74686973636f6d7075746572 = kept on this computer
+
+m6c696e75782e77696e646f772e6b696c6f6279746573 = { $size } KB
+
+m6c696e75782e77696e646f772e6c61737472656163686564 = last reached
+
+m6c696e75782e77696e646f772e6c61737474616b656e696e = last taken in
+
+m6c696e75782e77696e646f772e6c6566746f7574 = left out
+
+m6c696e75782e77696e646f772e6d6567616279746573 = { $size } MB
+
+m6c696e75782e77696e646f772e6e6f7468696e67796574 = nothing yet
+
+m6c696e75782e77696e646f772e6e6f74706169726564 = not paired
+
+m6c696e75782e77696e646f772e6f6273696469616e = { "Obsidian" }
+
+m6c696e75782e77696e646f772e6f6666737562 = turn it on any time.
+
+m6c696e75782e77696e646f772e6f6b = ok
+
+m6c696e75782e77696e646f772e6f6e74686973646576696365 = on this device
+
+m6c696e75782e77696e646f772e7061757365 = pause ▾
+
+m6c696e75782e77696e646f772e726563656e74 = recent
+
+m6c696e75782e77696e646f772e72656d6f7665 = remove
+
+m6c696e75782e77696e646f772e72656d6f76652e766630323266306661 = remove { $value1 }?
+
+m6c696e75782e77696e646f772e726573756d65 = resume
+
+m6c696e75782e77696e646f772e73637265656e = screen
+
+m6c696e75782e77696e646f772e73637265656e627265617468 = while this is on, the solstone app takes in what's on your screen, the sound, and which apps and windows you're using, and all of it goes into your journal.
+
+m6c696e75782e77696e646f772e73637265656e736f756e64 = sound covers your microphone and what this computer plays. if there is no microphone, neither comes in.
+
+m6c696e75782e77696e646f772e73637265656e77616974696e67 = waiting to take in the screen.
+
+m6c696e75782e77696e646f772e73696465626172 = sidebar
+
+m6c696e75782e77696e646f772e736f666172 = so far
+
+m6c696e75782e77696e646f772e736f6d657468696e67796f7577657265616464696e676469646e7466696e697368 = something you were adding didn't finish saving. add it again.
+
+m6c696e75782e77696e646f772e736f7572636573 = sources
+
+m6c696e75782e77696e646f772e737461747573 = status
+
+m6c696e75782e77696e646f772e7374617475732e766166663132393065 = ‹ status
+
+m6c696e75782e77696e646f772e746563686e6963616c64657461696c73 = technical details
+
+m6c696e75782e77696e646f772e7465726d696e616c = terminal
+
+m6c696e75782e77696e646f772e7465726d696e616c627265617468 = the solstone app takes in your { "tmux" } sessions, and all of it goes into your journal. needs { "tmux" } on this computer, and works in any terminal session, including when you { "SSH" } into this computer.
+
+m6c696e75782e77696e646f772e746865636f70796973616c7265616479676f6e65736f74686973 = the copy is already gone, so this only clears it from here.
+
+m6c696e75782e77696e646f772e74686973636f6d7075746572 = this computer
+
+m6c696e75782e77696e646f772e7468697372656d6f766573746865636f70796f6e74686973646576696365 = this removes the copy on this device. your journal may still bring in the copy it already has.
+
+m6c696e75782e77696e646f772e7468697372656d6f766573746865636f70796f6e746869736465766963652e763535386130633466 = this removes the copy on this device, so it won't reach your journal.
+
+m6c696e75782e77696e646f772e7472796e6f77 = try now
+
+m6c696e75782e77696e646f772e75706461746573 = updates
+
+m6c696e75782e77696e646f772e796f75726a6f75726e616c = your journal
+
+m6c696e75782e77696e646f772e796f75726a6f75726e616c2e766334336664346435 = your · journal
+

@@ -1,0 +1,42 @@
+{
+  "description": "Complete version line. Versions, build IDs, operating system and architecture names are technical values.",
+  "context": "Complete version line. Versions, build IDs, operating system and architecture names are technical values.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "name",
+      "type": "string"
+    },
+    {
+      "name": "version",
+      "type": "string"
+    },
+    {
+      "name": "build",
+      "type": "string"
+    },
+    {
+      "name": "os",
+      "type": "string"
+    },
+    {
+      "name": "osversion",
+      "type": "string"
+    },
+    {
+      "name": "arch",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 72,
+  "source_revision": "d04ce81cff6fd2ed5a62a96f2787008e707d32701ae8e6ab7daef85f6c900345",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

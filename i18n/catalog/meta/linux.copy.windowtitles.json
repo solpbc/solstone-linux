@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktop.shared.settings.windowtitles, windows.desktop.shared.settings.windowtitles.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 13,
+  "source_revision": "958f10758456cc73a6e0006a8ff1c7a654b03a8e6a1c2a4fd9cb21bb844694d1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

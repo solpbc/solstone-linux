@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.logs.couldntreadthelogfilestry.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 39,
+  "source_revision": "dc75d880b69d8be8041bbb261c29c864cbd21f50b63652f0a78aa0dc44510877",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

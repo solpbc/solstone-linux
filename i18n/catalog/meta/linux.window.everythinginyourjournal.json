@@ -1,0 +1,17 @@
+{
+  "description": "Status pane detail when all material has arrived.",
+  "context": "Status pane detail when all material has arrived.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 29,
+  "source_revision": "7547fa32749a1ca8abaed25e12fa669821212adf3542037d65dee0488c4d86fc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

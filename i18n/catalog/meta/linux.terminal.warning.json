@@ -1,0 +1,22 @@
+{
+  "description": "Terminal helper diagnostic heading. The detail comes from the local engine.",
+  "context": "Terminal helper diagnostic heading. The detail comes from the local engine.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "detail",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 20,
+  "source_revision": "c620520aa5e771430d2a1cc2ebe0f68f929693048d70773983c011e34fb678ca",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

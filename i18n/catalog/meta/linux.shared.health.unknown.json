@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the cli component.",
+  "context": "Presentation from the cli component. Same English as macos.updatestabview.unknown, macos.version.unknown, windows.ui.unknown.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 7,
+  "source_revision": "2642526c3fad2ee76ba9d4b61184c7918fd26f1c4e0c8484492f2e4b15ca7ce4",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

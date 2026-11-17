@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.journalversion.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 15,
+  "source_revision": "2e764cadb3970fcb0c9f14e067a9e80062e9080948b9f5fd26360b026648718a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

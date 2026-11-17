@@ -21,6 +21,7 @@ use crate::{
     },
 };
 use gstreamer as gst;
+use solstone_i18n::{message, text};
 use std::{
     collections::HashMap,
     env, io,
@@ -40,10 +41,10 @@ pub enum Severity {
 impl Severity {
     fn label(self) -> &'static str {
         match self {
-            Self::Ok => "ok",
-            Self::Warn => "warn",
-            Self::Fail => "fail",
-            Self::NotApplicable => "n/a",
+            Self::Ok => text!("linux.doctor.label.ok"),
+            Self::Warn => text!("linux.doctor.label.warn"),
+            Self::Fail => text!("linux.doctor.label.fail"),
+            Self::NotApplicable => text!("linux.doctor.label.na"),
         }
     }
 }
@@ -116,6 +117,21 @@ const DESKTOP_ONLY_CHECKS: [&str; 5] = [
     "x11 capture",
 ];
 
+fn display_check_name(name: &str) -> &str {
+    match name {
+        "session type" => text!("linux.doctor.label.sessiontype"),
+        "desktop session" => text!("linux.doctor.label.desktopsession"),
+        "xdg-desktop-portal" => text!("linux.doctor.label.portal"),
+        "pipewire (pulse)" => text!("linux.doctor.label.pulse"),
+        "gstreamer" => text!("linux.doctor.label.gstreamer"),
+        "x11 capture" => text!("linux.doctor.label.x11capture"),
+        "systemd --user" => text!("linux.doctor.label.systemduser"),
+        "panel icon" => text!("linux.doctor.label.panelicon"),
+        "sync health" => text!("linux.doctor.label.synchealth"),
+        name => name,
+    }
+}
+
 pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> i32 {
     let names = [
         "session type",
@@ -156,7 +172,10 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
                 detail: reason.to_owned(),
             },
             None => catch_unwind(AssertUnwindSafe(|| function(checks))).unwrap_or_else(|_| {
-                CheckResult::fail(name, "probe panicked; inspect service logs and retry")
+                CheckResult::fail(
+                    name,
+                    text!("linux.doctor.probepanickedinspectservicelogsandretry"),
+                )
             }),
         };
         let result = if result.name == name {
@@ -168,7 +187,7 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
             output,
             "{:<4}  {:<28}  {}",
             result.severity.label(),
-            result.name,
+            display_check_name(result.name),
             result.detail
         );
         match result.severity {
@@ -188,7 +207,8 @@ pub fn run_doctor(checks: &mut dyn DoctorChecks, output: &mut dyn io::Write) -> 
     }
     let _ = writeln!(
         output,
-        "\ndoctor: 9 checks, {failures} failed, {warnings} warnings"
+        "{}",
+        message!("linux.doctor.doctor9checksxfailedxwarnings", "failures" => failures, "warnings" => warnings)
     );
     if failures == 0 { 0 } else { 1 }
 }
@@ -223,28 +243,28 @@ fn desktop_session_result(target: &crate::desktop_session::CaptureTarget) -> Che
         SessionPresence::Live => match (target.kind, target.display.as_deref()) {
             (Some(DesktopKind::X11), Some(display)) => CheckResult::ok(
                 NAME,
-                format!("following session {session} (x11 on {display})"),
+                message!("linux.doctor.followingsessionxx11onx", "session" => session, "display" => display),
             ),
-            _ => CheckResult::ok(NAME, format!("following session {session} (wayland)")),
+            _ => CheckResult::ok(
+                NAME,
+                message!("linux.doctor.followingsessionxwayland", "session" => session),
+            ),
         },
         SessionPresence::NotActive => CheckResult::warn(
             NAME,
-            "your desktop session isn't the one in front of the screen; screen and audio wait until it is",
+            text!("linux.doctor.yourdesktopsessionisnttheoneinfrontofthes"),
         ),
         SessionPresence::NoDesktop => CheckResult::warn(
             NAME,
-            "no desktop session of yours on this computer; screen and audio wait until you log in here (a session you log in to remotely doesn't count)",
+            text!("linux.doctor.nodesktopsessionofyoursonthiscomputernothing"),
         ),
         SessionPresence::Unreachable => CheckResult::fail(
             NAME,
-            format!(
-                "can't reach your desktop ({}); log out and back in to restore it",
-                target.detail
-            ),
+            message!("linux.doctor.cantreachyourdesktopxlogoutandbackintore", "value1" => target.detail),
         ),
         SessionPresence::LoginUnavailable => CheckResult::fail(
             NAME,
-            format!("{}; check that systemd-logind is running", target.detail),
+            message!("linux.doctor.xcheckthatsystemdlogindisrunning", "value1" => target.detail),
         ),
     }
 }
@@ -252,15 +272,18 @@ fn desktop_session_result(target: &crate::desktop_session::CaptureTarget) -> Che
 fn session_type_result(value: Option<&str>) -> CheckResult {
     let value = value.unwrap_or_default().to_lowercase();
     match value.as_str() {
-        "wayland" => CheckResult::ok("session type", "wayland"),
-        "x11" => CheckResult::ok("session type", "x11 (using ximagesrc capture)"),
+        "wayland" => CheckResult::ok("session type", text!("linux.doctor.wayland")),
+        "x11" => CheckResult::ok(
+            "session type",
+            text!("linux.doctor.x11usingximagesrccapture"),
+        ),
         "" => CheckResult::warn(
             "session type",
-            "XDG_SESSION_TYPE not set; Wayland or X11 required",
+            text!("linux.doctor.xdgsessiontypenotsetwaylandor"),
         ),
         _ => CheckResult::warn(
             "session type",
-            format!("unrecognized session type '{value}'; Wayland or X11 required"),
+            message!("linux.doctor.unrecognizedsessiontypexwaylandorx11required", "value" => value),
         ),
     }
 }
@@ -269,21 +292,19 @@ fn portal_result(result: Result<bool, String>, x11: bool) -> CheckResult {
     match result {
         Ok(true) => CheckResult::ok(
             "xdg-desktop-portal",
-            "org.freedesktop.portal.Desktop registered on session bus",
+            text!("linux.doctor.orgfreedesktopportaldesktopregisteredonsession"),
         ),
         Ok(false) if x11 => CheckResult::warn(
             "xdg-desktop-portal",
-            "not registered — not needed on X11 (using ximagesrc)",
+            text!("linux.doctor.notregisterednotneededonx11usingximagesrc"),
         ),
         Ok(false) => CheckResult::fail(
             "xdg-desktop-portal",
-            "org.freedesktop.portal.Desktop not registered on session bus; install/start xdg-desktop-portal",
+            text!("linux.doctor.orgfreedesktopportaldesktopnotregisteredon"),
         ),
         Err(error) => CheckResult::fail(
             "xdg-desktop-portal",
-            format!(
-                "session bus unreachable: {error}; start a graphical session and ensure xdg-desktop-portal is installed"
-            ),
+            message!("linux.doctor.sessionbusunreachablexstartagraphicalsession", "error" => error),
         ),
     }
 }
@@ -294,34 +315,35 @@ fn portal_result(result: Result<bool, String>, x11: bool) -> CheckResult {
 // no reachable pause control.
 fn panel_icon_result(readiness: PanelIconReadiness) -> CheckResult {
     match readiness {
-        PanelIconReadiness::Available => {
-            CheckResult::ok("panel icon", "this desktop can show the panel icon")
-        }
+        PanelIconReadiness::Available => CheckResult::ok(
+            "panel icon",
+            text!("linux.doctor.thisdesktopcanshowthepanelicon"),
+        ),
         PanelIconReadiness::NotApplicable => CheckResult::ok(
             "panel icon",
-            "not applicable (no GNOME Shell on the session bus)",
+            text!("linux.doctor.notapplicablenognomeshellonthesessionbus"),
         ),
         // ⛔ Never `ok`. This is "the probe could not answer", and reporting that as
         // "not applicable" turns a broken instrument into a green line.
         PanelIconReadiness::Unknown => CheckResult::warn(
             "panel icon",
-            "could not reach the session bus to check the panel icon",
+            text!("linux.doctor.couldnotreachthesessionbustocheckthepaneli"),
         ),
         PanelIconReadiness::ExtensionActiveNoHost => CheckResult::warn(
             "panel icon",
-            "the GNOME extension is on but no panel icon yet; log out and back in if it stays",
+            text!("linux.doctor.thegnomeextensionisonbutnopaneliconyetlog"),
         ),
         PanelIconReadiness::ExtensionOff => CheckResult::warn(
             "panel icon",
-            "the GNOME extension is installed but off; run solstone-linux panel-icon",
+            text!("linux.doctor.thegnomeextensionisinstalledbutoffrunsolston"),
         ),
         PanelIconReadiness::ExtensionNeedsRelogin => CheckResult::warn(
             "panel icon",
-            "the panel icon extension is installed; log out and back in to finish",
+            text!("linux.doctor.thepaneliconextensionisinstalledlogoutandba"),
         ),
         PanelIconReadiness::ExtensionMissing => CheckResult::warn(
             "panel icon",
-            "GNOME needs an extension; run solstone-linux panel-icon",
+            text!("linux.doctor.gnomeneedsanextensionrunsolstonelinuxpanelic"),
         ),
     }
 }
@@ -372,31 +394,30 @@ fn element_check(names: &[&str]) -> Result<Vec<String>, String> {
 
 fn gstreamer_result(missing: Result<Vec<String>, String>) -> CheckResult {
     match missing {
-        Ok(missing) if missing.is_empty() => {
-            CheckResult::ok("gstreamer", "pipewiresrc, vp8enc, and webmmux available")
-        }
+        Ok(missing) if missing.is_empty() => CheckResult::ok(
+            "gstreamer",
+            text!("linux.doctor.pipewiresrcvp8encandwebmmuxavailable"),
+        ),
         Ok(missing) => CheckResult::fail(
             "gstreamer",
-            format!(
-                "GStreamer element(s) {} missing; install the PipeWire and good/base plugin packages",
-                missing.join(", ")
-            ),
+            message!("linux.doctor.gstreamerelementsxmissinginstallthepipewirea", "value1" => missing.join(", ")),
         ),
         Err(error) => CheckResult::fail(
             "gstreamer",
-            format!("GStreamer initialization failed: {error}; install GStreamer 1.x"),
+            message!("linux.doctor.gstreamerinitializationfailedxinstallgstreamer", "error" => error),
         ),
     }
 }
 
 fn pulse_result(result: Result<(), String>) -> CheckResult {
     match result {
-        Ok(()) => CheckResult::ok("pipewire (pulse)", "PulseAudio-compatible server reachable"),
+        Ok(()) => CheckResult::ok(
+            "pipewire (pulse)",
+            text!("linux.doctor.pulseaudiocompatibleserverreachable"),
+        ),
         Err(error) => CheckResult::fail(
             "pipewire (pulse)",
-            format!(
-                "PulseAudio-compatible server unreachable: {error}; start PipeWire Pulse or PulseAudio"
-            ),
+            message!("linux.doctor.pulseaudiocompatibleserverunreachablexstartpip", "error" => error),
         ),
     }
 }
@@ -406,11 +427,11 @@ fn systemd_result(result: Result<Option<String>, String>) -> CheckResult {
         Ok(Some(detail)) => CheckResult::ok("systemd --user", detail),
         Ok(None) => CheckResult::fail(
             "systemd --user",
-            "systemctl --user not reachable; run inside a systemd user session",
+            text!("linux.doctor.systemctlusernotreachableruninsideasystemdus"),
         ),
         Err(error) => CheckResult::fail(
             "systemd --user",
-            format!("systemctl --user not reachable: {error}; run inside a systemd user session"),
+            message!("linux.doctor.systemctlusernotreachablexruninsideasystemd", "error" => error),
         ),
     }
 }
@@ -422,36 +443,43 @@ fn x11_result(
     missing: Result<Vec<String>, String>,
 ) -> CheckResult {
     if session.eq_ignore_ascii_case("wayland") {
-        return CheckResult::ok("x11 capture", "not applicable (wayland session)");
+        return CheckResult::ok(
+            "x11 capture",
+            text!("linux.doctor.notapplicablewaylandsession"),
+        );
     }
     if display.is_none() {
         return if session.eq_ignore_ascii_case("x11") {
             CheckResult::fail(
                 "x11 capture",
-                "DISPLAY not set; start solstone-linux from the X11 graphical session",
+                text!("linux.doctor.displaynotsetstartsolstonelinuxfromthex11gr"),
             )
         } else {
-            CheckResult::ok("x11 capture", "not applicable (no X11 display)")
+            CheckResult::ok(
+                "x11 capture",
+                text!("linux.doctor.notapplicablenox11display"),
+            )
         };
     }
     if let Err(error) = randr {
         return CheckResult::fail(
             "x11 capture",
-            format!("X11 RandR unavailable: {error}; check DISPLAY and X server RandR support"),
+            message!("linux.doctor.x11randrunavailablexcheckdisplayandxserverr", "error" => error),
         );
     }
     // Named deviation: in-process registry probing cannot produce Python's gst-inspect warning.
     match missing {
-        Ok(missing) if missing.is_empty() => {
-            CheckResult::ok("x11 capture", "X11 RandR and ximagesrc available")
-        }
+        Ok(missing) if missing.is_empty() => CheckResult::ok(
+            "x11 capture",
+            text!("linux.doctor.x11randrandximagesrcavailable"),
+        ),
         Ok(_) => CheckResult::fail(
             "x11 capture",
-            "ximagesrc missing; install the GStreamer good plugins package",
+            text!("linux.doctor.ximagesrcmissinginstallthegstreamergoodplugins"),
         ),
         Err(error) => CheckResult::fail(
             "x11 capture",
-            format!("GStreamer initialization failed: {error}; install GStreamer 1.x"),
+            message!("linux.doctor.gstreamerinitializationfailedxinstallgstreamer", "error" => error),
         ),
     }
 }
@@ -471,7 +499,7 @@ impl DoctorChecks for RealDoctor<'_> {
             }
             Err(error) => CheckResult::fail(
                 "desktop session",
-                format!("could not read login sessions: {error}"),
+                message!("linux.doctor.couldnotreadloginsessionsx", "error" => error),
             ),
         }
     }
@@ -484,9 +512,7 @@ impl DoctorChecks for RealDoctor<'_> {
             Err(error) => {
                 return CheckResult::fail(
                     "xdg-desktop-portal",
-                    format!(
-                        "session bus probe failed: {error}; start a graphical session and ensure xdg-desktop-portal is installed"
-                    ),
+                    message!("linux.doctor.sessionbusprobefailedxstartagraphicalsession", "error" => error),
                 );
             }
         };
@@ -497,7 +523,7 @@ impl DoctorChecks for RealDoctor<'_> {
             ),
             Err(()) => CheckResult::fail(
                 "xdg-desktop-portal",
-                "timed out after 2s; check the user D-Bus session and xdg-desktop-portal",
+                text!("linux.doctor.timedoutafter2schecktheuserdbussessionand"),
             ),
         }
     }
@@ -560,7 +586,7 @@ impl DoctorChecks for RealDoctor<'_> {
                 // The runtime never started, so no bus was ever contacted. Say that.
                 return CheckResult::warn(
                     "panel icon",
-                    format!("could not start the probe: {error}"),
+                    message!("linux.doctor.couldnotstarttheprobex", "error" => error),
                 );
             }
         };
@@ -602,14 +628,14 @@ impl DoctorChecks for RealDoctor<'_> {
 
     fn desktop_not_applicable(&mut self) -> Option<&'static str> {
         if !self.config().desktop_capture {
-            return Some("screen, audio and desktop activity are off");
+            return Some(text!("linux.doctor.screenaudioanddesktopactivityareoff"));
         }
         let presence = crate::desktop_session::doctor_resolver()
             .ok()?
             .resolve(std::time::Instant::now())
             .presence;
         (presence == crate::desktop_session::SessionPresence::NoDesktop)
-            .then_some("no desktop session of yours on this computer; screen and audio need one")
+            .then_some(text!("linux.doctor.nodesktopsessionofyoursonthis"))
     }
 
     fn terminal(&mut self) -> Vec<String> {

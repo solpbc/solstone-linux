@@ -1,0 +1,22 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "folder",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 47,
+  "source_revision": "e622b1d91757c3fd4ff070ebf863fe3525348bfd3f6dfc8ab0628597b99554da",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

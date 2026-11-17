@@ -1,0 +1,22 @@
+{
+  "description": "Tray status and tooltip when work is in progress.",
+  "context": "Tray status and tooltip when work is in progress.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "progress",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 19,
+  "source_revision": "798a80a57339834f8109e44300079fbdb5a7a3e921c1e6836197e253a5ab55ba",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

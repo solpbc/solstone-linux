@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.ui.terminal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 8,
+  "source_revision": "f91da9d8dd1eebfe4dcfbe412cc2183e291df31fcc3d39b626f25201cced7da1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

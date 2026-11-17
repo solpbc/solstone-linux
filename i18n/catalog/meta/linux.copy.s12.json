@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.screenshot.couldntcountyour, windows.ui.couldntcountyourscreenshots.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 32,
+  "source_revision": "0690224cfa5639d3339e18b0a4106c87f5272579b02cb01118b12f3cdb2758ee",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

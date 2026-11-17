@@ -1,0 +1,28 @@
+{
+  "description": "Shown by the terminal capture helper.",
+  "context": "Shown by the terminal capture helper.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "err",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 46,
+  "source_revision": "bc623514ddcc9b7044683b9e195f623fabd5b13928830770ee5ba6586757550b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "SIGINT"
+    }
+  ]
+}

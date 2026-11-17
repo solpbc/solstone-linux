@@ -62,6 +62,13 @@ fn main() {
         .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
+    app.connect_startup(|_| {
+        gtk::Widget::set_default_direction(if solstone_i18n::right_to_left() {
+            gtk::TextDirection::Rtl
+        } else {
+            gtk::TextDirection::Ltr
+        });
+    });
     app.connect_activate(ui::build_ui);
     app.connect_command_line(|app, command_line| {
         app.activate();

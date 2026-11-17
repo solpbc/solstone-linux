@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.partvaultcantberead.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 134,
+  "source_revision": "ba558d54cb92a7c2e9077594bbf545cdfe3a15aa7c826f4fb29d3303d61d8970",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

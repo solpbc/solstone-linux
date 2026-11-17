@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the tray model component.",
+  "context": "Presentation from the tray model component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 24,
+  "source_revision": "3a4e2184d12a00a237360c0cba0bafcec11a331f8a6bcf0545bb8152a8658d23",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

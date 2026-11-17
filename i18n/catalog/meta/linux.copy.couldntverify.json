@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktop.shared.copy.journalmarkunverifiedtitle, windows.desktop.shared.copy.journalmarkunverifiedtitle.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 15,
+  "source_revision": "aa6e7152a854a3961902434044a9def3936433e0aaf787a07211e11baf8e9990",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

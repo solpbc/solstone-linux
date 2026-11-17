@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopshellmodel.onthesitesyouallowthesolstoneextensiontakesin, windows.ui.onthesitesyouallowthesolstoneextensiontakesinthe.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 127,
+  "source_revision": "9a1958729d9c0ff5bb1597e8f03fed2477e6a7219d2157c2f77e15dea5f434d2",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

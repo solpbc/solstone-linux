@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the import source in the desktop app.",
+  "context": "Shown in the import source in the desktop app.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 55,
+  "source_revision": "3af4205c367f3d0987fcf43a8a7c7e5400a36ece8cbf9cf140945bbdb9fd80ee",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

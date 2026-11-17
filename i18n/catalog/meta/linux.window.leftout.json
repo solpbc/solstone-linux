@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopsource.leftout, windows.ui.leftout.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 8,
+  "source_revision": "edc1ebab89f4f14ab192bf3219eb43426b6c92a7d652fb4ae74284e4eeb836d0",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

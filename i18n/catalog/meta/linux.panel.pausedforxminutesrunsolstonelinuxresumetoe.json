@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the panel icon component.",
+  "context": "Presentation from the panel icon component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "minutes",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 78,
+  "source_revision": "b85c82222e17dd227d7cea7b80d648129d9bf461852ba31594a174f6de44bfa1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "solstone-linux"
+    }
+  ]
+}

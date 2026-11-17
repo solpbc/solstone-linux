@@ -1,0 +1,17 @@
+{
+  "description": "Autostart entry comment.",
+  "context": "Autostart entry comment.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 86,
+  "source_revision": "3989ebc3df55283a5047b6277ef9b879cea85a467f5bac10c4efb54b2670daec",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

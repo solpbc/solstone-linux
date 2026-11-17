@@ -1,0 +1,23 @@
+{
+  "description": "Description in GNOME Shell extension metadata.",
+  "context": "Description in GNOME Shell extension metadata.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "f981cc55c2453858abf04d504e8b37359c8e2d62a0e73b49ea4686d4cbf2d124",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "command",
+      "kind": "command",
+      "value": "solstone-linux"
+    }
+  ]
+}

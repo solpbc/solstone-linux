@@ -1,0 +1,31 @@
+{
+  "description": "Explanation when screenshots could not be brought in.",
+  "context": "Explanation when screenshots could not be brought in.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "formatted",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 160,
+  "source_revision": "9cd62a0c417e8e7f559abfe3fdb0a27aa8b2b8b75382295f9dc5de7cdcbeeb55",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

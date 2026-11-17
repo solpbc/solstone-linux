@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.screenshot.folder, windows.ui.folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 6,
+  "source_revision": "610ae6938b15c65d59773ea080bdb0bfbb4d0e3a0945fb9e1bdde82f96c506a2",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

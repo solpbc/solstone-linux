@@ -1,0 +1,38 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "route",
+      "type": "string"
+    },
+    {
+      "name": "foreground",
+      "type": "string"
+    },
+    {
+      "name": "title",
+      "type": "string"
+    },
+    {
+      "name": "url",
+      "type": "string"
+    },
+    {
+      "name": "idle",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 86,
+  "source_revision": "374fea70754fff517309bde68f3d8d480378e915cc86b042be096da1ba163fce",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the journal mark component.",
+  "context": "Presentation from the journal mark component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 327,
+  "source_revision": "0cd26f1921ec9c9efc83e986743130fa938f2bdfd7efad32b57191e5e66adf0b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "support@solstone.app"
+    }
+  ]
+}

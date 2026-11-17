@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.journalmarkgeneric.your, windows.ui.your.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 4,
+  "source_revision": "dcde812c60f1f532094c622a016d1d66334139d212cdf26cec77589a51a4be40",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

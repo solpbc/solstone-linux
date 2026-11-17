@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktopstatuspane.waitingtosync, windows.ui.waitingtosync.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 15,
+  "source_revision": "25bc12192ca1ae39271b247f9043a04e5b97418836564757d82c5d2f4dcf587c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

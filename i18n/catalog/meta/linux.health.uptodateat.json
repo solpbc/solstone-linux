@@ -1,0 +1,22 @@
+{
+  "description": "Doctor detail with the last successful sync time.",
+  "context": "Doctor detail with the last successful sync time.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "timestamp",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 41,
+  "source_revision": "80766fe14b7e7b682db1b4676a3a86bc23887f721f5de8931237a788587e20ce",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

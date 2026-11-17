@@ -1,5 +1,5 @@
 [Unit]
-Description=solstone app for linux
+Description={DESCRIPTION}
 StartLimitIntervalSec=300
 StartLimitBurst=5
 

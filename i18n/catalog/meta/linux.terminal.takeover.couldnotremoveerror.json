@@ -1,0 +1,26 @@
+{
+  "description": "Presentation from the takeover component.",
+  "context": "Presentation from the takeover component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    },
+    {
+      "name": "error",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "d3c8004f16f5f4d10d90da0b805e355225547c61f4255e38ef7dbb9ec1b16107",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

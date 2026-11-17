@@ -1,0 +1,23 @@
+{
+  "description": "Description in KWin package metadata.",
+  "context": "Description in KWin package metadata.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 37,
+  "source_revision": "bb95f689b6944ace03bdb15df8b28b1cc3e4560b9bb4a827f1f18a49278a9d10",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "command",
+      "kind": "command",
+      "value": "solstone-linux"
+    }
+  ]
+}

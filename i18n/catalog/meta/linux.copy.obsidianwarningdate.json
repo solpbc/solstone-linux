@@ -1,0 +1,26 @@
+{
+  "description": "Shown before adding a vault whose name is already in the journal.",
+  "context": "Shown before adding a vault whose name is already in the journal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "vault",
+      "type": "string"
+    },
+    {
+      "name": "date",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 159,
+  "source_revision": "cfd22e2f0850708acbd85880c93ccdffa44e622aaa83fcdb8127500d0c562c68",
+  "risk": "consent",
+  "auto_merge": false,
+  "protected_slots": []
+}

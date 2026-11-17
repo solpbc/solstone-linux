@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.ui.somethingansweredinsteadof, windows.ui.somethingotherthanyourjournalansweredcompare.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 42,
+  "source_revision": "db60a7297e2ca5f6900528d2376a5411b0e25389c48dd628ca359067a48665e6",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

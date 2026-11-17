@@ -184,6 +184,11 @@ does not recognise. Run `make ci` after editing any of them: an edit that looks
 like housekeeping can break the gate, and removing an entry can violate a policy
 the tests hold.
 
+## String catalog
+
+Put app copy, including accessible labels and desktop metadata, in
+`i18n/catalog/`. Regenerate the outputs when changing copy. Follow [the catalog instructions](i18n/README.md).
+
 ## Brand canon
 
 - **Owner-facing prose says what the app takes in, and lands the journal in the same breath.** In README, INSTALL, onboarding text, settings copy, error messages and package metadata, write "the solstone app takes in what you share with it, and all of it goes into your journal". ⛔ Never describe it as watching, recording, monitoring or tracking the owner. ⛔ **And never as an *observer*, never as *experiencing* anything, and never as *sending* or *syncing* the material** — conveyance and custody verbs belong to the journal, not to the app, and "observer"/"experiences" were retired from owner-facing copy in 2026. ⛔ It is "your journal", never "your solstone journal".

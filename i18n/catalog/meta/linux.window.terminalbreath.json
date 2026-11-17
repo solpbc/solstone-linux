@@ -1,0 +1,28 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 190,
+  "source_revision": "64f497cb089d6be024476ec3a91dae665364217623d52dac4fd93c79a32952c4",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "tmux"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "SSH"
+    }
+  ]
+}

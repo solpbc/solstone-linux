@@ -5,6 +5,7 @@ use crate::{
     config::Config, observer::StateSnapshot, private_link::OpenJournalAccess,
     sync_health::SyncHealth, tray_model,
 };
+use solstone_i18n::{message, text};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -12,8 +13,9 @@ use std::sync::{
 
 pub const OBSERVER_BUS_NAME: &str = "org.solpbc.solstone.Observer1";
 pub const ALREADY_RUNNING_MESSAGE: &str = "Another solstone app process is already running (owns org.solpbc.solstone.Observer1). Check: systemctl --user status solstone-linux";
-pub(crate) const OPEN_JOURNAL_REMEDIATION: &str =
-    "Could not open your journal. Wait for the solstone app to reconnect, then try again.";
+pub(crate) fn open_journal_remediation() -> &'static str {
+    text!("linux.desktop.couldnotopenyourjournalwaitforthesolstoneap")
+}
 
 pub trait BusNameRequester {
     fn request_name(
@@ -143,7 +145,7 @@ impl DesktopComponent {
             crate::tray::TrayCommand::OpenJournal => self
                 .open_journal
                 .open()
-                .map_err(|_| OPEN_JOURNAL_REMEDIATION.into()),
+                .map_err(|_| open_journal_remediation().into()),
             crate::tray::TrayCommand::OpenUrl(url) => open_detached(url),
             crate::tray::TrayCommand::ReportProblem(status, about) => open_detached(
                 crate::support::report_url(crate::tray_model::status_name(status), &about),
@@ -157,11 +159,12 @@ impl DesktopComponent {
                     Ok(true) => Ok(()),
                     // Name the one tool this session needs; the notification is the only
                     // place an owner on the portable archive learns it.
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
-                        "couldn't copy without {}. install it, or run `solstone-linux about` to select and copy your versions.",
-                        if wayland { "wl-clipboard" } else { "xclip" }
-                    )),
-                    _ => Err("couldn't copy. run `solstone-linux about` to select and copy your versions.".into()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+                        message!("linux.desktop.couldntcopywithoutxinstallitorrunsolstonel", "value1" => if wayland { "wl-clipboard" } else { "xclip" }),
+                    ),
+                    _ => Err(
+                        text!("linux.desktop.couldntcopyrunsolstonelinuxabouttoselectand").into(),
+                    ),
                 }
             }
             crate::tray::TrayCommand::CopyInstructions => {
@@ -179,7 +182,7 @@ impl DesktopComponent {
                         if ok {
                             Ok(())
                         } else {
-                            Err("clipboard command exited unsuccessfully".into())
+                            Err(text!("linux.desktop.clipboardcommandexitedunsuccessfully").into())
                         }
                     })
             }
@@ -187,7 +190,7 @@ impl DesktopComponent {
             | crate::tray::TrayCommand::PauseIndefinite
             | crate::tray::TrayCommand::Resume
             | crate::tray::TrayCommand::Quit => {
-                Err("observer command must be routed by the run-loop owner".into())
+                Err(text!("linux.desktop.observercommandmustberoutedbytherunloopowne").into())
             }
         }
     }

@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopimportpage.thisremovesthecopyonthisdeviceyourjournalmays, windows.ui.thisremovesthecopyonthisdeviceyourjournalmaystil.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 94,
+  "source_revision": "f04df4a14c7d6c8b19e083b2f926da6099fcdfb942e73cff819d320271716d1a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

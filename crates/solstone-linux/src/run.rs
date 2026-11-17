@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use solstone_i18n::text;
 use std::{
     env, io,
     path::PathBuf,
@@ -929,10 +930,10 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                     let message = if matches!(command, TrayCommand::CopyAbout(_)) {
                         error.as_str()
                     } else {
-                        crate::desktop_component::OPEN_JOURNAL_REMEDIATION
+                        crate::desktop_component::open_journal_remediation()
                     };
                     if let Err(notification_error) = notify_rust::Notification::new()
-                        .summary("solstone app")
+                        .summary(text!("linux.panel.solstoneapp"))
                         .body(message)
                         .show()
                     {
@@ -944,8 +945,8 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                 }
             } else if matches!(command, TrayCommand::CopyAbout(_))
                 && let Err(error) = notify_rust::Notification::new()
-                    .summary("solstone app")
-                    .body("copied")
+                    .summary(text!("linux.panel.solstoneapp"))
+                    .body(text!("linux.notification.copied"))
                     .show()
             {
                 tracing::debug!(%error, "Could not show clipboard confirmation");
@@ -2786,7 +2787,7 @@ mod tests {
             assert_eq!(failed_calls.load(Ordering::SeqCst), 0);
             assert_eq!(
                 String::from_utf8(failure_errors.clone()).unwrap(),
-                format!("{}\n", crate::journal_mark::SETUP_BAD_LINK_LINE)
+                format!("{}\n", crate::journal_mark::setup_bad_link_line())
             );
             failure_output.clear();
             failure_errors.clear();

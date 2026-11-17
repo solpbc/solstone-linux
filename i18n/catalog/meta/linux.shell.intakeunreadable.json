@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop or panel source status.",
+  "context": "Shown in the desktop or panel source status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 59,
+  "source_revision": "3d19a327dad9e861515a202ae19010b95900e149ed94f8ca92670e21c9ce4ad7",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

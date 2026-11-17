@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the sync health component.",
+  "context": "Presentation from the sync health component. Same English as macos.copy.menubarobservingconnected.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 13,
+  "source_revision": "0e2a3866ca3fa99f34c98800d690628832a8d6b31100b07a225aebeea7b01761",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

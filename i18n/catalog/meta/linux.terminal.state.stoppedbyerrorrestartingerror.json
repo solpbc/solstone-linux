@@ -1,0 +1,22 @@
+{
+  "description": "Presentation from the state component.",
+  "context": "Presentation from the state component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "error",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 43,
+  "source_revision": "dd703b665771d3be4bc739f68592d062fd65faf8bb26d8b6be6d724011c8c75f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

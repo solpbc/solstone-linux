@@ -8,6 +8,7 @@
 //! recover its spool in place. Each is safe to run again, and the caller saves the
 //! record after each one.
 
+use solstone_i18n::message;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -144,10 +145,9 @@ fn unit_is_ours(unit: &Path) -> bool {
 
 fn refuse_foreign_units(findings: &LegacyFindings) -> Result<(), StepError> {
     match findings.units.iter().find(|unit| !unit_is_ours(unit)) {
-        Some(unit) => Err(StepError::Refused(format!(
-            "{} is not the solstone for tmux service, so nothing was changed.",
-            unit.display()
-        ))),
+        Some(unit) => Err(StepError::Refused(
+            message!("linux.terminal.takeover.isnotsolstonetmuxservice", "value1" => unit.display()),
+        )),
         None => Ok(()),
     }
 }
@@ -218,10 +218,9 @@ fn remove_if_present(path: &Path) -> Result<(), StepError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(StepError::Temporary(format!(
-            "could not remove {}: {error}",
-            path.display()
-        ))),
+        Err(error) => Err(StepError::Temporary(
+            message!("linux.terminal.takeover.couldnotremoveerror", "value1" => path.display(), "error" => error),
+        )),
     }
 }
 

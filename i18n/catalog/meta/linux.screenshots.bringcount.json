@@ -1,0 +1,31 @@
+{
+  "description": "Button to bring in the counted screenshots.",
+  "context": "Button to bring in the counted screenshots.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "formatted",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 93,
+  "source_revision": "bdeef70fa277f937edf1247255df67a803115c58f386ae29cd0966ad661f2746",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

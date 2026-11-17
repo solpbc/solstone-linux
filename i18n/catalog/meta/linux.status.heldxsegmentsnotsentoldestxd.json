@@ -1,0 +1,26 @@
+{
+  "description": "Presentation from the capture stats component.",
+  "context": "Presentation from the capture stats component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    },
+    {
+      "name": "value2",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 58,
+  "source_revision": "beb7020589480e5ce8b6aa13bcaeec7435c618ad57842839782fd4e033f67357",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

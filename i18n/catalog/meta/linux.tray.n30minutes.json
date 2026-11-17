@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the tray component.",
+  "context": "Presentation from the tray component. Same English as macos.setup.n30minutes, windows.ui.value30minutes.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 10,
+  "source_revision": "a73813b376c28521bebe43e049f65c42e31ba6cea06a0ce4292a6de27f250c39",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

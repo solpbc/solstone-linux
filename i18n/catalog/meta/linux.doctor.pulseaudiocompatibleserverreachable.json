@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 38,
+  "source_revision": "5e195e20c0b18f324b9997971944bf130c78ed6f1437402618e4990acdcaf6b8",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "PulseAudio"
+    }
+  ]
+}

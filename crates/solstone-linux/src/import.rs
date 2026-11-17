@@ -8,6 +8,7 @@ use crate::private_link::{LinkOutcome, PrivateLinkCapability};
 use crate::upload::{CapturedAssociation, UploadClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use solstone_i18n::{message, text};
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
@@ -24,10 +25,18 @@ use tokio_util::io::ReaderStream;
 
 const FILE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const BATCH: usize = 16;
-pub const EXPLANATION: &str = "adds PDFs, audio, images and text you choose here.";
-pub const STORE_ERROR: &str = "couldn't read imports on this device. nothing has been removed. restart the solstone app to try again.";
-pub const STEP_ERROR: &str = "this step couldn't finish. try again.";
-pub const REMOVE_ERROR: &str = "couldn't remove this. try again.";
+pub fn explanation() -> &'static str {
+    text!("linux.import.explanation")
+}
+pub fn store_error() -> &'static str {
+    text!("linux.import.storeerror")
+}
+pub fn step_error() -> &'static str {
+    text!("linux.import.steperror")
+}
+pub fn remove_error() -> &'static str {
+    text!("linux.import.removeerror")
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -90,7 +99,7 @@ pub struct IntakeRefusal {
 
 impl IntakeRefusal {
     pub fn line(&self) -> String {
-        format!("{}: {}", self.name, self.reason)
+        message!("linux.import.namedrefusal", "name" => self.name, "reason" => self.reason)
     }
 }
 
@@ -439,7 +448,8 @@ impl ImportHandle {
                     .state
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .addition = Some(format!("saving on this device: {} of {total}", index + 1));
+                    .addition =
+                    Some(message!("linux.import.saving", "saved" => index + 1, "total" => total));
                 if handle.copy_one(Path::new(&path))? {
                     accepted += 1;
                 }
@@ -449,9 +459,9 @@ impl ImportHandle {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .addition = Some(if accepted == 0 {
-                "nothing was saved on this device.".to_owned()
+                text!("linux.import.nothingwassaved").to_owned()
             } else {
-                format!("saved on this device: {accepted}")
+                message!("linux.import.saved", "count" => accepted)
             });
             Ok::<_, io::Error>(())
         })
@@ -533,10 +543,10 @@ impl ImportHandle {
             }
             Err(error) => {
                 let reason = match error.to_string().as_str() {
-                    "unsupported" => "your journal can't take this kind of file",
-                    "too_large" => "it's larger than your journal takes",
+                    "unsupported" => text!("linux.import.filekind"),
+                    "too_large" => text!("linux.import.filetoolarge"),
                     _ if error.raw_os_error() == Some(28) => {
-                        "there isn't enough room on this device"
+                        text!("linux.import.noroom")
                     }
                     _ => "this couldn't be read. add it again",
                 };
@@ -568,7 +578,7 @@ impl ImportHandle {
         if self.root.is_none() {
             return ImportDocument {
                 v: 1,
-                recent: "nothing yet.".to_owned(),
+                recent: text!("linux.import.nothingyet").to_owned(),
                 ..ImportDocument::default()
             };
         }
@@ -604,7 +614,7 @@ impl ImportHandle {
         if state.failed {
             document.held = true;
             document.interrupted = false;
-            document.recent = STORE_ERROR.to_owned();
+            document.recent = store_error().to_owned();
             return document;
         }
         document.intake_refused = state.intake_refused.clone();
@@ -645,29 +655,29 @@ impl ImportHandle {
         document.held =
             state.failed || !state.loaded || !document.rows.is_empty() || document.adding;
         document.recent = if capability.is_none() {
-            "imports wait on this device until you connect a journal."
+            text!("linux.import.waitforjournal")
         } else if facts.as_ref().is_some_and(|f| f.journal_mark_held) {
-            "imports wait until you confirm your journal's mark."
+            text!("linux.import.waitformark")
         } else if !ready {
-            "your journal stopped accepting this device. imports wait here until you pair again."
+            text!("linux.import.pairagain")
         } else if !document.rows.is_empty() && !supported {
-            "imports wait until your journal is updated."
+            text!("linux.import.waitforupdate")
         } else if document.sending {
-            "sending to your journal."
+            text!("linux.import.sendingtojournal")
         } else if document.waiting > 0
             || document.adding
             || state.items.values().any(|i| i.phase == Phase::Copying)
         {
-            "waiting to go to your journal."
+            text!("linux.import.waitingforjournal")
         } else if !document.rows.is_empty() {
-            "not going to your journal right now. each one says why."
+            text!("linux.import.held")
         } else if capability
             .as_ref()
             .is_some_and(|c| state.delivered_journal.as_deref() == Some(c.writer().identity_key()))
         {
-            "in your journal."
+            text!("linux.import.delivered")
         } else {
-            "nothing yet."
+            text!("linux.import.nothingyet")
         }
         .to_owned();
         document
@@ -1244,13 +1254,25 @@ fn parse_reply(outcome: LinkOutcome, start: bool) -> Answer {
         Some("client_item_conflict" | "nothing_to_import")
     );
     Answer::Refused(Refusal {
-        reason: string("error").unwrap_or_else(|| "your journal couldn't accept this.".to_owned()),
+        reason: string("error").unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned()),
         reason_code,
         kind,
         binding: None,
         version: None,
         retryable,
     })
+}
+
+/// Render the app's stable import status and reasons from older saved items.
+pub fn display_import_status(value: &str) -> &str {
+    match value {
+        "sending" => text!("linux.import.sending"),
+        "waiting" => text!("linux.import.waiting"),
+        "needs attention" => text!("linux.import.attention"),
+        "this couldn't be read. add it again" => text!("linux.import.filenotread"),
+        "the copy on this device is missing" => text!("linux.import.filemissing"),
+        reason => reason,
+    }
 }
 
 #[cfg(test)]

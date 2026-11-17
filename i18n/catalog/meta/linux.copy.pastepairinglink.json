@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.setup.pairinglinkplaceholder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 18,
+  "source_revision": "81ced632adf7e1a4fec26568d693f816c707b1fee2a6c4756e3fdc07ed3a2916",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

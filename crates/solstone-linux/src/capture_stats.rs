@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use solstone_i18n::message;
 use std::{ffi::OsStr, fs, path::Path};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -262,12 +263,10 @@ pub fn format_quarantine_line(stats: &QuarantineStats) -> Option<String> {
         return None;
     }
     match stats.oldest_age_seconds {
-        None => Some(format!("Held: {} segment(s) not sent", stats.count)),
-        Some(age) => Some(format!(
-            "Held: {} segment(s) not sent, oldest {}d",
-            stats.count,
-            (age / 86_400.0) as u64
-        )),
+        None => Some(message!("linux.status.heldxsegmentsnotsent", "value1" => stats.count)),
+        Some(age) => Some(
+            message!("linux.status.heldxsegmentsnotsentoldestxd", "value1" => stats.count, "value2" => (age / 86_400.0) as u64),
+        ),
     }
 }
 

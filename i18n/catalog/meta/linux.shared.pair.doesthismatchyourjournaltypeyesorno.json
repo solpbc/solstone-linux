@@ -1,0 +1,33 @@
+{
+  "description": "Presentation from the journal mark component.",
+  "context": "Presentation from the journal mark component. Review the disclosure before publishing a translation.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 46,
+  "source_revision": "336c5eeccb9aaeaaa7bd45adba249d4e56c236129f21f0fbb0664fc9a1b56c41",
+  "risk": "consent",
+  "auto_merge": false,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "accepted-input",
+      "value": "yes"
+    },
+    {
+      "name": "literal2",
+      "kind": "accepted-input",
+      "value": "no"
+    },
+    {
+      "name": "ws3",
+      "kind": "whitespace",
+      "value": "\n"
+    }
+  ]
+}

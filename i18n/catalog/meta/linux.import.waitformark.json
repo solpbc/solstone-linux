@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the import source in the desktop app.",
+  "context": "Shown in the import source in the desktop app. Review the disclosure before publishing a translation.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 51,
+  "source_revision": "e49899e9879e9e241925ce79c59b08f15d07660534328453ddc5c7e88b0e56a6",
+  "risk": "consent",
+  "auto_merge": false,
+  "protected_slots": []
+}

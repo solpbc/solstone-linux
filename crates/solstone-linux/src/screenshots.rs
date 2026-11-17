@@ -112,10 +112,10 @@ pub fn word(doc: &ScreenshotsDocument) -> crate::shell_model::StateWord {
 pub fn tile_line(doc: &ScreenshotsDocument) -> Option<String> {
     use crate::copy::screenshots as copy;
     match doc.mode {
-        Mode::NotSetUp | Mode::Choosing => doc.folder.is_some().then(|| copy::S11.to_owned()),
+        Mode::NotSetUp | Mode::Choosing => doc.folder.is_some().then(|| copy::s11().to_owned()),
         Mode::Off => None,
         Mode::On if doc.folder_gone => Some(copy::d9(doc.folder_name.as_deref()?)),
-        Mode::On if doc.paused => Some(copy::S16_COMPUTER.to_owned()),
+        Mode::On if doc.paused => Some(copy::s16_computer().to_owned()),
         Mode::On => match doc.progress {
             Some([done, total]) => Some(copy::s5(&group(done), &group(total))),
             None => doc.folder_label.as_deref().map(copy::s4),

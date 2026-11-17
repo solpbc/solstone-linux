@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use solstone_i18n::{message, text};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, FileTimes},
@@ -1095,12 +1096,16 @@ impl SyncWorker {
         let elapsed = self.clock.monotonic_seconds() - self.circuit_open_since;
         if !fresh && elapsed < self.circuit_cooldown {
             self.set_progress(
-                format!("{:.0}s until probe", self.circuit_cooldown - elapsed),
+                solstone_i18n::cardinal(
+                    "linux.sync.xsuntilprobe",
+                    i64::from((self.circuit_cooldown - elapsed).round_ties_even() as i32),
+                    &[],
+                ),
                 false,
             );
             return false;
         }
-        self.set_progress("probing journal...".to_owned(), false);
+        self.set_progress(text!("linux.sync.probingjournal").to_owned(), false);
         let outcome = if let Some(capability) = self.client.capability() {
             capability.system_status().await
         } else {
@@ -1130,7 +1135,7 @@ impl SyncWorker {
                 self.last_error_type = None;
                 self.last_error_code = None;
                 drop(facts);
-                self.set_progress("syncing...".to_owned(), false);
+                self.set_progress(text!("linux.sync.syncing").to_owned(), false);
                 true
             }
             Err(outcome) => {
@@ -1144,7 +1149,11 @@ impl SyncWorker {
                     (previous_cooldown * CIRCUIT_COOLDOWN_FACTOR).min(CIRCUIT_COOLDOWN_MAX);
                 self.circuit_open_since = self.clock.monotonic_seconds();
                 self.set_progress(
-                    format!("probe failed, next in {:.0}s", self.circuit_cooldown),
+                    solstone_i18n::cardinal(
+                        "linux.sync.probefailednextinxs",
+                        i64::from(self.circuit_cooldown.round_ties_even() as i32),
+                        &[],
+                    ),
                     false,
                 );
                 false
@@ -1175,7 +1184,7 @@ impl SyncWorker {
         let mut days: Vec<String> = segments_by_day.keys().cloned().collect();
         days.sort_by(|a, b| b.cmp(a));
 
-        self.set_progress("checking journal...".to_owned(), false);
+        self.set_progress(text!("linux.sync.checkingjournal").to_owned(), false);
         let mut pass_stopped = false;
         let mut pass_error_type = None;
         let mut pass_error_code = None;
@@ -1239,7 +1248,10 @@ impl SyncWorker {
                     }
                 }
                 let segment_key = segment_dir.file_name().unwrap().to_string_lossy();
-                self.set_progress(format!("uploading {segment_key}"), true);
+                self.set_progress(
+                    message!("linux.sync.uploadingx", "segment-key" => segment_key),
+                    true,
+                );
                 match self.upload_segment(day, segment_dir).await {
                     UploadOutcome::Acked => {
                         uploaded_in_phase1.insert(segment_dir.to_path_buf());
@@ -1344,7 +1356,7 @@ impl SyncWorker {
                     pass_stopped = true;
                     break;
                 }
-                self.set_progress(format!("checking {day}..."), true);
+                self.set_progress(message!("linux.sync.checkingx", "day" => day), true);
                 let custody = self.client.fetch_source_day_custody(&day, source).await;
                 if !self.association_is_current() {
                     return;

@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the state component.",
+  "context": "Presentation from the state component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 128,
+  "source_revision": "4fdcc176f9c2f284e9dcf4b84ccd4a9646161206341d75254099c4c2f8aed85c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "tmux"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "solstone-linux"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the tray component.",
+  "context": "Presentation from the tray component. Same English as macos.desktopshellmodel.opensettings, windows.ui.opensettings.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 13,
+  "source_revision": "33374347f1a911a0c05f2b7613b89ffbfcf5d4ca37138429f8e5e044b9e45795",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

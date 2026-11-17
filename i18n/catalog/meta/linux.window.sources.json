@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktop.shared.app.sourcestitle, windows.desktop.shared.app.sourcestitle.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 7,
+  "source_revision": "b2335c4ee6c188e52d20665af3f7bbc08b5b16e59cd8ddba3e93638c497eb9d5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

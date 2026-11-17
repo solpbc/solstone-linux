@@ -1,0 +1,26 @@
+{
+  "description": "Shown in the desktop or panel source status.",
+  "context": "Shown in the desktop or panel source status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "total",
+      "type": "string"
+    },
+    {
+      "name": "date",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 27,
+  "source_revision": "1482a239387ac8023e1b989eb7305a86db7b24d02e4fd1b3c5717ce7c7ad0d80",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

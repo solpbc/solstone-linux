@@ -1,0 +1,17 @@
+{
+  "description": "Displayed on the app and journal version card.",
+  "context": "Displayed on the app and journal version card.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 17,
+  "source_revision": "4a30f77c4e33182a56ecb82aa9230a7a31fc3783a912289545eb05404851f1da",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

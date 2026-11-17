@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.notyet.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 7,
+  "source_revision": "e23cd835d56da49f05f716a7c100f56943c461f343b469927185d28e935753c1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

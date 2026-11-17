@@ -1,0 +1,17 @@
+{
+  "description": "Name or severity tag in a row of the doctor report.",
+  "context": "Name or severity tag in a row of the doctor report.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 11,
+  "source_revision": "023b4ff7679562b3aed66077a56944a89dcc40c6df6a7305203df33266c3ed37",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

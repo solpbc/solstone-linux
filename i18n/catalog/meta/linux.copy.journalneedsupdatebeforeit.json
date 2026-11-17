@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.journalneedsupdatebeforecantake.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 94,
+  "source_revision": "610354926763ccfaf45844e5e66ebe7ebe720ef915df4bbca5e0c8e656f82359",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

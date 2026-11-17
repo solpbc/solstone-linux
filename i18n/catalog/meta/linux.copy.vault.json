@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.obsidian.vault.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 5,
+  "source_revision": "33f9e7280c0ed1b4c71710ef28808779866fb931a9b7abe662468035cae82b09",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

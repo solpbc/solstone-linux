@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the journal mark component.",
+  "context": "Presentation from the journal mark component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 72,
+  "source_revision": "563f702a44b6047ed839daaac9e22bd363633efa6f348638c788e6d0de6ff2ee",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "--mark \"bramble quokka\""
+    }
+  ]
+}

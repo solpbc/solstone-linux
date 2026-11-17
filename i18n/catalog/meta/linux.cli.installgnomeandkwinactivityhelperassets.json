@@ -1,0 +1,28 @@
+{
+  "description": "Description in the command-line help.",
+  "context": "Description in the command-line help.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 62,
+  "source_revision": "537178af92b8ea5ccf50bc3380722e19aa3da7695ad7f374a6f504aad01a1189",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "command1",
+      "kind": "command",
+      "value": "GNOME"
+    },
+    {
+      "name": "command2",
+      "kind": "command",
+      "value": "KWin"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "description": "Number of screenshots that could not be read.",
+  "context": "Number of screenshots that could not be read.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "formatted",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 105,
+  "source_revision": "7694d166f9dbf901a36de055469eb8b46e2b9dc3a345080b7d5accff40413c35",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.app.syncingtoyourjournal2.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 24,
+  "source_revision": "d8606a4c783fd0d8e3793a5e5787ac1d8bd4e92a9dfd4bd1e4e286d870c5b18e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

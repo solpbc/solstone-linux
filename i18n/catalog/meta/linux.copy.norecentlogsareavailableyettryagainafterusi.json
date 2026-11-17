@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.logs.norecentlogsareavailableyettry.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 64,
+  "source_revision": "5e46bd2f4c4c0726085234ab687d6f92c0d120df2b9936193a901e7c6840a769",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

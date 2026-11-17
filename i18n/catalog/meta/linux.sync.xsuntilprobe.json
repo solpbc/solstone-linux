@@ -1,0 +1,27 @@
+{
+  "description": "Sync progress while waiting to probe the connection.",
+  "context": "Sync progress while waiting to probe the connection.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 96,
+  "source_revision": "ff47dae3f02bc58439d127b8161343673175d9bfdcbdd10ea421a8b3914947b0",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

@@ -7,6 +7,7 @@
 //! without a restart and works with no session bus. With none, the command takes
 //! the locks in the daemon's order and writes the config the daemon will read.
 
+use solstone_i18n::{message, text};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -34,8 +35,9 @@ pub const TEMPORARY: i32 = 75;
 /// The move needs the owner's agreement and it was not given.
 pub const NEEDS_CONSENT: i32 = 3;
 
-const LEGACY_REFUSAL: &str =
-    "solstone for tmux is still installed on this computer, so terminal stays off for now";
+fn legacy_refusal() -> &'static str {
+    text!("linux.terminal.control.solstonetmuxisstillinstalled")
+}
 
 fn running(config: &Config) -> bool {
     CaptureRootLock::is_held(&config.base_dir)
@@ -67,7 +69,7 @@ fn write_without_daemon(paths: &ConfigPaths, field: &str, value: bool) -> Result
     let config = resolve_config_paths(paths);
     let capture = CaptureRootLock::try_acquire(&config.base_dir)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the solstone app is starting; try again in a moment".to_owned())?;
+        .ok_or_else(|| text!("linux.control.thesolstoneappisstartingtryagain").to_owned())?;
     let mut state =
         PrivateStateLock::acquire(&config.config_dir).map_err(|error| error.to_string())?;
     state.adopt_capture_root(capture);
@@ -93,12 +95,17 @@ fn send(
         Ok(WaitResult::TimedOut { .. }) => {
             let _ = writeln!(
                 errors,
-                "the solstone app did not answer in time; try again in a moment"
+                "{}",
+                text!("linux.terminal.control.solstoneappdidnotanswer")
             );
             TEMPORARY
         }
         Err(error) => {
-            let _ = writeln!(errors, "could not reach the solstone app: {error}");
+            let _ = writeln!(
+                errors,
+                "{}",
+                message!("linux.terminal.control.couldnotreachsolstoneapp", "error" => error)
+            );
             1
         }
     }
@@ -129,12 +136,17 @@ fn set_owner_switch(
             let confirmation = switch.confirmation;
             let _ = writeln!(
                 output,
-                "{confirmation} the solstone app isn't running; this takes effect when it starts."
+                "{}",
+                message!("linux.terminal.control.confirmationsolstoneappisnt", "confirmation" => confirmation)
             );
             0
         }
         Err(error) => {
-            let _ = writeln!(errors, "could not save that: {error}");
+            let _ = writeln!(
+                errors,
+                "{}",
+                message!("linux.terminal.control.couldnotsavethaterror", "error" => error)
+            );
             1
         }
     }
@@ -167,15 +179,19 @@ impl Consent<'_> {
         if !self.tty {
             return false;
         }
-        let _ = write!(output, "{CONSENT_QUESTION} ");
+        let _ = write!(output, "{} ", consent_question());
         let _ = output.flush();
         (self.read_answer)()
             .is_some_and(|answer| matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
     }
 }
 
-const CONSENT_QUESTION: &str = "this moves solstone for tmux into this app, and it stops for good. what it still has waiting goes into your journal through this app, and anything that can't go stays on this computer. if this app isn't paired yet, it pairs with the journal solstone for tmux uses. move it now? [y/N]";
-const CONSENT_NEEDED: &str = "moving solstone for tmux needs your ok. run this in a terminal, or add --yes to `terminal adopt-tmux`.";
+fn consent_question() -> &'static str {
+    text!("linux.terminal.control.thismovessolstonetmuxinto")
+}
+fn consent_needed() -> &'static str {
+    text!("linux.terminal.control.movingsolstonetmuxneedsok")
+}
 
 /// `terminal adopt-tmux`: moves an old install in, or hands that to the daemon.
 pub fn adopt_tmux(
@@ -199,10 +215,7 @@ pub fn adopt_tmux(
 }
 
 fn unusable_record_line(path: &std::path::Path) -> String {
-    format!(
-        "the record of moving solstone for tmux can't be read: {}. please contact support, and don't delete it.",
-        path.display()
-    )
+    message!("linux.terminal.control.recordmovingsolstonetmuxcan", "value1" => path.display())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -224,17 +237,25 @@ fn adopt_tmux_with(
             return 1;
         }
         Stored::Present(state) if state.is_done() => {
-            let _ = writeln!(output, "solstone for tmux has already moved in.");
+            let _ = writeln!(
+                output,
+                "{}",
+                text!("linux.terminal.control.solstonetmuxhasalreadymoved")
+            );
             return 0;
         }
         Stored::Present(_) => {}
         Stored::Absent => {
             if !legacy_find::find(sources).found() {
-                let _ = writeln!(output, "no solstone for tmux to move in.");
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    text!("linux.terminal.control.nosolstonetmuxmove")
+                );
                 return 0;
             }
             if !consent.granted(output) {
-                let _ = writeln!(errors, "{CONSENT_NEEDED}");
+                let _ = writeln!(errors, "{}", consent_needed());
                 return NEEDS_CONSENT;
             }
         }
@@ -260,7 +281,8 @@ fn adopt_through_daemon(
     let temporary = |errors: &mut dyn Write| {
         let _ = writeln!(
             errors,
-            "the solstone app is still moving solstone for tmux in; it finishes on its own."
+            "{}",
+            text!("linux.terminal.control.solstoneappisstillmoving")
         );
         TEMPORARY
     };
@@ -270,7 +292,8 @@ fn adopt_through_daemon(
             control_request::Advertised::Unsupported => {
                 let _ = writeln!(
                     errors,
-                    "the solstone app needs restarting before it can move solstone for tmux in."
+                    "{}",
+                    text!("linux.terminal.control.solstoneappneedsrestartingbefore")
                 );
                 return TEMPORARY;
             }
@@ -279,7 +302,8 @@ fn adopt_through_daemon(
         if std::time::Instant::now() >= deadline {
             let _ = writeln!(
                 errors,
-                "the solstone app did not answer, so nothing changed; try again in a moment."
+                "{}",
+                text!("linux.terminal.control.solstoneappdidnotanswer2")
             );
             return TEMPORARY;
         }
@@ -293,7 +317,11 @@ fn adopt_through_daemon(
             WAIT_POLL,
         ),
         Err(error) => {
-            let _ = writeln!(errors, "could not reach the solstone app: {error}");
+            let _ = writeln!(
+                errors,
+                "{}",
+                message!("linux.terminal.control.couldnotreachsolstoneapp", "error" => error)
+            );
             return 1;
         }
     };
@@ -305,7 +333,8 @@ fn adopt_through_daemon(
         WaitResult::TimedOut { withdrawn: true } => {
             let _ = writeln!(
                 errors,
-                "the solstone app did not answer, so nothing changed; try again in a moment."
+                "{}",
+                text!("linux.terminal.control.solstoneappdidnotanswer2")
             );
             return TEMPORARY;
         }
@@ -317,7 +346,11 @@ fn adopt_through_daemon(
             && state.settings_applied
             && state.terminal_settled
         {
-            let _ = writeln!(output, "solstone for tmux has moved in.");
+            let _ = writeln!(
+                output,
+                "{}",
+                text!("linux.terminal.control.solstonetmuxhasmoved")
+            );
             return 0;
         }
         if std::time::Instant::now() >= deadline {
@@ -337,7 +370,11 @@ fn adopt_with_no_daemon(
 ) -> i32 {
     let config = resolve_config_paths(&daemon_paths(paths, runner));
     let failed = |errors: &mut dyn Write, error: String| {
-        let _ = writeln!(errors, "could not move solstone for tmux in: {error}");
+        let _ = writeln!(
+            errors,
+            "{}",
+            message!("linux.terminal.control.couldnotmovesolstonetmux", "error" => error)
+        );
         1
     };
     let capture = match CaptureRootLock::try_acquire(&config.base_dir) {
@@ -345,7 +382,8 @@ fn adopt_with_no_daemon(
         Ok(None) => {
             let _ = writeln!(
                 errors,
-                "the solstone app is starting; try again in a moment."
+                "{}",
+                text!("linux.terminal.control.solstoneappisstartingtry")
             );
             return TEMPORARY;
         }
@@ -389,7 +427,11 @@ fn adopt_with_no_daemon(
             return code;
         }
         if let Err(error) = takeover_state::save(&state_dir, &state) {
-            let _ = writeln!(errors, "could not record the move yet: {error}");
+            let _ = writeln!(
+                errors,
+                "{}",
+                message!("linux.terminal.control.couldnotrecordmoveyet", "error" => error)
+            );
             return TEMPORARY;
         }
     }
@@ -398,12 +440,17 @@ fn adopt_with_no_daemon(
         return code;
     }
     if let Err(error) = takeover_state::save(&state_dir, &state) {
-        let _ = writeln!(errors, "could not record the move yet: {error}");
+        let _ = writeln!(
+            errors,
+            "{}",
+            message!("linux.terminal.control.couldnotrecordmoveyet", "error" => error)
+        );
         return TEMPORARY;
     }
     let _ = writeln!(
         output,
-        "solstone for tmux has moved in. the solstone app finishes the rest when it starts."
+        "{}",
+        text!("linux.terminal.control.solstonetmuxhasmovedsolstone")
     );
     0
 }
@@ -446,14 +493,14 @@ fn set_terminal_with_sources(
         }
     }
     let (command, confirmation) = if enabled {
-        (Command::TerminalOn, "terminal is on.")
+        (Command::TerminalOn, text!("linux.terminal.control.ison"))
     } else {
         // A daemon does this as it applies the request; with none running, this is the only place.
         let state_dir = resolve_config_paths(&paths).state_dir();
         if !running(&resolve_config_paths(&paths)) {
             let _ = takeover_state::update(&state_dir, keep_terminal_off);
         }
-        (Command::TerminalOff, "terminal is off.")
+        (Command::TerminalOff, text!("linux.terminal.control.isoff"))
     };
     set_owner_switch(
         paths,
@@ -479,12 +526,12 @@ pub fn set_desktop_capture(
     let (command, confirmation) = if enabled {
         (
             Command::DesktopCaptureOn,
-            "screen, audio and desktop activity are on.",
+            text!("linux.terminal.control.screenison"),
         )
     } else {
         (
             Command::DesktopCaptureOff,
-            "screen, audio and desktop activity are off.",
+            text!("linux.terminal.control.screenisoff"),
         )
     };
     set_owner_switch(
@@ -512,7 +559,8 @@ pub fn control_without_bus(
     if !running(&config) {
         let _ = writeln!(
             errors,
-            "the solstone app is not running, so there is nothing to pause or resume."
+            "{}",
+            text!("linux.panel.thesolstoneappisnotrunningsothereisnothing")
         );
         return 1;
     }
@@ -527,56 +575,61 @@ fn takeover_lines(config: &Config) -> Vec<String> {
     };
     let mut lines = Vec::new();
     let phase = match state.phase {
-        Phase::Consented => Some("stopping the old app"),
-        Phase::Stopped => Some("bringing over what's waiting"),
+        Phase::Consented => Some(text!("linux.terminal.control.stopold")),
+        Phase::Stopped => Some(text!("linux.terminal.control.bringold")),
         Phase::Recovered => Some("finishing"),
         Phase::Done => None,
     };
     if let Some(phase) = phase {
-        lines.push(format!("  moving solstone for tmux in: {phase}"));
+        lines.push(message!("linux.terminal.control.movingsolstonetmuxphase", "phase" => phase));
     }
     match &state.continuity {
         Some(Continuity::Adopted) => {
-            lines.push("  terminal history: continued, under the old pairing".to_owned());
+            lines
+                .push(text!("linux.control.terminalhistorycontinuedundertheoldpairing").to_owned());
         }
         Some(Continuity::Continued) => {
-            lines.push("  terminal history: continued".to_owned());
+            lines.push(text!("linux.control.terminalhistorycontinued").to_owned());
         }
         Some(Continuity::NewStream {
             reason,
             needs_attention,
         }) => {
-            lines.push(format!("  new terminal history from here, and what's already in your journal stays ({reason})"));
+            lines.push(
+                message!("linux.terminal.control.newterminalhistoryfromhere", "reason" => reason),
+            );
             if *needs_attention {
-                lines.push("  this needs attention: please contact support".to_owned());
+                lines
+                    .push(text!("linux.control.thisneedsattentionpleasecontactsupport").to_owned());
             }
         }
         None => {}
     }
     if !state.service_was_on && !state.owner_turned_on && state.terminal_settled {
-        lines.push("  solstone for tmux had been stopped, so terminal stays off".to_owned());
+        lines.push(text!("linux.control.solstonefortmuxhadbeenstoppedso").to_owned());
     }
     if let Some(answer) = &state.last_answer {
-        lines.push(format!("  waiting: {answer}"));
+        lines.push(message!("linux.terminal.control.waitinganswer", "answer" => answer));
     }
     for path in &state.conflicting_credentials {
-        lines.push(format!("  more than one old pairing: {}", path.display()));
+        lines.push(
+            message!("linux.terminal.control.morethanoneoldpairing", "value1" => path.display()),
+        );
     }
     for (root, record) in &state.roots {
         if let Some(problem) = &record.problem {
-            lines.push(format!("  couldn't use {}: {problem}", root.display()));
+            lines.push(message!("linux.terminal.control.couldntuseproblem", "value1" => root.display(), "problem" => problem));
         }
         if record.waiting != 0 {
-            lines.push(format!(
-                "  {} segment(s) from solstone for tmux waiting to upload",
-                record.waiting
-            ));
+            lines.push(message!("linux.terminal.control.segmentsfromsolstonetmux", "value1" => record.waiting));
         }
         if record.held != 0 {
-            lines.push(format!("  {} old segment(s) held back", record.held));
+            lines.push(
+                message!("linux.terminal.control.oldsegmentsheldback", "value1" => record.held),
+            );
         }
         for path in &record.problem_paths {
-            lines.push(format!("  problem: {}", path.display()));
+            lines.push(message!("linux.terminal.control.problem", "value1" => path.display()));
         }
     }
     lines
@@ -603,31 +656,30 @@ pub fn status_lines(config: &Config, say_if_stopped: bool) -> Vec<String> {
     match (daemon, &state) {
         (false, _) => {
             if say_if_stopped {
-                lines.push("  the solstone app isn't running".to_owned());
+                lines.push(text!("linux.control.thesolstoneappisntrunning").to_owned());
             }
         }
         (true, Some(state)) => {
             lines.push(format!("  {}", state.engine_line()));
             if let Some(tmux) = &state.tmux_path {
-                lines.push(format!("  tmux: {}", tmux.display()));
+                lines.push(message!("linux.terminal.control.tmux", "value1" => tmux.display()));
             }
             for key in &state.ignored_settings {
-                lines.push(format!("  ignored setting: {key}"));
+                lines.push(message!("linux.terminal.control.ignoredsettingkey", "key" => key));
             }
         }
         (true, None) => {}
     }
     if counts.waiting != 0 {
-        lines.push(format!("  {} segment(s) waiting to upload", counts.waiting));
+        lines.push(
+            message!("linux.terminal.control.segmentswaitingupload", "value1" => counts.waiting),
+        );
     }
     if counts.awaiting_recovery != 0 {
-        lines.push(format!(
-            "  {} unfinished segment(s) waiting for terminal to run again",
-            counts.awaiting_recovery
-        ));
+        lines.push(message!("linux.terminal.control.unfinishedsegmentswaitingterminal", "value1" => counts.awaiting_recovery));
     }
     if counts.held != 0 {
-        lines.push(format!("  {} segment(s) held", counts.held));
+        lines.push(message!("linux.terminal.control.segmentsheld", "value1" => counts.held));
     }
     lines
 }
@@ -644,7 +696,7 @@ pub fn config_for_status(config: &Config, runner: &dyn Runner) -> Config {
 /// Whether screen and audio can run, for `status`.
 pub fn desktop_lines(config: &Config) -> Vec<String> {
     if !config.desktop_capture {
-        return vec!["screen, audio and desktop activity: off".to_owned()];
+        return vec![text!("linux.terminal.control.screenoffstatus").to_owned()];
     }
     let mut lines = Vec::new();
     let no_desktop = crate::desktop_session::doctor_resolver()
@@ -652,7 +704,7 @@ pub fn desktop_lines(config: &Config) -> Vec<String> {
         .map(|mut resolver| resolver.resolve(std::time::Instant::now()).presence)
         == Some(crate::desktop_session::SessionPresence::NoDesktop);
     if no_desktop {
-        lines.push("screen and audio: need your desktop session, and none is running".to_owned());
+        lines.push(text!("linux.control.screenandaudioneedyourdesktopsession").to_owned());
     }
     lines.extend(session_bus_line(config));
     lines
@@ -665,12 +717,13 @@ pub fn session_bus_line(config: &Config) -> Option<String> {
             .state_dir()
             .join(crate::desktop_component::NO_BUS_MARKER)
             .exists())
-    .then(|| NO_BUS_LINE.to_owned())
+    .then(|| no_bus_line().to_owned())
 }
 
 /// Said by `status` and `doctor` when the daemon started without a session bus.
-pub const NO_BUS_LINE: &str =
-    "screen and audio: restart the app after you log in to your desktop here";
+pub fn no_bus_line() -> &'static str {
+    text!("linux.terminal.control.screenaudiorestartappafter")
+}
 
 pub fn terminal_status(paths: ConfigPaths, output: &mut dyn Write) -> i32 {
     let config = load_config(paths).config;
@@ -759,11 +812,11 @@ impl DaemonApplier {
                     });
                 }
                 (self.wake_takeover)();
-                Outcome::ok("moving solstone for tmux in.")
+                Outcome::ok(text!("linux.terminal.control.moving"))
             }
             Stored::Absent => {
                 if !(self.legacy)().found() {
-                    return Outcome::failed(1, "no solstone for tmux to move in.");
+                    return Outcome::failed(1, text!("linux.terminal.control.nosolstonetmuxmove"));
                 }
                 let mut state = match (self.prepare)() {
                     Ok(state) => state,
@@ -772,10 +825,13 @@ impl DaemonApplier {
                 };
                 state.owner_turned_on = terminal_on;
                 if let Err(error) = takeover_state::save_if_absent(&self.state_dir, &state) {
-                    return Outcome::failed(1, format!("could not save that: {error}"));
+                    return Outcome::failed(
+                        1,
+                        message!("linux.terminal.control.couldnotsavethaterror", "error" => error),
+                    );
                 }
                 (self.wake_takeover)();
-                Outcome::ok("moving solstone for tmux in.")
+                Outcome::ok(text!("linux.terminal.control.moving"))
             }
         }
     }
@@ -783,7 +839,12 @@ impl DaemonApplier {
     fn save(&self, field: &str, value: bool) -> Result<(), Outcome> {
         set_guided_field(&self.paths, field, Value::Bool(value))
             .map(|_| ())
-            .map_err(|error| Outcome::failed(1, format!("could not save that: {error}")))
+            .map_err(|error| {
+                Outcome::failed(
+                    1,
+                    message!("linux.terminal.control.couldnotsavethaterror", "error" => error),
+                )
+            })
     }
 }
 
@@ -792,25 +853,25 @@ impl Applier for DaemonApplier {
         let result = match command {
             Command::TerminalOn => {
                 if (self.legacy)().found() {
-                    return Outcome::failed(REFUSED, LEGACY_REFUSAL);
+                    return Outcome::failed(REFUSED, legacy_refusal());
                 }
                 self.save("terminal", true).map(|()| {
                     self.live.terminal(true);
-                    "terminal is on."
+                    text!("linux.terminal.control.ison")
                 })
             }
             Command::TerminalOff => self.save("terminal", false).map(|()| {
                 let _ = takeover_state::update(&self.state_dir, keep_terminal_off);
                 self.live.terminal(false);
-                "terminal is off."
+                text!("linux.terminal.control.isoff")
             }),
             Command::DesktopCaptureOn => self.save("desktop_capture", true).map(|()| {
                 self.live.desktop_capture(true);
-                "screen, audio and desktop activity are on."
+                text!("linux.terminal.control.screenison")
             }),
             Command::DesktopCaptureOff => self.save("desktop_capture", false).map(|()| {
                 self.live.desktop_capture(false);
-                "screen, audio and desktop activity are off."
+                text!("linux.terminal.control.screenisoff")
             }),
             Command::Pause { minutes } => {
                 self.live.pause(*minutes);
@@ -871,7 +932,7 @@ pub fn window_move_needed() -> bool {
 pub fn window_request_move() -> Option<String> {
     let config = resolve_config_paths(&ConfigPaths::default());
     if !running(&config) {
-        return Some("the solstone app isn't running; start it and try again.".to_owned());
+        return Some(text!("linux.control.thesolstoneappisntrunningstart").to_owned());
     }
     match control_request::request(
         &config.state_dir(),
@@ -880,9 +941,11 @@ pub fn window_request_move() -> Option<String> {
         Ok(WaitResult::Answered(outcome)) if outcome.code == 0 => None,
         Ok(WaitResult::Answered(outcome)) => Some(outcome.line),
         Ok(WaitResult::TimedOut { .. }) => {
-            Some("the solstone app did not answer in time; try again in a moment.".to_owned())
+            Some(text!("linux.control.thesolstoneappdidnotanswerin").to_owned())
         }
-        Err(error) => Some(format!("could not reach the solstone app: {error}")),
+        Err(error) => {
+            Some(message!("linux.terminal.control.couldnotreachsolstoneapp", "error" => error))
+        }
     }
 }
 

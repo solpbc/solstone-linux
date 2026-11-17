@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/rust-release-manifest",
+    "crates/solstone-i18n",
     "crates/solstone-linux",
     "crates/solstone-linux-window",
     "crates/solstone-terminal",

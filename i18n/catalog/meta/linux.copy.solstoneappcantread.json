@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.solstoneappcantreadvault.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 168,
+  "source_revision": "4c464d8bd3f670ab47e23ca70952a6b8d6a2ebd5781db4b81a1a1bccaa1af2d8",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the sync component.",
+  "context": "Presentation from the sync component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 10,
+  "source_revision": "8aa0be7b2e17ac4fb579a530b138d3d49be47406a2c7b7637582112dd6c2ced3",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -4,6 +4,7 @@
 //! The screenshots page under its verdict: the reason and its one action (the
 //! chooser while setting up), what it takes in, and its facts.
 
+use solstone_i18n::text;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -89,17 +90,17 @@ impl ScreenshotsSection {
         root.set_visible(false);
 
         let reason = ink(note_label(None));
-        let reason_action = action(copy::CHOOSE_FOLDER);
+        let reason_action = action(copy::choose_folder());
         reason_action.set_visible(false);
         root.append(&reason);
         root.append(&reason_action);
 
         let chooser = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let heading = crate::deck::section_label(copy::S7);
+        let heading = crate::deck::section_label(copy::s7());
         heading.add_css_class("sol-rule");
         chooser.append(&heading);
         let mut choices: Vec<gtk::CheckButton> = Vec::new();
-        for text in copy::S8 {
+        for text in copy::s8() {
             let choice = gtk::CheckButton::with_label(text);
             choice.add_css_class("sol-ink");
             choice.add_css_class("sol-choice");
@@ -110,55 +111,55 @@ impl ScreenshotsSection {
             choices.push(choice);
         }
         choices[0].set_active(true);
-        chooser.append(&note_label(Some(copy::S9)));
-        let returning = note_label(Some(copy::S17));
+        chooser.append(&note_label(Some(copy::s9())));
+        let returning = note_label(Some(copy::s17()));
         chooser.append(&returning);
-        let confirm = action(copy::S10_COUNTING);
+        let confirm = action(copy::s10_counting());
         chooser.append(&confirm);
         let count_failed = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        count_failed.append(&ink(note_label(Some(copy::S12))));
-        let count_again = action(copy::S12_ACTION);
+        count_failed.append(&ink(note_label(Some(copy::s12()))));
+        let count_again = action(copy::s12_action());
         count_failed.append(&count_again);
         count_failed.set_visible(false);
         chooser.append(&count_failed);
         chooser.set_visible(false);
         root.append(&chooser);
 
-        root.append(&note_label(Some(copy::D1)));
+        root.append(&note_label(Some(copy::d1())));
         let folder_note = note_label(None);
         root.append(&folder_note);
-        root.append(&note_label(Some(copy::S14)));
-        root.append(&note_label(Some(copy::S15)));
-        root.append(&note_label(Some(copy::S23)));
+        root.append(&note_label(Some(copy::s14())));
+        root.append(&note_label(Some(copy::s15())));
+        root.append(&note_label(Some(copy::s23())));
 
-        let (so_far_row, so_far) = fact_row("so far");
-        let (last_row, last) = fact_row("last taken in");
+        let (so_far_row, so_far) = fact_row(text!("linux.window.sofar"));
+        let (last_row, last) = fact_row(text!("linux.window.lasttakenin"));
         root.append(&so_far_row);
         root.append(&last_row);
         let progress = note_label(None);
         root.append(&progress);
-        let (folder_row, folder) = fact_row(copy::S22);
-        let folder_button = action(copy::CHOOSE_FOLDER);
+        let (folder_row, folder) = fact_row(copy::s22());
+        let folder_button = action(copy::choose_folder());
         let folder_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
         folder_box.append(&folder_row);
         folder_box.append(&folder_button);
         root.append(&folder_box);
-        let (checked_row, checked) = fact_row(copy::S18);
+        let (checked_row, checked) = fact_row(copy::s18());
         root.append(&checked_row);
-        let (waiting_row, waiting) = fact_row(copy::S19);
+        let (waiting_row, waiting) = fact_row(copy::s19());
         root.append(&waiting_row);
         let cant_come_in = ink(note_label(None));
         root.append(&cant_come_in);
         let cant_read = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let cant_read_text = ink(note_label(None));
-        let read_again = action(copy::S12_ACTION);
+        let read_again = action(copy::s12_action());
         cant_read.append(&cant_read_text);
         cant_read.append(&read_again);
         root.append(&cant_read);
 
-        let more = gtk::Expander::new(Some(copy::D15));
+        let more = gtk::Expander::new(Some(copy::d15()));
         more.add_css_class("sol-ink");
-        more.set_child(Some(&note_label(Some(copy::D10))));
+        more.set_child(Some(&note_label(Some(copy::d10()))));
         root.append(&more);
 
         let section = Rc::new(Self {
@@ -275,11 +276,11 @@ impl ScreenshotsSection {
 
     fn pick_folder(self: &Rc<Self>, button: &gtk::Button) {
         let picker = gtk::FileChooserNative::new(
-            Some(copy::D8_PICKER_TITLE),
+            Some(copy::d8_picker_title()),
             button.root().and_downcast::<gtk::Window>().as_ref(),
             gtk::FileChooserAction::SelectFolder,
-            Some(solstone_linux::copy::OBSIDIAN_CHOOSER_ACCEPT),
-            Some(solstone_linux::copy::OBSIDIAN_CANCEL),
+            Some(solstone_linux::copy::obsidian_chooser_accept()),
+            Some(solstone_linux::copy::obsidian_cancel()),
         );
         let weak = Rc::downgrade(self);
         picker.connect_response(move |picker, response| {
@@ -343,7 +344,7 @@ impl ScreenshotsSection {
         self.folder_button.set_sensitive(!busy);
         self.reason_action.set_sensitive(!busy);
         if busy {
-            self.confirm.set_label(copy::S10_COUNTING);
+            self.confirm.set_label(copy::s10_counting());
             self.confirm.set_sensitive(false);
         }
     }
@@ -360,10 +361,10 @@ impl ScreenshotsSection {
 
         // The reason, and its one action.
         let reason: Option<String> = match doc.mode {
-            Mode::NotSetUp | Mode::Choosing if doc.folder.is_none() => Some(copy::D8.to_owned()),
+            Mode::NotSetUp | Mode::Choosing if doc.folder.is_none() => Some(copy::d8().to_owned()),
             Mode::On if doc.folder_gone => doc.folder_name.as_deref().map(copy::d9),
-            Mode::On if doc.paused => Some(copy::S16_COMPUTER.to_owned()),
-            Mode::On if doc.journal_lists == Some(false) => Some(copy::S21.to_owned()),
+            Mode::On if doc.paused => Some(copy::s16_computer().to_owned()),
+            Mode::On if doc.journal_lists == Some(false) => Some(copy::s21().to_owned()),
             _ => None,
         };
         let folder_action =
@@ -398,7 +399,7 @@ impl ScreenshotsSection {
             match counted {
                 Some(count) if !self.busy.get() => {
                     let label = if self.span.get() == Span::Today {
-                        copy::S10_TODAY.to_owned()
+                        copy::s10_today().to_owned()
                     } else {
                         copy::s10(count.n, &group(count.n))
                     };
@@ -406,7 +407,7 @@ impl ScreenshotsSection {
                     self.confirm.set_sensitive(true);
                 }
                 _ => {
-                    self.confirm.set_label(copy::S10_COUNTING);
+                    self.confirm.set_label(copy::s10_counting());
                     self.confirm.set_sensitive(false);
                 }
             }

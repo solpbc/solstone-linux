@@ -1,0 +1,26 @@
+{
+  "description": "Version line for a journal last seen in the past.",
+  "context": "Version line for a journal last seen in the past.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "journal",
+      "type": "string"
+    },
+    {
+      "name": "age",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 33,
+  "source_revision": "83b0ef8c6b16693a8fe7f327adf40888fd0ab302b09d9631d2e7f68ed3472da0",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,22 @@
+{
+  "description": "Status label with its display value.",
+  "context": "Status label with its display value.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 23,
+  "source_revision": "50f1d4735896121eaa64308cc2437fe73ee9754679f9ff1a48b5318e088a801d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

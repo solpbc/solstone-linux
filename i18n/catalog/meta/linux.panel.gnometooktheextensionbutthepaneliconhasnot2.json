@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the panel icon component.",
+  "context": "Presentation from the panel icon component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 115,
+  "source_revision": "4292adf2c1a85daa1a7c7bc4b036c8912ca33ced4eec9ae616565d703a3e3b28",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "GNOME"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "solstone-linux"
+    }
+  ]
+}

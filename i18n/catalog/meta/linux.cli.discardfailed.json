@@ -1,0 +1,17 @@
+{
+  "description": "Fallback when the browser host rejects a discard request without a diagnostic.",
+  "context": "Fallback when the browser host rejects a discard request without a diagnostic.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 14,
+  "source_revision": "174df286f2d302a650122ab525731e9fcf25288e0e25b996041359b4ed260943",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

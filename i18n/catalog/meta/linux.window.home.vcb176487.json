@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopshellviews.home2, windows.ui.home.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 4,
+  "source_revision": "682640950b9214f1f3bffe5f94b9d89e3b5effafbf3e9c21647605df43b5e7d2",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

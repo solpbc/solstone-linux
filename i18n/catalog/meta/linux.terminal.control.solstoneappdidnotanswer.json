@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the control component.",
+  "context": "Presentation from the control component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 62,
+  "source_revision": "48b6e812bcf2c41967fe545d80f342366effd4d691202932aefa0bfd081d2ac6",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

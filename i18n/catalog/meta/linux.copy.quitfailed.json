@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 42,
+  "source_revision": "818bafe8b706c53eb68bc7064658673ea1d331ab3a3eb5bfe957610f87b463f0",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

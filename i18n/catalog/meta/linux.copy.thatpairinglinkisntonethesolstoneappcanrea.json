@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.thatpairinglinkisntonethe.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 110,
+  "source_revision": "3e662512366a17e8c5ca7e5fd177a941906427734d8f1d177ab228d2c9ceba75",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

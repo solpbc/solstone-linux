@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.copy.journalmarkheldcaption.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 52,
+  "source_revision": "06848e5492b9be7592ddb123b55d0e858002dd872bc92e14ba309e42a95604d1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

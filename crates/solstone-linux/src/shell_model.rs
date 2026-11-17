@@ -5,6 +5,7 @@
 //! The window calls [`deck_columns`]. A phrase here is a locked word.
 
 use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Timelike};
+use solstone_i18n::{message, text};
 
 use crate::browser::status::RUNNING_STALE_MS;
 use crate::obsidian::State as VaultState;
@@ -212,29 +213,31 @@ pub fn browsers_tile(host: BrowserHost) -> StateWord {
 pub fn browser_host_reason(host: BrowserHost) -> Option<&'static str> {
     let down = !browser_host_up(host.updated_at_ms, host.now_ms);
     (down && browsers_tile(host) == StateWord::NeedsAttention)
-        .then_some("browser pages can't start right now.")
+        .then_some(text!("linux.shell.browserunavailable"))
 }
 
 /// The terminal line when the switch is on and the daemon is down.
 #[must_use]
 pub fn terminal_daemon_reason(switch_on: bool, daemon_up: bool) -> Option<&'static str> {
-    (switch_on && !daemon_up).then_some("terminal sessions can't start right now.")
+    (switch_on && !daemon_up).then_some(text!("linux.shell.terminalunavailable"))
 }
 
 /// Shown under technical details when `source-intake.json` is present and will not parse.
-pub const INTAKE_UNREADABLE: &str = "the record of how much has been taken in could not be read.";
+pub fn intake_unreadable() -> &'static str {
+    text!("linux.shell.intakeunreadable")
+}
 
 /// The locked state word, including the ellipsis on `checking…`.
 #[must_use]
 pub fn state_label(word: StateWord) -> &'static str {
     match word {
-        StateWord::Off => "off",
-        StateWord::NeedsAttention => "needs attention",
-        StateWord::Paused => "paused",
-        StateWord::On => "on",
-        StateWord::SettingUp => "setting up",
-        StateWord::ReadyToSetUp => "ready to set up",
-        StateWord::Checking => "checking…",
+        StateWord::Off => text!("linux.copy.off"),
+        StateWord::NeedsAttention => text!("linux.shell.attention"),
+        StateWord::Paused => text!("linux.copy.paused"),
+        StateWord::On => text!("linux.copy.on"),
+        StateWord::SettingUp => text!("linux.shell.settingup"),
+        StateWord::ReadyToSetUp => text!("linux.shell.readytosetup"),
+        StateWord::Checking => text!("linux.shell.checking"),
     }
 }
 
@@ -242,9 +245,9 @@ pub fn state_label(word: StateWord) -> &'static str {
 pub fn screen_sub_label(sub: ScreenSub) -> Option<&'static str> {
     match sub {
         ScreenSub::None => None,
-        ScreenSub::WithAudioAndActivity => Some("with audio and activity"),
-        ScreenSub::WithAudio => Some("with audio"),
-        ScreenSub::ActivityStillOn => Some("activity is still on."),
+        ScreenSub::WithAudioAndActivity => Some(text!("linux.shell.withaudioactivity")),
+        ScreenSub::WithAudio => Some(text!("linux.shell.withaudio")),
+        ScreenSub::ActivityStillOn => Some(text!("linux.shell.activitystillon")),
     }
 }
 
@@ -339,18 +342,18 @@ pub enum PauseFor {
 #[must_use]
 pub fn tile_name(tile: TileId) -> &'static str {
     match tile {
-        TileId::Screen => "screen",
-        TileId::Terminal => "terminal",
-        TileId::Browsers => "browsers",
-        TileId::Obsidian => "Obsidian",
-        TileId::Screenshots => crate::copy::screenshots::S1,
-        TileId::Import => "import",
+        TileId::Screen => text!("linux.window.screen"),
+        TileId::Terminal => text!("linux.window.terminal"),
+        TileId::Browsers => text!("linux.window.browsers"),
+        TileId::Obsidian => text!("linux.copy.obsidian"),
+        TileId::Screenshots => crate::copy::screenshots::s1(),
+        TileId::Import => text!("linux.window.import"),
     }
 }
 
 #[must_use]
 pub fn attention_label(tile: TileId) -> String {
-    format!("{} needs attention", tile_name(tile))
+    message!("linux.shell.tileneedsattention", "source" => tile_name(tile))
 }
 
 /// The panel menu. One attention row per source that needs it, in deck order.
@@ -418,10 +421,10 @@ pub fn menu_target(id: MenuId) -> Option<MenuTarget> {
 #[must_use]
 pub fn pause_menu() -> [(&'static str, PauseFor); 4] {
     [
-        ("15 minutes", PauseFor::Seconds(900)),
-        ("30 minutes", PauseFor::Seconds(1800)),
-        ("1 hour", PauseFor::Seconds(3600)),
-        ("until I resume", PauseFor::UntilResume),
+        (text!("linux.tray.n15minutes"), PauseFor::Seconds(900)),
+        (text!("linux.tray.n30minutes"), PauseFor::Seconds(1800)),
+        (text!("linux.tray.n1hour"), PauseFor::Seconds(3600)),
+        (text!("linux.tray.untiliresume"), PauseFor::UntilResume),
     ]
 }
 
@@ -429,9 +432,9 @@ pub fn pause_menu() -> [(&'static str, PauseFor); 4] {
 #[must_use]
 pub fn greeting(hour: u32) -> &'static str {
     match hour {
-        5..=11 => "good morning",
-        12..=16 => "good afternoon",
-        _ => "good evening",
+        5..=11 => text!("linux.shell.morning"),
+        12..=16 => text!("linux.shell.afternoon"),
+        _ => text!("linux.shell.evening"),
     }
 }
 
@@ -462,13 +465,13 @@ pub enum PauseLeft {
 #[must_use]
 pub fn pause_line(left: PauseLeft) -> String {
     match left {
-        PauseLeft::UntilResume => "paused until you resume".to_string(),
+        PauseLeft::UntilResume => text!("linux.shell.untilresume").to_string(),
         PauseLeft::Seconds(seconds) if seconds < 60 => {
-            "paused, less than a minute left".to_string()
+            text!("linux.shell.lessthanminuteleft").to_string()
         }
         PauseLeft::Seconds(seconds) => {
             let minutes = seconds.div_ceil(60);
-            format!("paused, {minutes} min left")
+            message!("linux.shell.pauseleft", "minutes" => minutes)
         }
     }
 }
@@ -595,7 +598,7 @@ pub fn source_last(file: &IntakeFile, last: Option<&str>, now: DateTime<FixedOff
 #[must_use]
 pub fn total_text(total: &ShownTotal) -> Option<&str> {
     match total {
-        ShownTotal::NothingYet => Some("nothing yet"),
+        ShownTotal::NothingYet => Some(text!("linux.window.nothingyet")),
         ShownTotal::Amount(text) => Some(text),
         ShownTotal::Hidden => None,
     }
@@ -616,9 +619,9 @@ pub fn page_total_text(
 ) -> Option<String> {
     match total {
         ShownTotal::Hidden => None,
-        ShownTotal::NothingYet => Some("nothing yet".to_owned()),
+        ShownTotal::NothingYet => Some(text!("linux.window.nothingyet").to_owned()),
         ShownTotal::Amount(text) => match started.and_then(|day| format_started(day, today)) {
-            Some(day) => Some(format!("{text}, since {day}")),
+            Some(day) => Some(message!("linux.shell.amountsince", "total" => text, "date" => day)),
             None => Some(text.clone()),
         },
     }
@@ -643,38 +646,28 @@ enum TotalUnit {
 fn format_total(total: u64, unit: TotalUnit) -> String {
     match unit {
         TotalUnit::Seconds => format_seconds(total),
-        TotalUnit::Pages => format_count(total, "page", "pages"),
-        TotalUnit::Notes => format_count(total, "note", "notes"),
-        TotalUnit::Screenshots => format_count(total, "screenshot", "screenshots"),
+        TotalUnit::Pages => format_count(total, "linux.shell.pagecount"),
+        TotalUnit::Notes => format_count(total, "linux.shell.notecount"),
+        TotalUnit::Screenshots => format_count(total, "linux.shell.screenshotcount"),
     }
 }
 
 fn format_seconds(total: u64) -> String {
     if total < 60 {
-        "less than a minute".to_owned()
+        text!("linux.shell.lessthanminute").to_owned()
     } else if total < 3600 {
-        let minutes = total / 60;
-        if minutes == 1 {
-            "1 minute".to_owned()
-        } else {
-            format!("{minutes} minutes")
-        }
+        format_count(total / 60, "linux.shell.minutecount")
     } else {
-        let hours = total / 3600;
-        if hours == 1 {
-            "1 hour".to_owned()
-        } else {
-            format!("{} hours", grouped(hours))
-        }
+        format_count(total / 3600, "linux.shell.hourcount")
     }
 }
 
-fn format_count(total: u64, one: &str, many: &str) -> String {
-    if total == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{} {many}", grouped(total))
-    }
+fn format_count(total: u64, id: &str) -> String {
+    solstone_i18n::cardinal(
+        id,
+        total.min(i64::MAX as u64) as i64,
+        &[("display", solstone_i18n::Value::String(&grouped(total)))],
+    )
 }
 
 /// English grouping. The locked phrases are English, so this does not follow
@@ -701,26 +694,26 @@ pub fn format_started(started: &str, today: NaiveDate) -> Option<String> {
 fn format_date(date: NaiveDate, today: NaiveDate) -> String {
     let month = month_name(date.month());
     if date.year() == today.year() {
-        format!("{month} {}", date.day())
+        message!("linux.shell.monthday", "month" => month, "day" => date.day())
     } else {
-        format!("{month} {}, {}", date.day(), date.year())
+        message!("linux.shell.monthdayyear", "month" => month, "day" => date.day(), "year" => date.year())
     }
 }
 
 fn month_name(month: u32) -> &'static str {
     match month {
-        1 => "january",
-        2 => "february",
-        3 => "march",
-        4 => "april",
-        5 => "may",
-        6 => "june",
-        7 => "july",
-        8 => "august",
-        9 => "september",
-        10 => "october",
-        11 => "november",
-        _ => "december",
+        1 => text!("linux.shell.month.january"),
+        2 => text!("linux.shell.month.february"),
+        3 => text!("linux.shell.month.march"),
+        4 => text!("linux.shell.month.april"),
+        5 => text!("linux.shell.month.may"),
+        6 => text!("linux.shell.month.june"),
+        7 => text!("linux.shell.month.july"),
+        8 => text!("linux.shell.month.august"),
+        9 => text!("linux.shell.month.september"),
+        10 => text!("linux.shell.month.october"),
+        11 => text!("linux.shell.month.november"),
+        _ => text!("linux.shell.month.december"),
     }
 }
 
@@ -731,24 +724,25 @@ pub fn format_relative(last: &str, now: DateTime<FixedOffset>) -> String {
     };
     let age = now.signed_duration_since(parsed).num_seconds();
     if age < 60 {
-        return "just now".to_owned();
+        return text!("linux.about.now").to_owned();
     }
     if age < 3600 {
-        return format!("{} min ago", age / 60);
+        return message!("linux.shell.minutesago", "minutes" => age / 60);
     }
     if age < 86_400 {
         let hours = age / 3600;
-        return if hours == 1 {
-            "1 hour ago".to_owned()
-        } else {
-            format!("{hours} hours ago")
-        };
+        // The age report keeps its ungrouped numeric presentation.
+        return solstone_i18n::cardinal(
+            "linux.shell.hoursago",
+            hours,
+            &[("display", solstone_i18n::Value::String(&hours.to_string()))],
+        );
     }
     let last_local = parsed.with_timezone(now.offset());
     let today = now.date_naive();
     let last_day = last_local.date_naive();
     if today.pred_opt() == Some(last_day) {
-        "yesterday".to_owned()
+        text!("linux.shell.yesterday").to_owned()
     } else {
         format_date(last_day, today)
     }

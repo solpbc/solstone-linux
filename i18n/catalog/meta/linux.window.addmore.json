@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopshellviews.addmore, windows.ui.addmore.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 8,
+  "source_revision": "5efd614940b6e1be58e6e3fcee9bf6305a4f6b4f6b15d219f5c8d22edacd65d4",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

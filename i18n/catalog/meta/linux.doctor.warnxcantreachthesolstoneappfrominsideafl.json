@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the status component.",
+  "context": "Presentation from the status component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "id",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 120,
+  "source_revision": "f2d8cce862cff93905bd2404f16e1f763b4af739b044fa10c92b36d21115edc7",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "  "
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktop.shared.app.settingsdiagnosticson, windows.desktop.shared.app.settingsdiagnosticson.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 2,
+  "source_revision": "40d611c1c8b58aebd4ae5eef8a0723365b0d1bcaa7cba752d40a13221a70bdca",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

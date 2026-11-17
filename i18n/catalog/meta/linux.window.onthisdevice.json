@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopstatuspane.onthisdevice, windows.ui.onthisdevice.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 14,
+  "source_revision": "56863d43233acf6cb326d192ff09a0dbcacba584ca65d1c71034be7fcad74295",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

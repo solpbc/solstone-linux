@@ -1,0 +1,26 @@
+{
+  "description": "Shown in the import source in the desktop app.",
+  "context": "Shown in the import source in the desktop app.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "saved",
+      "type": "string"
+    },
+    {
+      "name": "total",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 47,
+  "source_revision": "b13680c5f79d2ab5ab813637c12a327e95b57fa7484fa145cb6ab3c6063b3c4e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

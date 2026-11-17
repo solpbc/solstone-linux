@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.couldntverifyjournalsonothing.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 87,
+  "source_revision": "fda39567f60d2750c2a0d2c71155ba021bcd24861ffc79f4d3c75f16d044c648",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

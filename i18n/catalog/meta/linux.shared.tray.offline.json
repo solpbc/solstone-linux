@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the tray component.",
+  "context": "Presentation from the tray component. Same English as windows.ui.offline, windows.pill.offline.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 7,
+  "source_revision": "26c08223707237777e26074e31b245efb7421c2db12eedce46ec68e1784ab3b4",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

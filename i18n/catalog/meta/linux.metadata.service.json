@@ -1,0 +1,17 @@
+{
+  "description": "User service description shown by systemd.",
+  "context": "User service description shown by systemd.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 22,
+  "source_revision": "4234c68836df7674389f45c879baf5cac6852469b05f67251cfcbc1a8715ae90",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

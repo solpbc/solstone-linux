@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktop.shared.settings.severity, windows.desktop.shared.settings.severity.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 2,
+  "source_revision": "7215fe69aa21a2b073c5e6c8c18daaa73b91c9d619b7e8fb38d01d84f8d53a3f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

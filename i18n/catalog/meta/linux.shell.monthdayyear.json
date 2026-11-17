@@ -1,0 +1,30 @@
+{
+  "description": "Shown in the desktop or panel source status.",
+  "context": "Shown in the desktop or panel source status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "month",
+      "type": "string"
+    },
+    {
+      "name": "day",
+      "type": "string"
+    },
+    {
+      "name": "year",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 30,
+  "source_revision": "098e932ff87d716f958cb35b766042953e3701121c99b5299f9c1c4951cc4162",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

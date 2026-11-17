@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the control component.",
+  "context": "Presentation from the control component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "key",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 27,
+  "source_revision": "152cb5665292474e7bb014c9e9933be96d7c83f2f4ae46e5a15b68b45bcc214e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "  "
+    }
+  ]
+}

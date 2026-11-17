@@ -16,37 +16,38 @@ pub struct ObsidianLines {
 
 pub fn map_obsidian(status: &solstone_linux::obsidian::Status) -> ObsidianLines {
     use solstone_linux::copy::{
-        OBSIDIAN_ATTENTION_FILE, OBSIDIAN_ATTENTION_PART, OBSIDIAN_ATTENTION_STORAGE,
-        OBSIDIAN_ATTENTION_VAULT, OBSIDIAN_DETAIL_UPDATE, OBSIDIAN_STATE_CHECKING,
-        OBSIDIAN_STATE_UPDATE, STATUS_ATTENTION, STATUS_ON, STATUS_PAUSED,
+        obsidian_attention_file, obsidian_attention_part, obsidian_attention_storage,
+        obsidian_attention_vault, obsidian_detail_update, obsidian_state_checking,
+        obsidian_state_update, status_attention, status_on, status_paused,
     };
     use solstone_vault::{Attention, State};
     let detail_for_attention = match status.attention {
-        Some(Attention::VaultUnreadable) => Some(OBSIDIAN_ATTENTION_VAULT),
-        Some(Attention::PartUnreadable) => Some(OBSIDIAN_ATTENTION_PART),
-        Some(Attention::FileRefused) => Some(OBSIDIAN_ATTENTION_FILE),
-        Some(Attention::Storage) => Some(OBSIDIAN_ATTENTION_STORAGE),
+        Some(Attention::VaultUnreadable) => Some(obsidian_attention_vault()),
+        Some(Attention::PartUnreadable) => Some(obsidian_attention_part()),
+        Some(Attention::FileRefused) => Some(obsidian_attention_file()),
+        Some(Attention::Storage) => Some(obsidian_attention_storage()),
         None => None,
     };
     let (state, detail) = match status.state {
         State::Off | State::Confirm => (None, None),
-        State::Checking => (Some(OBSIDIAN_STATE_CHECKING), None),
-        State::On => (Some(STATUS_ON), None),
-        State::Paused => (Some(STATUS_PAUSED), None),
-        State::WaitingForJournalUpdate => {
-            (Some(OBSIDIAN_STATE_UPDATE), Some(OBSIDIAN_DETAIL_UPDATE))
-        }
-        State::NeedsAttention => (Some(STATUS_ATTENTION), detail_for_attention),
+        State::Checking => (Some(obsidian_state_checking()), None),
+        State::On => (Some(status_on()), None),
+        State::Paused => (Some(status_paused()), None),
+        State::WaitingForJournalUpdate => (
+            Some(obsidian_state_update()),
+            Some(obsidian_detail_update()),
+        ),
+        State::NeedsAttention => (Some(status_attention()), detail_for_attention),
     };
     ObsidianLines { state, detail }
 }
 
 /// The owner-facing line for a chosen folder that was refused.
 pub fn map_obsidian_refusal(refusal: solstone_linux::obsidian::Refusal) -> &'static str {
-    use solstone_linux::copy::{OBSIDIAN_REFUSED_NAME, OBSIDIAN_REFUSED_NOT_A_VAULT};
+    use solstone_linux::copy::{obsidian_refused_name, obsidian_refused_not_a_vault};
     match refusal {
-        solstone_linux::obsidian::Refusal::NotAVault => OBSIDIAN_REFUSED_NOT_A_VAULT,
-        solstone_linux::obsidian::Refusal::UnusableName => OBSIDIAN_REFUSED_NAME,
+        solstone_linux::obsidian::Refusal::NotAVault => obsidian_refused_not_a_vault(),
+        solstone_linux::obsidian::Refusal::UnusableName => obsidian_refused_name(),
     }
 }
 
@@ -743,24 +744,24 @@ mod obsidian_copy_tests {
         use solstone_linux::copy::*;
         assert_eq!(
             map_obsidian(&status(State::On, None)).state,
-            Some(STATUS_ON)
+            Some(status_on())
         );
         assert_eq!(
             map_obsidian(&status(State::Paused, None)).state,
-            Some(STATUS_PAUSED)
+            Some(status_paused())
         );
         let waiting = map_obsidian(&status(State::WaitingForJournalUpdate, None));
-        assert_eq!(waiting.state, Some(OBSIDIAN_STATE_UPDATE));
-        assert_eq!(waiting.detail, Some(OBSIDIAN_DETAIL_UPDATE));
+        assert_eq!(waiting.state, Some(obsidian_state_update()));
+        assert_eq!(waiting.detail, Some(obsidian_detail_update()));
         let attention = map_obsidian(&status(
             State::NeedsAttention,
             Some(Attention::VaultUnreadable),
         ));
-        assert_eq!(attention.state, Some(STATUS_ATTENTION));
-        assert_eq!(attention.detail, Some(OBSIDIAN_ATTENTION_VAULT));
+        assert_eq!(attention.state, Some(status_attention()));
+        assert_eq!(attention.detail, Some(obsidian_attention_vault()));
         assert_eq!(
             map_obsidian(&status(State::Checking, None)).state,
-            Some(OBSIDIAN_STATE_CHECKING)
+            Some(obsidian_state_checking())
         );
     }
 
@@ -782,11 +783,11 @@ mod obsidian_copy_tests {
         use solstone_linux::copy::*;
         assert_eq!(
             map_obsidian_refusal(Refusal::NotAVault),
-            OBSIDIAN_REFUSED_NOT_A_VAULT
+            obsidian_refused_not_a_vault()
         );
         assert_eq!(
             map_obsidian_refusal(Refusal::UnusableName),
-            OBSIDIAN_REFUSED_NAME
+            obsidian_refused_name()
         );
     }
 
@@ -794,32 +795,32 @@ mod obsidian_copy_tests {
     fn no_new_owner_copy_uses_a_retired_word() {
         use solstone_linux::copy::*;
         for line in [
-            OBSIDIAN_HEADING,
-            OBSIDIAN_EXPLAIN,
-            OBSIDIAN_FOUND_LABEL,
-            OBSIDIAN_NONE_FOUND,
-            OBSIDIAN_USE_THIS,
-            OBSIDIAN_CHOOSE_FOLDER,
-            OBSIDIAN_CHOOSER_TITLE,
-            OBSIDIAN_CHOOSER_ACCEPT,
-            OBSIDIAN_CANCEL,
-            OBSIDIAN_REFUSED_NOT_A_VAULT,
-            OBSIDIAN_REFUSED_NAME,
-            OBSIDIAN_WARNING_HEADING,
-            OBSIDIAN_CONTINUE,
-            OBSIDIAN_STATE_CHECKING,
-            OBSIDIAN_STATE_UPDATE,
-            OBSIDIAN_DETAIL_UPDATE,
-            OBSIDIAN_VAULT_LABEL,
-            OBSIDIAN_LAST_CHECKED,
-            OBSIDIAN_NOT_ON_DEVICE,
-            OBSIDIAN_TOO_LARGE,
-            OBSIDIAN_ATTENTION_VAULT,
-            OBSIDIAN_ATTENTION_PART,
-            OBSIDIAN_ATTENTION_FILE,
-            OBSIDIAN_ATTENTION_STORAGE,
-            OBSIDIAN_TURN_OFF,
-            OBSIDIAN_TURN_OFF_NOTE,
+            "Obsidian",
+            "the solstone app takes in the notes in one vault on this computer. all of them go into your journal, then each one as it changes. your vault stays as it is.",
+            "vaults on this computer",
+            "the solstone app didn't find a vault on this computer. choose its folder instead.",
+            "use this vault",
+            "choose a folder",
+            "choose your Obsidian vault",
+            "choose",
+            "cancel",
+            obsidian_refused_not_a_vault(),
+            obsidian_refused_name(),
+            "a vault with this name is already in your journal",
+            "continue",
+            obsidian_state_checking(),
+            obsidian_state_update(),
+            obsidian_detail_update(),
+            "vault",
+            "last checked",
+            "not on this device",
+            "too large to bring in",
+            obsidian_attention_vault(),
+            obsidian_attention_part(),
+            obsidian_attention_file(),
+            obsidian_attention_storage(),
+            "turn off",
+            "turning this off stops bringing in changes. what's already in your journal stays there, and what's waiting stays on this computer until you turn it on again.",
             &obsidian_warning_detail("Notes", Some("studio"), Some("today")),
             &obsidian_warning_detail("Notes", None, None),
             &obsidian_progress("3", "9"),

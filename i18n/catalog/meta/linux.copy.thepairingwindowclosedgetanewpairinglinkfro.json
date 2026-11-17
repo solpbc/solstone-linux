@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.ui.thepairingwindowclosedgetanew.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 84,
+  "source_revision": "a957b5d9be7921885d23c1d58124bb60af3cd0aafe63b8b22e0920dfe4715e01",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

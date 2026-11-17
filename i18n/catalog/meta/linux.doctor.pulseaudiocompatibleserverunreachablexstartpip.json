@@ -1,0 +1,33 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "error",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 88,
+  "source_revision": "522ecd0d90b90236dfea542109988a07a56ae69f8265b7e283f9489121618a76",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "PulseAudio"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "PipeWire"
+    }
+  ]
+}

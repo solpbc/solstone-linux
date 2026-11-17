@@ -1,0 +1,33 @@
+{
+  "description": "Presentation from the doctor component.",
+  "context": "Presentation from the doctor component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "value1",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 92,
+  "source_revision": "d26895f727dde096d27bbbb89657c854635b661d7bfb13b98542d558082a6540",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "GStreamer"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "PipeWire"
+    }
+  ]
+}

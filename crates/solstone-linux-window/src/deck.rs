@@ -3,6 +3,7 @@
 
 //! The deck, the shelf, and the status pane on the sun-arc chrome.
 
+use solstone_i18n::{message, text};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -27,14 +28,27 @@ const PANE_WIDTH: i32 = 360;
 /// Space between the deck and the pane's hairline. The shelf inset stays 8 px.
 const PANE_GUTTER: i32 = 24;
 const GLYPH_IMPORT: &str = r#"<path d="M12 3v11m-4-4 4 4 4-4M4 14v6h16v-6"/>"#;
-const OFF_SUB: &str = "turn it on any time.";
-const SCREEN_WAITING: &str = "waiting to take in the screen.";
-const SCREEN_BREATH: &str = "while this is on, the solstone app takes in what's on your screen, the sound, and which apps and windows you're using, and all of it goes into your journal.";
-const SCREEN_SOUND: &str = "sound covers your microphone and what this computer plays. if there is no microphone, neither comes in.";
-const TERMINAL_BREATH: &str = "the solstone app takes in your tmux sessions, and all of it goes into your journal. needs tmux on this computer, and works in any terminal session, including when you SSH into this computer.";
-const BROWSERS_BREATH: &str = "on the sites you allow, the solstone extension takes in the page's text and rough layout, and all of it goes into your journal.";
-const BROWSERS_GAP: &str =
-    "pages come in from the solstone extension. there is no switch for it here.";
+fn off_sub() -> &'static str {
+    text!("linux.window.offsub")
+}
+fn screen_waiting() -> &'static str {
+    text!("linux.window.screenwaiting")
+}
+fn screen_breath() -> &'static str {
+    text!("linux.window.screenbreath")
+}
+fn screen_sound() -> &'static str {
+    text!("linux.window.screensound")
+}
+fn terminal_breath() -> &'static str {
+    text!("linux.window.terminalbreath")
+}
+fn browsers_breath() -> &'static str {
+    text!("linux.window.browsersbreath")
+}
+fn browsers_gap() -> &'static str {
+    text!("linux.window.browsersgap")
+}
 const GLYPH_SIDE: &str =
     r#"<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M9 5v14"/>"#;
 
@@ -122,7 +136,7 @@ impl ServiceSnap {
             obsidian_vault: false,
             screenshots: None,
             imports: None,
-            kept: "nothing yet".to_owned(),
+            kept: text!("linux.window.nothingyet").to_owned(),
             pause_bounded: None,
             mark: None,
         }
@@ -196,27 +210,32 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     grid.set_hexpand(true);
     grid.set_valign(gtk::Align::Start);
 
-    let screen = make_tile("screen", GLYPH_SCREEN, Some(view.borrow().screen_on), false);
+    let screen = make_tile(
+        text!("linux.window.screen"),
+        GLYPH_SCREEN,
+        Some(view.borrow().screen_on),
+        false,
+    );
     let terminal = make_tile(
-        "terminal",
+        text!("linux.window.terminal"),
         GLYPH_TERMINAL,
         Some(view.borrow().terminal_on),
         false,
     );
-    let browsers = make_tile("browsers", GLYPH_BROWSERS, None, false);
-    let obsidian = make_tile("Obsidian", GLYPH_OBSIDIAN, None, false);
+    let browsers = make_tile(text!("linux.window.browsers"), GLYPH_BROWSERS, None, false);
+    let obsidian = make_tile(text!("linux.window.obsidian"), GLYPH_OBSIDIAN, None, false);
     let screenshots = make_tile(
-        solstone_linux::copy::screenshots::S1,
+        solstone_linux::copy::screenshots::s1(),
         GLYPH_SCREENSHOTS,
         None,
         false,
     );
-    let import = make_tile("import", GLYPH_IMPORT, None, false);
+    let import = make_tile(text!("linux.window.import"), GLYPH_IMPORT, None, false);
     import.1.set_visible(false);
     import.3.set_visible(false);
-    import.2.set_text("files");
+    import.2.set_text(text!("linux.window.files"));
     import.2.set_visible(true);
-    let (add_more, _, _, _, _) = make_tile("add more", GLYPH_PLUS, None, true);
+    let (add_more, _, _, _, _) = make_tile(text!("linux.window.addmore"), GLYPH_PLUS, None, true);
     let tiles = vec![
         tile_widgets(screen, TileId::Screen),
         tile_widgets(terminal, TileId::Terminal),
@@ -266,10 +285,9 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     SLOTS.with(|slot| *slot.borrow_mut() = Some((journal_slot.clone(), help_slot.clone())));
     OBSIDIAN_SLOT.with(|slot| *slot.borrow_mut() = Some(built.page.obsidian_extra.clone()));
 
-    let shelf_button = gtk::Button::new();
+    let shelf_button = named_icon_button(text!("linux.window.sidebar"));
     shelf_button.add_css_class("sol-glyph");
     shelf_button.set_has_frame(false);
-    shelf_button.set_tooltip_text(Some("sidebar"));
     shelf_button.set_child(Some(&glyph_widget(GLYPH_SIDE)));
     shelf_button.set_visible(false);
     let (computer, cursor_switch, paused_switch, segment_value, computer_note) = computer_page();
@@ -935,7 +953,11 @@ fn make_tile(
     if dashed {
         state.set_visible(false);
     }
-    let sub = gtk::Label::new(if dashed { Some("sources") } else { None });
+    let sub = gtk::Label::new(if dashed {
+        Some(text!("linux.window.sources"))
+    } else {
+        None
+    });
     sub.add_css_class("sol-faint");
     sub.set_halign(gtk::Align::Start);
     sub.set_xalign(0.0);
@@ -972,12 +994,12 @@ fn make_pane() -> BuiltPane {
     pane.set_size_request(PANE_WIDTH, -1);
 
     let status = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let title = gtk::Label::new(Some("status"));
+    let title = gtk::Label::new(Some(text!("linux.window.status")));
     title.add_css_class("sol-display");
     title.add_css_class("sol-pane-title");
     title.add_css_class("sol-ink");
     title.set_halign(gtk::Align::Start);
-    let lead = gtk::Label::new(Some("not paired"));
+    let lead = gtk::Label::new(Some(text!("linux.window.notpaired")));
     lead.add_css_class("sol-display");
     lead.add_css_class("sol-lead");
     lead.add_css_class("sol-ink");
@@ -986,7 +1008,7 @@ fn make_pane() -> BuiltPane {
     lead.set_max_width_chars(24);
     lead.set_xalign(0.0);
     // Pairing stays on the journal page. This button does not open another flow.
-    let connect = gtk::Button::with_label("connect a journal");
+    let connect = gtk::Button::with_label(text!("linux.window.connectajournal"));
     connect.add_css_class("sol-action");
     connect.set_halign(gtk::Align::Start);
     let soft = gtk::Label::new(None);
@@ -1003,12 +1025,12 @@ fn make_pane() -> BuiltPane {
 
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     head.add_css_class("sol-rule");
-    let sources = section_label("sources");
+    let sources = section_label(text!("linux.window.sources"));
     sources.set_hexpand(true);
-    let so_far_head = gtk::Label::new(Some("so far"));
+    let so_far_head = gtk::Label::new(Some(text!("linux.window.sofar")));
     so_far_head.add_css_class("sol-section");
     so_far_head.add_css_class("sol-faint");
-    let last_head = gtk::Label::new(Some("last taken in"));
+    let last_head = gtk::Label::new(Some(text!("linux.window.lasttakenin")));
     last_head.add_css_class("sol-section");
     last_head.add_css_class("sol-faint");
     last_head.set_width_chars(14);
@@ -1019,13 +1041,25 @@ fn make_pane() -> BuiltPane {
     status.append(&head);
 
     let rows = [
-        (TileId::Screen, "screen", GLYPH_SCREEN),
-        (TileId::Terminal, "terminal", GLYPH_TERMINAL),
-        (TileId::Browsers, "browsers", GLYPH_BROWSERS),
-        (TileId::Obsidian, "Obsidian", GLYPH_OBSIDIAN),
+        (TileId::Screen, text!("linux.window.screen"), GLYPH_SCREEN),
+        (
+            TileId::Terminal,
+            text!("linux.window.terminal"),
+            GLYPH_TERMINAL,
+        ),
+        (
+            TileId::Browsers,
+            text!("linux.window.browsers"),
+            GLYPH_BROWSERS,
+        ),
+        (
+            TileId::Obsidian,
+            text!("linux.window.obsidian"),
+            GLYPH_OBSIDIAN,
+        ),
         (
             TileId::Screenshots,
-            solstone_linux::copy::screenshots::S1,
+            solstone_linux::copy::screenshots::s1(),
             GLYPH_SCREENSHOTS,
         ),
     ];
@@ -1036,37 +1070,37 @@ fn make_pane() -> BuiltPane {
         facts.push(FactWidgets { so_far, last });
     }
 
-    let import_attention = gtk::Button::with_label("import");
+    let import_attention = gtk::Button::with_label(text!("linux.window.import"));
     import_attention.add_css_class("sol-back");
     import_attention.set_halign(gtk::Align::Start);
     import_attention.set_visible(false);
     status.append(&import_attention);
 
-    let journal_head = section_label("your journal");
+    let journal_head = section_label(text!("linux.window.yourjournal"));
     journal_head.add_css_class("sol-rule");
     status.append(&journal_head);
     let kept_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     kept_row.add_css_class("sol-row");
-    let kept_name = gtk::Label::new(Some("kept on this computer"));
+    let kept_name = gtk::Label::new(Some(text!("linux.window.keptonthiscomputer")));
     kept_name.add_css_class("sol-ink");
     kept_name.set_halign(gtk::Align::Start);
     kept_name.set_hexpand(true);
-    let kept = gtk::Label::new(Some("nothing yet"));
+    let kept = gtk::Label::new(Some(text!("linux.window.nothingyet")));
     kept.add_css_class("sol-faint");
     kept.set_halign(gtk::Align::End);
     kept_row.append(&kept_name);
     kept_row.append(&kept);
     status.append(&kept_row);
-    let (connection_row, connection) = fact_row("connection");
+    let (connection_row, connection) = fact_row(text!("linux.window.connection"));
     connection_row.set_visible(false);
     status.append(&connection_row);
-    let (reached_row, reached) = fact_row("last reached");
+    let (reached_row, reached) = fact_row(text!("linux.window.lastreached"));
     reached_row.set_visible(false);
     status.append(&reached_row);
 
     let details = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     details.add_css_class("sol-row");
-    let details_name = gtk::Label::new(Some("technical details"));
+    let details_name = gtk::Label::new(Some(text!("linux.window.technicaldetails")));
     details_name.add_css_class("sol-ink");
     details_name.set_halign(gtk::Align::Start);
     details_name.set_hexpand(true);
@@ -1112,10 +1146,25 @@ fn make_pane() -> BuiltPane {
     }
 }
 
+/// GTK 4.6 can set an explicit accessible name through GtkBuilder.
+fn named_icon_button(name: &str) -> gtk::Button {
+    let label = gtk::glib::markup_escape_text(name);
+    let interface = format!(
+        r#"<interface><object class="GtkButton" id="button">
+          <accessibility><property name="label">{label}</property></accessibility>
+        </object></interface>"#
+    );
+    let button: gtk::Button = gtk::Builder::from_string(&interface)
+        .object("button")
+        .expect("the icon button interface names its only object");
+    button.set_tooltip_text(Some(name));
+    button
+}
+
 fn make_source_page(status: gtk::Box) -> Page {
     let page_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page_box.add_css_class("sol-page");
-    let home = gtk::Button::with_label("‹ home");
+    let home = gtk::Button::with_label(text!("linux.window.home"));
     home.add_css_class("sol-back");
     home.set_has_frame(false);
     home.set_halign(gtk::Align::Start);
@@ -1142,10 +1191,10 @@ fn make_source_page(status: gtk::Box) -> Page {
     title.set_halign(gtk::Align::Start);
     title.set_hexpand(true);
     title.set_xalign(0.0);
-    let close = gtk::Button::with_label("×");
+    let close = named_icon_button(text!("linux.window.close"));
+    close.set_label("×");
     close.add_css_class("sol-glyph");
     close.set_has_frame(false);
-    close.set_tooltip_text(Some("close"));
     close.set_visible(false);
     page_top.append(&title);
     page_top.append(&close);
@@ -1171,15 +1220,15 @@ fn make_source_page(status: gtk::Box) -> Page {
     let next = note_label(None);
     let breath = note_label(None);
     breath.set_visible(true);
-    let sound = note_label(Some(SCREEN_SOUND));
+    let sound = note_label(Some(screen_sound()));
     sound.add_css_class("sol-quiet");
     page_box.append(&reason);
     page_box.append(&next);
     page_box.append(&breath);
     page_box.append(&sound);
 
-    let (so_far_row, so_far) = fact_row("so far");
-    let (last_row, last) = fact_row("last taken in");
+    let (so_far_row, so_far) = fact_row(text!("linux.window.sofar"));
+    let (last_row, last) = fact_row(text!("linux.window.lasttakenin"));
     page_box.append(&so_far_row);
     page_box.append(&last_row);
 
@@ -1268,45 +1317,45 @@ fn screen_settings() -> (
     gtk::Label,
 ) {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let head = section_label("goes along with it");
+    let head = section_label(text!("linux.window.goesalongwithit"));
     head.add_css_class("sol-rule");
     box_.append(&head);
-    let (activity_row, activity) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_SOURCE);
-    let (titles_row, titles) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_TITLES);
-    let (urls_row, urls) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_URLS);
+    let (activity_row, activity) = setting_row(solstone_linux::copy::settings_activity_source());
+    let (titles_row, titles) = setting_row(solstone_linux::copy::settings_activity_titles());
+    let (urls_row, urls) = setting_row(solstone_linux::copy::settings_activity_urls());
     let (pause_row, through_pause) =
-        setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_THROUGH_PAUSE);
-    let (only_row, activity_only) = setting_row(solstone_linux::copy::SETTINGS_ACTIVITY_ONLY);
+        setting_row(solstone_linux::copy::settings_activity_through_pause());
+    let (only_row, activity_only) = setting_row(solstone_linux::copy::settings_activity_only());
     box_.append(&activity_row);
     box_.append(&titles_row);
     box_.append(&urls_row);
     box_.append(&pause_row);
     box_.append(&note_label(Some(
-        solstone_linux::copy::SETTINGS_ACTIVITY_THROUGH_PAUSE_HELP,
+        solstone_linux::copy::settings_activity_through_pause_help(),
     )));
     box_.append(&only_row);
     box_.append(&note_label(Some(
-        solstone_linux::copy::SETTINGS_ACTIVITY_ONLY_HELP,
+        solstone_linux::copy::settings_activity_only_help(),
     )));
     box_.append(&note_label(Some(
-        solstone_linux::copy::SETTINGS_RESTART_HELP,
+        solstone_linux::copy::settings_restart_help(),
     )));
-    let save = gtk::Button::with_label(solstone_linux::copy::SETTINGS_SAVE);
+    let save = gtk::Button::with_label(solstone_linux::copy::settings_save());
     save.add_css_class("sol-action");
     save.set_halign(gtk::Align::Start);
     box_.append(&save);
     let save_note = note_label(None);
     box_.append(&save_note);
-    let left = section_label("left out");
+    let left = section_label(text!("linux.window.leftout"));
     left.add_css_class("sol-rule");
     box_.append(&left);
-    let (apps_row, exclude_apps) = fact_row(solstone_linux::copy::SETTINGS_ACTIVITY_EXCLUDE_APPS);
+    let (apps_row, exclude_apps) = fact_row(solstone_linux::copy::settings_activity_exclude_apps());
     let (titles_left, exclude_titles) =
-        fact_row(solstone_linux::copy::SETTINGS_ACTIVITY_EXCLUDE_TITLES);
+        fact_row(solstone_linux::copy::settings_activity_exclude_titles());
     box_.append(&apps_row);
     box_.append(&titles_left);
     box_.append(&note_label(Some(
-        solstone_linux::copy::SETTINGS_ACTIVITY_PRIVATE_WINDOWS_NOTE,
+        solstone_linux::copy::settings_activity_private_windows_note(),
     )));
     (
         box_,
@@ -1324,11 +1373,11 @@ fn screen_settings() -> (
 
 fn browsers_settings() -> (gtk::Box, gtk::Label) {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let head = section_label("browsers");
+    let head = section_label(text!("linux.window.browsers"));
     head.add_css_class("sol-rule");
     box_.append(&head);
-    box_.append(&note_label(Some(BROWSERS_GAP)));
-    let (row, names) = fact_row("connected");
+    box_.append(&note_label(Some(browsers_gap())));
+    let (row, names) = fact_row(text!("linux.window.connected"));
     names.set_wrap(true);
     box_.append(&row);
     box_.set_visible(false);
@@ -1345,12 +1394,12 @@ fn obsidian_settings() -> gtk::Box {
 
 fn page_breath(id: TileId) -> &'static str {
     match id {
-        TileId::Screen => SCREEN_BREATH,
-        TileId::Terminal => TERMINAL_BREATH,
-        TileId::Browsers => BROWSERS_BREATH,
-        TileId::Obsidian => solstone_linux::copy::OBSIDIAN_EXPLAIN,
-        TileId::Screenshots => solstone_linux::copy::screenshots::D1,
-        TileId::Import => solstone_linux::import::EXPLANATION,
+        TileId::Screen => screen_breath(),
+        TileId::Terminal => terminal_breath(),
+        TileId::Browsers => browsers_breath(),
+        TileId::Obsidian => solstone_linux::copy::obsidian_explain(),
+        TileId::Screenshots => solstone_linux::copy::screenshots::d1(),
+        TileId::Import => solstone_linux::import::explanation(),
     }
 }
 
@@ -1363,10 +1412,10 @@ fn page_reason(
         return (None, None);
     }
     match id {
-        TileId::Screen => (Some(SCREEN_WAITING), None),
+        TileId::Screen => (Some(screen_waiting()), None),
         TileId::Terminal => (view.terminal_reason, None),
         TileId::Browsers => (view.browsers_reason, None),
-        TileId::Obsidian => (Some(solstone_linux::copy::OBSIDIAN_ATTENTION_VAULT), None),
+        TileId::Obsidian => (Some(solstone_linux::copy::obsidian_attention_vault()), None),
         TileId::Screenshots | TileId::Import => (None, None),
     }
 }
@@ -1478,7 +1527,7 @@ fn source_row(name: &str, glyph: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
     title.set_hexpand(true);
     title.set_xalign(0.0);
     // The pane never widens for a value: a long one wraps (`10` over `screenshots`).
-    let so_far = gtk::Label::new(Some("nothing yet"));
+    let so_far = gtk::Label::new(Some(text!("linux.window.nothingyet")));
     so_far.add_css_class("sol-ink");
     so_far.set_halign(gtk::Align::End);
     so_far.set_xalign(1.0);
@@ -1498,11 +1547,27 @@ fn source_row(name: &str, glyph: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
 
 fn fill_shelf(shelf: &gtk::Box) -> Vec<ShelfWidgets> {
     let rows = [
-        ("home", ShelfRow::Home, GLYPH_HOME),
-        ("your journal", ShelfRow::Journal, GLYPH_JOURNAL),
-        ("this computer", ShelfRow::Computer, GLYPH_DEVICE),
-        ("updates", ShelfRow::Updates, GLYPH_UPDATES),
-        ("help", ShelfRow::Help, GLYPH_HELP),
+        (
+            text!("linux.window.home.vcb176487"),
+            ShelfRow::Home,
+            GLYPH_HOME,
+        ),
+        (
+            text!("linux.window.yourjournal"),
+            ShelfRow::Journal,
+            GLYPH_JOURNAL,
+        ),
+        (
+            text!("linux.window.thiscomputer"),
+            ShelfRow::Computer,
+            GLYPH_DEVICE,
+        ),
+        (
+            text!("linux.window.updates"),
+            ShelfRow::Updates,
+            GLYPH_UPDATES,
+        ),
+        (text!("linux.window.help"), ShelfRow::Help, GLYPH_HELP),
     ];
     rows.into_iter()
         .map(|(label, which, glyph)| {
@@ -1538,7 +1603,7 @@ fn fill_shelf(shelf: &gtk::Box) -> Vec<ShelfWidgets> {
 
 fn pause_controls() -> (gtk::MenuButton, gtk::Button) {
     let pause = gtk::MenuButton::new();
-    pause.set_label("pause ▾");
+    pause.set_label(text!("linux.window.pause"));
     pause.set_always_show_arrow(false);
     pause.add_css_class("sol-pill");
     let popover = gtk::Popover::new();
@@ -1548,7 +1613,7 @@ fn pause_controls() -> (gtk::MenuButton, gtk::Button) {
     }
     popover.set_child(Some(&menu));
     pause.set_popover(Some(&popover));
-    let resume = gtk::Button::with_label("resume");
+    let resume = gtk::Button::with_label(text!("linux.window.resume"));
     resume.add_css_class("sol-pill");
     resume.set_visible(false);
     (pause, resume)
@@ -1559,7 +1624,7 @@ fn status_pill() -> (gtk::Button, gtk::DrawingArea, gtk::Label) {
     pill.add_css_class("sol-pill");
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let mark = mark_widget();
-    let label = gtk::Label::new(Some("not paired"));
+    let label = gtk::Label::new(Some(text!("linux.window.notpaired")));
     label.add_css_class("sol-ink");
     row.append(&mark);
     row.append(&label);
@@ -1579,7 +1644,7 @@ fn journal_pill() -> (gtk::Box, gtk::Label, gtk::DrawingArea) {
     right.add_css_class("sol-chip");
     right.add_css_class("sol-chip-b");
     right.set_size_request(11, 11);
-    let label = gtk::Label::new(Some("your · journal"));
+    let label = gtk::Label::new(Some(text!("linux.window.yourjournal.vc43fd4d5")));
     label.add_css_class("sol-display");
     label.add_css_class("sol-ink");
     // A paired journal shows its own mark in place of the two placeholder chips.
@@ -1796,7 +1861,7 @@ fn wire_activity_save(
             return;
         }
         button.set_sensitive(false);
-        button.set_label(solstone_linux::copy::SETTINGS_SAVING);
+        button.set_label(solstone_linux::copy::settings_saving());
         let button = button.clone();
         let ui = Rc::clone(&ui);
         let view = Rc::clone(&view);
@@ -1805,14 +1870,14 @@ fn wire_activity_save(
         let selected = Rc::clone(&selected);
         glib::MainContext::default().spawn_local(async move {
             let done = write_settings(&writes).await;
-            button.set_label(solstone_linux::copy::SETTINGS_SAVE);
+            button.set_label(solstone_linux::copy::settings_save());
             button.set_sensitive(true);
             let note = &ui.page.save_note;
             if done {
                 ui.page.edited.set(false);
-                note.set_text(solstone_linux::copy::SETTINGS_SAVED);
+                note.set_text(solstone_linux::copy::settings_saved());
             } else {
-                note.set_text(solstone_linux::copy::SETTINGS_SAVE_UNAVAILABLE);
+                note.set_text(solstone_linux::copy::settings_save_unavailable());
             }
             note.set_visible(true);
             refresh(&ui, &view, &seen, &daemon, &selected);
@@ -1857,7 +1922,7 @@ fn wire_computer(
                 refresh(&ui, &view, &seen, &daemon, &selected);
                 if !done || saved_value(&view.borrow(), field) != on {
                     ui.computer_note
-                        .set_text(solstone_linux::copy::SETTINGS_SAVE_UNAVAILABLE);
+                        .set_text(solstone_linux::copy::settings_save_unavailable());
                     ui.computer_note.set_visible(true);
                 }
             });
@@ -1910,21 +1975,21 @@ fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label, gtk::Labe
     page.set_hexpand(true);
     page.set_vexpand(true);
     page.set_valign(gtk::Align::Fill);
-    let title = gtk::Label::new(Some("this computer"));
+    let title = gtk::Label::new(Some(text!("linux.window.thiscomputer")));
     title.add_css_class("sol-name");
     title.add_css_class("sol-display");
     title.add_css_class("sol-ink");
     title.set_halign(gtk::Align::Start);
     page.append(&title);
-    let (cursor_row, cursor) = setting_row(solstone_linux::copy::SETTINGS_CURSOR);
-    let (paused_row, start_paused) = setting_row(solstone_linux::copy::SETTINGS_START_PAUSED);
-    let (segment_row, segment) = fact_row(solstone_linux::copy::SETTINGS_SEGMENT);
+    let (cursor_row, cursor) = setting_row(solstone_linux::copy::settings_cursor());
+    let (paused_row, start_paused) = setting_row(solstone_linux::copy::settings_start_paused());
+    let (segment_row, segment) = fact_row(solstone_linux::copy::settings_segment());
     page.append(&cursor_row);
     page.append(&paused_row);
     let note = note_label(None);
     page.append(&note);
     page.append(&segment_row);
-    let (file_row, file_value) = fact_row(solstone_linux::copy::SETTINGS_FILE);
+    let (file_row, file_value) = fact_row(solstone_linux::copy::settings_file());
     let loaded = config::load_config(config::ConfigPaths::default());
     file_value.set_text(&loaded.config.config_path().display().to_string());
     file_value.set_visible(true);
@@ -1942,19 +2007,19 @@ fn updates_page() -> (gtk::Box, gtk::Box, gtk::Label) {
     page.set_hexpand(true);
     page.set_vexpand(true);
     page.set_valign(gtk::Align::Fill);
-    let title = gtk::Label::new(Some("updates"));
+    let title = gtk::Label::new(Some(text!("linux.window.updates")));
     title.add_css_class("sol-name");
     title.add_css_class("sol-display");
     title.add_css_class("sol-ink");
     title.set_halign(gtk::Align::Start);
     page.append(&title);
-    let (app_row, app_version) = fact_row(solstone_linux::copy::STATUS_VERSION);
+    let (app_row, app_version) = fact_row(solstone_linux::copy::status_version());
     app_version.set_text(env!("CARGO_PKG_VERSION"));
     page.append(&app_row);
-    let (journal_row, journal_version) = fact_row(solstone_linux::copy::UPDATES_JOURNAL_VERSION);
+    let (journal_row, journal_version) = fact_row(solstone_linux::copy::updates_journal_version());
     journal_row.set_visible(false);
     page.append(&journal_row);
-    page.append(&note_label(Some(solstone_linux::copy::UPDATES_HOW)));
+    page.append(&note_label(Some(solstone_linux::copy::updates_how())));
     (page, journal_row, journal_version)
 }
 
@@ -2212,10 +2277,10 @@ fn apply_view(ui: &Ui, view: &View) {
     ui.segment.set_text(&format!(
         "{} {}",
         view.segment_interval,
-        solstone_linux::copy::SETTINGS_SEGMENT_HELP
+        solstone_linux::copy::settings_segment_help()
     ));
     if hidden {
-        ui.unread.set_text(shell_model::INTAKE_UNREADABLE);
+        ui.unread.set_text(shell_model::intake_unreadable());
         ui.unread.set_visible(true);
     } else {
         ui.unread.set_visible(false);
@@ -2377,9 +2442,11 @@ fn apply_layout(
     // The desktop close sits on this corner. The page's way back is a link.
     ui.page.close.set_visible(false);
     if page_open.get() {
-        ui.page
-            .home
-            .set_label(if phone_page { "‹ home" } else { "‹ status" });
+        ui.page.home.set_label(if phone_page {
+            text!("linux.window.home")
+        } else {
+            text!("linux.window.status.vaff1290e")
+        });
         ui.page.home.set_visible(true);
     } else {
         ui.page.home.set_visible(false);
@@ -2417,11 +2484,11 @@ fn place_tiles(grid: &gtk::Grid, tiles: &[TileWidgets], add_more: &gtk::Box, col
 
 fn shelf_label(row: ShelfRow) -> &'static str {
     match row {
-        ShelfRow::Home => "home",
-        ShelfRow::Journal => "your journal",
-        ShelfRow::Computer => "this computer",
-        ShelfRow::Updates => "updates",
-        ShelfRow::Help => "help",
+        ShelfRow::Home => text!("linux.window.home.vcb176487"),
+        ShelfRow::Journal => text!("linux.window.yourjournal"),
+        ShelfRow::Computer => text!("linux.window.thiscomputer"),
+        ShelfRow::Updates => text!("linux.window.updates"),
+        ShelfRow::Help => text!("linux.window.help"),
     }
 }
 
@@ -2658,7 +2725,7 @@ fn apply_journal_fixture(
             *paired = true;
             *offline = false;
             *waiting = None;
-            *connection = Some(solstone_linux::copy::JOURNAL_CONNECTED.to_owned());
+            *connection = Some(solstone_linux::copy::journal_connected().to_owned());
             *last_reached = fixture_reached(0);
             *named = true;
         }
@@ -2666,7 +2733,7 @@ fn apply_journal_fixture(
             *paired = true;
             *offline = true;
             *waiting = None;
-            *connection = Some(solstone_linux::copy::JOURNAL_OFFLINE.to_owned());
+            *connection = Some(solstone_linux::copy::journal_offline().to_owned());
             *last_reached = fixture_reached(40 * 60);
             *named = true;
         }
@@ -2683,7 +2750,7 @@ fn apply_journal_fixture(
             *paired = true;
             *offline = true;
             *waiting = Some(count);
-            *connection = Some(solstone_linux::copy::JOURNAL_OFFLINE.to_owned());
+            *connection = Some(solstone_linux::copy::journal_offline().to_owned());
             *last_reached = fixture_reached(40 * 60);
             *named = true;
         }
@@ -3386,9 +3453,9 @@ fn widget_dark(widget: &gtk::Widget) -> bool {
 
 fn connection_words(health: &str) -> &'static str {
     match health {
-        "connected" | "syncing" => solstone_linux::copy::JOURNAL_CONNECTED,
-        "connecting" | "listener-ready" => solstone_linux::copy::LOCAL_JOURNAL_CONNECTING,
-        _ => solstone_linux::copy::JOURNAL_OFFLINE,
+        "connected" | "syncing" => solstone_linux::copy::journal_connected(),
+        "connecting" | "listener-ready" => solstone_linux::copy::local_journal_connecting(),
+        _ => solstone_linux::copy::journal_offline(),
     }
 }
 
@@ -3465,11 +3532,13 @@ fn paint_journal_name(ui: &Ui, view: &View) {
     if view.fixture_mark {
         ui.journal.add_css_class("sol-named");
         ui.journal.remove_css_class("sol-paired");
-        ui.journal_label.set_text("bright · harbor");
+        ui.journal_label
+            .set_text(text!("linux.window.brightharbor"));
         return;
     }
     ui.journal.remove_css_class("sol-named");
-    ui.journal_label.set_text("your · journal");
+    ui.journal_label
+        .set_text(text!("linux.window.yourjournal.vc43fd4d5"));
     if view.paired {
         ui.journal.add_css_class("sol-paired");
     } else {
@@ -3481,33 +3550,33 @@ fn paint_pairing(ui: &Ui, view: &View) {
     paint_journal_facts(ui, view);
     paint_journal_name(ui, view);
     if !view.paired {
-        ui.pill_label.set_text("not paired");
-        ui.lead.set_text("not paired");
-        show_connect(ui, Some("connect a journal"));
+        ui.pill_label.set_text(text!("linux.window.notpaired"));
+        ui.lead.set_text(text!("linux.window.notpaired"));
+        show_connect(ui, true, None);
         apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         return;
     }
     if view.offline {
         if let Some(count) = view.offline_waiting {
-            let line = format!("offline · {count} waiting");
+            let line = message!("linux.tray.offlinewaiting", "count" => count);
             ui.pill_label.set_text(&line);
             ui.lead.set_text(&line);
-            show_connect(ui, Some("on this device"));
+            show_connect(ui, false, Some(text!("linux.window.onthisdevice")));
             apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         } else {
             ui.pill_label.set_text("");
             ui.lead.set_text("");
-            show_connect(ui, None);
+            show_connect(ui, false, None);
             apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         }
         return;
     }
-    ui.pill_label.set_text("connected");
+    ui.pill_label.set_text(text!("linux.window.connected"));
     if let Some(imports) = current_snap().imports
         && imports.held
     {
         ui.lead.set_text(&imports.recent);
-        show_connect(ui, None);
+        show_connect(ui, false, None);
         apply_mark_kind(
             &ui.pill_mark,
             if imports.sending {
@@ -3518,17 +3587,22 @@ fn paint_pairing(ui: &Ui, view: &View) {
         );
         return;
     }
-    ui.lead.set_text("all caught up");
-    show_connect(ui, Some("everything is in your journal"));
+    ui.lead.set_text(text!("linux.window.allcaughtup"));
+    show_connect(
+        ui,
+        false,
+        Some(text!("linux.window.everythinginyourjournal")),
+    );
     apply_mark_kind(&ui.pill_mark, MarkKind::Good);
 }
 
-fn show_connect(ui: &Ui, text: Option<&str>) {
+fn show_connect(ui: &Ui, show_button: bool, text: Option<&str>) {
+    if show_button {
+        ui.connect.set_visible(true);
+        ui.soft.set_visible(false);
+        return;
+    }
     match text {
-        Some("connect a journal") => {
-            ui.connect.set_visible(true);
-            ui.soft.set_visible(false);
-        }
         Some(text) => {
             ui.connect.set_visible(false);
             ui.soft.set_text(text);
@@ -3543,7 +3617,7 @@ fn show_connect(ui: &Ui, text: Option<&str>) {
 }
 
 fn tile_subs(view: &View) -> [Option<String>; 5] {
-    let off_sub = |word: StateWord| (word == StateWord::Off).then(|| OFF_SUB.to_owned());
+    let off_sub = |word: StateWord| (word == StateWord::Off).then(|| off_sub().to_owned());
     let screen = shell_model::screen_sub_label(view.screen_sub)
         .map(str::to_owned)
         .or_else(|| off_sub(view.screen));
@@ -3646,7 +3720,7 @@ fn apply_document(
             .as_ref()
             .is_some_and(|document| document.status.vault.is_some()),
         screenshots: screenshots_text.and_then(solstone_linux::screenshots::decode_document),
-        kept: "nothing yet".to_owned(),
+        kept: text!("linux.window.nothingyet").to_owned(),
         pause_bounded: doc.pause_bounded,
         mark: doc.confirmed_mark,
     })
@@ -3689,7 +3763,7 @@ async fn watcher_present() -> Option<bool> {
 async fn kept_label() -> String {
     gio::spawn_blocking(measure_kept)
         .await
-        .unwrap_or_else(|_| "nothing yet".to_owned())
+        .unwrap_or_else(|_| text!("linux.window.nothingyet").to_owned())
 }
 
 fn measure_kept() -> String {
@@ -3728,12 +3802,12 @@ fn measure_kept() -> String {
 
 fn format_kept(bytes: u64) -> String {
     if bytes == 0 {
-        return "nothing yet".to_owned();
+        return text!("linux.window.nothingyet").to_owned();
     }
     const MB: u64 = 1_000_000;
     const KB: u64 = 1_000;
     if bytes < MB {
-        return format!("{} KB", (bytes / KB).max(1));
+        return message!("linux.window.kilobytes", "size" => (bytes / KB).max(1));
     }
-    format!("{} MB", bytes / MB)
+    message!("linux.window.megabytes", "size" => bytes / MB)
 }

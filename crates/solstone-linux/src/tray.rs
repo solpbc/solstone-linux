@@ -6,6 +6,7 @@ use crate::sync_health::HealthState;
 use crate::tray_model::TrayModel;
 use ksni::menu::{MenuItem, StandardItem, SubMenu};
 use ksni::{Category, Icon, Status, ToolTip, Tray};
+use solstone_i18n::{message, text};
 use std::sync::mpsc::Sender;
 
 mod generated {
@@ -58,12 +59,16 @@ fn menu_status_line(model: &TrayModel) -> String {
         };
     }
     match model.health_state {
-        HealthState::PairingRequired | HealthState::NotReported => "not paired".to_string(),
+        HealthState::PairingRequired | HealthState::NotReported => {
+            text!("linux.tray.notpaired").to_string()
+        }
         HealthState::Connected if model.import_held => model.sync.clone(),
-        HealthState::Connected => "connected · all caught up".to_string(),
+        HealthState::Connected => text!("linux.tray.connectedallcaughtup").to_string(),
         HealthState::Offline => match model.waiting_count {
-            Some(count) if count > 0 => format!("offline · {count} waiting"),
-            _ => "offline".to_string(),
+            Some(count) if count > 0 => {
+                message!("linux.tray.offlinewaiting", "count" => count)
+            }
+            _ => text!("linux.shared.tray.offline").to_string(),
         },
         _ => String::new(),
     }
@@ -90,7 +95,7 @@ impl Tray for KsniTray {
         Category::SystemServices
     }
     fn title(&self) -> String {
-        "solstone".into()
+        text!("linux.metadata.name").into()
     }
     fn status(&self) -> Status {
         if self.model.sni_status == "NeedsAttention" {
@@ -117,7 +122,7 @@ impl Tray for KsniTray {
     }
     fn tool_tip(&self) -> ToolTip {
         ToolTip {
-            title: "solstone".into(),
+            title: text!("linux.metadata.name").into(),
             description: self.model.tooltip.clone(),
             ..Default::default()
         }
@@ -127,7 +132,7 @@ impl Tray for KsniTray {
         if self.model.status.needs_attention() {
             rows.push(
                 StandardItem {
-                    label: "screen needs attention".into(),
+                    label: text!("linux.tray.screenneedsattention").into(),
                     activate: Box::new(|_: &mut KsniTray| {
                         crate::cli::spawn_window_from_tray();
                     }),
@@ -140,12 +145,16 @@ impl Tray for KsniTray {
         if self.model.pause_visible {
             rows.push(
                 SubMenu {
-                    label: "pause".into(),
+                    label: text!("linux.copy.pause").into(),
                     submenu: vec![
-                        action("15 minutes", TrayCommand::Pause(900)).into(),
-                        action("30 minutes", TrayCommand::Pause(1800)).into(),
-                        action("1 hour", TrayCommand::Pause(3600)).into(),
-                        action("until I resume", TrayCommand::PauseIndefinite).into(),
+                        action(text!("linux.tray.n15minutes"), TrayCommand::Pause(900)).into(),
+                        action(text!("linux.tray.n30minutes"), TrayCommand::Pause(1800)).into(),
+                        action(text!("linux.tray.n1hour"), TrayCommand::Pause(3600)).into(),
+                        action(
+                            text!("linux.tray.untiliresume"),
+                            TrayCommand::PauseIndefinite,
+                        )
+                        .into(),
                     ],
                     ..Default::default()
                 }
@@ -155,7 +164,7 @@ impl Tray for KsniTray {
         if self.model.resume_visible {
             rows.push(
                 StandardItem {
-                    label: "resume".into(),
+                    label: text!("linux.tray.resume").into(),
                     activate: Box::new(|tray: &mut KsniTray| {
                         let _ = tray.commands.send(TrayCommand::Resume);
                     }),
@@ -166,7 +175,7 @@ impl Tray for KsniTray {
         }
         rows.push(
             StandardItem {
-                label: "open settings".into(),
+                label: text!("linux.tray.opensettings").into(),
                 activate: Box::new(|_: &mut KsniTray| {
                     crate::cli::spawn_settings_window_from_tray();
                 }),
@@ -177,7 +186,7 @@ impl Tray for KsniTray {
         if journal_paired(self.model.health_state) {
             rows.push(
                 StandardItem {
-                    label: "open journal".into(),
+                    label: text!("linux.tray.openjournal").into(),
                     enabled: self.model.open_journal_enabled,
                     activate: Box::new(|tray: &mut KsniTray| {
                         let _ = tray.commands.send(TrayCommand::OpenJournal);
@@ -189,7 +198,7 @@ impl Tray for KsniTray {
         }
         rows.push(
             StandardItem {
-                label: "about solstone".into(),
+                label: text!("linux.tray.aboutsolstone").into(),
                 activate: Box::new(|_: &mut KsniTray| {
                     crate::cli::spawn_window_from_tray();
                 }),
@@ -199,7 +208,7 @@ impl Tray for KsniTray {
         );
         rows.push(
             StandardItem {
-                label: "quit solstone".into(),
+                label: text!("linux.tray.quitsolstone").into(),
                 activate: Box::new(|tray: &mut KsniTray| {
                     let _ = tray.commands.send(TrayCommand::Quit);
                 }),

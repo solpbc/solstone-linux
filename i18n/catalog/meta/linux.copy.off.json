@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.desktop.shared.app.microphonemodeoff, windows.desktop.shared.app.microphonemodeoff.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 3,
+  "source_revision": "586bf5ca34678fde5d5ee91f0d9afc705ee026707d1342de2557fe14bed025a4",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

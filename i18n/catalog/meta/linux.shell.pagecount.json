@@ -1,0 +1,31 @@
+{
+  "description": "Source total with its unit.",
+  "context": "Source total with its unit.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "display",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 18,
+  "source_revision": "2803523a7d0b257c79c2785a95613d5c341408acf9eabcedebcefcad7f153ac6",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

@@ -10,6 +10,7 @@ publish = false
 workspace = true
 
 [dependencies]
+solstone-i18n = { version = "2.0.45", path = "../solstone-i18n" }
 gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_6"] }
 num-format = { version = "0.4.4", features = ["with-system-locale"] }
 resvg = { version = "0.48.1", default-features = false, features = ["text"] }

@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the tray component.",
+  "context": "Presentation from the tray component. Same English as macos.setup.untiliresume, windows.ui.untiliresume.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 14,
+  "source_revision": "08e0631e8bc379c38fac1ff44917c9b020996b6ae0b70841b27dc924fb1eb2a9",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

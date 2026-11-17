@@ -1,0 +1,32 @@
+{
+  "description": "Two-line app and journal version card.",
+  "context": "Two-line app and journal version card.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "app",
+      "type": "string"
+    },
+    {
+      "name": "journal",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 30,
+  "source_revision": "1157b2bd5ae5f428af2a46d3af4f6505747a75382cbf5669d49e1df1ce82891c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "break",
+      "kind": "whitespace",
+      "value": "\n"
+    }
+  ]
+}

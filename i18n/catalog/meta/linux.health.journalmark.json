@@ -1,0 +1,28 @@
+{
+  "description": "Technical detail when another journal answered this computer.",
+  "context": "Technical detail when another journal answered this computer.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "paired",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 27,
+  "source_revision": "70f0de6d56b02aacd3deba9b0c36e43352ef475f5a118c920055d4cf1d3e9d30",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "ws1",
+      "kind": "whitespace",
+      "value": "   "
+    }
+  ]
+}

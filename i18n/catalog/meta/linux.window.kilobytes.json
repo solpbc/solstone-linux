@@ -1,0 +1,22 @@
+{
+  "description": "Storage amount used for local material.",
+  "context": "Storage amount used for local material.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "size",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 12,
+  "source_revision": "0371a2a689aad774ff7f1b2383816c1fc4da6a197c55121368bbf9ae547c00d2",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

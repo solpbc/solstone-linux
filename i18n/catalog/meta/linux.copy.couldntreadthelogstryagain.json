@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as windows.logs.textcontent4.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 34,
+  "source_revision": "f3583260c27d3f58e27b932424a063a664ac9bbc759e6d8aa39d10c8768e9676",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

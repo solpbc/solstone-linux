@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.ui.noidentitypresented, windows.ui.noidentitypresented.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 21,
+  "source_revision": "fefb5737680e565132678c5353c1054ed84759a22a4bf6e863960f84dcd7b6f5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

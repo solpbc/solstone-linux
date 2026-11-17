@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as windows.ui.yourjournal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 14,
+  "source_revision": "25b2673bdb53e00718ccd322fb3a70a06d5595d984eeda039aa8227c4bb47421",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

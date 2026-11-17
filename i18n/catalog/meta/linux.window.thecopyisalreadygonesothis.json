@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopimportpage.thecopyisalreadygonesothisonlyclearsitfromher, windows.ui.thecopyisalreadygonesothisonlyclearsitfromhere.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 59,
+  "source_revision": "66b139afe15ad2432ee3c51b6b82aa3ed184e31192f21ae1ea242da241fb3b1f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

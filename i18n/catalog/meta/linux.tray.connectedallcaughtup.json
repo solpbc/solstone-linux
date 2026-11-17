@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the tray component.",
+  "context": "Presentation from the tray component. Same English as macos.desktopglance.connectedallcaughtup.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 25,
+  "source_revision": "b8ca845d9180e8f2869610ab414bf6caa8c3273ea5394eed8a81280224db1ebe",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

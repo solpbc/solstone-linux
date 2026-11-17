@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the desktop window.",
+  "context": "Shown in the desktop window. Same English as macos.desktopimportpage.choosefiles, windows.ui.choosefiles.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 13,
+  "source_revision": "4ed2a940f578c3117575f2f607ae63806602b573aa501bbaa7534f8ec56fae2d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

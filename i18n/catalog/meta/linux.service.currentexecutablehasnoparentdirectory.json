@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the service component.",
+  "context": "Presentation from the service component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 42,
+  "source_revision": "310232d1b88e5ae01801baff6ec7b6bb03d6fb48e43638c6367c2b3f8d5a1211",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

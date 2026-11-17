@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.copy.journalmarkheld, windows.ui.waitingforyoutoconfirmyourjournalsmark.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 46,
+  "source_revision": "941f0be92efba26f40a0c121ad5c599d383b42c1477ce29131b15cf25cf598dd",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

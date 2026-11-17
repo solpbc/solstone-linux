@@ -1,0 +1,23 @@
+{
+  "description": "Presentation from the service component.",
+  "context": "Presentation from the service component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 105,
+  "source_revision": "87652dcfc1af40bcf94526e240f5e798b195dceeb4c92e0dab64a2316d8114b7",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "systemctl --user start solstone-linux.service"
+    }
+  ]
+}

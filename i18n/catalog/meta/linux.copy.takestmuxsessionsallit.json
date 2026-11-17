@@ -1,0 +1,28 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 135,
+  "source_revision": "4a06a970490095e983255aa3201c70f4bed389e1043296419d8ef3b63e0cc00a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "tmux"
+    },
+    {
+      "name": "literal2",
+      "kind": "command",
+      "value": "SSH"
+    }
+  ]
+}

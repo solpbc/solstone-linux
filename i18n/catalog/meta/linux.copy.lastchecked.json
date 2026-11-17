@@ -1,0 +1,17 @@
+{
+  "description": "Presentation from the copy component.",
+  "context": "Presentation from the copy component. Same English as macos.screenshot.lastchecked, windows.ui.lastchecked.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 12,
+  "source_revision": "5839c17409b0d1123bfe88df304e00f59ce30f8de3a67de8d3065ad4e502faa8",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}
