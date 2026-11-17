@@ -41,7 +41,7 @@ fn drain(reader: &mut impl Read, bytes: &mut Vec<u8>, limit: usize) -> io::Resul
 }
 
 /// Capture bounded diagnostics without waiting for pipe EOF held by a descendant.
-/// A missing deadline is used only for the interactive window's lifetime.
+/// A missing deadline leaves lifetime control to the caller or the child's own deadlines.
 pub fn run(command: &mut Command, deadline: Option<Duration>, limit: usize) -> io::Result<Output> {
     let mut child = command
         .stdout(Stdio::piped())

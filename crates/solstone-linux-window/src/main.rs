@@ -7,6 +7,7 @@ mod copy_map;
 mod deck;
 mod format;
 mod import_page;
+mod journal_setup;
 mod logs;
 mod mark_card;
 mod screenshots_page;

@@ -231,11 +231,15 @@ async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
         (
             classify_user_service(&runner),
             user_service_pid(&runner).ok(),
+            solstone_linux::local_journal::app_pairing_is_absent(),
         )
     })
     .await;
-    let (presence, service_pid) =
-        service.unwrap_or((solstone_linux::service::ServicePresence::Uncertain, None));
+    let (presence, service_pid, local_pairing_absent) = service.unwrap_or((
+        solstone_linux::service::ServicePresence::Uncertain,
+        None,
+        false,
+    ));
     let result = match ControlClient::session().await {
         Ok(client) => match client.get_owner().await {
             Ok(owner) => {
@@ -277,6 +281,7 @@ async fn refresh_state(controller: &Rc<RefCell<Controller>>) {
     };
     let mut c = controller.borrow_mut();
     c.service_presence = presence;
+    c.local_pairing_absent = local_pairing_absent;
     c.obsidian = obsidian_doc;
     c.obsidian_found = found_vaults;
     if let Some((owner, pid, reply, offer, _)) = result {
@@ -969,6 +974,58 @@ fn create_journal_page(
     local_connect_button.set_halign(gtk::Align::Center);
     local_connect_button.set_visible(false);
 
+    let setup_running = Rc::new(Cell::new(false));
+    let setup_outcome = Rc::new(Cell::new(None::<crate::journal_setup::Outcome>));
+    let setup_button = gtk::Button::with_label(solstone_linux::copy::JOURNAL_SETUP_ACTION);
+    setup_button.set_halign(gtk::Align::Center);
+    setup_button.set_visible(false);
+    let setup_notice = gtk::Label::new(None);
+    setup_notice.set_wrap(true);
+    setup_notice.set_visible(false);
+    let setup_install = gtk::LinkButton::with_label(
+        "https://solstone.app/install#linux",
+        solstone_linux::copy::JOURNAL_SETUP_INSTALL,
+    );
+    setup_install.set_halign(gtk::Align::Center);
+    setup_install.set_visible(false);
+    {
+        let running = Rc::clone(&setup_running);
+        let outcome = Rc::clone(&setup_outcome);
+        let ctrl = Rc::clone(&controller);
+        let changed = Rc::clone(&changed);
+        setup_button.connect_clicked(move |_| {
+            if !ctrl.borrow().can_setup_local_journal() {
+                return;
+            }
+            if running.replace(true) {
+                return;
+            }
+            outcome.set(None);
+            notify(&changed);
+            let running = Rc::clone(&running);
+            let outcome = Rc::clone(&outcome);
+            let ctrl = Rc::clone(&ctrl);
+            let changed = Rc::clone(&changed);
+            glib::MainContext::default().spawn_local(async move {
+                let result = gio::spawn_blocking(crate::journal_setup::run)
+                    .await
+                    .unwrap_or(crate::journal_setup::Outcome::SetupFailed);
+                running.set(false);
+                outcome.set(Some(result));
+                if matches!(
+                    result,
+                    crate::journal_setup::Outcome::Opened
+                        | crate::journal_setup::Outcome::OpenFailed
+                ) && ctrl.borrow().bus_owner.is_none()
+                {
+                    begin_start(Rc::clone(&ctrl), Rc::clone(&changed));
+                }
+                refresh_state(&ctrl).await;
+                notify(&changed);
+            });
+        });
+    }
+
     let pairing_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
     let link_entry = gtk::Entry::new();
     let submitted_link = Rc::new(RefCell::new(None::<glib::GString>));
@@ -1018,6 +1075,9 @@ fn create_journal_page(
     container.append(&unknown_journals_box);
     container.append(&mark_container);
     container.append(&local_connect_button);
+    container.append(&setup_button);
+    container.append(&setup_notice);
+    container.append(&setup_install);
     container.append(&pairing_box);
     scrolled.set_child(Some(&container));
 
@@ -1304,10 +1364,40 @@ fn create_journal_page(
 
             // Mark chip rendering
             let offer = c.offer_to_show();
+            let can_setup = c.can_setup_local_journal();
+            setup_button.set_visible(can_setup);
+            setup_button.set_sensitive(!setup_running.get());
+            setup_button.set_label(if setup_running.get() {
+                solstone_linux::copy::JOURNAL_SETUP_PREPARING
+            } else {
+                solstone_linux::copy::JOURNAL_SETUP_ACTION
+            });
+            let notice = match setup_outcome.get() {
+                Some(crate::journal_setup::Outcome::Opened) => {
+                    solstone_linux::copy::JOURNAL_SETUP_IN_BROWSER
+                }
+                Some(crate::journal_setup::Outcome::NotInstalled) => {
+                    solstone_linux::copy::JOURNAL_SETUP_NOT_INSTALLED
+                }
+                Some(crate::journal_setup::Outcome::SetupFailed) => {
+                    solstone_linux::copy::JOURNAL_SETUP_FAILED
+                }
+                Some(crate::journal_setup::Outcome::OpenFailed) => {
+                    solstone_linux::copy::JOURNAL_SETUP_OPEN_FAILED
+                }
+                None => "",
+            };
+            setup_notice.set_text(notice);
+            setup_notice.set_visible(can_setup && !notice.is_empty());
+            setup_install.set_visible(
+                can_setup
+                    && setup_outcome.get() == Some(crate::journal_setup::Outcome::NotInstalled),
+            );
             let mark = offer
                 .map(|offer| offer.mark.clone())
                 .or_else(|| crate::copy_map::mark_to_show(&c.document));
-            let unavailable = crate::copy_map::empty_mark_is_unavailable(&c.document);
+            let unavailable = crate::copy_map::empty_mark_is_unavailable(&c.document)
+                && !(c.bus_owner.is_none() && c.local_pairing_absent);
             let heading = if offer.is_some() {
                 Some(CopyKey::LocalJournalFound)
             } else if c.connected_from_offer {

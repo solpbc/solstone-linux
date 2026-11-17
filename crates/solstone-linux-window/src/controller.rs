@@ -282,6 +282,7 @@ pub struct Controller {
     pub pairing_error: Option<String>,
     pub last_answer_mark: Option<MarkRenderDocument>,
     pub local_journal_offer: Option<LocalJournalOffer>,
+    pub local_pairing_absent: bool,
     pub connected_from_offer: bool,
     pub settings_draft: SettingsDraft,
     pub logs: LogSlot,
@@ -331,6 +332,7 @@ impl Controller {
             pairing_error: None,
             last_answer_mark: None,
             local_journal_offer: None,
+            local_pairing_absent: false,
             connected_from_offer: false,
             settings_draft: SettingsDraft::default(),
             logs: LogSlot::default(),
@@ -433,6 +435,12 @@ impl Controller {
         offer_applies(&self.document)
             .then_some(self.local_journal_offer.as_ref())
             .flatten()
+    }
+
+    pub fn can_setup_local_journal(&self) -> bool {
+        (offer_applies(&self.document) || (self.bus_owner.is_none() && self.local_pairing_absent))
+            && self.pairing.is_none()
+            && self.local_journal_offer.is_none()
     }
 
     pub fn start_connect_local_journal(&mut self, bus_owner: &str) -> Option<(u64, String)> {
@@ -1854,6 +1862,31 @@ mod tests {
             assert!(c.offer_to_show().is_none());
             assert!(c.start_connect_local_journal(":1.1").is_none());
             assert!(c.pairing.is_none());
+        }
+
+        #[test]
+        fn local_setup_yields_to_a_found_journal_or_pairing() {
+            let mut c = unpaired_with_offer();
+            assert!(!c.can_setup_local_journal());
+            c.local_journal_offer = None;
+            assert!(c.can_setup_local_journal());
+            c.start_pairing(":1.1", PairingCommand::Begin("private link".into()));
+            assert!(!c.can_setup_local_journal());
+            c.pairing = None;
+            c.document.durable = "held".into();
+            assert!(!c.can_setup_local_journal());
+            c.document = decode_control_str(CONFIRMED).unwrap();
+            assert!(!c.can_setup_local_journal());
+        }
+
+        #[test]
+        fn fresh_setup_does_not_need_an_app_service_but_keeps_an_existing_pairing() {
+            let mut c = Controller::new();
+            assert!(!c.can_setup_local_journal());
+            c.local_pairing_absent = true;
+            assert!(c.can_setup_local_journal());
+            c.local_pairing_absent = false;
+            assert!(!c.can_setup_local_journal());
         }
 
         #[test]

@@ -19,6 +19,16 @@ use spl_transport::credential::Credential;
 
 use crate::window_control::MarkRenderDocument;
 
+/// A stopped app may offer local setup only when no pairing file exists.
+/// An unreadable or malformed file remains a pairing, never an invitation to replace it.
+pub fn app_pairing_is_absent() -> bool {
+    let config = crate::config::Config::default();
+    matches!(
+        std::fs::symlink_metadata(config.config_dir.join(crate::private_link::CREDENTIALS_FILENAME)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 const SOCKET_ENV: &str = "SOLSTONE_JOURNAL_SOCKET";
 const IDENTITY_PATH: &str = "/app/link/api/identity";
 const PAIR_START_PATH: &str = "/app/network/pair-start";

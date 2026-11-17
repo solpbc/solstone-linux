@@ -844,3 +844,10 @@ impl CopyKey {
         }
     }
 }
+pub const JOURNAL_SETUP_ACTION: &str = "set up a journal on this computer";
+pub const JOURNAL_SETUP_PREPARING: &str = "preparing your journal…";
+pub const JOURNAL_SETUP_IN_BROWSER: &str = "finish setup in your browser.";
+pub const JOURNAL_SETUP_NOT_INSTALLED: &str = "the journal isn't installed on this computer yet.";
+pub const JOURNAL_SETUP_INSTALL: &str = "install the journal";
+pub const JOURNAL_SETUP_FAILED: &str = "couldn't prepare your journal. run solstone journal setup in a terminal to see what needs attention.";
+pub const JOURNAL_SETUP_OPEN_FAILED: &str = "your journal is prepared, but the browser didn't open. run solstone journal open /init in a terminal to finish setup.";

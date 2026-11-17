@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- after a package install, you can start journal setup from the app's "your journal" page. setup opens in your browser.
 - an update no longer starts the solstone app if you quit it. if the app is running, it still restarts on the new version.
 - a journal link now opens when your browser hands it to the solstone app with an extra slash. before, the app said the link wasn't valid.
 
