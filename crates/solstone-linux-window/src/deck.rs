@@ -12,8 +12,10 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use solstone_linux::config::{self, OwnerSwitch};
+use solstone_linux::dbus_client::ControlClientError;
 use solstone_linux::desktop_session::SessionPresence;
 use solstone_linux::pause_hold::{self, HeldPause};
+use solstone_linux::service::ServicePresence;
 use solstone_linux::shell_model::{
     self, BrowserHost, ObsidianFacts, PauseFor, PauseLeft, ScreenSub, StateWord, TileId, WidthClass,
 };
@@ -62,6 +64,7 @@ enum ShelfRow {
 }
 
 struct View {
+    service: ServiceReading,
     screen_on: bool,
     terminal_on: bool,
     screen: StateWord,
@@ -99,9 +102,44 @@ struct View {
     segment_interval: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceReading {
+    Checking,
+    Answering,
+    Stopped,
+    Unavailable,
+}
+
+impl ServiceReading {
+    fn unanswered(presence: Option<ServicePresence>) -> Self {
+        match presence {
+            Some(ServicePresence::Absent | ServicePresence::Inactive) => Self::Stopped,
+            _ => Self::Unavailable,
+        }
+    }
+
+    fn source_word(self) -> Option<StateWord> {
+        match self {
+            Self::Checking => Some(StateWord::Checking),
+            Self::Answering => None,
+            Self::Stopped => Some(StateWord::NotRunning),
+            Self::Unavailable => Some(StateWord::Unavailable),
+        }
+    }
+
+    fn status_line(self) -> Option<&'static str> {
+        match self {
+            Self::Checking => Some(shell_model::state_label(StateWord::Checking)),
+            Self::Answering => None,
+            Self::Stopped => Some(shell_model::state_label(StateWord::NotRunning)),
+            Self::Unavailable => Some(text!("linux.copy.statusunavailable")),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ServiceSnap {
-    ready: bool,
+    reading: ServiceReading,
     capture: String,
     capture_attention: bool,
     activity_source: bool,
@@ -123,7 +161,7 @@ struct ServiceSnap {
 impl ServiceSnap {
     fn unread() -> Self {
         Self {
-            ready: false,
+            reading: ServiceReading::Checking,
             capture: String::new(),
             capture_attention: false,
             activity_source: true,
@@ -140,6 +178,14 @@ impl ServiceSnap {
             pause_bounded: None,
             mark: None,
         }
+    }
+
+    fn withdraw(&mut self, presence: Option<ServicePresence>) {
+        *self = Self {
+            reading: ServiceReading::unanswered(presence),
+            mark: self.mark.take(),
+            ..Self::unread()
+        };
     }
 }
 
@@ -202,6 +248,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     let (pause_button, resume_button) = pause_controls();
     let start_button = gtk::Button::with_label(solstone_linux::copy::CopyKey::ActionStart.as_str());
     start_button.add_css_class("sol-pill");
+    start_button.set_halign(gtk::Align::Start);
     start_button.set_visible(false);
     // The paused greeting is two lines. The pills keep their own height beside it.
     for widget in [
@@ -338,6 +385,9 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         tile_painting: Cell::new(false),
         segment: segment_value,
         pane: built.root.clone(),
+        greet_row,
+        greet_text,
+        greet_spacer,
         greet,
         pause_line,
         pill_mark,
@@ -456,6 +506,9 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         target.set_types(&[gtk::gdk::FileList::static_type(), gio::File::static_type()]);
         let imports = ui.page.imports.clone();
         target.connect_drop(move |_, value, _, _| {
+            if current_snap().imports.is_none() {
+                return false;
+            }
             let Some(paths) = crate::import_page::drop_paths(value) else {
                 return false;
             };
@@ -651,7 +704,10 @@ pub fn adopt_obsidian(section: &impl IsA<gtk::Widget>) {
 pub fn take_screenshots(doc: solstone_linux::screenshots::ScreenshotsDocument) {
     SERVICE.with(|slot| {
         if let Some(snap) = slot.borrow().as_ref() {
-            snap.borrow_mut().screenshots = Some(doc);
+            let mut snap = snap.borrow_mut();
+            if snap.reading == ServiceReading::Answering {
+                snap.screenshots = Some(doc);
+            }
         }
     });
     let refresh = REFRESH.with(|slot| slot.borrow().clone());
@@ -704,6 +760,9 @@ struct Ui {
     tile_painting: Cell<bool>,
     segment: gtk::Label,
     pane: gtk::Box,
+    greet_row: gtk::Box,
+    greet_text: gtk::Box,
+    greet_spacer: gtk::Box,
     greet: gtk::Label,
     pause_line: gtk::Label,
     pill_mark: gtk::DrawingArea,
@@ -789,14 +848,14 @@ impl Page {
     }
 
     fn show_tile(&self, id: TileId, view: &View) {
-        let word = match id {
+        let word = view.service.source_word().unwrap_or(match id {
             TileId::Screen => view.screen,
             TileId::Terminal => view.terminal,
             TileId::Browsers => view.browsers,
             TileId::Obsidian => view.obsidian,
             TileId::Screenshots => view.screenshots,
             TileId::Import => StateWord::Checking,
-        };
+        });
         let shown = match id {
             TileId::Screen => 0,
             TileId::Terminal => 1,
@@ -810,40 +869,58 @@ impl Page {
         }
         self.title.set_text(shell_model::tile_name(id));
         self.verdict.set_visible(id != TileId::Import);
-        self.imports.widget.set_visible(id == TileId::Import);
-        if let Some(document) = current_snap().imports {
-            self.imports.refresh(&document);
-        }
+        let snap = current_snap();
+        self.imports
+            .widget
+            .set_visible(id == TileId::Import && snap.imports.is_some());
         self.word.set_text(shell_model::state_label(word));
         paint_word(&self.word, word);
         paint_mark(&self.mark, word);
-        let (reason, next) = page_reason(id, word, view);
+        let (reason, next) = if id == TileId::Import && snap.imports.is_none() {
+            (
+                Some(
+                    view.service
+                        .status_line()
+                        .unwrap_or(text!("linux.copy.statusunavailable")),
+                ),
+                None,
+            )
+        } else {
+            page_reason(id, word, view)
+        };
         set_fact(&self.reason, reason);
         set_fact(&self.next, next);
         self.breath.set_text(page_breath(id));
         let screen = id == TileId::Screen;
         self.sound.set_visible(screen);
-        self.screen_extra.set_visible(screen);
+        self.screen_extra
+            .set_visible(screen && view.service == ServiceReading::Answering);
         self.browsers_extra.set_visible(id == TileId::Browsers);
-        self.obsidian_extra.set_visible(id == TileId::Obsidian);
+        self.obsidian_extra
+            .set_visible(id == TileId::Obsidian && view.service == ServiceReading::Answering);
         // The screenshots page lays out its own reason, sentence and facts.
-        let screenshots = id == TileId::Screenshots;
+        // When it has no live document, show the common disk-backed history.
+        let screenshots = id == TileId::Screenshots && snap.screenshots.is_some();
+        self.screenshots.root.set_visible(screenshots);
         self.screenshots.set_shown(screenshots);
+        self.breath.set_visible(true);
         if screenshots {
-            self.screenshots
-                .update(current_snap().screenshots.as_ref(), &view.intake);
             for label in [&self.reason, &self.next, &self.breath] {
                 label.set_visible(false);
             }
         }
-        if let Some(names) = view.browsers_sub.as_deref() {
+        let browser_names = view
+            .browsers_sub
+            .as_deref()
+            .filter(|_| view.service == ServiceReading::Answering);
+        if let Some(names) = browser_names {
             self.browsers_names.set_text(names);
             self.browsers_names.set_visible(true);
         } else {
             self.browsers_names.set_visible(false);
         }
         if let Some(row) = self.browsers_names.parent() {
-            row.set_visible(view.browsers_sub.is_some());
+            row.set_visible(browser_names.is_some());
         }
         let (so_far, last) = page_facts(id, &view.intake);
         set_fact(&self.so_far, so_far.as_deref());
@@ -2208,8 +2285,9 @@ fn refresh(
 fn apply_view(ui: &Ui, view: &View) {
     ui.greet.set_text(shell_model::greeting_now());
     let host = HOST_UP.with(|cell| cell.get());
-    let show_pause =
-        view.pause.is_none() && shell_model::header_shows_pause(host == Some(true), host.is_none());
+    let show_pause = view.service == ServiceReading::Answering
+        && view.pause.is_none()
+        && shell_model::header_shows_pause(host == Some(true), host.is_none());
     match &view.pause {
         Some(left) => {
             ui.pause_line.set_text(&shell_model::pause_line(*left));
@@ -2229,17 +2307,19 @@ fn apply_view(ui: &Ui, view: &View) {
         }
     });
     paint_pairing(ui, view);
-    if let Some(imports) = current_snap().imports {
-        ui.page.imports.refresh(&imports);
-        ui.import_attention.set_visible(
+    let snap = current_snap();
+    if let Some(imports) = &snap.imports {
+        ui.page.imports.refresh(imports);
+    }
+    ui.import_attention
+        .set_visible(snap.imports.as_ref().is_some_and(|imports| {
             imports.store_error
                 || imports.rows.iter().any(|row| row.reason.is_some())
-                || (!imports.rows.is_empty() && imports.waiting == 0 && !imports.sending),
-        );
-    }
+                || (!imports.rows.is_empty() && imports.waiting == 0 && !imports.sending)
+        }));
     ui.page
         .screenshots
-        .update(current_snap().screenshots.as_ref(), &view.intake);
+        .update(snap.screenshots.as_ref(), &view.intake);
     let words = [
         view.screen,
         view.terminal,
@@ -2249,6 +2329,7 @@ fn apply_view(ui: &Ui, view: &View) {
     ];
     let subs = tile_subs(view);
     for (tile, (word, sub)) in ui.tiles.iter().zip(words.into_iter().zip(subs)) {
+        let word = view.service.source_word().unwrap_or(word);
         tile.word.set_text(shell_model::state_label(word));
         paint_word(&tile.word, word);
         paint_mark(&tile.mark, word);
@@ -2389,6 +2470,17 @@ fn apply_layout(
     let class = shell_model::width_class(width);
     let phone = class == WidthClass::Phone;
     let tuck = shell_model::shelf_button(width);
+    // At narrower widths, keep Start below its disclosure so it cannot push
+    // the status pill under the adjacent pane.
+    let start_below = ui.start_button.parent().as_ref() == Some(ui.greet_text.upcast_ref());
+    if tuck && !start_below {
+        ui.greet_row.remove(&ui.start_button);
+        ui.greet_text.append(&ui.start_button);
+    } else if !tuck && start_below {
+        ui.greet_text.remove(&ui.start_button);
+        ui.greet_row
+            .insert_child_after(&ui.start_button, Some(&ui.greet_spacer));
+    }
     if tuck {
         ui.shelf_button.set_visible(true);
         ui.shelf.set_visible(shelf_open.get());
@@ -2580,7 +2672,7 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let snap = current_snap();
     let paused = pause_left(&config, &snap);
     let app_paused = paused.is_some();
-    let activity_running = if snap.ready {
+    let activity_running = if snap.reading == ServiceReading::Answering {
         shell_model::activity_running(
             snap.activity_source,
             app_paused,
@@ -2594,6 +2686,11 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
         )
     };
     let screen = screen_now(&config, app_paused, activity_running, &snap);
+    let daemon_up = if snap.reading == ServiceReading::Answering {
+        Some(true)
+    } else {
+        daemon_up
+    };
     let (terminal, terminal_reason) = terminal_word(&config, daemon_up, app_paused);
     let (browsers, browsers_reason, browsers_sub) = browsers_word(&config, seen_report);
     let obsidian = obsidian_word(&snap);
@@ -2623,6 +2720,7 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
         &mut fixture_mark,
     );
     View {
+        service: snap.reading,
         screen_on: config.desktop_capture,
         terminal_on: config.terminal,
         screen: hold_pause_word(screen.word, app_paused),
@@ -2683,7 +2781,7 @@ fn screen_now(
     }
     let status = if app_paused {
         Some(TrayStatus::Paused)
-    } else if snap.ready {
+    } else if snap.reading == ServiceReading::Answering {
         tray_from_capture(&snap.capture, snap.capture_attention)
     } else {
         None
@@ -2797,7 +2895,7 @@ fn fixture_reached(seconds_ago: u32) -> Option<String> {
 }
 
 fn journal_face(snap: &ServiceSnap) -> (bool, bool, Option<i64>) {
-    if !snap.ready {
+    if snap.reading != ServiceReading::Answering {
         return (false, false, None);
     }
     let paired = snap.durable == "confirmed" || snap.durable == "held";
@@ -2887,22 +2985,13 @@ fn browsers_word(
     )
 }
 
-/// A running app's own word decides whether it is paused. `start paused` only says
-/// how the app starts, so with no app answering, this is the pause it would start in.
+/// The app must report a live pause. Startup settings only describe its next run.
 fn pause_left(config: &solstone_linux::config::Config, snap: &ServiceSnap) -> Option<PauseLeft> {
     let wall = unix_secs();
-    let until_wall = if snap.ready {
-        snap.pause_bounded?;
-        match pause_hold::load(&config.state_dir()) {
-            Some(HeldPause::Until(deadline)) if deadline > wall => Some(deadline),
-            _ => None,
-        }
-    } else {
-        let starting = pause_hold::StartingPause::read(config, wall, wall);
-        if !starting.paused {
-            return None;
-        }
-        starting.until_wall
+    snap.pause_bounded?;
+    let until_wall = match pause_hold::load(&config.state_dir()) {
+        Some(HeldPause::Until(deadline)) if deadline > wall => Some(deadline),
+        _ => None,
     };
     match until_wall {
         Some(deadline) => {
@@ -3368,9 +3457,12 @@ fn paint_mark(area: &gtk::DrawingArea, word: StateWord) {
         StateWord::On => MarkKind::Dot,
         StateWord::NeedsAttention => MarkKind::Diamond,
         StateWord::Paused => MarkKind::Bars,
-        StateWord::Off | StateWord::Checking | StateWord::SettingUp | StateWord::ReadyToSetUp => {
-            MarkKind::Ring
-        }
+        StateWord::Off
+        | StateWord::Checking
+        | StateWord::SettingUp
+        | StateWord::ReadyToSetUp
+        | StateWord::NotRunning
+        | StateWord::Unavailable => MarkKind::Ring,
     };
     apply_mark_kind(area, kind);
 }
@@ -3509,7 +3601,8 @@ fn place_fact_value(row: &gtk::Box, value: &gtk::Label, text: &str) {
 
 fn paint_journal_facts(ui: &Ui, view: &View) {
     if !view.paired {
-        ui.kept_row.set_visible(true);
+        ui.kept_row
+            .set_visible(view.service == ServiceReading::Answering);
         ui.connection_row.set_visible(false);
         ui.reached_row.set_visible(false);
         return;
@@ -3532,10 +3625,9 @@ fn paint_journal_facts(ui: &Ui, view: &View) {
 }
 
 fn paint_journal_name(ui: &Ui, view: &View) {
-    let mark = view
-        .mark
-        .as_ref()
-        .filter(|_| view.paired && !view.fixture_mark);
+    let mark = view.mark.as_ref().filter(|_| {
+        !view.fixture_mark && (view.paired || view.service != ServiceReading::Answering)
+    });
     ui.journal_mark.set_visible(mark.is_some());
     let mut chip = ui.journal.first_child();
     while let Some(widget) = chip {
@@ -3579,6 +3671,15 @@ fn paint_journal_name(ui: &Ui, view: &View) {
 fn paint_pairing(ui: &Ui, view: &View) {
     paint_journal_facts(ui, view);
     paint_journal_name(ui, view);
+    if !view.fixture_mark
+        && let Some(line) = view.service.status_line()
+    {
+        ui.pill_label.set_text(line);
+        ui.lead.set_text(line);
+        show_connect(ui, false, None);
+        apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
+        return;
+    }
     if !view.paired {
         ui.pill_label.set_text(text!("linux.window.notpaired"));
         ui.lead.set_text(text!("linux.window.notpaired"));
@@ -3649,6 +3750,9 @@ fn show_connect(ui: &Ui, show_button: bool, text: Option<&str>) {
 }
 
 fn tile_subs(view: &View) -> [Option<String>; 5] {
+    if view.service != ServiceReading::Answering {
+        return [None, None, None, None, None];
+    }
     let off_sub = |word: StateWord| (word == StateWord::Off).then(|| off_sub().to_owned());
     let screen = shell_model::screen_sub_label(view.screen_sub)
         .map(str::to_owned)
@@ -3709,33 +3813,44 @@ fn watch_service(
         loop {
             let host = watcher_present().await;
             HOST_UP.with(|cell| cell.set(host));
-            if let Some(mut next) = fetch_service().await {
-                ui.start.borrow_mut().presence =
-                    Some(solstone_linux::service::ServicePresence::Active);
-                paint_start(&ui, true);
-                next.kept = kept_label().await;
-                *snap.borrow_mut() = next;
-                refresh(&ui, &view, &seen, &daemon, &selected);
-                if frame && !released.get() {
-                    released.set(true);
-                    let window = ui.window.clone();
-                    glib::idle_add_local_once(move || {
-                        sun_bg::set_frame_hold(false);
-                        sun_bg::try_frame_file(&window);
-                    });
-                }
-            } else {
-                let presence = gio::spawn_blocking(|| {
-                    solstone_linux::service::classify_user_service(
-                        &solstone_linux::cli::SystemRunner,
-                    )
-                })
-                .await
-                .ok();
-                ui.start.borrow_mut().presence = presence;
-                paint_start(&ui, false);
-                if ui.window.is_mapped() {
+            match fetch_service().await {
+                Ok(mut next) => {
+                    ui.start.borrow_mut().presence =
+                        Some(solstone_linux::service::ServicePresence::Active);
+                    paint_start(&ui, true);
+                    next.kept = kept_label().await;
+                    *snap.borrow_mut() = next;
                     refresh(&ui, &view, &seen, &daemon, &selected);
+                    if frame && !released.get() {
+                        released.set(true);
+                        let window = ui.window.clone();
+                        glib::idle_add_local_once(move || {
+                            sun_bg::set_frame_hold(false);
+                            sun_bg::try_frame_file(&window);
+                        });
+                    }
+                }
+                Err(error) => {
+                    // A timeout or a malformed reply can come from a live foreground
+                    // app even when the unit is stopped. Only a missing bus owner
+                    // lets the unit's inactive state earn a stopped verdict.
+                    let presence = if error == ControlClientError::NoOwner {
+                        gio::spawn_blocking(|| {
+                            solstone_linux::service::classify_user_service(
+                                &solstone_linux::cli::SystemRunner,
+                            )
+                        })
+                        .await
+                        .ok()
+                    } else {
+                        None
+                    };
+                    snap.borrow_mut().withdraw(presence);
+                    ui.start.borrow_mut().presence = presence;
+                    paint_start(&ui, false);
+                    if ui.window.is_mapped() {
+                        refresh(&ui, &view, &seen, &daemon, &selected);
+                    }
                 }
             }
             glib::timeout_future(Duration::from_secs(2)).await;
@@ -3770,7 +3885,6 @@ fn start_keys(
     bool,
 )> {
     use solstone_linux::copy::CopyKey;
-    use solstone_linux::service::ServicePresence;
     let down = matches!(
         presence,
         Some(ServicePresence::Absent | ServicePresence::Inactive)
@@ -3846,7 +3960,7 @@ fn begin_start(ui: &Rc<Ui>) {
             start.flight = StartFlight::Failed;
             start.detail = detail.trim().to_owned();
         }
-        paint_start(&ui, false);
+        paint_start(&ui, current_snap().reading == ServiceReading::Answering);
     });
 }
 
@@ -3858,7 +3972,7 @@ fn apply_document(
     let doc: solstone_linux::window_control::ControlDocument = serde_json::from_str(text).ok()?;
     let decoded = obsidian_text.and_then(solstone_linux::obsidian::decode_document);
     Some(ServiceSnap {
-        ready: true,
+        reading: ServiceReading::Answering,
         capture: doc.capture,
         capture_attention: doc.capture_attention,
         activity_source: doc.settings.activity_source,
@@ -3879,20 +3993,22 @@ fn apply_document(
     })
 }
 
-async fn fetch_service() -> Option<ServiceSnap> {
-    let client = solstone_linux::dbus_client::ControlClient::session()
-        .await
-        .ok()?;
-    let state = client.get_control_state().await.ok()?;
+async fn fetch_service() -> Result<ServiceSnap, ControlClientError> {
+    let client = solstone_linux::dbus_client::ControlClient::session().await?;
+    let owner = client.get_owner().await?;
+    let client = client.expect_owner(owner.clone());
+    let state = client.get_control_state().await?;
     let obsidian = client.obsidian_state().await.ok();
     let screenshots = client.screenshots_state().await.ok();
-    let mut snap = apply_document(&state, obsidian.as_deref(), screenshots.as_deref())?;
+    let mut snap = apply_document(&state, obsidian.as_deref(), screenshots.as_deref())
+        .ok_or_else(|| ControlClientError::Call("invalid control state".into()))?;
     snap.imports = client
         .import_state()
         .await
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok());
-    Some(snap)
+    solstone_linux::dbus_client::verify_owner(Some(&client.get_owner().await?), &owner)?;
+    Ok(snap)
 }
 
 async fn watcher_present() -> Option<bool> {
@@ -3970,6 +4086,40 @@ mod tests {
     use super::*;
     use solstone_linux::copy::CopyKey;
     use solstone_linux::service::ServicePresence;
+
+    #[test]
+    fn a_missed_poll_withdraws_a_live_snapshot_until_the_app_answers_again() {
+        let live = ServiceSnap {
+            reading: ServiceReading::Answering,
+            capture: "running".into(),
+            durable: "confirmed".into(),
+            health: "connected".into(),
+            last_sync: Some(60.0),
+            queue: Some(4),
+            pause_bounded: Some(true),
+            ..ServiceSnap::unread()
+        };
+        let mut snap = live.clone();
+        assert_eq!(journal_face(&snap), (true, false, None));
+        assert_eq!(snap.reading.source_word(), None);
+        for (presence, word) in [
+            (None, StateWord::Unavailable),
+            (Some(ServicePresence::Active), StateWord::Unavailable),
+            (Some(ServicePresence::Inactive), StateWord::NotRunning),
+            (Some(ServicePresence::Absent), StateWord::NotRunning),
+        ] {
+            snap.withdraw(presence);
+            assert_eq!(snap.reading.source_word(), Some(word));
+            assert_eq!(journal_face(&snap), (false, false, None));
+            assert_eq!(snap.last_sync, None);
+            assert_eq!(snap.pause_bounded, None);
+            assert!(snap.capture.is_empty());
+            snap = live.clone();
+        }
+        snap.health = "offline".into();
+        assert_eq!(journal_face(&snap), (true, true, Some(4)));
+        assert_eq!(snap.reading.source_word(), None);
+    }
 
     #[test]
     fn start_control_shows_only_for_an_app_that_is_not_running() {

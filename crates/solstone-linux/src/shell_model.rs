@@ -35,6 +35,8 @@ const TILE_ORDER: [TileId; 5] = [
 /// A source tile's state word. Import is an action destination and has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateWord {
+    NotRunning,
+    Unavailable,
     Off,
     NeedsAttention,
     Paused,
@@ -232,6 +234,8 @@ pub fn intake_unreadable() -> &'static str {
 #[must_use]
 pub fn state_label(word: StateWord) -> &'static str {
     match word {
+        StateWord::NotRunning => text!("linux.tray.notrunning"),
+        StateWord::Unavailable => text!("linux.copy.unavailable"),
         StateWord::Off => text!("linux.copy.off"),
         StateWord::NeedsAttention => text!("linux.shell.attention"),
         StateWord::Paused => text!("linux.copy.paused"),

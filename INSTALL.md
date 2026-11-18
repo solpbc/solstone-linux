@@ -210,19 +210,20 @@ open it again.
 
 ### Open the window
 
-The window comes with version 2.0.24 and later. On an earlier version, use
-[terminal pairing](#pair-from-a-terminal).
+open solstone from your app menu or the panel icon. the current window opens on `home`,
+where you can see your sources and status. the sidebar also has `your journal`,
+`this computer`, `updates` and `help`. in a narrow window, use the menu button
+at the upper left to open the sidebar.
 
-Open solstone from your app menu or the panel icon. No panel icon extension is
-needed for the window. It has four tabs: `status`, `journal`, `settings` and `help`.
-If the solstone app isn't running, choose `start the solstone app` when you're
-ready. This sets it up to run now and when you sign in. Opening or closing the
-window does not start or stop intake.
+if `home` shows `start the solstone app`, choose it when you're ready. this sets
+the app up to run now and when you sign in. opening or closing the window does
+not start or stop intake. if your version has an older layout or no window, you
+can [pair from a terminal](#pair-from-a-terminal).
 
-In `journal`, the window says when it has found your journal running on this
-computer under your account. Press `connect to your journal`: the app verifies the
-mark itself, with no link to handle and no mark to compare. Nothing connects until
-you press it. A journal under another account is never offered.
+in `your journal`, the window says when it has found your journal running on this
+computer under your account. choose `connect to your journal` to let the app
+verify the mark for you. pairing starts when you press it. a journal under
+another account is never offered.
 
 For a journal on another computer, paste its pairing link, or open the link and
 choose `open in the solstone app`, which fills it in here and waits for you. Either
@@ -234,12 +235,10 @@ the desktop's `update-desktop-database` is installed. If you used the quick way 
 a clicked link goes nowhere, [update](#update-a-release). If it still goes nowhere,
 paste it.
 
-In `settings`, change whether to show the cursor, whether to start paused, or
-segment duration. The config file remains the source of truth:
-`$XDG_CONFIG_HOME/solstone-linux/config.json`, normally
-`~/.config/solstone-linux/config.json`. Saving keeps unknown and hand-added keys.
-The window says when a saved change needs a restart and offers to restart the
-solstone app when it can safely do so.
+while the solstone app is running, you can choose whether to show the cursor and
+whether to start paused in `this computer`. these changes apply the next time
+the app starts. the page also shows the segment duration and the path to your
+config file, normally `~/.config/solstone-linux/config.json`.
 
 In `help`, read recent logs before choosing `save a copy…`. The saved file is
 exactly the preview you read. Saving does not send it anywhere.
@@ -332,16 +331,20 @@ Activity detection uses screen-lock and power-save signals to notice when you st
 
 ### Your tmux sessions
 
-The app can take in your tmux sessions, and all of it goes into your journal. It's off until you turn it on, in the window's
-settings or with `solstone-linux terminal on`, and it needs tmux on this computer. It uses
-this app's connection to your journal. Terminal follows your account rather than the desktop
-in front of the screen, so it works over SSH and on a computer with no desktop. Pausing the
-app pauses it too. `solstone-linux terminal status` shows what it's doing.
+the app can take in your tmux sessions, and all of it goes into your journal.
+it's off until you turn it on with the `terminal` switch on `home` or with
+`solstone-linux terminal on`, and it needs tmux on this computer. it uses this
+app's connection to your journal. terminal follows your account rather than the
+desktop in front of the screen, so it works over SSH and on a computer with no
+desktop. pausing the app pauses it too. `solstone-linux terminal status` shows
+what it's doing.
 
-If solstone for tmux is on this computer, turning terminal on asks first, then moves it in:
-what it still has waiting goes into your journal through this app, anything that can't go
-stays on this computer, and solstone for tmux stops for good.
-`solstone-linux terminal adopt-tmux` makes the same move from a shell, and turns terminal on
+if solstone for tmux is on this computer, use `solstone-linux terminal on` in a
+terminal. it asks before moving your tmux intake into the solstone app.
+what's waiting goes into the journal paired with the solstone app. if the app
+isn't paired yet, it can use the existing pairing from solstone for tmux.
+anything that can't go stays on this computer. solstone for tmux stops for good.
+`solstone-linux terminal adopt-tmux` makes the same move and turns terminal on
 only if solstone for tmux was on.
 
 A session is taken in, and goes into your journal, while someone types in it, or attaches
