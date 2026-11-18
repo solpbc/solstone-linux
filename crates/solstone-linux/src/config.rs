@@ -109,6 +109,10 @@ pub struct Config {
     /// by `terminal::settings`; never written from a settings snapshot.
     #[serde(skip)]
     pub terminal_settings: Option<Value>,
+    /// Terminal keys saved at the top level, outside `terminal_settings`.
+    /// They are not read; `terminal status` lists them as ignored.
+    #[serde(skip)]
+    pub misplaced_terminal_settings: Vec<String>,
     #[serde(skip)]
     pub base_dir: PathBuf,
     #[serde(skip)]
@@ -152,6 +156,7 @@ impl Default for Config {
             terminal: DEFAULT_TERMINAL,
             desktop_capture: DEFAULT_DESKTOP_CAPTURE,
             terminal_settings: None,
+            misplaced_terminal_settings: Vec::new(),
             base_dir: home.join(".local/share/solstone-linux"),
             config_dir: config_dir_for(home, env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)),
         }
@@ -617,6 +622,15 @@ fn load_resolved_config(mut config: Config) -> LoadedConfig {
         &mut warnings,
     );
     config.terminal_settings = values.get("terminal_settings").cloned();
+    config.misplaced_terminal_settings = crate::terminal::settings::misplaced_keys(values);
+    for key in &config.misplaced_terminal_settings {
+        warnings.push(ConfigWarning {
+            field: None,
+            message: format!(
+                "{key} is a terminal setting and is read only inside terminal_settings; ignored at the top level"
+            ),
+        });
+    }
     LoadedConfig { config, warnings }
 }
 
@@ -1174,6 +1188,7 @@ fn write_config_merge(
         terminal,
         desktop_capture,
         terminal_settings: map.get("terminal_settings").cloned(),
+        misplaced_terminal_settings: crate::terminal::settings::misplaced_keys(&map),
         base_dir: resolved.base_dir.clone(),
         config_dir: resolved.config_dir.clone(),
     };
@@ -1939,6 +1954,30 @@ mod tests {
                 ..Config::default()
             }
         );
+    }
+    #[test]
+    fn a_terminal_setting_at_the_top_level_is_named_not_dropped_silently() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("cfg");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("config.json"),
+            br#"{"segment_interval":300,"output_sessions":["agent-*"],"terminal_settings":{"pane_title":true}}"#,
+        )
+        .unwrap();
+        let loaded = load(t.path());
+        assert_eq!(
+            loaded.config.misplaced_terminal_settings,
+            ["output_sessions"]
+        );
+        assert!(loaded.warnings.iter().any(|w| {
+            w.message.contains("output_sessions") && w.message.contains("terminal_settings")
+        }));
+        let settings = crate::terminal::settings::TerminalSettings::from_saved(
+            loaded.config.terminal_settings.as_ref(),
+        );
+        assert!(settings.capture.pane_title);
+        assert!(settings.capture.output_sessions.is_empty());
     }
     #[test]
     fn malformed_activity_policy_disables_source_and_keeps_the_file() {

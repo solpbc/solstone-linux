@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- `solstone-linux terminal status` now lists a terminal setting such as `output_sessions` left at the top of `config.json` as an ignored setting, and the install guide shows where it goes, inside `terminal_settings`. before, it was ignored without a word. thanks @dvanduzer.
+
 ## [2.0.45] - 2026-11-17
 
 ### Added

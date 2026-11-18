@@ -28,6 +28,18 @@ pub const CAPTURE_KEYS: [&str; 7] = [
 /// The tmux the owner chose; not a capture setting.
 pub const TMUX_PATH_KEY: &str = "tmux_path";
 
+/// Terminal keys saved at the top of `config.json` rather than inside
+/// `terminal_settings`, where alone they are read. `segment_interval` is not
+/// one: at the top level it is the screen's own.
+pub fn misplaced_keys(top_level: &Map<String, Value>) -> Vec<String> {
+    CAPTURE_KEYS
+        .into_iter()
+        .chain([TMUX_PATH_KEY])
+        .filter(|key| *key != "segment_interval" && top_level.contains_key(*key))
+        .map(str::to_owned)
+        .collect()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TerminalSettings {
     pub capture: CaptureSettings,

@@ -404,6 +404,10 @@ fn run_capture(
         terminal_config.settings = crate::terminal::settings::TerminalSettings::from_saved(
             config.terminal_settings.as_ref(),
         );
+        terminal_config
+            .settings
+            .ignored
+            .extend(config.misplaced_terminal_settings.iter().cloned());
         crate::terminal::supervisor::TerminalSupervisor::spawn(terminal_config)
             .map_err(|error| ObserverError::Io(format!("terminal thread: {error}")))?
     };

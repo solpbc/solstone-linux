@@ -344,6 +344,24 @@ stays on this computer, and solstone for tmux stops for good.
 `solstone-linux terminal adopt-tmux` makes the same move from a shell, and turns terminal on
 only if solstone for tmux was on.
 
+A session is taken in, and goes into your journal, while someone types in it, or attaches
+or detaches. To also take in a session's output in its current window when nobody is
+typing, such as an agent working on its own, name it in `output_sessions` inside
+`terminal_settings` in `~/.config/solstone-linux/config.json`, then run
+`systemctl --user restart solstone-linux`. A `*` matches any run of characters. Keep the rest of the
+file as it is:
+
+```json
+{
+  "terminal_settings": {
+    "output_sessions": ["agent-*", "build"]
+  }
+}
+```
+
+Terminal settings are read only inside `terminal_settings`. `output_sessions` left at the
+top of the file is not used, and `solstone-linux terminal status` lists it as an ignored setting.
+
 `solstone-linux desktop-capture off` turns off screen, audio and desktop activity, and the
 window has the same switch.
 
