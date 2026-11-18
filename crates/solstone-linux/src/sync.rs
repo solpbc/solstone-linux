@@ -8156,21 +8156,15 @@ mod tests {
 
     /// Keep one browser batch and finish its period into a capture segment.
     fn browser_period(temp: &tempfile::TempDir) -> PathBuf {
-        use chrono::TimeZone;
         let layout = crate::browser::custody::Layout::new(temp.path());
-        let at = |minute| {
-            chrono::Local
-                .with_ymd_and_hms(2026, 10, 2, 10, minute, 0)
-                .earliest()
-                .unwrap()
-        };
+        let at = |minute| crate::local_time::wall_for_test(2026, 10, 2, 10, minute, 0);
         let mut custody = crate::browser::custody::Custody::open(layout, at(1)).unwrap();
         let batch = json!({
             "type": "batch",
             "destination_generation": "g1",
             "inst": "inst-a",
             "batch_id": "0123456789abcdef0123456789abcdef",
-            "queued_at_ms": at(1).timestamp_millis() - 1000,
+            "queued_at_ms": at(1).as_millisecond() - 1000,
             "records": [{"t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
                          "blocks": [{"id": "b1", "text": "browser marker"}]}],
         });
@@ -8200,7 +8194,7 @@ mod tests {
         let custody = Arc::new(Mutex::new(
             crate::browser::custody::Custody::open(
                 crate::browser::custody::Layout::new(temp.path()),
-                chrono::Local::now(),
+                jiff::Timestamp::now(),
             )
             .unwrap(),
         ));
@@ -8250,7 +8244,7 @@ mod tests {
         assert!(fs::metadata(layout.evidence()).unwrap().len() > 0);
         assert_eq!(crate::browser::custody::held_bytes(&layout), 0);
         let recovered =
-            crate::browser::custody::Custody::open(layout, chrono::Local::now()).unwrap();
+            crate::browser::custody::Custody::open(layout, jiff::Timestamp::now()).unwrap();
         let after_restart = recovered.facts(Some("g1"), false);
         assert_eq!(after_restart.delivery, "idle");
         assert_eq!(after_restart.held_bytes, 0);
@@ -8292,7 +8286,7 @@ mod tests {
         worker.browser_custody = Some(Arc::new(Mutex::new(
             crate::browser::custody::Custody::open(
                 crate::browser::custody::Layout::new(temp.path()),
-                chrono::Local::now(),
+                jiff::Timestamp::now(),
             )
             .unwrap(),
         )));
@@ -8330,7 +8324,7 @@ mod tests {
         worker.browser_custody = Some(Arc::new(Mutex::new(
             crate::browser::custody::Custody::open(
                 crate::browser::custody::Layout::new(temp.path()),
-                chrono::Local::now(),
+                jiff::Timestamp::now(),
             )
             .unwrap(),
         )));
@@ -8341,8 +8335,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn held_browser_period_moves_to_newly_confirmed_pairing_after_unpair() {
-        use chrono::TimeZone;
-
         let temp = tempfile::tempdir().unwrap();
         let config_root = temp.path().join("config");
         let config = Config {
@@ -8406,12 +8398,7 @@ mod tests {
         );
         assert!(!upload.has_capability());
 
-        let at = |minute| {
-            chrono::Local
-                .with_ymd_and_hms(2026, 10, 2, 10, minute, 0)
-                .earliest()
-                .unwrap()
-        };
+        let at = |minute| crate::local_time::wall_for_test(2026, 10, 2, 10, minute, 0);
         let custody = Arc::new(Mutex::new(
             crate::browser::custody::Custody::open(
                 crate::browser::custody::Layout::new(&config.base_dir),
@@ -8423,7 +8410,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&period_path).unwrap()).unwrap();
         assert_eq!(recovered_period["period_id"], original_period_id);
         assert_eq!(fs::read(&pages).unwrap(), original_bytes);
-        clock.set_wall(at(16).timestamp() as f64);
+        clock.set_wall(at(16).as_second() as f64);
 
         let control = SyncControl::test_new(
             Arc::new(Notify::new()),
@@ -8532,13 +8519,11 @@ mod tests {
         );
 
         drop(custody);
-        let replay_time = chrono::Local
-            .timestamp_millis_opt(
-                at(1).timestamp_millis()
-                    + (3 * native_browser_frame::ACCEPTED_RETENTION_MS_MIN + 1) as i64,
-            )
-            .single()
-            .unwrap();
+        let replay_time = jiff::Timestamp::from_millisecond(
+            at(1).as_millisecond()
+                + (3 * native_browser_frame::ACCEPTED_RETENTION_MS_MIN + 1) as i64,
+        )
+        .unwrap();
         let mut recovered = crate::browser::custody::Custody::open(
             crate::browser::custody::Layout::new(&config.base_dir),
             replay_time,
@@ -8549,7 +8534,7 @@ mod tests {
             "destination_generation": "generation-after-restart",
             "inst": "inst-a",
             "batch_id": "0123456789abcdef0123456789abcdef",
-            "queued_at_ms": at(1).timestamp_millis() - 1000,
+            "queued_at_ms": at(1).as_millisecond() - 1000,
             "records": [{
                 "t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
                 "blocks": [{"id": "b1", "text": "browser marker"}]
@@ -8704,7 +8689,7 @@ mod tests {
         let custody = Arc::new(Mutex::new(
             crate::browser::custody::Custody::open(
                 crate::browser::custody::Layout::new(&config.base_dir),
-                chrono::Local::now(),
+                jiff::Timestamp::now(),
             )
             .unwrap(),
         ));
@@ -8754,8 +8739,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn browser_upload_reservations_release_on_failure_cancel_and_abort() {
-        use chrono::TimeZone;
-
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
             base_dir: temp.path().to_path_buf(),
@@ -8766,12 +8749,7 @@ mod tests {
             ..Config::default()
         };
         config.ensure_dirs().unwrap();
-        let at = |minute| {
-            chrono::Local
-                .with_ymd_and_hms(2026, 10, 2, 10, minute, 0)
-                .earliest()
-                .unwrap()
-        };
+        let at = |minute| crate::local_time::wall_for_test(2026, 10, 2, 10, minute, 0);
         let mut disk_custody = crate::browser::custody::Custody::open(
             crate::browser::custody::Layout::new(&config.base_dir),
             at(1),
@@ -8785,7 +8763,7 @@ mod tests {
                     "destination_generation": "g1",
                     "inst": "inst-a",
                     "batch_id": format!("{id:032x}"),
-                    "queued_at_ms": now.timestamp_millis() - 1000,
+                    "queued_at_ms": now.as_millisecond() - 1000,
                     "records": [{
                         "t": "segment_start", "ts": 1, "ctx": context, "inst": "inst-a",
                         "blocks": [{"id": "b1", "text": context}]

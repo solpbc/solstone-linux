@@ -3,7 +3,7 @@
 
 use super::*;
 use base64::Engine;
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::process::Output;
@@ -93,7 +93,7 @@ pub fn run_audit(request: &AuditRequest<'_>) -> Result<AuditStatus> {
     run_audit_mode(
         request,
         &ProcessEnvironment::default(),
-        Utc::now(),
+        Timestamp::now(),
         APPROVED_PUBKEY_SHA256,
         APPROVED_KEY_ID,
         None,
@@ -225,7 +225,7 @@ pub(crate) fn validate_public_key(
 
 pub(crate) fn parse_receipt(
     bytes: &[u8],
-    now: DateTime<Utc>,
+    now: Timestamp,
     sensitive: &SensitiveValues,
 ) -> Result<Receipt> {
     let receipt: Receipt = serde_json::from_slice(bytes).map_err(|_| {
@@ -269,18 +269,16 @@ pub(crate) fn parse_receipt(
             "obtain a fresh signed mirror receipt",
         ));
     }
-    let observed = DateTime::parse_from_rfc3339(&receipt.utc)
-        .map_err(|_| {
-            sensitive.error(
-                "audit freshness gate",
-                "canonical RFC3339 UTC seconds",
-                "invalid time",
-                "obtain a fresh signed mirror receipt",
-            )
-        })?
-        .with_timezone(&Utc);
-    if observed > now + Duration::seconds(FUTURE_SKEW_SECONDS)
-        || now.signed_duration_since(observed) > Duration::seconds(MAX_AGE as i64)
+    let observed = time::parse_utc_seconds(&receipt.utc).ok_or_else(|| {
+        sensitive.error(
+            "audit freshness gate",
+            "canonical RFC3339 UTC seconds",
+            "invalid time",
+            "obtain a fresh signed mirror receipt",
+        )
+    })?;
+    if observed > now + SignedDuration::from_secs(FUTURE_SKEW_SECONDS)
+        || now.duration_since(observed) > SignedDuration::from_secs(MAX_AGE as i64)
     {
         return Err(sensitive.error(
             "audit freshness gate",
@@ -611,7 +609,7 @@ fn run_materialized_audit(
         synced_commit: receipt.synced_commit.clone(),
         utc: receipt.utc.clone(),
         max_age: receipt.max_age,
-        checked_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        checked_at: time::utc_seconds(Timestamp::now()),
         cargo_lock_sha256: context.cargo_lock_sha256.clone(),
         cargo_deny_version: cargo_deny_version.into(),
         verdict: "pass".into(),
@@ -621,7 +619,7 @@ fn run_materialized_audit(
 pub(crate) fn run_audit_mode(
     request: &AuditRequest<'_>,
     processes: &ProcessEnvironment,
-    now: DateTime<Utc>,
+    now: Timestamp,
     expected_pubkey_digest: &str,
     expected_key_id: &str,
     root_override: Option<&RepoRoot>,

@@ -22,7 +22,7 @@ mod store;
 pub mod table;
 pub mod wire;
 
-pub use clock::{Clock, Stamp, SystemClock, Window};
+pub use clock::{Clock, Stamp, SystemClock, Window, local_zone};
 pub use discover::{FoundVault, Refusal, check_vault_folder, found_vaults, linux_candidates};
 pub use engine::{
     Attention, Engine, ListedVault, Phase, ScanOutcome, State, Status, next_scan_delay,

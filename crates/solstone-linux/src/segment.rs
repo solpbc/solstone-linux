@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use chrono::{DateTime, Local, LocalResult, Offset, TimeZone};
 use std::{
     ffi::OsString,
     fs, io,
@@ -15,25 +14,22 @@ pub(crate) const ZONE_INFO_DIRECTORIES: [&str; 4] = [
     "/usr/share/lib/zoneinfo",
 ];
 
-fn local_datetime(timestamp: f64) -> DateTime<Local> {
+fn local_datetime(timestamp: f64) -> jiff::ZonedDateTime {
     let seconds = timestamp.floor() as i64;
-    let nanos = ((timestamp - timestamp.floor()) * 1e9) as u32;
-    match Local.timestamp_opt(seconds, nanos) {
-        LocalResult::Single(value) | LocalResult::Ambiguous(value, _) => value,
-        LocalResult::None => Local
-            .timestamp_opt(seconds, 0)
-            .earliest()
-            .expect("Unix timestamp must be representable"),
-    }
+    let nanos = ((timestamp - timestamp.floor()) * 1e9) as i32;
+    jiff::Timestamp::new(seconds, nanos)
+        .or_else(|_| jiff::Timestamp::new(seconds, 0))
+        .expect("Unix timestamp must be representable")
+        .to_zoned_datetime(crate::local_time::zone())
 }
 
 /// The reading used when no zone can be resolved: the host's local time, no zone name.
 fn host_local_reading(wall_seconds: f64) -> ZoneReading {
     let local = local_datetime(wall_seconds);
     ZoneReading {
-        day: local.format("%Y%m%d").to_string(),
-        hms: local.format("%H%M%S").to_string(),
-        utc_offset_seconds: local.offset().fix().local_minus_utc(),
+        day: local.strftime("%Y%m%d").to_string(),
+        hms: local.strftime("%H%M%S").to_string(),
+        utc_offset_seconds: local.offset().seconds(),
         tz: None,
     }
 }
@@ -41,14 +37,14 @@ fn host_local_reading(wall_seconds: f64) -> ZoneReading {
 pub fn timestamp_parts(timestamp: f64) -> (String, String) {
     let datetime = local_datetime(timestamp);
     (
-        datetime.format("%Y%m%d").to_string(),
-        datetime.format("%H%M%S").to_string(),
+        datetime.strftime("%Y%m%d").to_string(),
+        datetime.strftime("%H%M%S").to_string(),
     )
 }
 
 #[cfg(test)]
 pub(crate) fn local_offset_seconds(timestamp: f64) -> i32 {
-    local_datetime(timestamp).offset().fix().local_minus_utc()
+    local_datetime(timestamp).offset().seconds()
 }
 
 fn strip_zoneinfo_alias(mut name: &str) -> &str {
@@ -483,10 +479,11 @@ pub(crate) fn civil_time_in_zoneinfo(zone: &str, unix_seconds: i64) -> Option<Ci
         }
     };
 
-    let naive = chrono::DateTime::from_timestamp(unix_seconds + i64::from(utoff), 0)?.naive_utc();
+    let wall = jiff::tz::Offset::UTC
+        .to_datetime(jiff::Timestamp::from_second(unix_seconds + i64::from(utoff)).ok()?);
     Some(CivilTime {
-        day: naive.format("%Y%m%d").to_string(),
-        hms: naive.format("%H%M%S").to_string(),
+        day: wall.strftime("%Y%m%d").to_string(),
+        hms: wall.strftime("%H%M%S").to_string(),
         utc_offset_seconds: utoff,
     })
 }

@@ -10,7 +10,6 @@
 
 use super::custody::{Custody, Facts, Layout, Outcome};
 use crate::observer::StateSnapshot;
-use chrono::Local;
 use native_browser_frame::{
     Assembler, CONTROL_MAX, Chunk, DecodeOutcome, Direction, FRESHNESS_MS_MAX, HANDSHAKE_MS_BUDGET,
     STATE_RENEWAL_MS_INTERVAL, Step, build_reply, decode, encode,
@@ -145,7 +144,7 @@ impl Shared {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let status = super::status::Running {
-            updated_at_ms: Local::now().timestamp_millis(),
+            updated_at_ms: jiff::Timestamp::now().as_millisecond(),
             capture: facts.capture.to_owned(),
             delivery: facts.delivery.to_owned(),
             failure: facts.failure.map(str::to_owned),
@@ -300,7 +299,7 @@ async fn clock_loop(shared: Arc<Shared>) {
         }
         let Ok(rotated) = shared
             .with_custody(move |custody| {
-                let new_period = custody.tick(Local::now());
+                let new_period = custody.tick(jiff::Timestamp::now());
                 if refresh {
                     custody.refresh_held();
                 }
@@ -540,7 +539,7 @@ async fn session(shared: Arc<Shared>, stream: UnixStream) {
         .unwrap_or_else(|e| e.into_inner())
         .push(Connected {
             brand: hello.brand.clone(),
-            since_ms: Local::now().timestamp_millis(),
+            since_ms: jiff::Timestamp::now().as_millisecond(),
             id,
         });
     shared.write_status();
@@ -587,7 +586,7 @@ async fn run_session(
                             "batch_id": batch["batch_id"],
                         });
                         let page = snapshot_page(&batch);
-                        let (outcome, rotated) = custody.accept(&batch, Local::now());
+                        let (outcome, rotated) = custody.accept(&batch, jiff::Timestamp::now());
                         Some((ids, outcome, rotated, page))
                     })
                     .await?;
@@ -727,7 +726,7 @@ mod tests {
         let (pause, paused) = watch::channel(snapshot(false));
         let base_dir = temp.path().join("data");
         let custody = Arc::new(Mutex::new(
-            Custody::open(Layout::new(&base_dir), Local::now()).unwrap(),
+            Custody::open(Layout::new(&base_dir), jiff::Timestamp::now()).unwrap(),
         ));
         let fingerprint = Arc::new(Mutex::new(journal.map(str::to_owned)));
         let fingerprint_source = Arc::clone(&fingerprint);
@@ -826,7 +825,7 @@ mod tests {
         let batch = json!({
             "type": "batch", "destination_generation": generation, "inst": "inst-a",
             "batch_id": "0123456789abcdef0123456789abcdef",
-            "queued_at_ms": Local::now().timestamp_millis(),
+            "queued_at_ms": jiff::Timestamp::now().as_millisecond(),
             "records": [{"t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
                          "blocks": [{"id": "b", "text": "marker"}]}],
         });
@@ -886,7 +885,7 @@ mod tests {
         let batch = json!({
             "type": "batch", "destination_generation": "extension-generation",
             "inst": "inst-a", "batch_id": "0123456789abcdef0123456789abcdef",
-            "queued_at_ms": Local::now().timestamp_millis(),
+            "queued_at_ms": jiff::Timestamp::now().as_millisecond(),
             "records": [{"t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
                          "blocks": [{"id": "b", "text": "held while unpaired"}]}],
         });
@@ -938,11 +937,11 @@ mod tests {
                 .custody
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = Local::now();
+            let now = jiff::Timestamp::now();
             let batch = json!({
                 "type": "batch", "destination_generation": "g1", "inst": "inst-a",
                 "batch_id": "0123456789abcdef0123456789abcdef",
-                "queued_at_ms": now.timestamp_millis(),
+                "queued_at_ms": now.as_millisecond(),
                 "records": [{"t": "segment_start", "ts": 1, "ctx": "c1", "inst": "inst-a",
                              "blocks": [{"id": "b", "text": "waiting"}]}],
             });

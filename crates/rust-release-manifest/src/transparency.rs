@@ -4,7 +4,7 @@
 //! Operator-driven publication of retained release evidence.
 
 use super::*;
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
@@ -29,16 +29,19 @@ struct TestOperationSeam {
 #[cfg(test)]
 thread_local! {
     static TEST_OPERATION_SEAM: std::cell::RefCell<Option<TestOperationSeam>> = const { std::cell::RefCell::new(None) };
-    static TEST_NOW: std::cell::RefCell<Option<DateTime<Utc>>> = const { std::cell::RefCell::new(None) };
+    static TEST_NOW: std::cell::RefCell<Option<Timestamp>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn transparency_now() -> DateTime<Utc> {
+pub(crate) fn transparency_now() -> Timestamp {
     #[cfg(test)]
     if let Some(now) = TEST_NOW.with(|state| *state.borrow()) {
         return now;
     }
-    Utc::now()
+    Timestamp::now()
 }
+
+/// How long a signed transparency pointer stays valid: fourteen days, exactly.
+const POINTER_LIFETIME: SignedDuration = SignedDuration::from_hours(24 * 14);
 
 pub(crate) fn operation_seam(label: &str) -> Result<()> {
     #[cfg(test)]
@@ -88,7 +91,7 @@ pub(crate) fn test_operation_seam_state() -> (usize, Vec<String>) {
 }
 
 #[cfg(test)]
-pub(crate) fn set_test_now(now: Option<DateTime<Utc>>) {
+pub(crate) fn set_test_now(now: Option<Timestamp>) {
     TEST_NOW.with(|state| *state.borrow_mut() = now);
 }
 
@@ -407,7 +410,7 @@ pub fn pointer_trusted_comment(pointer: &TransparencyPointer) -> String {
     )
 }
 
-fn exact_timestamp(label: &str, timestamp: &str) -> Result<DateTime<Utc>> {
+fn exact_timestamp(label: &str, timestamp: &str) -> Result<Timestamp> {
     if timestamp.len() != 20
         || !timestamp.ends_with('Z')
         || timestamp.as_bytes().get(4) != Some(&b'-')
@@ -424,17 +427,15 @@ fn exact_timestamp(label: &str, timestamp: &str) -> Result<DateTime<Utc>> {
             "provide an exact UTC-seconds timestamp",
         ));
     }
-    DateTime::parse_from_rfc3339(timestamp)
-        .map(|value| value.with_timezone(&Utc))
-        .map_err(|_| {
-            transparency_error(
-                "terminal",
-                label,
-                "valid UTC timestamp",
-                timestamp,
-                "provide an exact UTC-seconds timestamp",
-            )
-        })
+    time::parse_utc_seconds(timestamp).ok_or_else(|| {
+        transparency_error(
+            "terminal",
+            label,
+            "valid UTC timestamp",
+            timestamp,
+            "provide an exact UTC-seconds timestamp",
+        )
+    })
 }
 
 pub fn validate_entry(
@@ -545,7 +546,7 @@ pub fn validate_pointer(pointer: &TransparencyPointer, tip: &TransparencyEntry) 
         || pointer.chain_length != tip.seq
         || pointer.tip_sha256 != tip_identity
         || pointer.version != tip.version
-        || valid != signed + Duration::days(14)
+        || valid != signed + POINTER_LIFETIME
     {
         return Err(transparency_error(
             "terminal",
@@ -2077,7 +2078,7 @@ pub(crate) fn build_entry(
         }
         None => ZERO_SHA256.into(),
     };
-    let now = transparency_now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let now = time::utc_seconds(transparency_now());
     let entry = TransparencyEntry {
         artifacts: inventory.artifacts,
         manifests: inventory.manifests,
@@ -2113,7 +2114,7 @@ pub(crate) fn build_pointer(
         schema: TRANSPARENCY_LATEST_SCHEMA.into(),
         signed_at: entry.published_utc.clone(),
         tip_sha256: digest(entry_bytes),
-        valid_until: (signed + Duration::days(14)).to_rfc3339_opts(SecondsFormat::Secs, true),
+        valid_until: time::utc_seconds(signed + POINTER_LIFETIME),
         version: entry.version.clone(),
     };
     let bytes =
@@ -2123,15 +2124,15 @@ pub(crate) fn build_pointer(
 
 pub(crate) fn renew_pointer(
     old: &TransparencyPointer,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(TransparencyPointer, Vec<u8>)> {
     let pointer = TransparencyPointer {
         chain_length: old.chain_length,
         product: PRODUCT.into(),
         schema: TRANSPARENCY_LATEST_SCHEMA.into(),
-        signed_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+        signed_at: time::utc_seconds(now),
         tip_sha256: old.tip_sha256.clone(),
-        valid_until: (now + Duration::days(14)).to_rfc3339_opts(SecondsFormat::Secs, true),
+        valid_until: time::utc_seconds(now + POINTER_LIFETIME),
         version: old.version.clone(),
     };
     let bytes =
@@ -2145,7 +2146,7 @@ pub(crate) fn renew_pointer_now(
     renew_pointer(old, transparency_now())
 }
 
-pub(crate) fn pointer_is_stale(pointer: &TransparencyPointer, now: DateTime<Utc>) -> Result<bool> {
+pub(crate) fn pointer_is_stale(pointer: &TransparencyPointer, now: Timestamp) -> Result<bool> {
     Ok(exact_timestamp(
         "staged transparency pointer valid_until",
         &pointer.valid_until,

@@ -8,7 +8,7 @@
 //! nothing here asks for a location or opens a network connection. The zone table
 //! is the bundled copy of tzdb `zone.tab`.
 
-use chrono::{Datelike, NaiveDate, Timelike};
+use jiff::civil::Date;
 
 /// Published ratios. φ truncated as the pattern's token, and φ² the same way.
 const DIAMETER_RATIO: f64 = 1.618_033_988_7;
@@ -194,7 +194,7 @@ pub fn system_zone_id() -> String {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalSun {
     pub zone_id: String,
-    pub date: NaiveDate,
+    pub date: Date,
     pub offset_minutes: f64,
     pub minutes: f64,
     pub times: SunTimes,
@@ -226,10 +226,12 @@ pub fn pinned_sun_minutes(fallback: f64) -> f64 {
 
 #[must_use]
 pub fn local_sun() -> LocalSun {
-    let now = chrono::Local::now();
-    let date = now.date_naive();
-    let minutes = pinned_sun_minutes(f64::from(now.hour() * 60 + now.minute()));
-    let offset_minutes = f64::from(now.offset().local_minus_utc()) / 60.0;
+    let now = crate::local_time::now();
+    let date = now.date();
+    let minutes = pinned_sun_minutes(f64::from(
+        i32::from(now.hour()) * 60 + i32::from(now.minute()),
+    ));
+    let offset_minutes = f64::from(now.offset().seconds()) / 60.0;
     let zone_id = system_zone_id();
     let times = zone_point(&zone_id)
         .and_then(|(lat, lon)| solar_pair(lat, lon, date, offset_minutes))
@@ -264,12 +266,7 @@ pub fn zone_count() -> usize {
 /// Sunrise and sunset in local minutes. A sunset at or before sunrise is carried
 /// into the next day. Polar day or night walks back to the most recent valid day.
 #[must_use]
-pub fn solar_pair(
-    lat: f64,
-    lon: f64,
-    date: NaiveDate,
-    utc_offset_minutes: f64,
-) -> Option<SunTimes> {
+pub fn solar_pair(lat: f64, lon: f64, date: Date, utc_offset_minutes: f64) -> Option<SunTimes> {
     let mut probe = date;
     for _ in 0..=183 {
         if let Some(times) = noaa_sunrise_sunset(lat, lon, probe, utc_offset_minutes) {
@@ -283,7 +280,7 @@ pub fn solar_pair(
                 set,
             });
         }
-        probe = probe.pred_opt()?;
+        probe = probe.yesterday().ok()?;
     }
     None
 }
@@ -624,10 +621,10 @@ fn mix_oklab(a: Rgb, b: Rgb, t_raw: f64) -> Rgb {
 fn noaa_sunrise_sunset(
     lat: f64,
     lon: f64,
-    date: NaiveDate,
+    date: Date,
     utc_offset_minutes: f64,
 ) -> Option<SunTimes> {
-    let n = f64::from(date.ordinal());
+    let n = f64::from(date.day_of_year());
     let lng_hour = lon / 15.0;
     let calc = |is_rise: bool| -> Option<f64> {
         let t = n + ((if is_rise { 6.0 } else { 18.0 }) - lng_hour) / 24.0;
@@ -688,7 +685,6 @@ mod tests {
         frame, near, parse_sun_minutes, sample_due, solar_pair, zone_count,
         zone_id_from_zoneinfo_path, zone_point,
     };
-    use chrono::NaiveDate;
 
     const RISE: f64 = 6.0 * 60.0 + 48.0;
     const SET: f64 = 18.0 * 60.0 + 56.0;
@@ -790,7 +786,7 @@ mod tests {
     #[test]
     fn reykjavik_june_carries_sunset_past_midnight() {
         let (lat, lon) = zone_point("Atlantic/Reykjavik").expect("reykjavik");
-        let date = NaiveDate::from_ymd_opt(2026, 6, 21).expect("date");
+        let date = jiff::civil::date(2026, 6, 21);
         let times = solar_pair(lat, lon, date, 0.0).expect("pair");
         assert!(times.set > 1440.0, "set {}", times.set);
         assert!(times.set > times.rise);

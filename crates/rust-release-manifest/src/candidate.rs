@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use super::*;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::de::DeserializeOwned;
 use std::ffi::{OsStr, OsString};
 use std::process::Output;
@@ -388,9 +388,9 @@ fn validate_advisory_descriptor_identity_mode(
     }
     validate_evidence_text("advisory source_id", &descriptor.source_id)?;
     validate_timestamp("advisory acquired_at", &descriptor.acquired_at)?;
-    let acquired = DateTime::parse_from_rfc3339(&descriptor.acquired_at).map_err(display_error)?;
-    let age = Utc::now().signed_duration_since(acquired);
-    if enforce_freshness && (age.num_seconds() < 0 || age.num_seconds() > DAY_SECONDS) {
+    let acquired = canonical_instant("advisory acquired_at", &descriptor.acquired_at)?;
+    let age = Timestamp::now().duration_since(acquired);
+    if enforce_freshness && (age.as_secs() < 0 || age.as_secs() > DAY_SECONDS) {
         return Err(Error::new(
             "advisory acquisition time mismatch: expected within 24 hours, actual stale\nrepair: acquire and commit a current advisory cohort before finalization",
         ));
@@ -559,7 +559,7 @@ fn run_advisory_cohort_mode(
         &["licenses", "bans", "sources"],
     )?;
     run_cargo_deny(processes, &context.path, &config_path, &["advisories"])?;
-    let checked_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let checked_at = time::utc_seconds(Timestamp::now());
     Ok(AdvisoryCohort {
         source_id: identity.source_id,
         commit,
@@ -577,11 +577,11 @@ fn run_advisory_cohort_mode(
 pub fn recheck_advisory_cohort(
     cohort: &AdvisoryCohort,
     processes: &ProcessEnvironment,
-    validation_time: DateTime<Utc>,
+    validation_time: Timestamp,
 ) -> Result<()> {
-    let acquired = DateTime::parse_from_rfc3339(&cohort.acquired_at).map_err(display_error)?;
-    let age = validation_time.signed_duration_since(acquired);
-    if age.num_seconds() < 0 || age.num_seconds() > DAY_SECONDS {
+    let acquired = canonical_instant("advisory acquired_at", &cohort.acquired_at)?;
+    let age = validation_time.duration_since(acquired);
+    if age.as_secs() < 0 || age.as_secs() > DAY_SECONDS {
         return Err(Error::new(
             "advisory acquisition time mismatch: expected within 24 hours, actual stale",
         ));

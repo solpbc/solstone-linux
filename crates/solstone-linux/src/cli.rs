@@ -1312,7 +1312,7 @@ fn discard_browser_pages_at(
         }
         Err(Connect::Unavailable) => {
             let layout = Layout::new(&config.base_dir);
-            let mut custody = Custody::open(layout, chrono::Local::now())?;
+            let mut custody = Custody::open(layout, jiff::Timestamp::now())?;
             custody.discard_pending()
         }
         Err(Connect::Untrusted) => Err(io::Error::new(
@@ -4089,7 +4089,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn discard_browser_pages_uses_socket_when_running_and_disk_when_absent() {
         fn store(base_dir: &Path) {
-            let now = chrono::Local::now();
+            let now = jiff::Timestamp::now();
             let mut custody = crate::browser::custody::Custody::open(
                 crate::browser::custody::Layout::new(base_dir),
                 now,
@@ -4098,7 +4098,7 @@ mod tests {
             let batch = serde_json::json!({
                 "type": "batch", "destination_generation": "g1", "inst": "i1",
                 "batch_id": "0123456789abcdef0123456789abcdef",
-                "queued_at_ms": now.timestamp_millis(),
+                "queued_at_ms": now.as_millisecond(),
                 "records": [{"t":"segment_start", "ts":1, "ctx":"c1", "inst":"i1",
                              "blocks":[{"id":"b1", "text":"pending"}]}]
             });
@@ -4136,7 +4136,7 @@ mod tests {
         store(&running_config.base_dir);
         let layout = crate::browser::custody::Layout::new(&running_config.base_dir);
         let custody = Arc::new(std::sync::Mutex::new(
-            crate::browser::custody::Custody::open(layout, chrono::Local::now()).unwrap(),
+            crate::browser::custody::Custody::open(layout, jiff::Timestamp::now()).unwrap(),
         ));
         let endpoint = running
             .path()

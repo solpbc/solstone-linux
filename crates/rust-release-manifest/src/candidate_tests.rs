@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use super::*;
-use chrono::Utc;
+use jiff::Timestamp;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Output;
@@ -1247,7 +1247,7 @@ pub(super) fn descriptor(
 }
 
 pub(super) fn current_time() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    time::utc_seconds(Timestamp::now())
 }
 
 fn cargo_deny_fixture_prerequisite(cargo: &Path) -> Result<()> {
@@ -1617,9 +1617,9 @@ fn advisory_uses_exported_policy_and_lock_and_rechecks_snapshot() {
     );
     let (_bin, processes) = process_bin(&cargo, None);
     let cohort = run_advisory_cohort(&context, &staging, &path, &processes).unwrap();
-    recheck_advisory_cohort(&cohort, &processes, Utc::now()).unwrap();
+    recheck_advisory_cohort(&cohort, &processes, Timestamp::now()).unwrap();
     fs::write(db.path().join("DRIFT"), b"changed").unwrap();
-    assert!(recheck_advisory_cohort(&cohort, &processes, Utc::now()).is_err());
+    assert!(recheck_advisory_cohort(&cohort, &processes, Timestamp::now()).is_err());
 }
 
 #[test]

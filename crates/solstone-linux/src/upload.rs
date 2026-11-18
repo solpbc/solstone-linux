@@ -1559,7 +1559,6 @@ mod tests {
     #[tokio::test]
     async fn upload_multipart_meta_capture_zone_shape() {
         use crate::segment::civil_time_in_zoneinfo;
-        use chrono::{NaiveDate, NaiveTime};
 
         for (zone, instant, expected_offset) in [
             ("America/Denver", 1768503600_i64, -25200_i32),
@@ -1569,9 +1568,12 @@ mod tests {
             let civil = civil_time_in_zoneinfo(zone, instant).unwrap();
             assert_eq!(civil.utc_offset_seconds, expected_offset);
 
-            let naive_date = NaiveDate::parse_from_str(&civil.day, "%Y%m%d").unwrap();
-            let naive_time = NaiveTime::parse_from_str(&civil.hms, "%H%M%S").unwrap();
-            let wall_unix = naive_date.and_time(naive_time).and_utc().timestamp();
+            let date = jiff::civil::Date::strptime("%Y%m%d", &civil.day).unwrap();
+            let time = jiff::civil::Time::strptime("%H%M%S", &civil.hms).unwrap();
+            let wall_unix = jiff::tz::Offset::UTC
+                .to_timestamp(date.to_datetime(time))
+                .unwrap()
+                .as_second();
             assert_eq!(wall_unix - i64::from(civil.utc_offset_seconds), instant);
 
             let server = MockServer::new(vec![(200, json!({"status":"ok"}))]).await;

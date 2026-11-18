@@ -1365,10 +1365,12 @@ fn bump_stem(day: &str, hms: &str) -> (String, String) {
 
     let bumped_hms = format!("{new_hh:02}{new_mm:02}{new_ss:02}");
     if rollover_day {
-        if let Ok(date) = chrono::NaiveDate::parse_from_str(day, "%Y%m%d")
-            && let Some(next_date) = date.succ_opt()
+        // A signed year is no day key.
+        if !day.starts_with(['+', '-'])
+            && let Ok(date) = jiff::civil::Date::strptime("%Y%m%d", day)
+            && let Ok(next_date) = date.tomorrow()
         {
-            return (next_date.format("%Y%m%d").to_string(), bumped_hms);
+            return (next_date.strftime("%Y%m%d").to_string(), bumped_hms);
         }
         (day.to_string(), hms.to_string())
     } else {
@@ -1430,6 +1432,36 @@ pub(crate) mod tests {
         rc::Rc,
         time::Instant,
     };
+
+    #[test]
+    fn a_bumped_stem_carries_into_the_next_day() {
+        let bump = |day: &str, hms: &str| bump_stem(day, hms);
+        assert_eq!(
+            bump("20261108", "094210"),
+            ("20261108".into(), "094211".into())
+        );
+        assert_eq!(
+            bump("20261108", "235959"),
+            ("20261109".into(), "000000".into())
+        );
+        assert_eq!(
+            bump("20261231", "235959"),
+            ("20270101".into(), "000000".into())
+        );
+        assert_eq!(
+            bump("20280228", "235959"),
+            ("20280229".into(), "000000".into())
+        );
+        // A day that does not read keeps the stem as it was.
+        assert_eq!(
+            bump("+2026110", "235959"),
+            ("+2026110".into(), "235959".into())
+        );
+        assert_eq!(
+            bump("20261332", "235959"),
+            ("20261332".into(), "235959".into())
+        );
+    }
 
     #[derive(Clone)]
     struct FakeClock {
@@ -1595,12 +1627,13 @@ pub(crate) mod tests {
     impl ZoneSource for CountingZone {
         fn read_zone(&mut self, wall_seconds: f64) -> ZoneReading {
             self.reads.set(self.reads.get() + 1);
-            let dt = chrono::DateTime::from_timestamp(wall_seconds.floor() as i64, 0)
-                .expect("valid unix seconds")
-                .naive_utc();
+            let dt = jiff::tz::Offset::UTC.to_datetime(
+                jiff::Timestamp::from_second(wall_seconds.floor() as i64)
+                    .expect("valid unix seconds"),
+            );
             ZoneReading {
-                day: dt.format("%Y%m%d").to_string(),
-                hms: dt.format("%H%M%S").to_string(),
+                day: dt.strftime("%Y%m%d").to_string(),
+                hms: dt.strftime("%H%M%S").to_string(),
                 utc_offset_seconds: 46800,
                 tz: Some("Pacific/Auckland".into()),
             }

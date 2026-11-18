@@ -15,9 +15,9 @@ workspace = true
 [dependencies]
 ar = "0.9.0"
 base64 = "0.22"
-chrono = "0.4"
 clap = { workspace = true, features = ["derive"] }
 flate2 = "1"
+jiff = "1.0.0"
 jsonschema = { version = "=0.48.1", default-features = false }
 rpm = { version = "0.30.2", default-features = false, features = ["payload", "zstd-compression"] }
 serde = { version = "1", features = ["derive"] }

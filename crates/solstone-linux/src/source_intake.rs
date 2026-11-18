@@ -26,10 +26,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, FixedOffset, Local, TimeZone};
+use jiff::civil::{Date, Time};
+use jiff::tz::Offset;
+use jiff::{Timestamp, ZonedDateTime};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::local_time;
 use crate::private_file::atomic_write_bytes;
 
 pub const FILENAME: &str = "source-intake.json";
@@ -413,8 +416,8 @@ fn later_last(current: Option<&str>, incoming: Option<&str>) -> Option<String> {
         (Some(current), None) => Some(current.to_owned()),
         (None, Some(incoming)) => Some(incoming.to_owned()),
         (Some(current), Some(incoming)) => {
-            let left = DateTime::parse_from_rfc3339(current).ok();
-            let right = DateTime::parse_from_rfc3339(incoming).ok();
+            let left = local_time::parse_rfc3339(current).map(|at| at.timestamp());
+            let right = local_time::parse_rfc3339(incoming).map(|at| at.timestamp());
             match (left, right) {
                 (Some(left), Some(right)) if right > left => Some(incoming.to_owned()),
                 _ => Some(current.to_owned()),
@@ -480,16 +483,16 @@ fn before_cutoff(file: &Value, source: &str, day: &str, segment: &str) -> bool {
     let Some(started_at) = file[source].get("started_at").and_then(Value::as_str) else {
         return true;
     };
-    let Ok(cutoff) = DateTime::parse_from_rfc3339(started_at) else {
+    let Some(cutoff) = local_time::parse_rfc3339(started_at) else {
         return true;
     };
     let Some(hms) = hms_of(segment) else {
         return true;
     };
-    capture_instant(day, hms, *cutoff.offset()).is_none_or(|capture| capture < cutoff)
+    capture_instant(day, hms, cutoff.offset()).is_none_or(|capture| capture < cutoff.timestamp())
 }
 
-fn capture_instant(day: &str, hms: &str, offset: FixedOffset) -> Option<DateTime<FixedOffset>> {
+fn capture_instant(day: &str, hms: &str, offset: Offset) -> Option<Timestamp> {
     if day.len() != 8 || hms.len() != 6 {
         return None;
     }
@@ -499,9 +502,20 @@ fn capture_instant(day: &str, hms: &str, offset: FixedOffset) -> Option<DateTime
     let hour: u32 = hms[0..2].parse().ok()?;
     let minute: u32 = hms[2..4].parse().ok()?;
     let second: u32 = hms[4..6].parse().ok()?;
-    offset
-        .with_ymd_and_hms(year, month, day_n, hour, minute, second)
-        .single()
+    let date = Date::new(
+        i16::try_from(year).ok()?,
+        i8::try_from(month).ok()?,
+        i8::try_from(day_n).ok()?,
+    )
+    .ok()?;
+    let time = Time::new(
+        i8::try_from(hour).ok()?,
+        i8::try_from(minute).ok()?,
+        i8::try_from(second).ok()?,
+        0,
+    )
+    .ok()?;
+    offset.to_timestamp(date.to_datetime(time)).ok()
 }
 
 fn total_of(file: &Value, source: &str) -> Option<u64> {
@@ -944,7 +958,7 @@ fn started_at_ok(file: &Value, source: &str) -> bool {
         None => true,
         Some(value) => value
             .as_str()
-            .is_some_and(|text| DateTime::parse_from_rfc3339(text).is_ok()),
+            .is_some_and(|text| local_time::parse_rfc3339(text).is_some()),
     }
 }
 
@@ -1183,13 +1197,13 @@ struct ClockStamp {
 
 impl ClockStamp {
     fn now() -> Self {
-        Self::from_local(Local::now())
+        Self::from_local(&local_time::now())
     }
 
-    fn from_local(now: DateTime<Local>) -> Self {
+    fn from_local(now: &ZonedDateTime) -> Self {
         Self {
-            started: now.format("%Y-%m-%d").to_string(),
-            at: now.to_rfc3339(),
+            started: now.strftime("%Y-%m-%d").to_string(),
+            at: local_time::rfc3339(now, local_time::Precision::AutoSi, false),
         }
     }
 
@@ -1203,15 +1217,25 @@ impl ClockStamp {
         minute: u32,
         second: u32,
     ) -> Self {
-        let offset = FixedOffset::east_opt(offset_seconds).expect("offset fits a day");
-        let now = offset
-            .with_ymd_and_hms(year, month, day, hour, minute, second)
-            .single()
-            .expect("stamp is a real local time");
-        Self {
-            started: now.format("%Y-%m-%d").to_string(),
-            at: now.to_rfc3339(),
-        }
+        let offset = Offset::from_seconds(offset_seconds).expect("offset fits a day");
+        let wall = jiff::civil::date(
+            i16::try_from(year).unwrap(),
+            i8::try_from(month).unwrap(),
+            i8::try_from(day).unwrap(),
+        )
+        .at(
+            i8::try_from(hour).unwrap(),
+            i8::try_from(minute).unwrap(),
+            i8::try_from(second).unwrap(),
+            0,
+        );
+        let now = local_time::fixed(
+            offset
+                .to_timestamp(wall)
+                .expect("stamp is a real local time"),
+            offset,
+        );
+        Self::from_local(&now)
     }
 }
 

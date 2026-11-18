@@ -718,15 +718,19 @@ fn stage(delivery: &Delivery, outbox: &Path, converter: &Converter) -> Staged {
 /// The envelope's day and `HHMMSS_1`, and `captured_at`, at the capture second in
 /// its own offset.
 pub(crate) fn capture_moment(captured_ms: i64, offset_s: i32) -> (String, String, String) {
-    let offset = chrono::FixedOffset::east_opt(offset_s)
-        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("zero offset"));
-    let moment = chrono::DateTime::from_timestamp(captured_ms.div_euclid(1000), 0)
-        .unwrap_or_default()
-        .with_timezone(&offset);
+    // An offset of a whole day or more is read as UTC.
+    let offset = if offset_s.unsigned_abs() < 86_400 {
+        jiff::tz::Offset::from_seconds(offset_s).unwrap_or(jiff::tz::Offset::UTC)
+    } else {
+        jiff::tz::Offset::UTC
+    };
+    let instant = jiff::Timestamp::new(captured_ms.div_euclid(1000), 0)
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    let moment = crate::local_time::fixed(instant, offset);
     (
-        moment.format("%Y%m%d").to_string(),
-        moment.format("%H%M%S_1").to_string(),
-        moment.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        moment.strftime("%Y%m%d").to_string(),
+        moment.strftime("%H%M%S_1").to_string(),
+        crate::local_time::rfc3339(&moment, crate::local_time::Precision::Secs, true),
     )
 }
 

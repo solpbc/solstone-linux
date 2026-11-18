@@ -608,7 +608,7 @@ fn retained_fixture_from_products(
         &["git", "archive", "--format=tar", "HEAD"],
     )
     .unwrap();
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = time::utc_seconds(jiff::Timestamp::now());
     let descriptor_dir = tempfile::tempdir().unwrap();
     let descriptor = crate::candidate_tests::descriptor(
         descriptor_dir.path(),
@@ -911,7 +911,7 @@ fn write_valid_proof(root: &RepoRoot, ledger: &CandidateLedger, ledger_bytes: &[
         executable_sha256: member.sha256.clone(),
         version_output: "solstone-linux 1.0.0".into(),
         result: "pass".into(),
-        proof_time: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        proof_time: time::utc_seconds(jiff::Timestamp::now()),
         architecture: if id == "debian-amd64" {
             "amd64"
         } else {

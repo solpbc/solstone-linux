@@ -105,11 +105,11 @@ impl Recents {
             };
             let Some(added) = bookmark
                 .attribute("added")
-                .and_then(|added| chrono::DateTime::parse_from_rfc3339(added).ok())
+                .and_then(crate::local_time::parse_rfc3339)
             else {
                 continue;
             };
-            saved.insert(path, added.timestamp_millis());
+            saved.insert(path, crate::local_time::unix_millis(added.timestamp()));
         }
         Self { saved }
     }
@@ -197,9 +197,14 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(
-            chrono::DateTime::from_timestamp_millis(saved)
-                .unwrap()
-                .to_rfc3339(),
+            crate::local_time::rfc3339(
+                &crate::local_time::fixed(
+                    jiff::Timestamp::from_millisecond(saved).unwrap(),
+                    jiff::tz::Offset::UTC
+                ),
+                crate::local_time::Precision::AutoSi,
+                false
+            ),
             "2026-11-13T09:47:32.224+00:00"
         );
         assert!(

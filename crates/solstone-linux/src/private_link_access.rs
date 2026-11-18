@@ -284,7 +284,7 @@ pub(crate) async fn execute_relay_access_sync(
                         let claims = validate_relay_access_ready(
                             &ready,
                             writer.instance_id(),
-                            chrono::Utc::now().timestamp(),
+                            jiff::Timestamp::now().as_second(),
                         )?;
                         writer.commit_optional_relay_with_attempt(
                             &opener,
@@ -617,10 +617,9 @@ mod tests {
         let capability = session.capability();
 
         let inst_id = peer.credential().instance_id;
-        let future_exp = chrono::Utc::now().timestamp() + 3600;
-        let expires_at_str = chrono::DateTime::from_timestamp(future_exp, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let future_exp = jiff::Timestamp::now().as_second() + 3600;
+        let expires_at_str =
+            crate::local_time::utc_seconds(jiff::Timestamp::from_second(future_exp).unwrap());
 
         let claims_json = serde_json::json!({
             "iss": "https://relay.example.com",
@@ -1112,10 +1111,10 @@ mod tests {
                 }
                 "ready_equal" => {
                     let inst_id = peer.credential().instance_id;
-                    let future_exp = chrono::Utc::now().timestamp() + 3600;
-                    let expires_at_str = chrono::DateTime::from_timestamp(future_exp, 0)
-                        .unwrap()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let future_exp = jiff::Timestamp::now().as_second() + 3600;
+                    let expires_at_str = crate::local_time::utc_seconds(
+                        jiff::Timestamp::from_second(future_exp).unwrap(),
+                    );
                     let token = make_test_jwt(serde_json::json!({
                         "iss": "https://relay.example.com",
                         "sub": format!("instance:{inst_id}"),
@@ -1181,10 +1180,9 @@ mod tests {
     async fn test_session_local_endpoints_relay_ready_and_address_commit() {
         let peer = crate::private_link_test_peer::PrivateLinkPeer::start().await;
         let inst_id = peer.credential().instance_id;
-        let future_exp = chrono::Utc::now().timestamp() + 3600;
-        let expires_at_str = chrono::DateTime::from_timestamp(future_exp, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let future_exp = jiff::Timestamp::now().as_second() + 3600;
+        let expires_at_str =
+            crate::local_time::utc_seconds(jiff::Timestamp::from_second(future_exp).unwrap());
         let new_token = make_test_jwt(serde_json::json!({
             "iss": "https://relay.example.com",
             "sub": format!("instance:{inst_id}"),

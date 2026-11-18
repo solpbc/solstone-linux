@@ -315,7 +315,7 @@ fn run_capture(
     let browser_custody = if crate::browser::ENABLED {
         match crate::browser::custody::Custody::open(
             crate::browser::custody::Layout::new(&config.base_dir),
-            chrono::Local::now(),
+            jiff::Timestamp::now(),
         ) {
             Ok(custody) => Some(Arc::new(Mutex::new(custody))),
             Err(error) => {

@@ -4,7 +4,8 @@
 //! Tile words, widths, one attention row per source, and counter phrases. No toolkit.
 //! The window calls [`deck_columns`]. A phrase here is a locked word.
 
-use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Timelike};
+use jiff::ZonedDateTime;
+use jiff::civil::Date;
 use solstone_i18n::{message, text};
 
 use crate::browser::status::RUNNING_STALE_MS;
@@ -440,19 +441,21 @@ pub fn greeting(hour: u32) -> &'static str {
 
 #[must_use]
 pub fn greeting_now() -> &'static str {
-    let now = Local::now();
-    let minutes = crate::sun_arc::pinned_sun_minutes(f64::from(now.hour() * 60 + now.minute()));
+    let now = crate::local_time::now();
+    let minutes = crate::sun_arc::pinned_sun_minutes(f64::from(
+        i32::from(now.hour()) * 60 + i32::from(now.minute()),
+    ));
     let hour = minutes.div_euclid(60.0);
     if (0.0..24.0).contains(&hour) {
         greeting(hour as u32)
     } else {
-        greeting(now.hour())
+        greeting(u32::from(now.hour().unsigned_abs()))
     }
 }
 
 #[must_use]
 pub fn source_last_now(file: &IntakeFile, last: Option<&str>) -> LastTaken {
-    source_last(file, last, Local::now().fixed_offset())
+    source_last(file, last, crate::local_time::now())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -574,7 +577,7 @@ fn so_far(
 }
 
 #[must_use]
-pub fn screen_last(file: &IntakeFile, now: DateTime<FixedOffset>) -> LastTaken {
+pub fn screen_last(file: &IntakeFile, now: ZonedDateTime) -> LastTaken {
     let last = match file {
         IntakeFile::Rows(rows) => rows.screen.last.as_deref(),
         IntakeFile::Missing | IntakeFile::Refused => None,
@@ -584,12 +587,12 @@ pub fn screen_last(file: &IntakeFile, now: DateTime<FixedOffset>) -> LastTaken {
 
 /// `last taken in` for one counter. Absent and a refused file have no phrase.
 #[must_use]
-pub fn source_last(file: &IntakeFile, last: Option<&str>, now: DateTime<FixedOffset>) -> LastTaken {
+pub fn source_last(file: &IntakeFile, last: Option<&str>, now: ZonedDateTime) -> LastTaken {
     match file {
         IntakeFile::Missing => LastTaken::Absent,
         IntakeFile::Refused => LastTaken::Hidden,
         IntakeFile::Rows(_) => match last {
-            Some(last) if !last.is_empty() => LastTaken::When(format_relative(last, now)),
+            Some(last) if !last.is_empty() => LastTaken::When(format_relative(last, &now)),
             _ => LastTaken::Absent,
         },
     }
@@ -607,16 +610,12 @@ pub fn total_text(total: &ShownTotal) -> Option<&str> {
 /// The source page's `so far`, dated from today.
 #[must_use]
 pub fn page_total_now(total: &ShownTotal, started: Option<&str>) -> Option<String> {
-    page_total_text(total, started, Local::now().date_naive())
+    page_total_text(total, started, crate::local_time::now().date())
 }
 
 /// The source page's `so far`. A real total names the day it started.
 #[must_use]
-pub fn page_total_text(
-    total: &ShownTotal,
-    started: Option<&str>,
-    today: NaiveDate,
-) -> Option<String> {
+pub fn page_total_text(total: &ShownTotal, started: Option<&str>, today: Date) -> Option<String> {
     match total {
         ShownTotal::Hidden => None,
         ShownTotal::NothingYet => Some(text!("linux.window.nothingyet").to_owned()),
@@ -686,17 +685,18 @@ fn grouped(n: u64) -> String {
 }
 
 #[must_use]
-pub fn format_started(started: &str, today: NaiveDate) -> Option<String> {
-    let date = NaiveDate::parse_from_str(started, "%Y-%m-%d").ok()?;
+pub fn format_started(started: &str, today: Date) -> Option<String> {
+    let date = Date::strptime("%Y-%m-%d", started).ok()?;
     Some(format_date(date, today))
 }
 
-fn format_date(date: NaiveDate, today: NaiveDate) -> String {
-    let month = month_name(date.month());
+fn format_date(date: Date, today: Date) -> String {
+    let month = month_name(u32::from(date.month().unsigned_abs()));
+    let day = u32::from(date.day().unsigned_abs());
     if date.year() == today.year() {
-        message!("linux.shell.monthday", "month" => month, "day" => date.day())
+        message!("linux.shell.monthday", "month" => month, "day" => day)
     } else {
-        message!("linux.shell.monthdayyear", "month" => month, "day" => date.day(), "year" => date.year())
+        message!("linux.shell.monthdayyear", "month" => month, "day" => day, "year" => i32::from(date.year()))
     }
 }
 
@@ -718,11 +718,11 @@ fn month_name(month: u32) -> &'static str {
 }
 
 #[must_use]
-pub fn format_relative(last: &str, now: DateTime<FixedOffset>) -> String {
-    let Ok(parsed) = DateTime::parse_from_rfc3339(last) else {
+pub fn format_relative(last: &str, now: &ZonedDateTime) -> String {
+    let Some(parsed) = crate::local_time::parse_rfc3339(last) else {
         return String::new();
     };
-    let age = now.signed_duration_since(parsed).num_seconds();
+    let age = now.timestamp().duration_since(parsed.timestamp()).as_secs();
     if age < 60 {
         return text!("linux.about.now").to_owned();
     }
@@ -738,10 +738,10 @@ pub fn format_relative(last: &str, now: DateTime<FixedOffset>) -> String {
             &[("display", solstone_i18n::Value::String(&hours.to_string()))],
         );
     }
-    let last_local = parsed.with_timezone(now.offset());
-    let today = now.date_naive();
-    let last_day = last_local.date_naive();
-    if today.pred_opt() == Some(last_day) {
+    // Both days are read at the offset in effect now.
+    let today = now.date();
+    let last_day = crate::local_time::fixed(parsed.timestamp(), now.offset()).date();
+    if today.yesterday().ok() == Some(last_day) {
         text!("linux.shell.yesterday").to_owned()
     } else {
         format_date(last_day, today)
@@ -751,19 +751,24 @@ pub fn format_relative(last: &str, now: DateTime<FixedOffset>) -> String {
 /// A unix instant, as the same relative words `last taken in` uses. Absent when the
 /// instant is not a real time.
 #[must_use]
-pub fn relative_unix(at: f64, now: DateTime<FixedOffset>) -> Option<String> {
+pub fn relative_unix(at: f64, now: &ZonedDateTime) -> Option<String> {
     if !at.is_finite() {
         return None;
     }
     let whole = at.trunc() as i64;
-    let when = DateTime::from_timestamp(whole, 0)?;
-    let text = format_relative(&when.to_rfc3339(), now);
+    let when = jiff::Timestamp::from_second(whole).ok()?;
+    let when = crate::local_time::rfc3339(
+        &crate::local_time::fixed(when, jiff::tz::Offset::UTC),
+        crate::local_time::Precision::AutoSi,
+        false,
+    );
+    let text = format_relative(&when, now);
     if text.is_empty() { None } else { Some(text) }
 }
 
 #[must_use]
 pub fn relative_unix_now(at: f64) -> Option<String> {
-    relative_unix(at, Local::now().fixed_offset())
+    relative_unix(at, &crate::local_time::now())
 }
 
 #[cfg(test)]
@@ -771,7 +776,8 @@ mod tests {
     use super::*;
     use crate::desktop_session::SessionPresence;
     use crate::source_intake::Counter;
-    use chrono::{Duration, TimeZone};
+    use jiff::SignedDuration;
+    use jiff::tz::Offset;
 
     fn rows(screen: u64, audio: u64, screen_last: Option<&str>) -> IntakeFile {
         IntakeFile::Rows(Box::new(IntakeRows {
@@ -821,10 +827,12 @@ mod tests {
             screen_so_far(&screen),
             ShownTotal::Amount("1 hour".to_owned())
         );
-        let now = FixedOffset::east_opt(0)
-            .unwrap()
-            .with_ymd_and_hms(2026, 11, 10, 15, 0, 0)
-            .unwrap();
+        let now = crate::local_time::fixed(
+            Offset::UTC
+                .to_timestamp(jiff::civil::date(2026, 11, 10).at(15, 0, 0, 0))
+                .unwrap(),
+            Offset::UTC,
+        );
         assert_eq!(screen_last(&screen, now), LastTaken::Absent);
         assert_eq!(screen_so_far(&IntakeFile::Missing), ShownTotal::NothingYet);
         assert_eq!(screen_so_far(&IntakeFile::Refused), ShownTotal::Hidden);
@@ -841,7 +849,7 @@ mod tests {
         assert_eq!(format_seconds(7200), "2 hours");
         assert_eq!(format_seconds(3_600_000), "1,000 hours");
         assert_eq!(format_seconds(9_424_800), "2,618 hours");
-        let today = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let today = jiff::civil::date(2026, 11, 10);
         assert_eq!(
             format_started("2025-03-03", today).as_deref(),
             Some("march 3, 2025")
@@ -924,22 +932,34 @@ mod tests {
 
     #[test]
     fn relative_phrases_follow_the_locked_order() {
-        let zone = FixedOffset::east_opt(-7 * 3600).unwrap();
-        let now = zone.with_ymd_and_hms(2026, 11, 10, 15, 0, 0).unwrap();
-        let phrase =
-            |seconds: i64| format_relative(&(now - Duration::seconds(seconds)).to_rfc3339(), now);
+        let zone = Offset::from_seconds(-7 * 3600).unwrap();
+        let now = crate::local_time::fixed(
+            zone.to_timestamp(jiff::civil::date(2026, 11, 10).at(15, 0, 0, 0))
+                .unwrap(),
+            zone,
+        );
+        let phrase = |seconds: i64| {
+            let then = crate::local_time::fixed(
+                now.timestamp() - SignedDuration::from_secs(seconds),
+                zone,
+            );
+            format_relative(
+                &crate::local_time::rfc3339(&then, crate::local_time::Precision::AutoSi, false),
+                &now,
+            )
+        };
         assert_eq!(phrase(30), "just now");
         assert_eq!(phrase(90), "1 min ago");
         assert_eq!(phrase(3600), "1 hour ago");
         assert_eq!(phrase(86_400), "yesterday");
-        let at = now.timestamp() as f64 - 30.0;
-        assert_eq!(relative_unix(at, now).as_deref(), Some("just now"));
-        assert_eq!(relative_unix(f64::NAN, now), None);
+        let at = now.timestamp().as_second() as f64 - 30.0;
+        assert_eq!(relative_unix(at, &now).as_deref(), Some("just now"));
+        assert_eq!(relative_unix(f64::NAN, &now), None);
     }
 
     #[test]
     fn the_page_total_names_the_day_it_started() {
-        let today = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let today = jiff::civil::date(2026, 11, 10);
         assert_eq!(
             page_total_text(
                 &ShownTotal::Amount("212 hours".to_owned()),

@@ -2,7 +2,6 @@
 // Copyright (c) 2026 sol pbc
 
 use super::*;
-use chrono::Utc;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -709,11 +708,7 @@ fn chain_with_historical_candidate(
         tip: None,
         transparency_ledger: Vec::new(),
     };
-    set_test_now(Some(
-        DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
-    ));
+    set_test_now(Some("2026-07-22T00:00:00Z".parse::<Timestamp>().unwrap()));
     let (historical, historical_bytes) = build_entry(
         &snapshot.staging,
         &snapshot.manifest,
@@ -999,9 +994,7 @@ fn transparency_second_publication_and_resign_replace_mutable_objects_end_to_end
     assert_eq!(fs::read(&pointer_path).unwrap(), new_pointer);
 
     let published: TransparencyPointer = serde_json::from_slice(&new_pointer).unwrap();
-    let now = DateTime::parse_from_rfc3339("2026-07-30T00:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
+    let now = "2026-07-30T00:00:00Z".parse::<Timestamp>().unwrap();
     let (renewed, renewed_bytes) = renew_pointer(&published, now).unwrap();
     let renewed_signature = fake_signature(&pointer_trusted_comment(&renewed));
     let signature_destination = s3_destination("releases/solstone-linux/latest.json.minisig");
@@ -2140,11 +2133,7 @@ fn transparency_stale_staged_publication_preserves_bytes_and_emits_resign_direct
         fs::write(signature, fake_signature(comment)).map_err(display_error)
     };
     let mut probe = |_: &str| Ok(None);
-    set_test_now(Some(
-        DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
-    ));
+    set_test_now(Some("2026-07-22T00:00:00Z".parse::<Timestamp>().unwrap()));
     let _reset = ResetClock;
     let first = prepare_publication(
         &fixture.repo.root,
@@ -2162,11 +2151,7 @@ fn transparency_stale_staged_publication_preserves_bytes_and_emits_resign_direct
         first.pointer_bytes.clone(),
         first.pointer_signature.clone(),
     ];
-    set_test_now(Some(
-        DateTime::parse_from_rfc3339("2026-08-06T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
-    ));
+    set_test_now(Some("2026-08-06T00:00:00Z".parse::<Timestamp>().unwrap()));
     let second = prepare_publication(
         &fixture.repo.root,
         &release,
@@ -3030,9 +3015,7 @@ fn transparency_expired_pointer_does_not_invalidate_verified_head() {
 fn transparency_resign_cannot_change_chain_length_or_tip() {
     let tip = genesis_entry();
     let old = pointer_for(&tip);
-    let now = DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
+    let now = "2026-07-23T00:00:00Z".parse::<Timestamp>().unwrap();
     let (renewed, bytes) = renew_pointer(&old, now).unwrap();
     assert_eq!(renewed.chain_length, old.chain_length);
     assert_eq!(renewed.tip_sha256, old.tip_sha256);
@@ -3051,9 +3034,7 @@ fn transparency_resign_uses_injected_clock_without_changing_tip() {
     }
 
     let old = pointer_for(&genesis_entry());
-    let now = DateTime::parse_from_rfc3339("2026-07-30T12:34:56Z")
-        .unwrap()
-        .with_timezone(&Utc);
+    let now = "2026-07-30T12:34:56Z".parse::<Timestamp>().unwrap();
     set_test_now(Some(now));
     let _reset = ResetClock;
     let (renewed, _) = renew_pointer_now(&old).unwrap();
@@ -3080,11 +3061,7 @@ fn transparency_deterministic_entry_and_pointer_bytes_ignore_later_clock() {
         fs::write(signature, fake_signature(comment)).map_err(display_error)
     };
     let mut probe = |_: &str| Ok(None);
-    set_test_now(Some(
-        DateTime::parse_from_rfc3339("2026-07-22T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
-    ));
+    set_test_now(Some("2026-07-22T00:00:00Z".parse::<Timestamp>().unwrap()));
     configure_test_operation_seam(None);
     let first = prepare_publication(
         &fixture.repo.root,
@@ -3127,11 +3104,7 @@ fn transparency_deterministic_entry_and_pointer_bytes_ignore_later_clock() {
         )
         .is_err()
     );
-    set_test_now(Some(
-        DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
-    ));
+    set_test_now(Some("2026-07-23T00:00:00Z".parse::<Timestamp>().unwrap()));
     let second = prepare_publication(
         &fixture.repo.root,
         &release,

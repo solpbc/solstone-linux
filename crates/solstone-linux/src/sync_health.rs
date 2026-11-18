@@ -3,7 +3,6 @@
 
 use crate::copy::{unknown_journal_seen_at, unknown_journal_seen_through_relay};
 use crate::private_link::{LinkFactState, PrivateStateLockLiveness};
-use chrono::{DateTime, Local};
 use serde_json::{Map, Value, json};
 use solstone_i18n::{message, text};
 use std::{
@@ -442,15 +441,15 @@ fn format_ts(timestamp: Option<f64>) -> String {
         return text!("linux.shared.health.unknown").to_owned();
     };
     let seconds = timestamp.floor() as i64;
-    let nanos = ((timestamp - timestamp.floor()) * 1e9) as u32;
-    DateTime::from_timestamp(seconds, nanos)
-        .map(|datetime| {
-            datetime
-                .with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M")
+    let nanos = ((timestamp - timestamp.floor()) * 1e9) as i32;
+    jiff::Timestamp::new(seconds, nanos)
+        .map(|instant| {
+            instant
+                .to_zoned_datetime(crate::local_time::zone())
+                .strftime("%Y-%m-%d %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|| text!("linux.shared.health.unknown").to_owned())
+        .unwrap_or_else(|_| text!("linux.shared.health.unknown").to_owned())
 }
 
 #[cfg(test)]

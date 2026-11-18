@@ -3,9 +3,9 @@
 
 //! Offline validation and deterministic rendering for Rust release manifests.
 
-use chrono::DateTime;
 use flate2::bufread::GzDecoder as BufGzDecoder;
 use flate2::read::GzDecoder;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -37,6 +37,7 @@ mod dependency_notices;
 pub use dependency_notices::*;
 mod transaction;
 pub use transaction::*;
+mod time;
 mod transparency;
 pub use transparency::*;
 
@@ -1981,11 +1982,9 @@ pub fn validate_candidate_proof(value: &Value, expected: &ProofBindings) -> Resu
     validate_timestamp("proof_time", proof_time)?;
     validate_timestamp("policy checked_at", &expected.policy_checked_at)?;
     validate_timestamp("proof validation time", &expected.validation_time)?;
-    let proof_time = DateTime::parse_from_rfc3339(proof_time).map_err(display_error)?;
-    let checked_at =
-        DateTime::parse_from_rfc3339(&expected.policy_checked_at).map_err(display_error)?;
-    let validation_time =
-        DateTime::parse_from_rfc3339(&expected.validation_time).map_err(display_error)?;
+    let proof_time = canonical_instant("proof_time", proof_time)?;
+    let checked_at = canonical_instant("policy checked_at", &expected.policy_checked_at)?;
+    let validation_time = canonical_instant("proof validation time", &expected.validation_time)?;
     if proof_time < checked_at || proof_time > validation_time {
         return Err(Error::new(
             "proof proof_time mismatch: expected advisory window, actual outside",
@@ -2210,7 +2209,7 @@ fn validate_rustc_verbose_banner(field: &str, value: &str) -> Result<String> {
         || fields["host"].is_empty()
         || fields["release"].is_empty()
         || fields["LLVM version"].is_empty()
-        || DateTime::parse_from_rfc3339(&format!("{}T00:00:00Z", fields["commit-date"])).is_err()
+        || time::parse_utc_seconds(&format!("{}T00:00:00Z", fields["commit-date"])).is_none()
     {
         return Err(Error::new(format!(
             "evidence field {field} mismatch: expected complete rustc verbose banner"
@@ -2309,14 +2308,16 @@ fn validate_timestamp(field: &str, value: &str) -> Result<()> {
             "{field} mismatch: expected canonical UTC seconds with Z suffix"
         )));
     }
-    let parsed = DateTime::parse_from_rfc3339(value)
-        .map_err(|_| Error::new(format!("{field} mismatch: expected canonical UTC time")))?;
-    if parsed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true) != value {
-        return Err(Error::new(format!(
-            "{field} mismatch: expected canonical UTC seconds with Z suffix"
-        )));
-    }
+    // The text already has the canonical shape, so a real date and time is
+    // the whole remaining condition.
+    canonical_instant(field, value)?;
     Ok(())
+}
+
+/// The instant a canonical `YYYY-MM-DDTHH:MM:SSZ` field names.
+fn canonical_instant(field: &str, value: &str) -> Result<Timestamp> {
+    time::parse_utc_seconds(value)
+        .ok_or_else(|| Error::new(format!("{field} mismatch: expected canonical UTC time")))
 }
 
 fn validate_native_tools(root: &RepoRoot, tools: &BTreeMap<String, String>) -> Result<()> {

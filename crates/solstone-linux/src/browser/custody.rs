@@ -13,7 +13,8 @@
 //! - One bound covers everything held: past it, new batches are refused as
 //!   `queue_full` and the extension is told custody is full.
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
+use jiff::Timestamp;
+use jiff::civil::{Date, Time};
 use native_browser_frame::{
     ACCEPTED_RETENTION_MS_MIN, FILE_MAX, FUTURE_SKEW_MS_MAX, SPOOL_BYTES_MAX, canonical_stringify,
 };
@@ -26,6 +27,8 @@ use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
+
+use crate::local_time;
 
 /// Sidecar naming the period. Dot files are never uploaded.
 pub const PERIOD_FILE: &str = ".browser_period.json";
@@ -87,22 +90,32 @@ struct EvidenceLine {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Bucket {
-    date: NaiveDate,
+    date: Date,
     index: u32,
 }
 
 impl Bucket {
-    fn of(now: &DateTime<Local>) -> Self {
+    fn of(now: &Timestamp) -> Self {
+        let local = now.to_zoned_datetime(local_time::zone());
+        let minutes =
+            u32::from(local.hour().unsigned_abs()) * 60 + u32::from(local.minute().unsigned_abs());
         Self {
-            date: now.date_naive(),
-            index: (now.hour() * 60 + now.minute()) / PERIOD_MINUTES,
+            date: local.date(),
+            index: minutes / PERIOD_MINUTES,
         }
     }
     fn start_ms(&self) -> Option<u64> {
         let minutes = self.index * PERIOD_MINUTES;
-        let naive = self.date.and_hms_opt(minutes / 60, minutes % 60, 0)?;
-        let local = Local.from_local_datetime(&naive).earliest()?;
-        u64::try_from(local.timestamp_millis()).ok()
+        let time = Time::new(
+            i8::try_from(minutes / 60).ok()?,
+            i8::try_from(minutes % 60).ok()?,
+            0,
+            0,
+        )
+        .ok()?;
+        let local =
+            local_time::from_local(&local_time::zone(), self.date.to_datetime(time)).earliest()?;
+        u64::try_from(local_time::unix_millis(local.timestamp())).ok()
     }
 }
 
@@ -152,7 +165,7 @@ pub struct Custody {
     evidence_lines: Vec<EvidenceLine>,
     reserved_uploads: HashSet<PathBuf>,
     /// Finished periods that could not yet be turned into segments; retried each tick.
-    unfinished: Vec<(Period, DateTime<Local>)>,
+    unfinished: Vec<(Period, Timestamp)>,
     held_bytes: u64,
     bound: u64,
     #[cfg(test)]
@@ -163,7 +176,7 @@ pub struct Custody {
 
 impl Custody {
     /// Recover all pending browser pages without binding them to a journal.
-    pub fn open(layout: Layout, now: DateTime<Local>) -> io::Result<Self> {
+    pub fn open(layout: Layout, now: Timestamp) -> io::Result<Self> {
         create_private_dir(&layout.root)?;
         create_private_dir(&layout.open())?;
         // Legacy state is deliberately neither parsed nor imported. Failure to remove
@@ -248,7 +261,7 @@ impl Custody {
 
     /// Start a new period when the five-minute local-clock bucket changes. Returns the
     /// new period id, which every connected browser must hear as a `boundary`.
-    pub fn tick(&mut self, now: DateTime<Local>) -> Option<String> {
+    pub fn tick(&mut self, now: Timestamp) -> Option<String> {
         if !self.unfinished.is_empty() {
             let pending = std::mem::take(&mut self.unfinished);
             for (period, end) in pending {
@@ -269,7 +282,7 @@ impl Custody {
         self.rotate(now)
     }
 
-    fn rotate(&mut self, now: DateTime<Local>) -> Option<String> {
+    fn rotate(&mut self, now: Timestamp) -> Option<String> {
         if let Some(period) = self.period.take()
             && let Err(error) = self.finalize(&period, now)
         {
@@ -286,7 +299,7 @@ impl Custody {
 
     /// Accept one decoded batch. The second value is a new period id when accepting it
     /// had to start a new period.
-    pub fn accept(&mut self, batch: &Value, now: DateTime<Local>) -> (Outcome, Option<String>) {
+    pub fn accept(&mut self, batch: &Value, now: Timestamp) -> (Outcome, Option<String>) {
         let field = |name: &str| batch.get(name).and_then(Value::as_str).unwrap_or_default();
         let (inst, batch_id) = (field("inst"), field("batch_id"));
         let key = (inst.to_owned(), batch_id.to_owned());
@@ -477,7 +490,7 @@ impl Custody {
     }
 
     /// Turn a finished period into a capture segment the sync service delivers.
-    fn finalize(&self, period: &Period, end: DateTime<Local>) -> io::Result<()> {
+    fn finalize(&self, period: &Period, end: Timestamp) -> io::Result<()> {
         let directory = self.layout.open().join(&period.id);
         if !period.has_dir {
             return Ok(());
@@ -507,7 +520,7 @@ impl Custody {
         )
     }
 
-    fn recover_open(&mut self, now: DateTime<Local>) {
+    fn recover_open(&mut self, now: Timestamp) {
         let bucket = Bucket::of(&now);
         for directory in sorted_dirs(&self.layout.open()) {
             let Some(record) = read_period(&directory) else {
@@ -530,10 +543,7 @@ impl Custody {
                     },
                 );
             }
-            let created = Local
-                .timestamp_millis_opt(record.created_at_ms as i64)
-                .single()
-                .unwrap_or(now);
+            let created = Timestamp::from_millisecond(record.created_at_ms as i64).unwrap_or(now);
             let period = Period {
                 id: record.period_id.clone(),
                 bucket: Bucket::of(&created),
@@ -551,7 +561,7 @@ impl Custody {
                 // and the finish clamps the end to the period's window either way.
                 let end = last_accepted_ms(&directory)
                     .or_else(|| modified_ms(&directory.join(super::PAGES_FILENAME)))
-                    .and_then(|ms| Local.timestamp_millis_opt(ms as i64).single())
+                    .and_then(|ms| Timestamp::from_millisecond(ms as i64).ok())
                     .unwrap_or(now);
                 if let Err(error) = self.finalize(&period, end) {
                     tracing::warn!(%error, "Could not finish a browser period yet");
@@ -766,7 +776,7 @@ impl Custody {
             self.unfinished
                 .retain(|(period, _)| self.layout.open().join(&period.id) != directory);
         }
-        self.period = Some(new_period(&Local::now()));
+        self.period = Some(new_period(&Timestamp::now()));
         self.refresh_held();
         Ok(())
     }
@@ -839,7 +849,7 @@ pub fn held_bytes(layout: &Layout) -> u64 {
     })
 }
 
-fn new_period(now: &DateTime<Local>) -> Period {
+fn new_period(now: &Timestamp) -> Period {
     Period {
         id: random_id().unwrap_or_else(|_| format!("{:032x}", now_ms(now))),
         bucket: Bucket::of(now),
@@ -859,9 +869,7 @@ fn move_period(
     start_ms: u64,
     end_ms: u64,
 ) -> io::Result<()> {
-    let start = Local
-        .timestamp_millis_opt(start_ms as i64)
-        .single()
+    let start = local_time::at_millis(start_ms as i64)
         .ok_or_else(|| io::Error::other("period start is not a local time"))?;
     let day = format!("{:04}{:02}{:02}", start.year(), start.month(), start.day());
     let stem = format!(
@@ -1031,8 +1039,8 @@ fn modified_ms(path: &Path) -> Option<u64> {
     u64::try_from(since.as_millis()).ok()
 }
 
-fn now_ms(now: &DateTime<Local>) -> u64 {
-    u64::try_from(now.timestamp_millis()).unwrap_or(0)
+fn now_ms(now: &Timestamp) -> u64 {
+    u64::try_from(local_time::unix_millis(*now)).unwrap_or(0)
 }
 
 fn reject(reason: &'static str) -> Outcome {
@@ -1151,18 +1159,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn at(hour: u32, minute: u32, second: u32) -> DateTime<Local> {
-        Local
-            .with_ymd_and_hms(2026, 10, 2, hour, minute, second)
-            .earliest()
-            .unwrap()
+    fn at(hour: i8, minute: i8, second: i8) -> Timestamp {
+        local_time::wall_for_test(2026, 10, 2, hour, minute, second)
     }
 
     fn layout(temp: &tempfile::TempDir) -> Layout {
         Layout::new(temp.path())
     }
 
-    fn batch(_custody: &Custody, id: u8, records: Value, now: DateTime<Local>) -> Value {
+    fn batch(_custody: &Custody, id: u8, records: Value, now: Timestamp) -> Value {
         json!({
             "type": "batch",
             "destination_generation": "g1",
@@ -1299,8 +1304,8 @@ mod tests {
         drop(custody);
 
         let late_ms =
-            now.timestamp_millis() + i64::try_from(3 * ACCEPTED_RETENTION_MS_MIN + 1).unwrap();
-        let late = Local.timestamp_millis_opt(late_ms).single().unwrap();
+            now.as_millisecond() + i64::try_from(3 * ACCEPTED_RETENTION_MS_MIN + 1).unwrap();
+        let late = Timestamp::from_millisecond(late_ms).unwrap();
         let mut custody = Custody::open(layout(&temp), late).unwrap();
         let mut replay = batch;
         replay["destination_generation"] = json!("different-live-generation");
@@ -1378,7 +1383,7 @@ mod tests {
     #[test]
     fn failed_open_discard_cannot_mix_removed_bytes_with_new_intake() {
         let temp = tempfile::tempdir().unwrap();
-        let now = Local::now();
+        let now = Timestamp::now();
         let mut custody = Custody::open(layout(&temp), now).unwrap();
         let first = batch(&custody, 201, snapshot("c1", "removed-before-unlink"), now);
         let period = accepted(custody.accept(&first, now));
@@ -1386,7 +1391,7 @@ mod tests {
         assert!(custody.discard_pending().is_err());
         let next = batch(&custody, 202, snapshot("c1", "fresh-after-discard"), now);
         let _ = custody.accept(&next, now);
-        custody.tick(now + chrono::Duration::minutes(6));
+        custody.tick(now + jiff::SignedDuration::from_mins(6));
         for pages in segment_files(&custody.layout.captures) {
             let text = fs::read_to_string(pages).unwrap();
             assert!(!text.contains("removed-before-unlink"));
@@ -1395,7 +1400,7 @@ mod tests {
         custody.discard_pending().unwrap();
         let fresh = batch(&custody, 203, snapshot("c1", "fresh-after-retry"), now);
         accepted(custody.accept(&fresh, now));
-        custody.tick(now + chrono::Duration::minutes(12));
+        custody.tick(now + jiff::SignedDuration::from_mins(12));
         let text = segment_files(&custody.layout.captures)
             .into_iter()
             .map(|pages| fs::read_to_string(pages).unwrap())
@@ -1407,7 +1412,7 @@ mod tests {
     #[test]
     fn partial_unlink_cannot_reopen_a_removed_period_for_intake() {
         let temp = tempfile::tempdir().unwrap();
-        let now = Local::now();
+        let now = Timestamp::now();
         let mut custody = Custody::open(layout(&temp), now).unwrap();
         let first = batch(
             &custody,
@@ -1430,11 +1435,11 @@ mod tests {
     #[test]
     fn failed_finalized_discard_prevents_upload_reservation() {
         let temp = tempfile::tempdir().unwrap();
-        let now = Local::now();
+        let now = Timestamp::now();
         let mut custody = Custody::open(layout(&temp), now).unwrap();
         let first = batch(&custody, 204, snapshot("c1", "removed-finalized"), now);
         accepted(custody.accept(&first, now));
-        custody.tick(now + chrono::Duration::minutes(6));
+        custody.tick(now + jiff::SignedDuration::from_mins(6));
         let segment = segment_files(&custody.layout.captures)[0]
             .parent()
             .unwrap()
@@ -1448,7 +1453,7 @@ mod tests {
     #[test]
     fn failed_removal_directory_sync_prevents_old_bytes_from_rotation() {
         let temp = tempfile::tempdir().unwrap();
-        let now = Local::now();
+        let now = Timestamp::now();
         let mut custody = Custody::open(layout(&temp), now).unwrap();
         let first = batch(
             &custody,
@@ -1461,7 +1466,7 @@ mod tests {
         assert!(custody.discard_pending().is_err());
         let next = batch(&custody, 206, snapshot("c1", "fresh-after-dir-sync"), now);
         assert_eq!(custody.accept(&next, now).0, reject("queue_full"));
-        custody.tick(now + chrono::Duration::minutes(6));
+        custody.tick(now + jiff::SignedDuration::from_mins(6));
         assert!(segment_files(&custody.layout.captures).is_empty());
     }
 

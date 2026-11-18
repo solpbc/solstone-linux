@@ -90,9 +90,14 @@ impl Desk {
         let mut text = fs::read_to_string(&recents).unwrap_or_else(|_| {
             "<?xml version=\"1.0\"?>\n<xbel version=\"1.0\" xmlns:bookmark=\"http://www.freedesktop.org/standards/desktop-bookmarks\">\n</xbel>\n".to_owned()
         });
-        let added = chrono::DateTime::from_timestamp_millis(ms)
-            .unwrap()
-            .to_rfc3339();
+        let added = crate::local_time::rfc3339(
+            &crate::local_time::fixed(
+                jiff::Timestamp::from_millisecond(ms).unwrap(),
+                jiff::tz::Offset::UTC,
+            ),
+            crate::local_time::Precision::AutoSi,
+            false,
+        );
         let href = url::Url::from_file_path(&path).unwrap();
         let entry = format!(
             "  <bookmark href=\"{href}\" added=\"{added}\"><info><metadata owner=\"http://freedesktop.org\"><bookmark:applications><bookmark:application name=\"org.kde.spectacle\" exec=\"spectacle %f\" count=\"1\"/></bookmark:applications></metadata></info></bookmark>\n"

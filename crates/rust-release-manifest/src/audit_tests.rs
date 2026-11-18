@@ -4,7 +4,7 @@
 use super::audit::*;
 use super::*;
 use base64::Engine;
-use chrono::{Duration, SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
 use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::process::{Command, Output, Stdio};
@@ -36,8 +36,8 @@ fn canonical_receipt(commit: &str, utc: &str) -> Vec<u8> {
 
 #[test]
 fn audit_receipt_requires_canonical_bytes_commit_and_time_window() {
-    let now = Utc::now();
-    let utc = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let now = Timestamp::now();
+    let utc = time::utc_seconds(now);
     let commit = "a".repeat(40);
     let (_temp, sensitive) = sensitive("file://mirror.invalid/advisory-db");
     let receipt = parse_receipt(&canonical_receipt(&commit, &utc), now, &sensitive).unwrap();
@@ -64,9 +64,9 @@ fn audit_receipt_requires_canonical_bytes_commit_and_time_window() {
         assert!(parse_receipt(malformed.as_bytes(), now, &sensitive).is_err());
     }
     for invalid_time in [
-        (now + Duration::seconds(301)).to_rfc3339_opts(SecondsFormat::Secs, true),
-        (now - Duration::seconds(86_401)).to_rfc3339_opts(SecondsFormat::Secs, true),
-        now.to_rfc3339(),
+        time::utc_seconds(now + SignedDuration::from_secs(301)),
+        time::utc_seconds(now - SignedDuration::from_secs(86_401)),
+        now.strftime("%Y-%m-%dT%H:%M:%S%.f+00:00").to_string(),
     ] {
         assert!(
             parse_receipt(
@@ -306,7 +306,7 @@ fn create_bundle(repo: &Path, bundle: &Path, extra_head: bool) {
 }
 
 fn sign_receipt(secret: &Path, receipt: &Path, commit: &str) -> String {
-    let utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let utc = time::utc_seconds(Timestamp::now());
     fs::write(receipt, canonical_receipt(commit, &utc)).unwrap();
     let signature = receipt.with_file_name(format!(
         "{}.minisig",
@@ -358,7 +358,7 @@ fn audit_error(
     run_audit_mode(
         request,
         &ProcessEnvironment::default(),
-        Utc::now(),
+        Timestamp::now(),
         &digest(public_bytes),
         key_id,
         Some(&fixture.root),
@@ -422,7 +422,7 @@ fn real_signed_packet_local_audit() {
     let status = run_audit_mode(
         &request,
         &ProcessEnvironment::default(),
-        Utc::now(),
+        Timestamp::now(),
         &digest(&public_bytes),
         &key_id,
         Some(&fixture.root),

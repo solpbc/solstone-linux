@@ -3068,7 +3068,7 @@ impl OrderedCredentialWriter {
             return Err(());
         }
         if attempt.is_some_and(|attempt| {
-            !attempt.is_current() || expires_at <= chrono::Utc::now().timestamp()
+            !attempt.is_current() || expires_at <= jiff::Timestamp::now().as_second()
         }) {
             return Err(());
         }
@@ -3100,14 +3100,15 @@ impl OrderedCredentialWriter {
         let cred_path = self.config_root.join(CREDENTIALS_FILENAME);
         let durable = atomic_write_bytes_guarded(&cred_path, &bytes, self.fault.as_ref(), &|| {
             !self.shutdown_fenced.load(Ordering::Acquire)
-                && attempt
-                    .is_none_or(|a| a.is_current() && expires_at > chrono::Utc::now().timestamp())
+                && attempt.is_none_or(|a| {
+                    a.is_current() && expires_at > jiff::Timestamp::now().as_second()
+                })
         })
         .is_ok();
         if durable
             && (self.shutdown_fenced.load(Ordering::Acquire)
                 || attempt.is_some_and(|a| {
-                    !a.is_current() || expires_at <= chrono::Utc::now().timestamp()
+                    !a.is_current() || expires_at <= jiff::Timestamp::now().as_second()
                 }))
         {
             *self
@@ -3280,7 +3281,7 @@ impl OrderedCredentialWriter {
             .unwrap_or_else(|p| p.into_inner());
 
         let revision = self.access_mutation_generation();
-        let now_ts = chrono::Utc::now().timestamp();
+        let now_ts = jiff::Timestamp::now().as_second();
 
         let clear_live = clear_guard.as_ref().is_some_and(|c| {
             c.pairing_id == self.pairing_id && c.access_mutation_generation == revision
@@ -3467,7 +3468,7 @@ impl OrderedCredentialWriter {
                 && pending
                     .credential
                     .device_token_expires_at
-                    .is_none_or(|exp| exp <= chrono::Utc::now().timestamp())
+                    .is_none_or(|exp| exp <= jiff::Timestamp::now().as_second())
             {
                 return Err(());
             }
@@ -3490,7 +3491,7 @@ impl OrderedCredentialWriter {
                                 && pending
                                     .credential
                                     .device_token_expires_at
-                                    .is_some_and(|exp| exp > chrono::Utc::now().timestamp())
+                                    .is_some_and(|exp| exp > jiff::Timestamp::now().as_second())
                         })
                 },
             )
@@ -3503,7 +3504,7 @@ impl OrderedCredentialWriter {
                         || pending
                             .credential
                             .device_token_expires_at
-                            .is_none_or(|exp| exp <= chrono::Utc::now().timestamp())
+                            .is_none_or(|exp| exp <= jiff::Timestamp::now().as_second())
                 })
             {
                 return Err(());
@@ -6490,9 +6491,8 @@ pub(crate) mod tests {
             .unwrap()
             .as_secs() as i64
             + 3600;
-        let expires_at_str = chrono::DateTime::<chrono::Utc>::from_timestamp(exp, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at_str =
+            crate::local_time::utc_seconds(jiff::Timestamp::from_second(exp).unwrap());
         let refreshed = test_jwt_for_instance(&paired_inst, exp);
         let relay_refreshed = refreshed.clone();
         let relay_expires_at = expires_at_str.clone();
@@ -7238,10 +7238,9 @@ pub(crate) mod tests {
 
         let instance_id = capability.writer().current_credential().instance_id;
         let peer_ep = &peer.credential().endpoints[0];
-        let ready_exp = chrono::Utc::now().timestamp() + 3600;
-        let ready_expires_at = chrono::DateTime::from_timestamp(ready_exp, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ready_exp = jiff::Timestamp::now().as_second() + 3600;
+        let ready_expires_at =
+            crate::local_time::utc_seconds(jiff::Timestamp::from_second(ready_exp).unwrap());
         let relay_origin = format!("https://{}:{}", peer_ep.host, peer_ep.port);
         let ready_resp = serde_json::json!({
             "protocol_version": 2,
@@ -7306,10 +7305,9 @@ pub(crate) mod tests {
         let instance_id = capability.writer().current_credential().instance_id;
         let peer_ep = &peer.credential().endpoints[0];
 
-        let ready_exp = chrono::Utc::now().timestamp() + 3600;
-        let ready_expires_at = chrono::DateTime::from_timestamp(ready_exp, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ready_exp = jiff::Timestamp::now().as_second() + 3600;
+        let ready_expires_at =
+            crate::local_time::utc_seconds(jiff::Timestamp::from_second(ready_exp).unwrap());
         let ready_resp = serde_json::json!({
             "protocol_version": 2,
             "status": "ready",
@@ -7382,10 +7380,9 @@ pub(crate) mod tests {
         let capability = session.capability();
         let instance_id = capability.writer().current_credential().instance_id;
 
-        let ready_old_exp = chrono::Utc::now().timestamp() + 3600;
-        let ready_old_expires_at = chrono::DateTime::from_timestamp(ready_old_exp, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ready_old_exp = jiff::Timestamp::now().as_second() + 3600;
+        let ready_old_expires_at =
+            crate::local_time::utc_seconds(jiff::Timestamp::from_second(ready_old_exp).unwrap());
         let ready_old = serde_json::json!({
             "protocol_version": 2,
             "status": "ready",
@@ -7412,7 +7409,7 @@ pub(crate) mod tests {
         let pairing_id = writer.pairing_id().to_string();
         let access_gen = writer.access_mutation_generation();
         let opener_inc = capability.opener_relay_incarnation();
-        let newer_exp = chrono::Utc::now().timestamp() + 7200;
+        let newer_exp = jiff::Timestamp::now().as_second() + 7200;
         let new_tok = test_jwt_for_instance(&instance_id, newer_exp);
         assert!(
             writer
@@ -7741,7 +7738,7 @@ pub(crate) mod tests {
             LinkFacts::default(),
         ));
         let g = writer.access_mutation_generation();
-        let future_exp = chrono::Utc::now().timestamp() + 3600;
+        let future_exp = jiff::Timestamp::now().as_second() + 3600;
 
         let mut pending_cred = cred.clone();
         pending_cred.relay_origin = Some("https://pending.example.com".into());
@@ -8150,9 +8147,8 @@ pub(crate) mod tests {
             .unwrap()
             .as_secs() as i64
             + 3600;
-        let expires_at_str = chrono::DateTime::<chrono::Utc>::from_timestamp(exp, 0)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at_str =
+            crate::local_time::utc_seconds(jiff::Timestamp::from_second(exp).unwrap());
         let refreshed = test_jwt_for_instance(&paired_inst, exp);
         let relay_refreshed = refreshed.clone();
         let relay_expires_at = expires_at_str.clone();

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 use super::*;
-use chrono::Utc;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -539,7 +539,7 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
         input.arch,
         [&input.images.build_ubuntu, &input.images.build_fedora],
     )?;
-    recheck_advisory_cohort(input.cohort, input.processes, Utc::now())?;
+    recheck_advisory_cohort(input.cohort, input.processes, Timestamp::now())?;
     let boundary = ReservedReleaseBoundary::new(input.root);
     let payload_root = boundary
         .resolve_for_create(ReservedPath::Payload, ExpectedLeaf::Absent)?
@@ -647,7 +647,7 @@ pub fn finalize_candidate(input: FinalizeInput<'_>) -> Result<FinalizedCandidate
             input.arch,
             [&input.images.build_ubuntu, &input.images.build_fedora],
         )?;
-        recheck_advisory_cohort(input.cohort, input.processes, Utc::now())?;
+        recheck_advisory_cohort(input.cohort, input.processes, Timestamp::now())?;
         FinalizedCandidate::new(ledger, bytes, payload_root.clone(), evidence_root.clone())
     })();
     match result {
@@ -1182,7 +1182,7 @@ pub fn validate_proof_file(request: &ProofRequest<'_>, path: &Path) -> Result<Ca
         version_output: format!("solstone-linux {}", request.ledger.version),
         result: "pass".into(),
         policy_checked_at: request.ledger.policy.checked_at.clone(),
-        validation_time: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        validation_time: time::utc_seconds(Timestamp::now()),
     };
     validate_candidate_proof(
         &serde_json::to_value(&proof).map_err(display_error)?,
@@ -1590,7 +1590,7 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
         executable_sha256: digest(&fs::read(actual_executable).map_err(display_error)?),
         version_output,
         result: "pass".into(),
-        proof_time: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        proof_time: time::utc_seconds(Timestamp::now()),
         architecture: spec.architecture.into(),
         network: "none".into(),
         isolation: "fresh-container".into(),
@@ -1845,7 +1845,7 @@ fn create_candidate_locked(
             }
             recheck_all_images(processes, engine, &images)?;
             recheck_source(root, &context, &finalized.payload_root)?;
-            recheck_advisory_cohort(&cohort, processes, Utc::now())?;
+            recheck_advisory_cohort(&cohort, processes, Timestamp::now())?;
             candidate_status(root, &finalized.ledger, &finalized.ledger_bytes)
         })();
         finish_created_candidate(&finalized, &owned, proof_result)
