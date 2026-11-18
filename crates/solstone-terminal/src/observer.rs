@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use crate::indicator::{IndicatorError, IndicatorIo, IndicatorOwnership, ServerIn
 use crate::model::{CaptureResult, PollOutcome};
 use crate::name::DerivedName;
 use crate::paths::ensure_private_directory;
-use crate::segment::{SegmentClose, SegmentError, SegmentState};
+use crate::segment::{AppendOutcome, SegmentClose, SegmentError, SegmentState, capture_digest};
 use crate::storage::FaultPlan;
 use crate::tmux::{TmuxAdapter, WarningSink};
 
@@ -257,6 +258,12 @@ pub struct SegmentManager {
     warnings: Arc<dyn WarningSink>,
     last_zone: Option<Zone>,
     zone_failure_warned: bool,
+    /// Each session's last written frame, kept across segments. A session taken
+    /// in for its output alone wakes on any byte it writes, visible or not, and
+    /// a segment drops a repeat only within itself. Without this, a pane left
+    /// as it was is written again into each new segment such a byte opens, and
+    /// reads there as new work.
+    last_frames: HashMap<String, u64>,
 }
 
 impl SegmentManager {
@@ -305,6 +312,7 @@ impl SegmentManager {
             warnings,
             last_zone,
             zone_failure_warned,
+            last_frames: HashMap::new(),
         })
     }
 
@@ -329,6 +337,7 @@ impl SegmentManager {
             warnings,
             last_zone,
             zone_failure_warned,
+            last_frames: HashMap::new(),
         }
     }
 
@@ -349,6 +358,7 @@ impl SegmentManager {
             warnings,
             last_zone,
             zone_failure_warned,
+            last_frames: HashMap::new(),
         }
     }
 
@@ -391,18 +401,25 @@ impl SegmentLifecycle for SegmentManager {
         }
         let timestamp = self.segment.frame_timestamp(wall_now);
         for capture in captures {
-            if let Err(error) = self
+            let digest = capture_digest(capture);
+            if capture.output_only && self.last_frames.get(&capture.session) == Some(&digest) {
+                continue;
+            }
+            match self
                 .segment
                 .append_capture(capture, timestamp, monotonic_now)
             {
-                if error.is_recoverable_append() {
+                Ok(AppendOutcome::Appended { .. }) => {
+                    self.last_frames.insert(capture.session.clone(), digest);
+                }
+                Ok(AppendOutcome::Unchanged) => {}
+                Err(error) if error.is_recoverable_append() => {
                     self.warnings.warn(&format!(
                         "durable append for session {:?} rolled back and will retry: {error}",
                         capture.session
                     ));
-                    continue;
                 }
-                return Err(operation_error(error));
+                Err(error) => return Err(operation_error(error)),
             }
         }
         if !activity_jsonl.is_empty()

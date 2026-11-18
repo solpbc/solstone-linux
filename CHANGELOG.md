@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- a session named in `output_sessions`, such as an agent's, is no longer taken in again each time it writes something that leaves the screen as it was. before, a session left as it was overnight could come back in your journal as the same new memory, over and over. thanks @dvanduzer.
 - when the solstone app isn't running, its window now shows "start the solstone app" at the top of the home page. before, after a package install the window could only say it couldn't read the app's status, with no way to start it.
 - when your journal can't be reached and nothing is waiting to go into it, the window now says "offline". before, the status at the top of the home page was blank.
 - the home page now shows when the solstone app has stopped. before, the window could still say "connected" and show sources as on after you quit.

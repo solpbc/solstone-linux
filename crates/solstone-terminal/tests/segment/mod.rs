@@ -14,6 +14,7 @@ mod segment_cases {
     use crate::support::NoopWarnings as StderrWarnings;
     use crate::support::{TestDirectory, golden_capture};
     use solstone_terminal::clock::{Zone, ZoneSource};
+    use solstone_terminal::model::CaptureResult;
     use solstone_terminal::name::derive_component;
     use solstone_terminal::observer::{SegmentLifecycle, SegmentManager, SyncWake};
     use solstone_terminal::segment::{
@@ -314,6 +315,48 @@ mod segment_cases {
             assert!(sealed.is_dir(), "{late:?}");
             assert_eq!(key_length(&sealed), 300);
         }
+    }
+
+    #[test]
+    fn an_output_only_pane_left_as_it_was_is_not_written_into_the_next_segment() {
+        let interval = Duration::from_secs(300);
+        let (temporary, segment) = segment("output-only-carry");
+        let start = segment_wall();
+        let mut manager = SegmentManager::new(
+            segment,
+            temporary.path().join("data"),
+            derive_component("host.tmux").expect("stream"),
+            SyncWake::default(),
+            Box::new(UtcZone),
+            Arc::new(StderrWarnings),
+            None,
+            false,
+        );
+        let mut agent = golden_capture("agent");
+        agent.output_only = true;
+        let poll = |manager: &mut SegmentManager, capture: &CaptureResult, at: u64| {
+            manager
+                .process_poll(
+                    std::slice::from_ref(capture),
+                    &[],
+                    start + time::Duration::seconds(at as i64),
+                    Duration::from_secs(at),
+                    interval,
+                )
+                .expect("poll");
+            manager.segment().metadata().durable_frame_count
+        };
+        assert_eq!(poll(&mut manager, &agent, 1), 1);
+        // Half an hour later the agent writes a byte that changes nothing on screen.
+        assert_eq!(poll(&mut manager, &agent, 1_800), 0);
+        // What it writes next changes the pane, and that is taken in.
+        let mut changed = agent.clone();
+        changed.panes[0].content.push_str("\nnext line");
+        assert_eq!(poll(&mut manager, &changed, 1_805), 1);
+        // A person using the session still gets each segment's first screen.
+        let mut attended = changed.clone();
+        attended.output_only = false;
+        assert_eq!(poll(&mut manager, &attended, 2_400), 1);
     }
 
     #[test]
