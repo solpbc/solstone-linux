@@ -180,9 +180,18 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     pause_line.add_css_class("sol-faint");
     pause_line.set_halign(gtk::Align::Start);
     pause_line.set_visible(false);
+    // An app the window finds not running gets its start control here, with what
+    // starting it does. Opening the window alone never starts intake.
+    let start_note = gtk::Label::new(None);
+    start_note.add_css_class("sol-faint");
+    start_note.set_halign(gtk::Align::Start);
+    start_note.set_xalign(0.0);
+    start_note.set_wrap(true);
+    start_note.set_visible(false);
     let greet_text = gtk::Box::new(gtk::Orientation::Vertical, 2);
     greet_text.append(&greet);
     greet_text.append(&pause_line);
+    greet_text.append(&start_note);
 
     let (pill, pill_mark, pill_label) = status_pill();
     let greet_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -191,14 +200,19 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     greet_spacer.set_hexpand(true);
     greet_row.append(&greet_spacer);
     let (pause_button, resume_button) = pause_controls();
+    let start_button = gtk::Button::with_label(solstone_linux::copy::CopyKey::ActionStart.as_str());
+    start_button.add_css_class("sol-pill");
+    start_button.set_visible(false);
     // The paused greeting is two lines. The pills keep their own height beside it.
     for widget in [
-        pause_button.upcast_ref::<gtk::Widget>(),
+        start_button.upcast_ref::<gtk::Widget>(),
+        pause_button.upcast_ref(),
         resume_button.upcast_ref(),
         pill.upcast_ref(),
     ] {
         widget.set_valign(gtk::Align::Center);
     }
+    greet_row.append(&start_button);
     greet_row.append(&pause_button);
     greet_row.append(&resume_button);
     greet_row.append(&pill);
@@ -330,6 +344,13 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         pill_label,
         pause_button,
         resume_button,
+        start_button,
+        start_note,
+        start: RefCell::new(StartUi {
+            presence: None,
+            flight: StartFlight::Idle,
+            detail: String::new(),
+        }),
         shelf_button: shelf_button.clone(),
         tiles,
         add_more,
@@ -523,6 +544,12 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     });
 
     {
+        let starter = Rc::clone(&ui);
+        ui.start_button
+            .connect_clicked(move |_| begin_start(&starter));
+    }
+
+    {
         let ui = Rc::clone(&ui);
         let view = Rc::clone(&view);
         let seen = Rc::clone(&seen_report);
@@ -683,6 +710,9 @@ struct Ui {
     pill_label: gtk::Label,
     pause_button: gtk::MenuButton,
     resume_button: gtk::Button,
+    start_button: gtk::Button,
+    start_note: gtk::Label,
+    start: RefCell<StartUi>,
     connect: gtk::Button,
     shelf_button: gtk::Button,
     tiles: Vec<TileWidgets>,
@@ -3557,18 +3587,20 @@ fn paint_pairing(ui: &Ui, view: &View) {
         return;
     }
     if view.offline {
-        if let Some(count) = view.offline_waiting {
-            let line = message!("linux.tray.offlinewaiting", "count" => count);
-            ui.pill_label.set_text(&line);
-            ui.lead.set_text(&line);
-            show_connect(ui, false, Some(text!("linux.window.onthisdevice")));
-            apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
-        } else {
-            ui.pill_label.set_text("");
-            ui.lead.set_text("");
-            show_connect(ui, false, None);
-            apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
-        }
+        // With nothing waiting the pill still says offline, as the panel menu does.
+        let line = shell_model::offline_line(
+            view.offline_waiting
+                .and_then(|count| u64::try_from(count).ok()),
+        );
+        ui.pill_label.set_text(&line);
+        ui.lead.set_text(&line);
+        show_connect(
+            ui,
+            false,
+            view.offline_waiting
+                .map(|_| text!("linux.window.onthisdevice")),
+        );
+        apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         return;
     }
     ui.pill_label.set_text(text!("linux.window.connected"));
@@ -3678,6 +3710,9 @@ fn watch_service(
             let host = watcher_present().await;
             HOST_UP.with(|cell| cell.set(host));
             if let Some(mut next) = fetch_service().await {
+                ui.start.borrow_mut().presence =
+                    Some(solstone_linux::service::ServicePresence::Active);
+                paint_start(&ui, true);
                 next.kept = kept_label().await;
                 *snap.borrow_mut() = next;
                 refresh(&ui, &view, &seen, &daemon, &selected);
@@ -3689,11 +3724,129 @@ fn watch_service(
                         sun_bg::try_frame_file(&window);
                     });
                 }
-            } else if ui.window.is_mapped() {
-                refresh(&ui, &view, &seen, &daemon, &selected);
+            } else {
+                let presence = gio::spawn_blocking(|| {
+                    solstone_linux::service::classify_user_service(
+                        &solstone_linux::cli::SystemRunner,
+                    )
+                })
+                .await
+                .ok();
+                ui.start.borrow_mut().presence = presence;
+                paint_start(&ui, false);
+                if ui.window.is_mapped() {
+                    refresh(&ui, &view, &seen, &daemon, &selected);
+                }
             }
             glib::timeout_future(Duration::from_secs(2)).await;
         }
+    });
+}
+
+/// Where the header's start control stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartFlight {
+    Idle,
+    Starting,
+    Failed,
+}
+
+struct StartUi {
+    /// The user service as systemd last reported it while the app wasn't answering.
+    presence: Option<solstone_linux::service::ServicePresence>,
+    flight: StartFlight,
+    /// What the failed start printed, shown under its sentence.
+    detail: String,
+}
+
+/// The header start control's words and whether it shows: only while the app isn't
+/// answering and its service is absent or stopped, or while a start is still settling.
+fn start_keys(
+    presence: Option<solstone_linux::service::ServicePresence>,
+    flight: StartFlight,
+) -> Option<(
+    solstone_linux::copy::CopyKey,
+    solstone_linux::copy::CopyKey,
+    bool,
+)> {
+    use solstone_linux::copy::CopyKey;
+    use solstone_linux::service::ServicePresence;
+    let down = matches!(
+        presence,
+        Some(ServicePresence::Absent | ServicePresence::Inactive)
+    );
+    match flight {
+        StartFlight::Starting => {
+            Some((CopyKey::ActionStarting, CopyKey::StatusStartWaiting, false))
+        }
+        StartFlight::Failed => Some((CopyKey::ActionStart, CopyKey::StatusStartFailed, true)),
+        StartFlight::Idle if down => {
+            Some((CopyKey::ActionStart, CopyKey::StatusStartDisclosure, true))
+        }
+        StartFlight::Idle => None,
+    }
+}
+
+/// Paint the header start control. `answering` means the app answered just now.
+fn paint_start(ui: &Ui, answering: bool) {
+    let mut start = ui.start.borrow_mut();
+    if answering {
+        start.flight = StartFlight::Idle;
+        start.detail.clear();
+    }
+    let keys = if answering {
+        None
+    } else {
+        start_keys(start.presence, start.flight)
+    };
+    ui.start_button.set_visible(keys.is_some());
+    ui.start_note.set_visible(keys.is_some());
+    let Some((action, note, sensitive)) = keys else {
+        return;
+    };
+    ui.start_button.set_label(action.as_str());
+    ui.start_button.set_sensitive(sensitive);
+    if start.flight == StartFlight::Failed && !start.detail.is_empty() {
+        ui.start_note
+            .set_text(&format!("{}\n{}", note.as_str(), start.detail));
+    } else {
+        ui.start_note.set_text(note.as_str());
+    }
+}
+
+/// Start the app as the window's start control asks: the same path the CLI's
+/// install-service takes, writing the user service and starting it.
+fn begin_start(ui: &Rc<Ui>) {
+    {
+        let mut start = ui.start.borrow_mut();
+        if start.flight == StartFlight::Starting {
+            return;
+        }
+        start.flight = StartFlight::Starting;
+        start.detail.clear();
+    }
+    paint_start(ui, false);
+    let ui = Rc::clone(ui);
+    glib::MainContext::default().spawn_local(async move {
+        use solstone_linux::service::{ServicePaths, WindowStart, start_for_window};
+        let (result, detail) = gio::spawn_blocking(|| {
+            let mut output = Vec::new();
+            let result = match ServicePaths::for_window() {
+                Ok(paths) => {
+                    start_for_window(&paths, &solstone_linux::cli::SystemRunner, &mut output)
+                }
+                Err(error) => return (WindowStart::Failed, error.to_string()),
+            };
+            (result, String::from_utf8_lossy(&output).into_owned())
+        })
+        .await
+        .unwrap_or((WindowStart::Uncertain, String::new()));
+        if matches!(result, WindowStart::Failed | WindowStart::Uncertain) {
+            let mut start = ui.start.borrow_mut();
+            start.flight = StartFlight::Failed;
+            start.detail = detail.trim().to_owned();
+        }
+        paint_start(&ui, false);
     });
 }
 
@@ -3810,4 +3963,36 @@ fn format_kept(bytes: u64) -> String {
         return message!("linux.window.kilobytes", "size" => (bytes / KB).max(1));
     }
     message!("linux.window.megabytes", "size" => bytes / MB)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solstone_linux::copy::CopyKey;
+    use solstone_linux::service::ServicePresence;
+
+    #[test]
+    fn start_control_shows_only_for_an_app_that_is_not_running() {
+        for presence in [ServicePresence::Absent, ServicePresence::Inactive] {
+            assert_eq!(
+                start_keys(Some(presence), StartFlight::Idle),
+                Some((CopyKey::ActionStart, CopyKey::StatusStartDisclosure, true))
+            );
+        }
+        for presence in [
+            None,
+            Some(ServicePresence::Active),
+            Some(ServicePresence::Uncertain),
+        ] {
+            assert_eq!(start_keys(presence, StartFlight::Idle), None);
+        }
+        assert_eq!(
+            start_keys(Some(ServicePresence::Active), StartFlight::Starting),
+            Some((CopyKey::ActionStarting, CopyKey::StatusStartWaiting, false))
+        );
+        assert_eq!(
+            start_keys(Some(ServicePresence::Inactive), StartFlight::Failed),
+            Some((CopyKey::ActionStart, CopyKey::StatusStartFailed, true))
+        );
+    }
 }

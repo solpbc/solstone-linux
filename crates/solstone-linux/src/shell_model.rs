@@ -464,6 +464,16 @@ pub enum PauseLeft {
     UntilResume,
 }
 
+/// The offline words, for the window's status pill and lead and the panel menu alike:
+/// the waiting count when something is waiting, and the plain word when nothing is.
+#[must_use]
+pub fn offline_line(waiting: Option<u64>) -> String {
+    match waiting {
+        Some(count) if count > 0 => message!("linux.tray.offlinewaiting", "count" => count),
+        _ => text!("linux.shared.tray.offline").to_string(),
+    }
+}
+
 /// The paused line. A timed pause rounds whole minutes up. Under a minute stays the short line.
 #[must_use]
 pub fn pause_line(left: PauseLeft) -> String {
@@ -774,6 +784,19 @@ pub fn relative_unix_now(at: f64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_line_never_leaves_the_pill_blank() {
+        let plain =
+            solstone_i18n::render(solstone_i18n::locale(), "linux.shared.tray.offline", &[]);
+        assert_eq!(offline_line(None), plain);
+        assert_eq!(offline_line(Some(0)), plain);
+        assert_eq!(
+            offline_line(Some(3)),
+            solstone_i18n::message!("linux.tray.offlinewaiting", "count" => 3)
+        );
+        assert!(!offline_line(None).is_empty());
+    }
     use crate::desktop_session::SessionPresence;
     use crate::source_intake::Counter;
     use jiff::SignedDuration;

@@ -6,7 +6,7 @@ use crate::sync_health::HealthState;
 use crate::tray_model::TrayModel;
 use ksni::menu::{MenuItem, StandardItem, SubMenu};
 use ksni::{Category, Icon, Status, ToolTip, Tray};
-use solstone_i18n::{message, text};
+use solstone_i18n::text;
 use std::sync::mpsc::Sender;
 
 mod generated {
@@ -64,12 +64,7 @@ fn menu_status_line(model: &TrayModel) -> String {
         }
         HealthState::Connected if model.import_held => model.sync.clone(),
         HealthState::Connected => text!("linux.tray.connectedallcaughtup").to_string(),
-        HealthState::Offline => match model.waiting_count {
-            Some(count) if count > 0 => {
-                message!("linux.tray.offlinewaiting", "count" => count)
-            }
-            _ => text!("linux.shared.tray.offline").to_string(),
-        },
+        HealthState::Offline => shell_model::offline_line(model.waiting_count),
         _ => String::new(),
     }
 }
