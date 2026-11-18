@@ -87,6 +87,7 @@ fn normalize_fixture_lock_versions(path: &Path) {
                     | "solstone-linux"
                     | "solstone-linux-window"
                     | "solstone-terminal"
+                    | "solstone-i18n"
             ) {
             replaced += 1;
             "version = \"1.0.0\""
@@ -96,7 +97,7 @@ fn normalize_fixture_lock_versions(path: &Path) {
         normalized.push_str(line);
         normalized.push('\n');
     }
-    assert_eq!(replaced, 4, "fixture workspace lock authorities");
+    assert_eq!(replaced, 5, "fixture workspace lock authorities");
     fs::write(path, normalized).unwrap();
 }
 
@@ -139,6 +140,26 @@ fn normalize_fixture_window_dependency(path: &Path) {
         normalized.push('\n');
     }
     assert_eq!(replaced, 1, "fixture window dependency authority");
+    fs::write(path, normalized).unwrap();
+}
+
+/// Every crate that takes the workspace's string catalog asks for the
+/// workspace version, which the fixture moves to 1.0.0.
+fn normalize_fixture_i18n_dependency(path: &Path) {
+    let manifest = fs::read_to_string(path).unwrap();
+    let mut replaced = 0;
+    let mut normalized = String::new();
+    for line in manifest.lines() {
+        let line = if line.starts_with("solstone-i18n = { version = ") {
+            replaced += 1;
+            "solstone-i18n = { version = \"1.0.0\", path = \"../solstone-i18n\" }"
+        } else {
+            line
+        };
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+    assert_eq!(replaced, 1, "fixture string catalog dependency authority");
     fs::write(path, normalized).unwrap();
 }
 
@@ -238,6 +259,15 @@ pub(super) fn fixture() -> TestRepo {
     normalize_fixture_window_dependency(
         &temp.path().join("crates/solstone-linux-window/Cargo.toml"),
     );
+    for krate in [
+        "solstone-linux",
+        "solstone-linux-window",
+        "solstone-terminal",
+    ] {
+        normalize_fixture_i18n_dependency(
+            &temp.path().join("crates").join(krate).join("Cargo.toml"),
+        );
+    }
     let image_policy = Path::new("packaging/release-policy.toml");
     if !temp.path().join(image_policy).exists() {
         fs::copy(source.join(image_policy), temp.path().join(image_policy)).unwrap();
@@ -328,6 +358,15 @@ pub(super) fn sha256_fixture() -> TestRepo {
     normalize_fixture_window_dependency(
         &temp.path().join("crates/solstone-linux-window/Cargo.toml"),
     );
+    for krate in [
+        "solstone-linux",
+        "solstone-linux-window",
+        "solstone-terminal",
+    ] {
+        normalize_fixture_i18n_dependency(
+            &temp.path().join("crates").join(krate).join("Cargo.toml"),
+        );
+    }
     let image_policy = Path::new("packaging/release-policy.toml");
     if !temp.path().join(image_policy).exists() {
         fs::copy(source.join(image_policy), temp.path().join(image_policy)).unwrap();
