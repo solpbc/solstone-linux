@@ -18,10 +18,13 @@ use gtk::gio::prelude::*;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // The running app converts a screenshot the journal can't keep through here,
-    // with the desktop's own imaging. No window opens.
+    // The running app converts a screenshot or HEIC/HEIF photo the journal
+    // doesn't take directly through here, with the desktop's own imaging. No window opens.
     if args.get(1).map(String::as_str) == Some(solstone_linux::screenshots::CONVERT_ARG) {
         std::process::exit(convert::run(&args[2..]));
+    }
+    if args.get(1).map(String::as_str) == Some(solstone_linux::import::CONVERT_PHOTO_ARG) {
+        std::process::exit(convert::run_photo(&args[2..]));
     }
 
     // Comfortaa is the display face for names and headings. Fontconfig reads

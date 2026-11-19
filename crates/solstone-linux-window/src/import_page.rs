@@ -142,6 +142,8 @@ impl ImportPage {
                 "image/jpeg",
                 "image/gif",
                 "image/webp",
+                "image/heic",
+                "image/heif",
                 "text/plain",
             ] {
                 filter.add_mime_type(mime);

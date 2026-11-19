@@ -3586,6 +3586,13 @@
       "locales": []
     },
     {
+      "id": "linux.import.cannotconvert",
+      "source": "a49333075b0c447aeb57a5428ef244bd8f297f26943b32c45699cc70b7cb4331",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.import.delivered",
       "source": "5207c25de2fae7ad0229a409681c7a3e02853cbbe3ca8b079b5472d38a34fa90",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",

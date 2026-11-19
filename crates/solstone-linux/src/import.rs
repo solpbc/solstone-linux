@@ -25,6 +25,10 @@ use tokio_util::io::ReaderStream;
 
 const FILE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const BATCH: usize = 16;
+/// The window binary converts a HEIC/HEIF photo into a JPEG with the desktop's
+/// own gdk-pixbuf loaders, preserving EXIF metadata.
+pub const CONVERT_PHOTO_ARG: &str = "--convert-photo";
+const CONVERT_DEADLINE: Duration = Duration::from_secs(120);
 pub fn explanation() -> &'static str {
     text!("linux.import.explanation")
 }
@@ -168,6 +172,48 @@ struct Store {
 }
 
 #[derive(Clone, Default)]
+enum PhotoConverter {
+    #[default]
+    Window,
+    #[cfg(test)]
+    Fixed(Result<Vec<u8>, ()>),
+}
+
+impl PhotoConverter {
+    fn convert(&self, source: &Path, target: &Path) -> Result<(), ()> {
+        match self {
+            Self::Window => {
+                let window = crate::service::current_executable()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|dir| dir.join("solstone-linux-window")))
+                    .ok_or(())?;
+                let mut command = std::process::Command::new(window);
+                command.arg(CONVERT_PHOTO_ARG).arg(source).arg(target);
+                match crate::bounded_process::run(&mut command, Some(CONVERT_DEADLINE), 16 * 1024) {
+                    Ok(output) if output.status.success() && target.is_file() => Ok(()),
+                    Ok(output) => {
+                        tracing::warn!(
+                            code = ?output.status.code(),
+                            "A photo couldn't be converted"
+                        );
+                        Err(())
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "A photo couldn't be converted");
+                        Err(())
+                    }
+                }
+            }
+            #[cfg(test)]
+            Self::Fixed(result) => {
+                let bytes = result.clone()?;
+                std::fs::write(target, bytes).map_err(|_| ())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct ImportHandle {
     root: Option<PathBuf>,
     state: Arc<Mutex<Store>>,
@@ -176,6 +222,7 @@ pub struct ImportHandle {
     trigger: Option<crate::sync::SyncTrigger>,
     status_sink: Option<Arc<dyn Fn(ImportSummary) + Send + Sync>>,
     status_lock: Arc<Mutex<()>>,
+    photo_converter: PhotoConverter,
 }
 
 fn ioe(error: impl std::fmt::Display) -> io::Error {
@@ -236,6 +283,21 @@ pub fn file_mime(path: &Path) -> Option<&'static str> {
         "aif" | "aiff" => "audio/aiff",
         _ => return None,
     })
+}
+
+pub fn is_convertible_photo(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif"))
+}
+
+pub fn converted_jpeg_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "photo".to_owned());
+    format!("{stem}.jpg")
 }
 
 fn binding(capability: &PrivateLinkCapability) -> String {
@@ -479,14 +541,20 @@ impl ImportHandle {
         let id = new_id()?;
         let dir = root.join(&id);
         ensure_private_directory(&dir).map_err(ioe)?;
+        let convertible = is_convertible_photo(path);
+        let original_name = path
+            .file_name()
+            .map_or_else(|| "file".to_owned(), |s| s.to_string_lossy().into_owned());
         let mut item = Item {
             id,
-            name: path
-                .file_name()
-                .map_or_else(|| "file".to_owned(), |s| s.to_string_lossy().into_owned()),
-            mime: file_mime(path)
-                .unwrap_or("application/octet-stream")
-                .to_owned(),
+            name: original_name.clone(),
+            mime: if convertible {
+                "image/jpeg".to_owned()
+            } else {
+                file_mime(path)
+                    .unwrap_or("application/octet-stream")
+                    .to_owned()
+            },
             size: 0,
             phase: Phase::Copying,
             may_have_saved: false,
@@ -495,7 +563,7 @@ impl ImportHandle {
         };
         self.publish(item.clone())?;
         let copied = (|| {
-            if file_mime(path).is_none() {
+            if !convertible && file_mime(path).is_none() {
                 return Err(ioe("unsupported"));
             }
             let mut source = regular_file(path)?;
@@ -506,11 +574,16 @@ impl ImportHandle {
             if available_space(&dir)? < size.saturating_add(256 * 1024 * 1024) {
                 return Err(io::Error::from_raw_os_error(28));
             }
+            let copy_target = if convertible {
+                dir.join("source.part")
+            } else {
+                dir.join("payload.part")
+            };
             let mut out = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(dir.join("payload.part"))?;
+                .open(&copy_target)?;
             let mut buffer = [0u8; 64 * 1024];
             let mut copied = 0u64;
             loop {
@@ -530,12 +603,39 @@ impl ImportHandle {
                 out.write_all(&buffer[..n])?;
             }
             out.sync_all()?;
+            drop(out);
+            drop(source);
+
+            let final_size = if convertible {
+                let payload_part = dir.join("payload.part");
+                let converted = self.photo_converter.convert(&copy_target, &payload_part);
+                let _ = fs::remove_file(&copy_target);
+                if converted.is_err() {
+                    let _ = fs::remove_file(&payload_part);
+                    return Err(ioe("cannot_convert"));
+                }
+                let converted_file = OpenOptions::new().read(true).open(&payload_part)?;
+                let converted_size = converted_file.metadata()?.len();
+                if converted_size > FILE_LIMIT {
+                    let _ = fs::remove_file(&payload_part);
+                    return Err(ioe("too_large"));
+                }
+                converted_file.sync_all()?;
+                drop(converted_file);
+                converted_size
+            } else {
+                copied
+            };
             fs::rename(dir.join("payload.part"), dir.join("payload"))?;
             File::open(&dir)?.sync_all()?;
-            Ok::<_, io::Error>(copied)
+            Ok::<_, io::Error>(final_size)
         })();
         match copied {
             Ok(size) => {
+                if convertible {
+                    item.name = converted_jpeg_name(path);
+                    item.mime = "image/jpeg".to_owned();
+                }
                 item.size = size;
                 item.phase = Phase::Pending;
                 self.publish(item)?;
@@ -544,6 +644,7 @@ impl ImportHandle {
             Err(error) => {
                 let reason = match error.to_string().as_str() {
                     "unsupported" => text!("linux.import.filekind"),
+                    "cannot_convert" => text!("linux.import.cannotconvert"),
                     "too_large" => text!("linux.import.filetoolarge"),
                     _ if error.raw_os_error() == Some(28) => {
                         text!("linux.import.noroom")
@@ -555,7 +656,7 @@ impl ImportHandle {
                     .unwrap_or_else(|p| p.into_inner())
                     .intake_refused
                     .push(IntakeRefusal {
-                        name: item.name.clone(),
+                        name: original_name,
                         reason: reason.to_owned(),
                     });
                 // Nothing was taken, so the pre-copy record goes the way a removal does:
@@ -1517,6 +1618,64 @@ mod tests {
         );
         assert_eq!(reopened.remove(items[1].id.clone(), false).await, "removed");
         assert!(!root.join(&items[1].id).exists());
+    }
+
+    #[test]
+    fn convertible_photo_extensions_and_jpeg_names() {
+        assert!(is_convertible_photo(Path::new("IMG_0412.HEIC")));
+        assert!(is_convertible_photo(Path::new("shot.heif")));
+        assert!(!is_convertible_photo(Path::new("photo.jpg")));
+        assert_eq!(
+            converted_jpeg_name(Path::new("/tmp/IMG_0412.HEIC")),
+            "IMG_0412.jpg"
+        );
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn heic_photo_converts_to_jpeg_in_custody_and_refuses_when_undecodable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("import");
+        let heic = temp.path().join("IMG_0412.HEIC");
+        fs::write(&heic, b"fake-heic").unwrap();
+
+        let ok_handle = ImportHandle {
+            root: Some(root.clone()),
+            photo_converter: PhotoConverter::Fixed(Ok(b"\xff\xd8jpeg-out\xff\xd9".to_vec())),
+            ..ImportHandle::default()
+        };
+        assert!(ok_handle.add_files(vec![heic.display().to_string()]).await);
+        let items: Vec<_> = ok_handle
+            .state
+            .lock()
+            .unwrap()
+            .items
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "IMG_0412.jpg");
+        assert_eq!(items[0].mime, "image/jpeg");
+        assert_eq!(
+            fs::read(root.join(&items[0].id).join("payload")).unwrap(),
+            b"\xff\xd8jpeg-out\xff\xd9"
+        );
+
+        let root_fail = temp.path().join("import-fail");
+        let bad = temp.path().join("IMG_0413.heif");
+        fs::write(&bad, b"bad-heif").unwrap();
+        let fail_handle = ImportHandle {
+            root: Some(root_fail.clone()),
+            photo_converter: PhotoConverter::Fixed(Err(())),
+            ..ImportHandle::default()
+        };
+        assert!(fail_handle.add_files(vec![bad.display().to_string()]).await);
+        assert!(fail_handle.state.lock().unwrap().items.is_empty());
+        assert!(store_entries(&root_fail).is_empty());
+        let doc = fail_handle.document();
+        assert_eq!(doc.intake_refused.len(), 1);
+        assert_eq!(doc.intake_refused[0].name, "IMG_0413.heif");
+        assert!(!doc.intake_refused[0].reason.is_empty());
     }
 
     #[cfg(feature = "full-tests")]

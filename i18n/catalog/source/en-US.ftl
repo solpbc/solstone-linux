@@ -853,6 +853,7 @@ linux.import.namedrefusal = { $name }: { $reason }
 linux.import.saving = saving on this device: { $saved } of { $total }
 linux.import.saved = saved on this device: { $count }
 linux.import.filekind = your journal can't take this kind of file
+linux.import.cannotconvert = this device can't convert this photo
 linux.import.filetoolarge = it's larger than your journal takes
 linux.import.noroom = there isn't enough room on this device
 linux.import.sending = sending

@@ -8117,6 +8117,18 @@
       "selector": null
     },
     {
+      "id": "linux.import.cannotconvert",
+      "resource": "m6c696e75782e696d706f72742e63616e6e6f74636f6e76657274",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.import.delivered",
       "resource": "m6c696e75782e696d706f72742e64656c697665726564",
       "namespace": "linux.import",
