@@ -175,7 +175,7 @@ struct Store {
 enum PhotoConverter {
     #[default]
     Window,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "full-tests"))]
     Fixed(Result<Vec<u8>, ()>),
 }
 
@@ -204,7 +204,7 @@ impl PhotoConverter {
                     }
                 }
             }
-            #[cfg(test)]
+            #[cfg(all(test, feature = "full-tests"))]
             Self::Fixed(result) => {
                 let bytes = result.clone()?;
                 std::fs::write(target, bytes).map_err(|_| ())
