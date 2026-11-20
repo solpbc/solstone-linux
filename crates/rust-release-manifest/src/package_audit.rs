@@ -126,6 +126,7 @@ pub(crate) enum PayloadRole {
     DependencyNotices,
     Icon,
     ActivityHelper,
+    JournalRuntime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,7 +137,26 @@ pub(crate) struct PayloadAuthority {
     pub(crate) role: PayloadRole,
 }
 
-pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 26] = [
+macro_rules! runtime {
+    ($path:literal, $mode:literal) => {
+        PayloadAuthority {
+            source: concat!("packaging/journal-root/", $path),
+            installed: concat!("/", $path),
+            mode: $mode,
+            role: PayloadRole::JournalRuntime,
+        }
+    };
+}
+
+pub(crate) fn journal_archive_path(authority: PayloadAuthority) -> String {
+    authority
+        .installed
+        .trim_start_matches("/usr/")
+        .trim_start_matches('/')
+        .to_owned()
+}
+
+pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 100] = [
     PayloadAuthority {
         source: "target/release/solstone-linux",
         installed: "/usr/bin/solstone-linux",
@@ -255,6 +275,269 @@ pub(crate) const PAYLOAD_AUTHORITY: [PayloadAuthority; 26] = [
         "packaging/activity-helpers/solstone-activity-kwin/contents/code/main.js",
         "/usr/share/solstone-linux/activity-helpers/solstone-activity-kwin/contents/code/main.js",
     ),
+    runtime!(
+        "usr/share/solstone-linux/apparmor/solstone-linux-journal",
+        0o644
+    ),
+    runtime!("opt/solstone-webkit/bin/journal", 0o755),
+    runtime!(
+        "opt/solstone-webkit/fallback/libjpeg.so.8/libjpeg.so.8",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/fallback/libmanette-0.2.so.0/libmanette-0.2.so.0",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/fallback/libxml2.so.2/libxml2.so.2",
+        0o644
+    ),
+    runtime!("opt/solstone-webkit/lib/libicudata.so.70", 0o644),
+    runtime!("opt/solstone-webkit/lib/libicui18n.so.70", 0o644),
+    runtime!("opt/solstone-webkit/lib/libicuuc.so.70", 0o644),
+    runtime!(
+        "opt/solstone-webkit/lib/libjavascriptcoregtk-6.0.so.1",
+        0o644
+    ),
+    runtime!("opt/solstone-webkit/lib/libwebkitgtk-6.0.so.4", 0o644),
+    runtime!(
+        "opt/solstone-webkit/lib/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitGPUProcess",
+        0o755
+    ),
+    runtime!(
+        "opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitNetworkProcess",
+        0o755
+    ),
+    runtime!(
+        "opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitWebProcess",
+        0o755
+    ),
+    runtime!("opt/solstone-webkit/licenses/libicu70.copyright", 0o644),
+    runtime!(
+        "opt/solstone-webkit/licenses/libjpeg-turbo8.copyright",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/licenses/libmanette-0.2-0.copyright",
+        0o644
+    ),
+    runtime!("opt/solstone-webkit/licenses/libxml2.copyright", 0o644),
+    runtime!("opt/solstone-webkit/licenses/sources", 0o644),
+    runtime!("opt/solstone-webkit/licenses/webkit-notices.tar.gz", 0o644),
+    runtime!("opt/solstone-webkit/runtime.json", 0o644),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ar/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/as/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/bg/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ca/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/cs/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/da/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/de/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/el/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/en_CA/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/en_GB/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/eo/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/es/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/et/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/eu/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/fi/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/fr/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/gl/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/gu/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/he/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/hi/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/hr/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/hu/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/id/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/it/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ja/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ka/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/kk/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/kn/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ko/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/lt/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/lv/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ml/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/mr/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/nb/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/nl/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/or/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/pa/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/pl/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/pt/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/pt_BR/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ro/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ru/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/sl/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/sr/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/sr@latin/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/sv/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/ta/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/te/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/tr/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/uk/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/vi/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!(
+        "opt/solstone-webkit/share/locale/zh_CN/LC_MESSAGES/WebKitGTK-6.0.mo",
+        0o644
+    ),
+    runtime!("usr/bin/solstone-linux-journal", 0o755),
 ];
 
 const fn activity_helper(source: &'static str, installed: &'static str) -> PayloadAuthority {
@@ -974,6 +1257,7 @@ fn expected_path(format: Format, authority: PayloadAuthority) -> String {
                 .strip_prefix("contrib/icons/")
                 .map(|value| format!("share/icons/{value}"))
                 .unwrap_or_default(),
+            PayloadRole::JournalRuntime => journal_archive_path(authority),
             PayloadRole::ActivityHelper => activity_helper_archive_path(authority.source),
         },
     }
@@ -1024,7 +1308,7 @@ fn inspect_payload(
             .ok_or_else(|| audit_error(path, "PayloadClosure", "missing", &expected))?;
         if !matches!(
             authority.role,
-            PayloadRole::Executable | PayloadRole::WindowExecutable
+            PayloadRole::Executable | PayloadRole::WindowExecutable | PayloadRole::JournalRuntime
         ) && member.mode & 0o111 != 0
         {
             return Err(audit_error(
@@ -1337,7 +1621,9 @@ mod tests {
                     PayloadRole::MarkFontLicense => MARK_FONT_LICENSE.to_vec(),
                     PayloadRole::DependencyNotices => RUST_DEPENDENCY_NOTICES.to_vec(),
                     PayloadRole::Icon => authority.source.as_bytes().to_vec(),
-                    PayloadRole::ActivityHelper => authority.source.as_bytes().to_vec(),
+                    PayloadRole::JournalRuntime | PayloadRole::ActivityHelper => {
+                        authority.source.as_bytes().to_vec()
+                    }
                 };
                 Member {
                     path: expected_path(format, authority),

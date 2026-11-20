@@ -11,6 +11,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use sha2::{Digest, Sha256};
+
 use crate::release_rail_tests::{command_path, workspace_root};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -49,7 +51,36 @@ fn add_window_payload(root: &Path) {
     .unwrap();
 }
 
-fn release_fixture(temp: &Path) -> PathBuf {
+// Use the release launcher itself so its verification runs both before and after
+// the installer moves the fixture into its content-addressed slot.
+fn add_journal_payload(root: &Path) {
+    let runtime = root.join("opt/solstone-webkit");
+    fs::create_dir_all(runtime.join("bin")).unwrap();
+    let viewer = runtime.join("bin/journal");
+    fs::write(&viewer, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&viewer, fs::Permissions::from_mode(0o755)).unwrap();
+    let sources = b"fixture engine source notice\n";
+    fs::create_dir_all(runtime.join("licenses")).unwrap();
+    fs::write(runtime.join("licenses/sources"), sources).unwrap();
+    let inventory = serde_json::json!({
+        "webkit": "fixture",
+        "files": {"licenses/sources": format!("{:x}", Sha256::digest(sources))}
+    });
+    fs::write(runtime.join("runtime.json"), inventory.to_string()).unwrap();
+
+    let output = Command::new("python3")
+        .current_dir(workspace_root().join("journal-viewer"))
+        .args(["-B", "-c", "import sys\nfrom pathlib import Path\nfrom release import launcher\nsys.stdout.write(launcher(Path(sys.argv[1])))"])
+        .arg(runtime)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", output_text(&output));
+    let launcher = root.join("bin/solstone-linux-journal");
+    fs::write(&launcher, output.stdout).unwrap();
+    fs::set_permissions(launcher, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn stage_release_fixture(temp: &Path) -> String {
     let root_name = format!("solstone-linux-{VERSION}-linux-{ARCH}");
     let root = temp.join(&root_name);
     fs::create_dir_all(root.join("bin")).unwrap();
@@ -60,6 +91,7 @@ fn release_fixture(temp: &Path) -> PathBuf {
     )
     .unwrap();
     add_window_payload(&root);
+    add_journal_payload(&root);
     fs::copy(workspace_root().join("LICENSE"), root.join("LICENSE")).unwrap();
     fs::copy(
         workspace_root().join("packaging/INSTALL-NOTES"),
@@ -80,11 +112,19 @@ fn release_fixture(temp: &Path) -> PathBuf {
         &root.join("share/solstone-linux/activity-helpers"),
     );
 
+    root_name
+}
+
+fn release_fixture(temp: &Path) -> PathBuf {
+    archive_tree(temp, &stage_release_fixture(temp))
+}
+
+fn archive_tree(temp: &Path, root_name: &str) -> PathBuf {
     let archive = temp.join(format!("{root_name}.tar.gz"));
     let status = Command::new("tar")
         .args(["-czf"])
         .arg(&archive)
-        .arg(&root_name)
+        .arg(root_name)
         .current_dir(temp)
         .status()
         .unwrap();
@@ -218,6 +258,7 @@ fn installer_dry_run_is_write_free() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains(&format!("solstone-linux {VERSION} install plan")));
     assert!(!stdout.contains("solstone-linux 24.04.4 LTS (Noble Numbat) install plan"));
+    assert!(stdout.contains("install journal window:"));
     assert!(stdout.contains("install binary:"));
     assert!(stdout.contains("install icons:"));
     assert!(stdout.contains("install docs:"));
@@ -258,6 +299,31 @@ fn installer_installs_archive_into_prefix() {
             .mode()
             & 0o777,
         0o755
+    );
+    let launcher = prefix.join("bin/solstone-linux-journal");
+    let slot_bin = launcher.canonicalize().unwrap();
+    assert!(launcher.is_symlink());
+    assert!(slot_bin.starts_with(prefix.join("lib/solstone-linux/journal")));
+    assert!(
+        Command::new(&launcher)
+            .arg("--verify-runtime")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let runtime = slot_bin
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("opt/solstone-webkit");
+    fs::write(runtime.join("licenses/sources"), b"changed notice").unwrap();
+    assert!(
+        !Command::new(&launcher)
+            .arg("--verify-runtime")
+            .status()
+            .unwrap()
+            .success()
     );
     let icon = prefix.join("share/icons/hicolor/scalable/apps/solstone-observer.svg");
     assert!(icon.is_file());
@@ -332,37 +398,14 @@ fn installer_preserves_foreign_hicolor_files() {
 #[test]
 fn installer_rejects_archive_missing_dependency_notices() {
     let temp = tempfile::tempdir().unwrap();
-    let root_name = format!("solstone-linux-{VERSION}-linux-{ARCH}");
-    let root = temp.path().join(&root_name);
-    fs::create_dir_all(root.join("bin")).unwrap();
-    fs::write(root.join("bin/solstone-linux"), b"fixture-binary\n").unwrap();
-    fs::set_permissions(
-        root.join("bin/solstone-linux"),
-        fs::Permissions::from_mode(0o755),
+    let root_name = stage_release_fixture(temp.path());
+    fs::remove_file(
+        temp.path()
+            .join(&root_name)
+            .join("RUST_DEPENDENCY_NOTICES.txt"),
     )
     .unwrap();
-    add_window_payload(&root);
-    fs::copy(workspace_root().join("LICENSE"), root.join("LICENSE")).unwrap();
-    fs::copy(
-        workspace_root().join("packaging/INSTALL-NOTES"),
-        root.join("INSTALL-NOTES"),
-    )
-    .unwrap();
-    // Omit RUST_DEPENDENCY_NOTICES.txt
-    copy_tree(
-        &workspace_root().join("contrib/icons/hicolor"),
-        &root.join("share/icons/hicolor"),
-    );
-
-    let archive = temp.path().join(format!("{root_name}.tar.gz"));
-    let status = Command::new("tar")
-        .args(["-czf"])
-        .arg(&archive)
-        .arg(&root_name)
-        .current_dir(temp.path())
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let archive = archive_tree(temp.path(), &root_name);
 
     let home = temp.path().join("home");
     let prefix = temp.path().join("prefix");

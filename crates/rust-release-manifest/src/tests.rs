@@ -616,7 +616,7 @@ fn package_payload_authority_matches_both_manifest_dialects() {
         .collect::<Vec<_>>();
     assert_eq!(deb, rpm);
     assert_eq!(deb, expected);
-    assert_eq!(expected.len(), 26);
+    assert_eq!(expected.len(), 100);
 }
 
 fn audit_fixture_bytes(
@@ -645,7 +645,8 @@ fn audit_fixture_bytes(
         crate::package_audit::PayloadRole::Icon => {
             format!("audit fixture {}\n", authority.source).into_bytes()
         }
-        crate::package_audit::PayloadRole::ActivityHelper => {
+        crate::package_audit::PayloadRole::JournalRuntime
+        | crate::package_audit::PayloadRole::ActivityHelper => {
             format!("audit fixture {}\n", authority.source).into_bytes()
         }
     }
@@ -698,6 +699,9 @@ fn audit_tar_with_payload(
                 "share/icons/{}",
                 authority.source.strip_prefix("contrib/icons/").unwrap()
             ),
+            crate::package_audit::PayloadRole::JournalRuntime => {
+                crate::package_audit::journal_archive_path(authority)
+            }
             crate::package_audit::PayloadRole::ActivityHelper => {
                 crate::package_audit::activity_helper_archive_path(authority.source)
             }
@@ -1215,6 +1219,9 @@ fn package_audit_real_artifacts_cover_payload_rejection_matrix() {
                                 .strip_prefix("contrib/icons/")
                                 .map(|path| format!("share/icons/{path}"))
                                 .unwrap(),
+                            PayloadRole::JournalRuntime => {
+                                crate::package_audit::journal_archive_path(*authority)
+                            }
                             PayloadRole::ActivityHelper => {
                                 crate::package_audit::activity_helper_archive_path(authority.source)
                             }
@@ -1243,6 +1250,9 @@ fn package_audit_real_artifacts_cover_payload_rejection_matrix() {
                                 "RUST_DEPENDENCY_NOTICES.txt".to_owned()
                             }
                             PayloadRole::Icon => unreachable!(),
+                            PayloadRole::JournalRuntime => {
+                                crate::package_audit::journal_archive_path(*authority)
+                            }
                             PayloadRole::ActivityHelper => {
                                 crate::package_audit::activity_helper_archive_path(authority.source)
                             }

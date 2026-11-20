@@ -1,0 +1,11 @@
+--- a/Source/ThirdParty/ANGLE/src/libANGLE/ResourceMap.h
++++ b/Source/ThirdParty/ANGLE/src/libANGLE/ResourceMap.h
+@@ -460,7 +460,7 @@
+     {
+         // This should only possible when lock is needed. Otherwise we could just grow
+         // mFlatResources.
+-        static_assert(kNeedsLock);
++        static_assert(kAdditionalFlatResourcesSize == 0 || kNeedsLock);
+         if (handle < kLocklessFlatResourcesLimit)
+         {
+             ResourceType **additionalResources =

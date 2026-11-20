@@ -1,0 +1,84 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# Only the daemon's inherited channel is accepted. The URL never enters argv.
+set -eu
+mode=open
+case $# in
+    0) ;;
+    1) case $1 in --check) mode=check ;; --verify-runtime) mode=verify ;; *) exit 2 ;; esac ;;
+    *) exit 2 ;;
+esac
+self=$(readlink -f -- "$0")
+prefix=${self%/bin/solstone-linux-journal}
+fixed=/opt/solstone-webkit
+if [ "$prefix" = /usr ]; then
+    root=$fixed
+else
+    root="$prefix/opt/solstone-webkit"
+fi
+[ -x "$root/bin/journal" ] || exit 1
+# All hashes come from the signed build. Never let the loader substitute host
+# WebKit or a different helper if a package update was interrupted.
+(cd "$root" && sha256sum --strict --check --status <<'SOLSTONE_DIGESTS'
+@JOURNAL_DIGESTS@
+SOLSTONE_DIGESTS
+) || exit 1
+[ "$mode" != verify ] || exit 0
+if [ "$mode" = open ]; then
+    # Routine engine updates can roll back. A security withdrawal raises this
+    # generation; remember it across a package downgrade for this account.
+    (
+        umask 077
+        state=${XDG_STATE_HOME:-"$HOME/.local/state"}/solstone-linux/journal-window
+        mkdir -p -- "$state" || exit 1
+        exec 9>"$state/lock"
+        flock -x 9 || exit 1
+        previous=0
+        if [ -f "$state/minimum-generation" ]; then
+            IFS= read -r previous < "$state/minimum-generation" || exit 1
+            case $previous in ''|*[!0-9]*) exit 1 ;; esac
+        fi
+        generation=@SECURITY_GENERATION@
+        [ "$previous" -le "$generation" ] || exit 1
+        if [ "$previous" -lt "$generation" ]; then
+            temporary=$(mktemp "$state/generation.XXXXXX") || exit 1
+            printf '%s\n' "$generation" > "$temporary" || exit 1
+            mv -f -- "$temporary" "$state/minimum-generation"
+        fi
+    ) || exit 1
+fi
+unset WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS WEBKIT_EXEC_PATH WEBKIT_INJECTED_BUNDLE_PATH
+# Give the engine its own SONAMEs. The distro's JPEG must win where present
+# (Leap's TIFF uses symbols outside the Jammy JPEG ABI).
+libs=$fixed/lib
+local_libs=$root/lib
+case $(uname -m) in
+    x86_64) cache_arch=x86-64 ;;
+    aarch64) cache_arch=AArch64 ;;
+    *) exit 1 ;;
+esac
+for soname in libjpeg.so.8 libxml2.so.2 libmanette-0.2.so.0; do
+    if ! /sbin/ldconfig -p | awk -v name="$soname" -v arch="$cache_arch" '$1 == name && index($0, arch) {found=1} END {exit !found}'; then
+        libs="$libs:$fixed/fallback/$soname"
+        local_libs="$local_libs:$root/fallback/$soname"
+    fi
+done
+if [ "$mode" = check ]; then
+    [ -x /usr/bin/bwrap ] && [ -x /usr/bin/xdg-dbus-proxy ] || exit 1
+    # ldd returns success for an unresolved indirect dependency on some glibc versions.
+    linked=$(LD_LIBRARY_PATH="$local_libs" ldd "$root/bin/journal") || exit 1
+    case "$linked" in *"not found"*) exit 1 ;; esac
+    if [ "$root" != "$fixed" ] && [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] &&
+        [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 ]; then
+        /usr/bin/bwrap --ro-bind / / -- /usr/bin/true || exit 3
+    fi
+    exit 0
+fi
+if [ "$root" = "$fixed" ]; then
+    LD_LIBRARY_PATH=$libs exec "$fixed/bin/journal"
+fi
+# The release build embeds absolute helper paths. Mount the verified portable
+# tree there for this process only. Keep the kernel's normal namespace policy.
+exec flock -s "$root/runtime.json" /usr/bin/bwrap --die-with-parent --bind / / --dev-bind /dev /dev --proc /proc \
+    --tmpfs /opt --ro-bind "$root" "$fixed" --setenv LD_LIBRARY_PATH "$libs" \
+    "$fixed/bin/journal"

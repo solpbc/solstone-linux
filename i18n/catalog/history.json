@@ -12882,6 +12882,18 @@
       "selector": null
     },
     {
+      "id": "linux.window.choosenewdownloadname",
+      "resource": "m6c696e75782e77696e646f772e63686f6f73656e6577646f776e6c6f61646e616d65",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.window.close",
       "resource": "m6c696e75782e77696e646f772e636c6f7365",
       "namespace": "linux.window",

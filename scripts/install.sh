@@ -7,7 +7,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/install.sh [--dry-run] [--prefix PATH] <tarball>
+Usage: scripts/install.sh [--dry-run] [--journal-window-only] [--prefix PATH] <tarball>
 
 The default prefix is $HOME/.local. A system prefix is an explicit operator
 choice and may require running this script with suitable privileges.
@@ -15,12 +15,14 @@ EOF
 }
 
 DRY_RUN=0
+WINDOW_ONLY=0
 PREFIX="${HOME:?HOME is required}/.local"
 PREFIX_EXPLICIT=0
 ARCHIVE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --journal-window-only) WINDOW_ONLY=1; shift ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -130,6 +132,9 @@ done <<< "$CONTENTS"
 for REQUIRED in \
   "$TOP/bin/solstone-linux" \
   "$TOP/bin/solstone-linux-window" \
+  "$TOP/bin/solstone-linux-journal" \
+  "$TOP/opt/solstone-webkit/runtime.json" \
+  "$TOP/opt/solstone-webkit/bin/journal" \
   "$TOP/LICENSE" \
   "$TOP/INSTALL-NOTES" \
   "$TOP/Comfortaa-OFL.txt" \
@@ -147,10 +152,16 @@ for REQUIRED in \
 done
 
 echo "solstone-linux $RELEASE_VERSION install plan ($DISTRO_FAMILY, $ARCH):"
-echo "  install binary: $PREFIX/bin/solstone-linux"
-echo "  install binary: $PREFIX/bin/solstone-linux-window"
-echo "  install icons:  $PREFIX/share/icons/hicolor/"
-echo "  install docs:   $PREFIX/share/doc/solstone-linux/"
+echo "  install journal window: $PREFIX/bin/solstone-linux-journal"
+if [[ $WINDOW_ONLY -eq 0 ]]; then
+    echo "  install binary: $PREFIX/bin/solstone-linux"
+    echo "  install binary: $PREFIX/bin/solstone-linux-window"
+    echo "  install icons:  $PREFIX/share/icons/hicolor/"
+    echo "  install docs:   $PREFIX/share/doc/solstone-linux/"
+elif [[ ! -x "$PREFIX/bin/solstone-linux" || -L "$PREFIX/bin/solstone-linux" || "$PREFIX" = /usr ]]; then
+    echo "error: the selected prefix needs an existing standalone portable app" >&2
+    exit 1
+fi
 if [[ ":$PATH:" != *":$PREFIX/bin:"* ]]; then
   echo "  notice: add $PREFIX/bin to PATH"
 fi
@@ -173,6 +184,42 @@ EXTRACT_DIR=$(mktemp -d)
 trap 'rm -rf "$EXTRACT_DIR"' EXIT
 tar -xzf "$ARCHIVE" -C "$EXTRACT_DIR"
 SOURCE="$EXTRACT_DIR/$TOP"
+
+# Install the complete version in a sibling directory on the target filesystem.
+# The public link switches only after verification. Running browsers keep their
+# old mount, and interrupted installs cannot leave a mismatched helper set.
+slots="$PREFIX/lib/solstone-linux/journal"
+mkdir -p "$PREFIX/bin" "$slots"
+exec 9>"$slots/install.lock"
+flock -x 9
+hash=$(sha256sum "$SOURCE/bin/solstone-linux-journal")
+slot="$slots/${hash%% *}"
+staged=$(mktemp -d "$slots/.install.XXXXXXXX")
+trap 'rm -rf -- "$EXTRACT_DIR" "$staged"' EXIT
+if [[ ! -d "$slot" ]]; then
+    mkdir -p "$staged/tree/bin" "$staged/tree/opt"
+    cp -a "$SOURCE/opt/solstone-webkit" "$staged/tree/opt/"
+    install -m 0755 "$SOURCE/bin/solstone-linux-journal" "$staged/tree/bin/solstone-linux-journal"
+    "$staged/tree/bin/solstone-linux-journal" --verify-runtime
+    chmod 0755 "$staged/tree"
+    mv -T -- "$staged/tree" "$slot"
+fi
+"$slot/bin/solstone-linux-journal" --verify-runtime
+previous=$(readlink -- "$PREFIX/bin/solstone-linux-journal" || true)
+ln -s -- "$slot/bin/solstone-linux-journal" "$staged/next"
+mv -Tf -- "$staged/next" "$PREFIX/bin/solstone-linux-journal"
+# Retain the prior complete selection for rollback and any older slot still
+# held by a running viewer. Only remove our own content-addressed directories.
+for old in "$slots"/*; do
+    [[ "$old" != "$slot" && "$old/bin/solstone-linux-journal" != "$previous" &&
+       "${old##*/}" =~ ^[0-9a-f]{64}$ && ! -L "$old" &&
+       -f "$old/opt/solstone-webkit/runtime.json" ]] || continue
+    flock -nx "$old/opt/solstone-webkit/runtime.json" rm -rf -- "$old" || true
+done
+flock -u 9
+if [[ $WINDOW_ONLY -eq 1 ]]; then
+    exit 0
+fi
 
 mkdir -p \
   "$PREFIX/bin" \

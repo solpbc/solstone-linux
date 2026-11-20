@@ -220,44 +220,111 @@ fn container_context_excludes_host_outputs() {
     assert!(!ignore.lines().any(|line| line.contains("contrib")));
 }
 
-// each tool's asset dialect resolves to the same committed files plus the
-// workspace-aware release binary, and every committed source exists.
+// The build stages these files from the native SDK. A source checkout has
+// their reviewed inventories, and the container checks the actual file digests.
+fn journal_assets(arch: &str) -> BTreeSet<(String, String, String)> {
+    let pin = workspace_root().join(format!("journal-viewer/engine/{arch}.json"));
+    let pin: serde_json::Value = serde_json::from_slice(&fs::read(pin).unwrap()).unwrap();
+    let mut files = vec![
+        ("usr/bin/solstone-linux-journal".to_owned(), "755"),
+        (
+            "usr/share/solstone-linux/apparmor/solstone-linux-journal".to_owned(),
+            "644",
+        ),
+        ("opt/solstone-webkit/runtime.json".to_owned(), "644"),
+        ("opt/solstone-webkit/bin/journal".to_owned(), "755"),
+    ];
+    for name in pin["files"].as_object().unwrap().keys() {
+        let mode = if name.starts_with("libexec/") {
+            "755"
+        } else {
+            "644"
+        };
+        files.push((format!("opt/solstone-webkit/{name}"), mode));
+    }
+    files
+        .into_iter()
+        .map(|(dest, mode)| {
+            (
+                format!("packaging/journal-root/{dest}"),
+                dest,
+                mode.to_owned(),
+            )
+        })
+        .collect()
+}
+
+// Resolve each tool's source and destination conventions, including cargo-deb's
+// directory destinations. Compare sources, installed filenames and file modes.
 #[test]
 fn package_assets_exist_and_match() {
     let (_, member) = metadata();
-    let expected = committed_asset_set();
+    let committed = committed_asset_set();
     assert_eq!(
-        expected.len(),
+        committed.len(),
         24,
-        "LICENSE + Comfortaa-OFL.txt + INSTALL-NOTES + RUST_DEPENDENCY_NOTICES.txt + launcher + 15 icons + 4 activity helpers"
+        "desktop, docs, icons and activity helpers"
     );
-
+    let journal = journal_assets("x86_64");
+    assert_eq!(journal, journal_assets("aarch64"));
+    let bins = ["solstone-linux", "solstone-linux-window"].map(|name| {
+        (
+            format!("target/release/{name}"),
+            format!("usr/bin/{name}"),
+            "755".to_owned(),
+        )
+    });
     let deb = deb_assets(&member);
     let rpm = rpm_assets(&member);
-    assert_eq!(deb.len(), 26);
-    assert_eq!(rpm.len(), 26);
-    assert_eq!(deb[0].0, "target/release/solstone-linux");
-    assert_eq!(rpm[0].0, "target/release/solstone-linux");
-    assert_eq!(deb[0].2, "755");
-    assert_eq!(rpm[0].2, "755");
-
-    let deb_paths = deb
-        .iter()
-        .skip(2)
-        .map(|(source, _, _)| manifest_dir().join(source).canonicalize().unwrap())
+    let count = committed.len() + bins.len() + journal.len();
+    assert_eq!(deb.len(), count);
+    assert_eq!(rpm.len(), count);
+    let deb = deb
+        .into_iter()
+        .map(|(source, dest, mode)| {
+            let source = if source.starts_with("target/release/") {
+                source
+            } else {
+                source
+                    .strip_prefix("../../")
+                    .expect("cargo-deb resolves sources from the crate directory")
+                    .to_owned()
+            };
+            let dest = if dest.ends_with('/') {
+                format!(
+                    "{dest}{}",
+                    Path::new(&source).file_name().unwrap().to_str().unwrap()
+                )
+            } else {
+                dest
+            };
+            (source, dest, mode)
+        })
         .collect::<BTreeSet<_>>();
-    let rpm_paths = rpm
-        .iter()
-        .skip(2)
-        .map(|(source, _, _)| workspace_root().join(source).canonicalize().unwrap())
+    let rpm = rpm
+        .into_iter()
+        .map(|(source, dest, mode)| (source, dest.strip_prefix('/').unwrap().to_owned(), mode))
         .collect::<BTreeSet<_>>();
-    assert_eq!(deb_paths, expected);
-    assert_eq!(rpm_paths, expected);
-
-    for (_, destination, mode) in deb.iter().chain(rpm.iter()) {
-        assert!(!destination.ends_with(".service"));
-        assert!(mode == "644" || mode == "755");
+    assert_eq!(deb, rpm);
+    assert_eq!(deb.len(), count, "duplicate package rows");
+    let destinations = deb.iter().map(|(_, dest, _)| dest).collect::<BTreeSet<_>>();
+    assert_eq!(destinations.len(), count, "duplicate install paths");
+    for dest in destinations {
+        assert!(!dest.ends_with(".service"));
     }
+    let mut remaining = deb;
+    for asset in journal.into_iter().chain(bins) {
+        assert!(remaining.remove(&asset), "missing or mismatched {asset:?}");
+    }
+    let root = workspace_root();
+    let paths = remaining
+        .into_iter()
+        .map(|(source, _, mode)| {
+            assert_eq!(mode, "644");
+            root.join(source).canonicalize().unwrap()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(paths, committed);
     assert!(
         member["package"]["metadata"]["deb"]
             .get("systemd-units")
@@ -272,9 +339,11 @@ fn package_assets_exist_and_match() {
 fn debian_sealing_enumerates_every_installed_payload() {
     let (_, member) = metadata();
     let payload_count = deb_assets(&member).len() + 1;
+    // Two Rust binaries and cargo-deb's generated copyright accompany the
+    // committed desktop files and the generated journal runtime.
     assert_eq!(
-        payload_count, 27,
-        "26 declared assets + generated copyright"
+        payload_count,
+        committed_asset_set().len() + journal_assets("x86_64").len() + 3
     );
 
     let containerfile =

@@ -5581,6 +5581,13 @@
       "locales": []
     },
     {
+      "id": "linux.window.choosenewdownloadname",
+      "source": "5222738c3e0f5d0cf4b5e9da12cbd62c0da700b610ba34555e12c510d8815c5f",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.window.close",
       "source": "a1f34abf437ec17e427804fd2f06f257c671423b17b647a1bd82dd7ac195af73",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",

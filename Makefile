@@ -282,6 +282,8 @@ release: release-candidate
 release-images:
 	@test -n "$(UBUNTU_STOCK_BASE)" && test -n "$(FEDORA_STOCK_BASE)" || { echo "error: release architecture mismatch: expected x86_64 or aarch64, actual '$(RELEASE_ARCH)'" >&2; exit 1; }
 	@test "$(RELEASE_ARCH)" = "$$(uname -m)" || { echo "error: release architecture mismatch: expected native host architecture $$(uname -m), actual requested $(RELEASE_ARCH)" >&2; echo "repair: run make release-images on a native $(RELEASE_ARCH) host" >&2; exit 1; }
+	podman build --pull=never --file journal-viewer/engine/Containerfile --tag localhost/solstone-linux-journal-sdk \
+		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" .
 	@# Build and proof images share the same explicitly pinned stock bases.
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target ubuntu-tools --tag localhost/solstone-linux-build-ubuntu \
 		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" \

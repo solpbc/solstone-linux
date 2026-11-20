@@ -919,6 +919,17 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                 tracing::warn!(%error, "quit could not stop the user service");
             }
         }
+        ObserverAction::Desktop(TrayCommand::OpenJournal) => {
+            let notify = || {
+                let _ = notify_rust::Notification::new()
+                    .summary(text!("linux.panel.solstoneapp"))
+                    .body(crate::desktop_component::open_journal_remediation())
+                    .show();
+            };
+            if open_journal.open_from_tray(notify).is_err() {
+                notify();
+            }
+        }
         ObserverAction::Desktop(command) => {
             if let Err(error) = crate::desktop_component::DesktopComponent::with_open_journal(
                 observer.config.clone(),
@@ -927,15 +938,8 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
             .perform_desktop_command(command.clone())
             {
                 tracing::warn!(%error, "Failed to perform desktop command");
-                if matches!(
-                    command,
-                    TrayCommand::OpenJournal | TrayCommand::CopyAbout(_)
-                ) {
-                    let message = if matches!(command, TrayCommand::CopyAbout(_)) {
-                        error.as_str()
-                    } else {
-                        crate::desktop_component::open_journal_remediation()
-                    };
+                if matches!(command, TrayCommand::CopyAbout(_)) {
+                    let message = error.as_str();
                     if let Err(notification_error) = notify_rust::Notification::new()
                         .summary(text!("linux.panel.solstoneapp"))
                         .body(message)

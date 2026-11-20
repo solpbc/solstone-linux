@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Development guidelines for solstone-linux, a standalone Linux desktop observer.
+Development guidelines for solstone-linux, the solstone app for linux.
 
 ## Project Overview
 
-solstone-linux is a companion app that runs alongside the main [solstone](https://solstone.app) journal. It takes in the screen and audio the owner shares with it on a Linux desktop using PipeWire and GStreamer, holds segments on the device, and all of it goes into the owner's journal. It runs as a systemd user service on GNOME Wayland sessions.
+the solstone app takes in the screen and audio you share with it, and all of it goes into your journal. the linux app uses PipeWire and GStreamer and runs as a systemd user service.
 
 This is **not** part of the solstone monorepo. It is a standalone Rust package with its own native release lifecycle.
 
@@ -118,6 +118,7 @@ markdown, TOML, or config files.
 Shipping system packages:
 - glibc 2.35 or newer
 - GTK 4.6 or newer for the separate window; the daemon remains GTK-free
+- The journal window runs the bundled WebKitGTK engine in a separate process. See [the distribution requirements](INSTALL.md#system-dependencies).
 - libpulse and a PulseAudio-compatible server such as PipeWire Pulse
 - GStreamer 1.0 core, base, good, PipeWire, and X11 plugins
 - PipeWire and xdg-desktop-portal with ScreenCast support for Wayland screen frames

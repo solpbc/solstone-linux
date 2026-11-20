@@ -82,15 +82,21 @@ if [[ -z "$UBUNTU_TOOL_BASE" || -z "$FEDORA_TOOL_BASE" || "$UBUNTU_TOOL_BASE" ==
 fi
 
 SOURCE_COMMIT=$(git rev-parse HEAD)
-SOURCE_ARCHIVE_SHA256=$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)
 CARGO_LOCK_SHA256=$(sha256sum Cargo.lock | cut -d' ' -f1)
 RELEASE_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 INVOCATION_ID=${SOURCE_COMMIT:0:32}
 OUTPUT_TMP=$(mktemp -d)
-trap 'rm -rf "$OUTPUT_TMP"' EXIT
+CONTEXT_TMP=$(mktemp -d)
+trap 'rm -rf "$OUTPUT_TMP" "$CONTEXT_TMP"' EXIT
+# The lane consumes the exported commit and its binding, just like a candidate.
+git archive --format=tar --output="$CONTEXT_TMP/.release-context.tar" "$SOURCE_COMMIT"
+tar -xf "$CONTEXT_TMP/.release-context.tar" -C "$CONTEXT_TMP"
+SOURCE_ARCHIVE_SHA256=$(sha256sum "$CONTEXT_TMP/.release-context.tar" | cut -d' ' -f1)
+printf '{"cargo_lock_sha256":"%s","source_archive_sha256":"%s","source_commit":"%s"}\n' \
+  "$CARGO_LOCK_SHA256" "$SOURCE_ARCHIVE_SHA256" "$SOURCE_COMMIT" > "$CONTEXT_TMP/.release-context.json"
 
 "${ENGINE[@]}" \
-  --file packaging/Containerfile \
+  --file "$CONTEXT_TMP/packaging/Containerfile" \
   --target "$FORMAT" \
   --output "type=local,dest=$OUTPUT_TMP" \
   --build-arg "UBUNTU_TOOL_BASE=$UBUNTU_TOOL_BASE" \
@@ -101,7 +107,7 @@ trap 'rm -rf "$OUTPUT_TMP"' EXIT
   --build-arg "CARGO_LOCK_SHA256=$CARGO_LOCK_SHA256" \
   --build-arg "RELEASE_VERSION=$RELEASE_VERSION" \
   --build-arg "RELEASE_TARGET=$ARCH-unknown-linux-gnu" \
-  "$REPO_ROOT"
+  "$CONTEXT_TMP"
 
 OUTPUT_DIR=dist/rust-drift
 shopt -s nullglob

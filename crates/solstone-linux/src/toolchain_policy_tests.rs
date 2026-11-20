@@ -166,8 +166,27 @@ fn command_segments(line: &str) -> Vec<String> {
     let mut single_quote = false;
     let mut double_quote = false;
     let mut conditional_test = false;
+    let mut assignments = Vec::new();
     while let Some(character) = chars.next() {
         match character {
+            // Scan the command in VAR="$(...)" on its own and then resume
+            // the enclosing command, which can itself have a dynamic wrapper.
+            '$' if !single_quote
+                && chars.peek() == Some(&'(')
+                && (current.ends_with('=') || current.ends_with("=\"")) =>
+            {
+                chars.next();
+                current.push('_');
+                assignments.push((std::mem::take(&mut current), double_quote, conditional_test));
+                double_quote = false;
+                conditional_test = false;
+                continue;
+            }
+            ')' if !single_quote && !double_quote && !assignments.is_empty() => {
+                segments.push(std::mem::take(&mut current));
+                (current, double_quote, conditional_test) = assignments.pop().unwrap();
+                continue;
+            }
             '\'' if !double_quote => single_quote = !single_quote,
             '"' if !single_quote => double_quote = !double_quote,
             '[' if !single_quote && !double_quote && chars.peek() == Some(&'[') => {
@@ -530,6 +549,25 @@ fn locked_policy_fails_closed_on_unresolved_command_wrapper() {
     let error = scan_policy(&makefile, &container, &scripts).unwrap_err();
     assert!(error.contains("Makefile:"));
     assert!(error.contains("$(SOME_UNDEFINED_CMD)"));
+}
+
+#[test]
+fn locked_policy_distinguishes_substitution_commands_from_their_arguments() {
+    let (makefile, container, mut scripts) = policy_sources();
+    scripts.push((
+        "scripts/hash.sh".into(),
+        r#"HASH=$(sha256sum "$INPUT/file")"#.into(),
+    ));
+    scan_policy(&makefile, &container, &scripts).unwrap();
+    for wrapper in [
+        r#"HASH=$("$UNDEFINED_CMD" file)"#,
+        r#"HASH=$(sha256sum "$INPUT/file") "$UNDEFINED_CMD" build"#,
+    ] {
+        scripts.push(("scripts/wrapper.sh".into(), wrapper.into()));
+        let error = scan_policy(&makefile, &container, &scripts).unwrap_err();
+        assert!(error.contains("scripts/wrapper.sh:1: unresolved command token '$UNDEFINED_CMD'"));
+        scripts.pop();
+    }
 }
 
 // a scan containing only exempt Cargo commands cannot satisfy lock-policy coverage.

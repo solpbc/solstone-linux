@@ -2200,10 +2200,19 @@ impl WindowControlSupervisor {
             }
             return self.assemble_current(None);
         }
-        let open_result = match opener {
-            Some(opener) => self.open_journal.open_at_path_with(path, |url| opener(url)),
-            None => self.open_journal.open_at_path(path),
-        };
+        // The loopback server runs on Tokio. On a single worker, waiting for
+        // the renderer here would prevent it from receiving its first page.
+        let capability = self.open_journal.snapshot();
+        let path = path.to_owned();
+        let open_result = tokio::task::spawn_blocking(move || {
+            let capability = capability?;
+            match opener {
+                Some(opener) => capability.open_inner(&path, |url| opener(url)),
+                None => capability.open_at_path(&path),
+            }
+        })
+        .await
+        .unwrap_or(Err(()));
         if open_result.is_err() {
             let mut phase = self.phase.lock().unwrap_or_else(|p| p.into_inner());
             phase.open_journal = Some("unavailable".into());

@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Added
 
+- your journal now opens in its own window on linux. opening a journal link takes you to that place in the window. if the window can't start, the app opens the same place in your browser.
 - importing a HEIC or HEIF photo through the solstone app on linux now converts it to JPEG on your computer while keeping the date it was taken and its orientation when your system has HEIC support installed. if your computer can't convert a photo, the app says so and doesn't add it to your journal.
 
 ## [2.0.47] - 2026-11-19

@@ -24,6 +24,13 @@ WORKDIR /src
 # The full repository is required: build.rs rasterizes contrib/icons and
 # deliberately panics if those canonical source files cannot be read.
 COPY . .
+# The verified engine, helper set and desktop host are produced together in the pinned native tool image.
+RUN mkdir -p packaging/journal-root \
+    && cp -a /opt/solstone-journal-dist/opt packaging/journal-root/ \
+    && install -Dm644 journal-viewer/apparmor packaging/journal-root/usr/share/solstone-linux/apparmor/solstone-linux-journal \
+    && python3 journal-viewer/build.py packaging/journal-root/opt/solstone-webkit/bin/journal \
+        --launcher packaging/journal-root/usr/bin/solstone-linux-journal \
+    && python3 journal-viewer/verify.py packaging/journal-root
 
 RUN case "$RELEASE_TARGET" in \
         x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu) ;; \
@@ -56,6 +63,9 @@ RUN cargo build --locked --release -p solstone-linux -p solstone-linux-window -p
     && mkdir -p "/release-tree/${ROOT}/share/icons" "/release-tree/${ROOT}/share/solstone-linux/activity-helpers" /release \
     && cp -R contrib/icons/hicolor "/release-tree/${ROOT}/share/icons/hicolor" \
     && cp -R packaging/activity-helpers/* "/release-tree/${ROOT}/share/solstone-linux/activity-helpers/" \
+    && cp -a packaging/journal-root/opt "/release-tree/${ROOT}/" \
+    && cp -a packaging/journal-root/usr/share/. "/release-tree/${ROOT}/share/" \
+    && cp -a packaging/journal-root/usr/bin/. "/release-tree/${ROOT}/bin/" \
     && tar -C /release-tree -czf "/release/${ROOT}.tar.gz" "$ROOT" \
     && printf '%s\n' "$VERSION" > /release/VERSION
 
@@ -95,8 +105,8 @@ RUN actual="$(cargo deb --version)" \
         | LC_ALL=C sort -z \
         | xargs -0 -r md5sum -- > DEBIAN/md5sums \
     && md5_count="$(wc -l < DEBIAN/md5sums)" \
-    && { test "${md5_count}" -eq 27 \
-        || { echo "error: Debian md5 inventory mismatch: expected 27 payloads, actual ${md5_count:-unavailable}" >&2; \
+    && { test "${md5_count}" -eq 101 \
+        || { echo "error: Debian md5 inventory mismatch: expected 101 payloads, actual ${md5_count:-unavailable}" >&2; \
              echo "repair: align the sealing bound with package assets and generated copyright" >&2; exit 1; }; } \
     && chmod 0644 DEBIAN/md5sums \
     && dpkg-deb --root-owner-group -Zxz -z9 --build "$DEB_ROOT" "${DEB}.sealed" >/dev/null \

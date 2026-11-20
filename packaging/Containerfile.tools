@@ -72,7 +72,11 @@ WORKDIR /src
 COPY . .
 RUN cargo fetch --locked
 
+# Draft and verify the engine layer from journal-viewer/engine/Containerfile
+# before rebuilding the native release tools.
+FROM localhost/solstone-linux-journal-sdk AS journal-sdk
 FROM ubuntu-tools-base AS ubuntu-tools
+COPY --from=journal-sdk /opt/solstone-journal-dist /opt/solstone-journal-dist
 COPY --from=ubuntu-cargo-fetch /root/.cargo /root/.cargo
 
 # All release images start from explicit stock-base digests supplied by Make.

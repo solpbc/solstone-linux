@@ -106,7 +106,7 @@ suggests = "gnome-shell-extension-appindicator, tmux"
 # The panel icon's "copy" hands its text to wl-copy on Wayland and xclip on X11: a
 # background app can't set a Wayland clipboard by itself. Recommended, so a missing
 # tool costs only the copy, never the install.
-recommends = "libgtk-4-1 (>= 4.6), wl-clipboard, xclip"
+recommends = "libgtk-4-1 (>= 4.6), wl-clipboard, xclip, bubblewrap, xdg-dbus-proxy, libsoup-3.0-0, libharfbuzz-icu0, libwebpdemux2, libwebpmux3, libxslt1.1, libenchant-2-2, libhyphen0, libsecret-1-0, libgles2, libegl1, libgudev-1.0-0, libevdev2, libatomic1, libwayland-server0, gstreamer1.0-gl, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav"
 section = "utils"
 priority = "optional"
 assets = [
@@ -136,6 +136,80 @@ assets = [
     ["../../packaging/activity-helpers/solstone-activity@solpbc.org/extension.js", "usr/share/solstone-linux/activity-helpers/solstone-activity@solpbc.org/extension.js", "644"],
     ["../../packaging/activity-helpers/solstone-activity-kwin/metadata.json", "usr/share/solstone-linux/activity-helpers/solstone-activity-kwin/metadata.json", "644"],
     ["../../packaging/activity-helpers/solstone-activity-kwin/contents/code/main.js", "usr/share/solstone-linux/activity-helpers/solstone-activity-kwin/contents/code/main.js", "644"],
+    ["../../packaging/journal-root/usr/share/solstone-linux/apparmor/solstone-linux-journal", "usr/share/solstone-linux/apparmor/solstone-linux-journal", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/bin/journal", "opt/solstone-webkit/bin/journal", "755"],
+    ["../../packaging/journal-root/opt/solstone-webkit/fallback/libjpeg.so.8/libjpeg.so.8", "opt/solstone-webkit/fallback/libjpeg.so.8/libjpeg.so.8", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/fallback/libmanette-0.2.so.0/libmanette-0.2.so.0", "opt/solstone-webkit/fallback/libmanette-0.2.so.0/libmanette-0.2.so.0", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/fallback/libxml2.so.2/libxml2.so.2", "opt/solstone-webkit/fallback/libxml2.so.2/libxml2.so.2", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/lib/libicudata.so.70", "opt/solstone-webkit/lib/libicudata.so.70", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/lib/libicui18n.so.70", "opt/solstone-webkit/lib/libicui18n.so.70", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/lib/libicuuc.so.70", "opt/solstone-webkit/lib/libicuuc.so.70", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/lib/libjavascriptcoregtk-6.0.so.1", "opt/solstone-webkit/lib/libjavascriptcoregtk-6.0.so.1", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/lib/libwebkitgtk-6.0.so.4", "opt/solstone-webkit/lib/libwebkitgtk-6.0.so.4", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/lib/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so", "opt/solstone-webkit/lib/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitGPUProcess", "opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitGPUProcess", "755"],
+    ["../../packaging/journal-root/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitNetworkProcess", "opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitNetworkProcess", "755"],
+    ["../../packaging/journal-root/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitWebProcess", "opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitWebProcess", "755"],
+    ["../../packaging/journal-root/opt/solstone-webkit/licenses/libicu70.copyright", "opt/solstone-webkit/licenses/libicu70.copyright", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/licenses/libjpeg-turbo8.copyright", "opt/solstone-webkit/licenses/libjpeg-turbo8.copyright", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/licenses/libmanette-0.2-0.copyright", "opt/solstone-webkit/licenses/libmanette-0.2-0.copyright", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/licenses/libxml2.copyright", "opt/solstone-webkit/licenses/libxml2.copyright", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/licenses/sources", "opt/solstone-webkit/licenses/sources", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/licenses/webkit-notices.tar.gz", "opt/solstone-webkit/licenses/webkit-notices.tar.gz", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/runtime.json", "opt/solstone-webkit/runtime.json", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ar/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ar/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/as/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/as/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/bg/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/bg/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ca/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ca/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/cs/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/cs/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/da/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/da/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/de/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/de/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/el/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/el/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/en_CA/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/en_CA/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/en_GB/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/en_GB/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/eo/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/eo/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/es/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/es/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/et/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/et/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/eu/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/eu/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/fi/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/fi/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/fr/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/fr/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/gl/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/gl/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/gu/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/gu/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/he/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/he/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/hi/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/hi/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/hr/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/hr/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/hu/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/hu/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/id/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/id/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/it/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/it/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ja/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ja/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ka/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ka/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/kk/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/kk/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/kn/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/kn/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ko/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ko/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/lt/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/lt/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/lv/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/lv/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ml/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ml/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/mr/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/mr/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/nb/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/nb/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/nl/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/nl/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/or/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/or/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/pa/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/pa/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/pl/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/pl/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/pt/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/pt/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/pt_BR/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/pt_BR/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ro/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ro/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ru/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ru/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/sl/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/sl/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/sr/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/sr/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/sr@latin/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/sr@latin/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/sv/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/sv/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/ta/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/ta/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/te/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/te/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/tr/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/tr/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/uk/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/uk/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/vi/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/vi/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/opt/solstone-webkit/share/locale/zh_CN/LC_MESSAGES/WebKitGTK-6.0.mo", "opt/solstone-webkit/share/locale/zh_CN/LC_MESSAGES/WebKitGTK-6.0.mo", "644"],
+    ["../../packaging/journal-root/usr/bin/solstone-linux-journal", "usr/bin/solstone-linux-journal", "755"],
 ]
 
 # cargo-generate-rpm resolves sources from build-release.sh's workspace-root CWD
@@ -174,6 +248,80 @@ assets = [
     { source = "packaging/activity-helpers/solstone-activity@solpbc.org/extension.js", dest = "/usr/share/solstone-linux/activity-helpers/solstone-activity@solpbc.org/extension.js", mode = "644" },
     { source = "packaging/activity-helpers/solstone-activity-kwin/metadata.json", dest = "/usr/share/solstone-linux/activity-helpers/solstone-activity-kwin/metadata.json", mode = "644" },
     { source = "packaging/activity-helpers/solstone-activity-kwin/contents/code/main.js", dest = "/usr/share/solstone-linux/activity-helpers/solstone-activity-kwin/contents/code/main.js", mode = "644" },
+    { source = "packaging/journal-root/usr/share/solstone-linux/apparmor/solstone-linux-journal", dest = "/usr/share/solstone-linux/apparmor/solstone-linux-journal", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/bin/journal", dest = "/opt/solstone-webkit/bin/journal", mode = "755" },
+    { source = "packaging/journal-root/opt/solstone-webkit/fallback/libjpeg.so.8/libjpeg.so.8", dest = "/opt/solstone-webkit/fallback/libjpeg.so.8/libjpeg.so.8", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/fallback/libmanette-0.2.so.0/libmanette-0.2.so.0", dest = "/opt/solstone-webkit/fallback/libmanette-0.2.so.0/libmanette-0.2.so.0", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/fallback/libxml2.so.2/libxml2.so.2", dest = "/opt/solstone-webkit/fallback/libxml2.so.2/libxml2.so.2", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/lib/libicudata.so.70", dest = "/opt/solstone-webkit/lib/libicudata.so.70", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/lib/libicui18n.so.70", dest = "/opt/solstone-webkit/lib/libicui18n.so.70", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/lib/libicuuc.so.70", dest = "/opt/solstone-webkit/lib/libicuuc.so.70", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/lib/libjavascriptcoregtk-6.0.so.1", dest = "/opt/solstone-webkit/lib/libjavascriptcoregtk-6.0.so.1", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/lib/libwebkitgtk-6.0.so.4", dest = "/opt/solstone-webkit/lib/libwebkitgtk-6.0.so.4", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/lib/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so", dest = "/opt/solstone-webkit/lib/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitGPUProcess", dest = "/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitGPUProcess", mode = "755" },
+    { source = "packaging/journal-root/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitNetworkProcess", dest = "/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitNetworkProcess", mode = "755" },
+    { source = "packaging/journal-root/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitWebProcess", dest = "/opt/solstone-webkit/libexec/webkitgtk-6.0/WebKitWebProcess", mode = "755" },
+    { source = "packaging/journal-root/opt/solstone-webkit/licenses/libicu70.copyright", dest = "/opt/solstone-webkit/licenses/libicu70.copyright", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/licenses/libjpeg-turbo8.copyright", dest = "/opt/solstone-webkit/licenses/libjpeg-turbo8.copyright", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/licenses/libmanette-0.2-0.copyright", dest = "/opt/solstone-webkit/licenses/libmanette-0.2-0.copyright", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/licenses/libxml2.copyright", dest = "/opt/solstone-webkit/licenses/libxml2.copyright", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/licenses/sources", dest = "/opt/solstone-webkit/licenses/sources", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/licenses/webkit-notices.tar.gz", dest = "/opt/solstone-webkit/licenses/webkit-notices.tar.gz", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/runtime.json", dest = "/opt/solstone-webkit/runtime.json", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ar/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ar/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/as/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/as/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/bg/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/bg/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ca/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ca/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/cs/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/cs/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/da/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/da/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/de/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/de/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/el/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/el/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/en_CA/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/en_CA/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/en_GB/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/en_GB/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/eo/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/eo/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/es/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/es/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/et/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/et/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/eu/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/eu/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/fi/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/fi/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/fr/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/fr/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/gl/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/gl/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/gu/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/gu/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/he/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/he/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/hi/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/hi/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/hr/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/hr/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/hu/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/hu/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/id/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/id/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/it/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/it/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ja/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ja/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ka/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ka/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/kk/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/kk/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/kn/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/kn/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ko/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ko/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/lt/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/lt/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/lv/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/lv/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ml/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ml/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/mr/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/mr/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/nb/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/nb/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/nl/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/nl/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/or/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/or/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/pa/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/pa/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/pl/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/pl/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/pt/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/pt/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/pt_BR/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/pt_BR/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ro/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ro/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ru/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ru/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/sl/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/sl/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/sr/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/sr/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/sr@latin/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/sr@latin/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/sv/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/sv/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/ta/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/ta/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/te/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/te/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/tr/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/tr/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/uk/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/uk/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/vi/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/vi/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/opt/solstone-webkit/share/locale/zh_CN/LC_MESSAGES/WebKitGTK-6.0.mo", dest = "/opt/solstone-webkit/share/locale/zh_CN/LC_MESSAGES/WebKitGTK-6.0.mo", mode = "644" },
+    { source = "packaging/journal-root/usr/bin/solstone-linux-journal", dest = "/usr/bin/solstone-linux-journal", mode = "755" },
 ]
 
 # On rpm the conditional IS expressible, so it is used: dnf and zypper honour weak
@@ -186,6 +334,32 @@ assets = [
 # the bits present, not the icon visible.
 [package.metadata.generate-rpm.recommends]
 gtk4 = ">= 4.6"
+bubblewrap = "*"
+xdg-dbus-proxy = "*"
+"libatomic.so.1()(64bit)" = "*"
+"libenchant-2.so.2()(64bit)" = "*"
+"libgbm.so.1()(64bit)" = "*"
+"libgcrypt.so.20()(64bit)" = "*"
+"libgstgl-1.0.so.0()(64bit)" = "*"
+"libharfbuzz-icu.so.0()(64bit)" = "*"
+"libhyphen.so.0()(64bit)" = "*"
+"libsecret-1.so.0()(64bit)" = "*"
+"libsoup-3.0.so.0()(64bit)" = "*"
+"libwayland-server.so.0()(64bit)" = "*"
+"libwebpdemux.so.2()(64bit)" = "*"
+"libwebpmux.so.3()(64bit)" = "*"
+"libxslt.so.1()(64bit)" = "*"
+"libGLESv2.so.2()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"
+"libgudev-1.0.so.0()(64bit)" = "*"
+"libevdev.so.2()(64bit)" = "*"
+"gstreamer1-plugins-good" = "*"
+"gstreamer-plugins-good" = "*"
+"gstreamer1-plugin-openh264" = "*"
+"gstreamer1-plugins-bad-free" = "*"
+"gstreamer1-plugin-libav" = "*"
+"gstreamer-plugins-bad" = "*"
+"gstreamer-plugins-libav" = "*"
 "(gnome-shell-extension-appindicator if gnome-shell)" = ""
 wl-clipboard = "*"
 xclip = "*"

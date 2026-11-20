@@ -824,6 +824,7 @@ pub enum MessageId {
     m6c696e75782e77696e646f772e63616e63656c,
     m6c696e75782e77696e646f772e636865636b696e67796f75726a6f75726e616c,
     m6c696e75782e77696e646f772e63686f6f736566696c6573,
+    m6c696e75782e77696e646f772e63686f6f73656e6577646f776e6c6f61646e616d65,
     m6c696e75782e77696e646f772e636c6f7365,
     m6c696e75782e77696e646f772e636f6e6e656374616a6f75726e616c,
     m6c696e75782e77696e646f772e636f6e6e6563746564,
@@ -1687,6 +1688,7 @@ pub fn render_dotted_with_options(locale: &str, dotted_id: &str, args: &[(&str, 
         "linux.window.cancel" => MessageId::m6c696e75782e77696e646f772e63616e63656c,
         "linux.window.checkingyourjournal" => MessageId::m6c696e75782e77696e646f772e636865636b696e67796f75726a6f75726e616c,
         "linux.window.choosefiles" => MessageId::m6c696e75782e77696e646f772e63686f6f736566696c6573,
+        "linux.window.choosenewdownloadname" => MessageId::m6c696e75782e77696e646f772e63686f6f73656e6577646f776e6c6f61646e616d65,
         "linux.window.close" => MessageId::m6c696e75782e77696e646f772e636c6f7365,
         "linux.window.connectajournal" => MessageId::m6c696e75782e77696e646f772e636f6e6e656374616a6f75726e616c,
         "linux.window.connected" => MessageId::m6c696e75782e77696e646f772e636f6e6e6563746564,
@@ -12130,6 +12132,17 @@ pub fn render_with_options(locale: &str, id: MessageId, args: &[(&str, Value)], 
             #[allow(unused_mut)]
             let mut f_args = FluentArgs::new();
             ("m6c696e75782e77696e646f772e63686f6f736566696c6573".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e77696e646f772e63686f6f73656e6577646f776e6c6f61646e616d65 => {
+            const DECLARED: &[&str] = &[];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            ("m6c696e75782e77696e646f772e63686f6f73656e6577646f776e6c6f61646e616d65".to_string(), f_args)
         }
         MessageId::m6c696e75782e77696e646f772e636c6f7365 => {
             const DECLARED: &[&str] = &[];

@@ -458,3 +458,30 @@ signature and validity. It never re-attests a rolled-back or foreign pointer.
 The surface attests what was released, that it is immutable, and that history is
 publicly reconstructible — not that binaries provably match source. Publication is
 operator-approved.
+
+
+## Private Linux journal runtime
+
+The engine release is pinned independently of the Rust workspace in
+`journal-viewer/engine/`. Build the SDK natively on each architecture using that
+directory's Containerfile and the Jammy stock digest in the Makefile. The SDK
+recipe verifies the upstream tarball digest and signature before applying the
+two floor-compatibility patches. Keep the exact upstream and Ubuntu source
+packages and notices with the release inputs. Use the distribution's GStreamer
+codecs and graphics drivers.
+
+For a WebKit or private library update, inspect the upstream security notices,
+refresh each reviewed `runtime.json` inventory in the architecture pins, and
+rebuild the native tool images. Increase `security-generation` if the previous
+engine is unsafe. The launcher records the minimum generation observed by the
+account and verifies the installed files before every cold start. Update the
+image IDs in `packaging/release-policy.toml` and retain the matching image
+caches. The GTK host is compiled from the release commit in the normal
+offline package build. A change to the host alone reuses the cached engine.
+
+The three existing signed desktop formats carry the entire engine and host.
+For graphical acceptance run
+`python3 journal-viewer/smoke.py /path/to/solstone-linux-journal` on a real display after installing. Check the
+paired journal, downloads, decoded media and the Ubuntu AppArmor profile on an
+ordinary account. The headless package proof verifies runtime integrity without
+installing the optional desktop libraries.

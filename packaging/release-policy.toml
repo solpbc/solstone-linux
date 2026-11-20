@@ -2,7 +2,7 @@
 # marks an architecture whose images and proof values were not yet observed on
 # a native host; candidate commands for that architecture refuse it.
 [x86_64]
-build_ubuntu = "sha256:dffe2aef69ac2732f90283f2b45fb7fb1ebc75ec8b4bb55691f3aaee389db866"
+build_ubuntu = "sha256:9e0f40694ffe8e4766e88c32a26bd1254a769d9cd28f53bfcd04fd9da8326350"
 build_fedora = "sha256:fb80844238c89349dcb6d4f9c3e90bfa8187efaeb3b8f005316da67d98b83687"
 proof_debian = "sha256:1cce4043c7ebeb337ad3b4d1fde7ef9dd688ffa9457a3c83d33f7f184e5bce56"
 proof_rpm = "sha256:22a720ed9dc2761d483fdaba73e06bffd45881a622600ebbc1f510711e21472c"
@@ -38,7 +38,7 @@ executable_path = "/bin/solstone-linux"
 executable_mode = 493
 
 [aarch64]
-build_ubuntu = "sha256:4ae49d3c86201e975c9e47225c70f06ef34baf2b9796a42eee064c7dafd07980"
+build_ubuntu = "sha256:dd6c4df8bc7395225f69de9f1d9778f7e521102e729d674857bce5734c1150db"
 build_fedora = "sha256:f7cfd5f3d56ea2f2e1c7e90493e039e2b75fc1d35a9b96d9557320c71f683fc3"
 proof_debian = "sha256:af58c437ba1094afe7ca6c9eab6973bed4f1e49631ff754b8a87884fde686a19"
 proof_rpm = "sha256:b79ea6c7fa30bf17115fe5c2c229a845be915b6ae4afbe4e34cbb4e90952c8cd"

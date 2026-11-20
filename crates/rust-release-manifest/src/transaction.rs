@@ -1564,6 +1564,17 @@ pub fn emit_proof_handoff(input: &ProofHandoffInput<'_>) -> Result<()> {
     {
         return Err(Error::new("proof window runtime/version command mismatch"));
     }
+    // This proof is headless. Verify the actual installed private payload
+    // without requiring the graphical/codec recommendations.
+    let journal = actual_executable.with_file_name("solstone-linux-journal");
+    if !Command::new(journal)
+        .arg("--verify-runtime")
+        .status()
+        .map_err(display_error)?
+        .success()
+    {
+        return Err(Error::new("proof journal runtime verification failed"));
+    }
     let proof = CandidateProof {
         schema_version: 1,
         platform: input.platform.into(),

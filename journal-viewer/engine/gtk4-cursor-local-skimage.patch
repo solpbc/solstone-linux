@@ -1,0 +1,5 @@
+--- a/Source/WebKit/UIProcess/API/gtk/WebKitWebViewBase.cpp
++++ b/Source/WebKit/UIProcess/API/gtk/WebKitWebViewBase.cpp
+@@ -3823 +3823 @@
+-    auto& platformImage = nativeImage->platformImage();
++    auto platformImage = nativeImage->platformImage();

@@ -16,20 +16,23 @@ Runtime requirements:
 - libpulse and a PulseAudio-compatible server (PipeWire Pulse is supported)
 - GStreamer 1.0 core, base, good, PipeWire, and X11 plugins
 - PipeWire and xdg-desktop-portal with ScreenCast support for Wayland screen frames
-- GIO tools for opening your journal in the browser
+- the bundled WebKit engine for the journal window. it uses bubblewrap,
+  xdg-dbus-proxy, libsoup 3 and the desktop's media plugins
+- GIO tools for opening your journal in your browser if the window cannot start
 - xdg-utils for desktop integration
 - a desktop notification service; a StatusNotifier host is what shows the panel icon.
   KDE has one. On GNOME, run `solstone-linux panel-icon` after installing this package
 
 Typical package families:
 
-- Debian/Ubuntu: libgtk-4-1, libglib2.0-bin, libpulse0, libgstreamer1.0-0,
+- Debian/Ubuntu: libgtk-4-1, libwayland-server0, libglib2.0-bin, libpulse0, libgstreamer1.0-0,
   gstreamer1.0-plugins-base, gstreamer1.0-plugins-good,
   gstreamer1.0-pipewire, gstreamer1.0-x, pipewire-pulse,
   xdg-desktop-portal, xdg-utils
 - Fedora/RHEL: gtk4, glib2, pulseaudio-libs, gstreamer1,
   gstreamer1-plugins-base, gstreamer1-plugins-good, pipewire-gstreamer,
   pipewire-pulseaudio, xdg-desktop-portal, xdg-utils
+  on Fedora, gstreamer1-plugin-openh264 adds H.264 video support.
 - openSUSE: libgtk-4-1, glib2-tools, libpulse0, gstreamer, gstreamer-plugins-base,
   gstreamer-plugins-good, gstreamer-plugin-pipewire, pipewire-pulseaudio,
   xdg-desktop-portal, xdg-utils
@@ -39,7 +42,7 @@ Typical package families:
 Create a pairing link for this device in your journal, paste it in the window's
 `journal` tab, then compare your journal's mark before confirming it.
 The window also has status, pause and resume, settings, and recent logs you can
-preview and save. `open your journal` opens your browser. Saved settings remain
+preview and save. Saved settings remain
 in config.json, including hand-added keys; the window says when a restart is
 needed. The portable archive needs the runtime packages installed separately.
 

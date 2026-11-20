@@ -30,6 +30,7 @@ pub mod encoding;
 pub mod import;
 pub mod journal_link;
 mod journal_mark;
+mod journal_viewer;
 pub mod local_journal;
 mod local_time;
 mod mark_cache;

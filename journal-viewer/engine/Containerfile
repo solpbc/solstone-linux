@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Supply the native Jammy stock image already pinned by packaging/release-policy.toml.
+ARG UBUNTU_STOCK_BASE
+FROM ${UBUNTU_STOCK_BASE} AS sdk
+ARG DEBIAN_FRONTEND=noninteractive
+RUN sed -n 's/^deb /deb-src /p' /etc/apt/sources.list > /etc/apt/sources.list.d/webkit-src.list \
+    && apt-get update && apt-get -y --no-install-recommends build-dep webkit2gtk \
+    && apt-get -y --no-install-recommends install gcc-12 g++-12 ninja-build cmake patch curl gpgv \
+        ca-certificates libgtk-4-dev libadwaita-1-dev libseccomp-dev libgstreamer-plugins-bad1.0-dev \
+        libsoup-3.0-dev libmanette-0.2-dev bison flex gperf ruby python3 libsecret-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY journal-viewer/engine/build-sdk.sh journal-viewer/engine/stage.py journal-viewer/engine/upstream.gpg journal-viewer/engine/*.patch /src/journal-viewer/engine/
+RUN /src/journal-viewer/engine/build-sdk.sh

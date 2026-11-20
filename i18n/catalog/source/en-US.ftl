@@ -908,3 +908,4 @@ linux.clipboard.agentinstructions = solstone app for linux (repo: { $repo })
     Segments: { $captures_dir }
     Logs: { $logs }
     Service: { $service }
+linux.window.choosenewdownloadname = choose a new name to keep the existing file

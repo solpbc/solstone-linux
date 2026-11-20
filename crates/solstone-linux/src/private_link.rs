@@ -1817,8 +1817,10 @@ fn streams_journal_response(request: &RequestHead) -> bool {
             "/app/import/api/save" | "/app/import/api/start"
         ))
         || request.method == "GET"
-            && (request.path() == "/sse/events"
-                || request.path().starts_with(JOURNAL_MEDIA_PATH_PREFIX))
+            && (matches!(
+                request.path(),
+                "/sse/events" | "/app/import/api/journal-archive/export"
+            ) || request.path().starts_with(JOURNAL_MEDIA_PATH_PREFIX))
 }
 
 pub(crate) struct PrivateLinkSession {
@@ -1843,6 +1845,7 @@ pub(crate) enum OpenJournalGate {
 }
 
 pub(crate) struct OpenJournalTarget {
+    viewer: Mutex<Option<crate::journal_viewer::JournalViewer>>,
     pub(crate) gate: Mutex<OpenJournalGate>,
 }
 
@@ -1860,6 +1863,7 @@ pub(crate) fn open_journal_fixture(
     target: &str,
 ) -> (Arc<OpenJournalTarget>, OpenJournalCapability) {
     let target = Arc::new(OpenJournalTarget {
+        viewer: Mutex::default(),
         gate: Mutex::new(OpenJournalGate::Fixture(target.to_owned())),
     });
     let capability = OpenJournalCapability {
@@ -1883,14 +1887,13 @@ impl OpenJournalCapability {
     fn available(&self) -> bool {
         self.target
             .upgrade()
-            .and_then(|target| {
-                target
-                    .gate
-                    .lock()
-                    .ok()
-                    .map(|gate| !matches!(*gate, OpenJournalGate::Closed))
+            .is_some_and(|target| match target.gate.try_lock() {
+                Ok(gate) => !matches!(*gate, OpenJournalGate::Closed),
+                // An in-flight open can hold the gate while the renderer loads.
+                // Checking the tray model must never block the capture tick.
+                Err(std::sync::TryLockError::WouldBlock) => true,
+                Err(std::sync::TryLockError::Poisoned(_)) => false,
             })
-            .unwrap_or(false)
     }
 
     pub(crate) fn open(&self) -> Result<(), ()> {
@@ -1898,9 +1901,18 @@ impl OpenJournalCapability {
     }
 
     pub(crate) fn open_at_path(&self, path: &str) -> Result<(), ()> {
-        // Opening necessarily hands the approved target to the desktop browser.
-        // The target is accepted in child argv here; it remains excluded from the
-        // secrecy contract's logs, errors, status, clipboard, D-Bus, state, and Debug surfaces.
+        let target = self.target.upgrade().ok_or(())?;
+        if self
+            .open_inner(path, |url| {
+                let mut viewer = target.viewer.lock().map_err(|_| ())?;
+                crate::journal_viewer::JournalViewer::open(&mut viewer, url).map_err(|_| ())
+            })
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // A failed viewer may already have redeemed its bootstrap. Ask the
+        // live pairing for a new single-use URL to the same destination.
         self.open_inner(path, |target| {
             let executable = crate::service::current_executable().map_err(|_| ())?;
             // Scope metadata carries only a fixed description and PIDs. The approved URL
@@ -1930,7 +1942,7 @@ impl OpenJournalCapability {
         })
     }
 
-    fn open_inner(
+    pub(crate) fn open_inner(
         &self,
         path: &str,
         opener: impl FnOnce(&str) -> Result<(), ()>,
@@ -1966,12 +1978,18 @@ impl OpenJournalCapability {
         match target.gate.lock() {
             Ok(mut gate) => *gate = OpenJournalGate::Closed,
             Err(poisoned) => *poisoned.into_inner() = OpenJournalGate::Closed,
-        }
+        };
+        target
+            .viewer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct OpenJournalAccess {
+    tray_pending: Arc<std::sync::atomic::AtomicBool>,
     current: Arc<Mutex<Option<OpenJournalCapability>>>,
 }
 
@@ -1995,18 +2013,28 @@ impl OpenJournalAccess {
         capability.open_with(opener)
     }
 
-    pub(crate) fn open_at_path(&self, path: &str) -> Result<(), ()> {
-        let capability = self.current.lock().map_err(|_| ())?.clone().ok_or(())?;
-        capability.open_at_path(path)
+    pub(crate) fn snapshot(&self) -> Result<OpenJournalCapability, ()> {
+        self.current.lock().map_err(|_| ())?.clone().ok_or(())
     }
 
-    pub(crate) fn open_at_path_with(
-        &self,
-        path: &str,
-        opener: impl FnOnce(&str) -> Result<(), ()>,
-    ) -> Result<(), ()> {
-        let capability = self.current.lock().map_err(|_| ())?.clone().ok_or(())?;
-        capability.open_inner(path, opener)
+    pub(crate) fn open_from_tray(&self, failure: impl FnOnce() + Send + 'static) -> Result<(), ()> {
+        let capability = self.snapshot()?;
+        let pending = self.tray_pending.clone();
+        if pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Ok(());
+        }
+        let worker = pending.clone();
+        std::thread::Builder::new()
+            .name("journal-open".into())
+            .spawn(move || {
+                let result = capability.open();
+                worker.store(false, std::sync::atomic::Ordering::Release);
+                if result.is_err() {
+                    failure();
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| pending.store(false, std::sync::atomic::Ordering::Release))
     }
 
     pub(crate) fn install(&self, capability: OpenJournalCapability) {
@@ -2733,6 +2761,7 @@ async fn finish_owner_start(
     Ok(PrivateLinkOwner {
         capability,
         open_journal_target: Arc::new(OpenJournalTarget {
+            viewer: Mutex::default(),
             gate: Mutex::new(OpenJournalGate::Open(browser_authorizer)),
         }),
         open_journal_access: None,
@@ -5287,6 +5316,14 @@ pub(crate) mod tests {
         assert!(!streams_journal_response(&request(
             "HEAD",
             "/app/transcripts/api/serve_file/20260829/run/screen.mp4",
+        )));
+        assert!(streams_journal_response(&request(
+            "GET",
+            "/app/import/api/journal-archive/export"
+        )));
+        assert!(!streams_journal_response(&request(
+            "POST",
+            "/app/import/api/journal-archive/export"
         )));
         assert!(!streams_journal_response(&request("GET", "/app/timeline")));
         assert!(!streams_journal_response(&request(

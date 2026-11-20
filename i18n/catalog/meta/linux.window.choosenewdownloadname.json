@@ -1,0 +1,17 @@
+{
+  "description": "Ask the owner to save a download under a new name.",
+  "context": "Title of the second save dialog when the previous filename already exists and the transfer length is unknown.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 84,
+  "source_revision": "5222738c3e0f5d0cf4b5e9da12cbd62c0da700b610ba34555e12c510d8815c5f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

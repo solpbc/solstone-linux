@@ -19,7 +19,7 @@ curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop
 
 To install the app with your system's package manager instead, add
 `--route package`. The installer verifies the signed release, then installs the
-`.deb` with `apt` or the `.rpm` with `dnf`, using `sudo`:
+`.deb` with `apt` or the `.rpm` with `dnf` or `zypper`, using `sudo`:
 
 ```bash
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --route package
@@ -43,6 +43,8 @@ printf 'Types: deb\nURIs: https://updates.solstone.app/linux/apt\nSuites: releas
 sudo apt update && sudo apt install solstone-linux
 ```
 
+on ubuntu systems that restrict user namespaces, the platform package installer activates the AppArmor profile for the journal window. if you installed directly with apt, enable the profile using the [platform instructions](https://github.com/solpbc/solstone/blob/main/INSTALL.md#opening-your-journal-on-linux).
+
 **Fedora / RHEL:**
 ```bash
 sudo rpmkeys --import https://updates.solstone.app/linux/keys/solstone-archive-keyring.asc
@@ -54,7 +56,7 @@ sudo dnf install solstone-linux
 ```bash
 sudo rpm --import https://updates.solstone.app/linux/keys/solstone-archive-keyring.asc
 printf '[solstone]\nname=solstone\nenabled=1\nautorefresh=1\nbaseurl=https://updates.solstone.app/linux/rpm/release/$basearch\ntype=rpm-md\ngpgcheck=1\nrepo_gpgcheck=1\npkg_gpgcheck=1\ngpgkey=https://updates.solstone.app/linux/keys/solstone-archive-keyring.asc\n' | sudo tee /etc/zypp/repos.d/solstone.repo >/dev/null
-sudo zypper refresh solstone && sudo zypper install solstone-linux
+sudo zypper refresh solstone && sudo zypper install --recommends solstone-linux
 ```
 
 When you install from the package repository, open the app from your app menu
@@ -70,26 +72,30 @@ computer under your account and connects with one press. For a journal on
 another computer, paste its pairing link. The next sections install the
 portable archive by hand; Verify and Desktop notes apply either way.
 
+when your desktop reports an active screen reader, opening a journal link takes you to the same page in your browser. the bundled window supports keyboard navigation.
+
 ## System dependencies
 
 **Fedora:**
 ```
-sudo dnf install gtk4 glib2 pulseaudio-libs gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good pipewire-gstreamer pipewire-pulseaudio xdg-desktop-portal xdg-utils
+sudo dnf install gtk4 glib2 pulseaudio-libs gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good pipewire-gstreamer pipewire-pulseaudio xdg-desktop-portal xdg-utils bubblewrap xdg-dbus-proxy gstreamer1-plugins-bad-free gstreamer1-plugin-openh264 'libgtk-4.so.1()(64bit)' 'libsoup-3.0.so.0()(64bit)' 'libharfbuzz-icu.so.0()(64bit)' 'libwebpdemux.so.2()(64bit)' 'libwebpmux.so.3()(64bit)' 'libenchant-2.so.2()(64bit)' 'libhyphen.so.0()(64bit)' 'libsecret-1.so.0()(64bit)' 'libxslt.so.1()(64bit)' 'libEGL.so.1()(64bit)' 'libGLESv2.so.2()(64bit)' 'libevdev.so.2()(64bit)' 'libgudev-1.0.so.0()(64bit)' 'libgstgl-1.0.so.0()(64bit)' 'libwayland-server.so.0()(64bit)' 'libatomic.so.1()(64bit)'
 ```
+
+on enterprise linux 10, omit `gstreamer1-plugin-openh264` if your repositories do not provide it. the journal window can still play WebM video. H.264 video needs a compatible GStreamer decoder.
 
 **Debian / Ubuntu:**
 ```
-sudo apt install libgtk-4-1 libglib2.0-bin libpulse0 libgstreamer1.0-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-pipewire gstreamer1.0-x pipewire-pulse xdg-desktop-portal xdg-utils
+sudo apt install libgtk-4-1 libglib2.0-bin libpulse0 libgstreamer1.0-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-pipewire gstreamer1.0-x pipewire-pulse xdg-desktop-portal xdg-utils bubblewrap xdg-dbus-proxy libsoup-3.0-0 libenchant-2-2 libhyphen0 libsecret-1-0 libharfbuzz-icu0 libwebpmux3 libwebpdemux2 libxslt1.1 libevdev2 libgudev-1.0-0 libgles2 libegl1 libatomic1 libwayland-server0 gstreamer1.0-gl gstreamer1.0-plugins-bad gstreamer1.0-libav
 ```
 
 **Arch:**
 ```
-sudo pacman -S gtk4 glib2 libpulse gstreamer gst-plugins-base gst-plugins-good gst-plugin-pipewire pipewire-pulse xdg-desktop-portal xdg-utils
+sudo pacman -S gtk4 glib2 libpulse gstreamer gst-plugins-base gst-plugins-good gst-plugin-pipewire pipewire-pulse xdg-desktop-portal xdg-utils libsoup3 libwebp libxslt harfbuzz-icu enchant hyphen libsecret libglvnd mesa bubblewrap xdg-dbus-proxy libgudev libevdev gst-plugins-bad gst-libav
 ```
 
 **openSUSE:**
 ```
-sudo zypper install libgtk-4-1 glib2-tools libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins-good gstreamer-plugin-pipewire pipewire-pulseaudio xdg-desktop-portal xdg-utils
+sudo zypper install libgtk-4-1 glib2-tools libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins-good gstreamer-plugin-pipewire pipewire-pulseaudio xdg-desktop-portal xdg-utils bubblewrap xdg-dbus-proxy gstreamer-plugins-bad 'libgtk-4.so.1()(64bit)' 'libsoup-3.0.so.0()(64bit)' 'libharfbuzz-icu.so.0()(64bit)' 'libwebpdemux.so.2()(64bit)' 'libwebpmux.so.3()(64bit)' 'libenchant-2.so.2()(64bit)' 'libhyphen.so.0()(64bit)' 'libsecret-1.so.0()(64bit)' 'libxslt.so.1()(64bit)' 'libEGL.so.1()(64bit)' 'libGLESv2.so.2()(64bit)' 'libevdev.so.2()(64bit)' 'libgudev-1.0.so.0()(64bit)' 'libgstgl-1.0.so.0()(64bit)' 'libwayland-server.so.0()(64bit)' 'libatomic.so.1()(64bit)'
 ```
 
 ## Install a release
@@ -175,12 +181,10 @@ installer is in the matching release source checkout, not inside the archive:
 scripts/install.sh "solstone-linux-$SOLSTONE_VERSION-linux-x86_64.tar.gz"
 ```
 
-If you downloaded only the tarball, obtain `scripts/install.sh` from the
-matching release source. Alternatively, extract the archive, copy
-the files from `bin/` to a directory on `PATH`, and copy `share/icons/hicolor`
-beneath the same installation prefix. Copy `share/applications` there when it
-is included. Copy the bundled license notices and `INSTALL-NOTES` to
-`share/doc/solstone-linux` beneath that prefix.
+if your standalone portable app already opens the journal in its own window,
+`scripts/install.sh --journal-window-only <verified-tarball>` updates that window.
+use the same prefix as the original install. close and reopen the journal window
+to use the new engine. for a browser-only release, update the full app first.
 
 The archive includes `INSTALL-NOTES`, which is the canonical cross-distribution
 runtime dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-party crate license texts. Native packages install the app under the system prefix.
@@ -228,7 +232,7 @@ another account is never offered.
 For a journal on another computer, paste its pairing link, or open the link and
 choose `open in the solstone app`, which fills it in here and waits for you. Either
 way, compare the displayed mark with your journal's mark before confirming it. You
-can pair again while intake continues. `open your journal` opens it in your browser.
+can pair again while intake continues.
 
 The solstone installer and the packages register the `solstone:` link handler when
 the desktop's `update-desktop-database` is installed. If you used the quick way and
@@ -278,6 +282,8 @@ of the journal or Python, or direct fallback to configure. The solstone app can
 continue taking in what you share while unpaired or offline. Setup asks you to confirm your journal's mark, or takes `--mark` when there is no terminal. Nothing goes into your journal until you confirm. `solstone-linux confirm` confirms a mark while the solstone app is running. Setup still needs the app stopped, because setup takes the private-state lock.
 
 ## Build from source
+
+a source install of the Rust binaries uses your browser unless you also install the matching bundled journal window. the signed desktop packages include it.
 
 Install rustup, a C toolchain, CMake, pkg-config, GTK4/GLib/GStreamer development headers (GTK4's are `gtk4-devel` on Fedora and `libgtk-4-dev` on Debian and Ubuntu), PulseAudio development headers, and the `minisign` and `shellcheck` commands, which `make ci` runs. Then:
 

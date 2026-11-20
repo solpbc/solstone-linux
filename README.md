@@ -68,7 +68,7 @@ mark itself, so there's no link to handle and no mark to compare.
 For a journal on another computer, paste its pairing link in the `journal` tab and
 choose `pair a device`, or open the link and choose `open in the solstone app`,
 which fills it in for you. Then compare the mark with the one in your journal
-before confirming it. `open your journal` opens your browser.
+before confirming it. choose `open your journal` to open the journal in its own window. if the window cannot start, your journal opens in your browser.
 
 The window needs GTK 4.6 or newer. The Debian and RPM packages recommend it;
 install it yourself for the portable archive. Intake runs in a separate process
