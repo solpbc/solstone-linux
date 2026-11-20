@@ -3,3 +3,4 @@ build/
 /target/
 /.transparency-staging/
 .wrangler/
+__pycache__/

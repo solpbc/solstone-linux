@@ -98,6 +98,14 @@ sudo pacman -S gtk4 glib2 libpulse gstreamer gst-plugins-base gst-plugins-good g
 sudo zypper install libgtk-4-1 glib2-tools libpulse0 gstreamer gstreamer-plugins-base gstreamer-plugins-good gstreamer-plugin-pipewire pipewire-pulseaudio xdg-desktop-portal xdg-utils bubblewrap xdg-dbus-proxy gstreamer-plugins-bad 'libgtk-4.so.1()(64bit)' 'libsoup-3.0.so.0()(64bit)' 'libharfbuzz-icu.so.0()(64bit)' 'libwebpdemux.so.2()(64bit)' 'libwebpmux.so.3()(64bit)' 'libenchant-2.so.2()(64bit)' 'libhyphen.so.0()(64bit)' 'libsecret-1.so.0()(64bit)' 'libxslt.so.1()(64bit)' 'libEGL.so.1()(64bit)' 'libGLESv2.so.2()(64bit)' 'libevdev.so.2()(64bit)' 'libgudev-1.0.so.0()(64bit)' 'libgstgl-1.0.so.0()(64bit)' 'libwayland-server.so.0()(64bit)' 'libatomic.so.1()(64bit)'
 ```
 
+**Optional HEIC / HEIF photo import:** converting HEIC and HEIF photos on import uses your system's `gdk-pixbuf` HEIF loader and an HEVC decoder. If your distribution does not include both by default:
+- **Debian / Ubuntu:** `sudo apt install heif-gdk-pixbuf libheif-plugin-libde265` (omit `libheif-plugin-libde265` on Debian 12 or Ubuntu 22.04, where `libheif1` includes it)
+- **Fedora:** install `libheif-freeworld` from RPM Fusion Free (alongside `libheif` and `glycin-loaders` or `heif-pixbuf-loader`)
+- **openSUSE:** install `gdk-pixbuf-loader-libheif` and an HEVC-capable `libheif` / FFmpeg codec package (such as from Packman)
+- **Arch:** `sudo pacman -S libheif` (which pulls `libde265` for HEVC)
+
+Without both, the app says this device can't convert the photo and leaves HEIC and HEIF photos out of your journal.
+
 ## Install a release
 
 Releases are published to `updates.solstone.app`. Read

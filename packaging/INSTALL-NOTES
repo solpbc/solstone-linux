@@ -38,6 +38,13 @@ Typical package families:
   xdg-desktop-portal, xdg-utils
 - Arch: gtk4, glib2, libpulse, gstreamer, gst-plugins-base, gst-plugins-good,
   gst-plugin-pipewire, pipewire-pulse, xdg-desktop-portal, xdg-utils
+- Optional HEIC/HEIF photo import (gdk-pixbuf HEIF loader + HEVC decoder):
+  Debian/Ubuntu: heif-gdk-pixbuf, and libheif-plugin-libde265 (Debian 13+ / Ubuntu 24.04+).
+  Fedora: libheif-freeworld (RPM Fusion Free) with libheif and glycin-loaders or
+  heif-pixbuf-loader.
+  openSUSE: gdk-pixbuf-loader-libheif plus an HEVC-capable libheif/FFmpeg codec
+  package (for example from Packman).
+  Arch: libheif (pulls libde265).
 
 Create a pairing link for this device in your journal, paste it in the window's
 `journal` tab, then compare your journal's mark before confirming it.
