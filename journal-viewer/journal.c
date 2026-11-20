@@ -17,6 +17,7 @@ typedef struct {
     GMainLoop *loop;
     GtkWindow *window;
     WebKitWebView *view;
+    GSocket *refusal_socket;
     int port;
     gboolean pending;
 } Journal;
@@ -43,6 +44,42 @@ static void answer(Journal *journal, gboolean ok)
         if (write(STDOUT_FILENO, ok ? "+" : "-", 1) != 1 || !ok)
             g_main_loop_quit(journal->loop);
     }
+}
+
+static void open_with_default_handler(const char *url)
+{
+    g_autoptr(GAppLaunchContext) launch = g_app_launch_context_new();
+    g_app_launch_context_unsetenv(launch, "LD_LIBRARY_PATH");
+    g_app_launch_context_unsetenv(launch, "SOLSTONE_JOURNAL_LANGUAGE");
+    g_app_launch_context_unsetenv(launch, "SOLSTONE_JOURNAL_NEW_NAME");
+    g_app_info_launch_default_for_uri_async(url, launch, NULL, NULL, NULL);
+}
+
+static void portal_opened(GObject *source, GAsyncResult *result, gpointer data)
+{
+    g_autofree char *url = data;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GVariant) handle = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
+    if (!handle && (g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_SERVICE_UNKNOWN) ||
+                    g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_NAME_HAS_NO_OWNER) ||
+                    g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD) ||
+                    g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_INTERFACE)))
+        open_with_default_handler(url);
+}
+
+static void open_external(const char *url)
+{
+    // The desktop launches the owner's handler outside the viewer's namespace
+    // and AppArmor profile. Older desktops without the portal can use GIO.
+    g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (!bus) {
+        open_with_default_handler(url);
+        return;
+    }
+    g_dbus_connection_call(bus, "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI", "OpenURI",
+        g_variant_new("(ss@a{sv})", "", url, g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0)),
+        G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, portal_opened, g_strdup(url));
 }
 
 static gboolean decide(WebKitWebView *view, WebKitPolicyDecision *decision,
@@ -84,12 +121,8 @@ static gboolean decide(WebKitWebView *view, WebKitPolicyDecision *decision,
         webkit_web_view_load_uri(view, url);
     } else {
         webkit_policy_decision_ignore(decision);
-        if (!journal->pending && external_uri(uri) && webkit_navigation_action_is_user_gesture(action)) {
-            g_autoptr(GAppLaunchContext) launch = g_app_launch_context_new();
-            g_app_launch_context_unsetenv(launch, "LD_LIBRARY_PATH");
-            g_app_launch_context_unsetenv(launch, "SOLSTONE_JOURNAL_LANGUAGE");
-            g_app_info_launch_default_for_uri_async(url, launch, NULL, NULL, NULL);
-        }
+        if (!journal->pending && external_uri(uri) && webkit_navigation_action_is_user_gesture(action))
+            open_external(url);
     }
     return TRUE;
 }
@@ -298,7 +331,30 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint key, guint 
     return TRUE;
 }
 
-static void create_view(Journal *journal)
+// WebKit may preconnect before a navigation decision. Reserve a non-listening
+// loopback port for this view so every other destination fails locally, even
+// on desktops with a system-wide proxy. GLib supports host:port exceptions.
+static gboolean restrict_network(Journal *journal, WebKitNetworkSession *session)
+{
+    g_autoptr(GInetAddress) loopback = g_inet_address_new_loopback(G_SOCKET_FAMILY_IPV4);
+    g_autoptr(GSocketAddress) bind_address = g_inet_socket_address_new(loopback, 0);
+    journal->refusal_socket = g_socket_new(G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL);
+    if (!journal->refusal_socket || !g_socket_bind(journal->refusal_socket, bind_address, FALSE, NULL))
+        return FALSE;
+    g_autoptr(GSocketAddress) bound = g_socket_get_local_address(journal->refusal_socket, NULL);
+    if (!bound)
+        return FALSE;
+    g_autofree char *proxy = g_strdup_printf("http://127.0.0.1:%u",
+        g_inet_socket_address_get_port(G_INET_SOCKET_ADDRESS(bound)));
+    g_autofree char *bridge = g_strdup_printf("127.0.0.1:%d", journal->port);
+    const char *direct[] = {bridge, NULL};
+    WebKitNetworkProxySettings *settings = webkit_network_proxy_settings_new(proxy, direct);
+    webkit_network_session_set_proxy_settings(session, WEBKIT_NETWORK_PROXY_MODE_CUSTOM, settings);
+    webkit_network_proxy_settings_free(settings);
+    return TRUE;
+}
+
+static gboolean create_view(Journal *journal)
 {
     g_autoptr(WebKitWebContext) context = webkit_web_context_new();
     const char *language = g_getenv("SOLSTONE_JOURNAL_LANGUAGE");
@@ -307,6 +363,8 @@ static void create_view(Journal *journal)
         webkit_web_context_set_preferred_languages(context, languages);
     }
     g_autoptr(WebKitNetworkSession) session = webkit_network_session_new_ephemeral();
+    if (!restrict_network(journal, session))
+        return FALSE;
     g_autoptr(WebKitUserContentManager) manager = webkit_user_content_manager_new();
     g_autoptr(WebKitSettings) settings = webkit_settings_new();
     webkit_settings_set_user_agent_with_application_details(settings, HOST_PRODUCT, HOST_VERSION);
@@ -343,6 +401,7 @@ static void create_view(Journal *journal)
     g_signal_connect(journal->view, "load-changed", G_CALLBACK(loaded), journal);
     g_signal_connect(journal->view, "load-failed", G_CALLBACK(failed), journal);
     g_signal_connect(journal->view, "web-process-terminated", G_CALLBACK(terminated), journal);
+    return TRUE;
 }
 
 // The GTK 4.6 compatibility build cannot attach WebKit's content tree to
@@ -398,9 +457,11 @@ static gboolean incoming(GIOChannel *channel, GIOCondition condition, gpointer d
         answer(journal, FALSE);
         return G_SOURCE_REMOVE;
     }
-    if (!journal->view)
-        create_view(journal);
     journal->pending = TRUE;
+    if (!journal->view && !create_view(journal)) {
+        answer(journal, FALSE);
+        return G_SOURCE_REMOVE;
+    }
     webkit_web_view_load_uri(journal->view, line);
     return G_SOURCE_CONTINUE;
 }
@@ -413,6 +474,7 @@ int main(void)
     g_autoptr(GIOChannel) input = g_io_channel_unix_new(STDIN_FILENO);
     g_io_add_watch(input, G_IO_IN | G_IO_HUP | G_IO_ERR, incoming, &journal);
     g_main_loop_run(journal.loop);
+    g_clear_object(&journal.refusal_socket);
     g_main_loop_unref(journal.loop);
     return 0;
 }
