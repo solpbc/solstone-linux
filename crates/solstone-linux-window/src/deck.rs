@@ -150,6 +150,7 @@ struct ServiceSnap {
     queue: Option<i64>,
     obsidian: Option<solstone_linux::obsidian::State>,
     obsidian_vault: bool,
+    others: Vec<solstone_linux::shared_sources::OtherVault>,
     screenshots: Option<solstone_linux::screenshots::ScreenshotsDocument>,
     imports: Option<solstone_linux::import::ImportDocument>,
     kept: String,
@@ -172,6 +173,7 @@ impl ServiceSnap {
             queue: None,
             obsidian: None,
             obsidian_vault: false,
+            others: Vec::new(),
             screenshots: None,
             imports: None,
             kept: text!("linux.window.nothingyet").to_owned(),
@@ -433,6 +435,11 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         let shelf_open = Rc::clone(&shelf_open);
         let view = Rc::clone(&view);
         let open: Rc<dyn Fn()> = Rc::new(move || {
+            if id == TileId::Obsidian
+                && current_snap().obsidian == Some(solstone_linux::obsidian::State::Off)
+            {
+                request_source_refresh(true);
+            }
             row.set(ShelfRow::Home);
             selected.set(Some(id));
             page_open.set(true);
@@ -590,6 +597,11 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     apply_shot_hooks(&ui, &view, &selected, &row, &shelf_open, &page_open);
     apply_layout(&ui, &selected, &row, &shelf_open, &page_open);
     let focus_window = window.clone();
+    focus_window.connect_is_active_notify(|window| {
+        if window.is_active() {
+            request_source_refresh(false);
+        }
+    });
     focus_window.connect_map(move |window| {
         window.set_focus_visible(false);
         let none: Option<&gtk::Widget> = None;
@@ -824,6 +836,9 @@ struct Page {
     screen_extra: gtk::Box,
     browsers_extra: gtk::Box,
     obsidian_extra: gtk::Box,
+    known_vaults: gtk::Box,
+    also_on: gtk::Box,
+    vault_content: RefCell<Vec<String>>,
     screenshots: Rc<crate::screenshots_page::ScreenshotsSection>,
     browsers_names: gtk::Label,
     activity: gtk::Switch,
@@ -845,6 +860,92 @@ impl Page {
     fn show_status(&self) {
         self.box_.set_visible(false);
         self.status.set_visible(true);
+    }
+
+    fn show_remote_vaults(&self, id: TileId, snap: &ServiceSnap) {
+        use solstone_linux::{obsidian::State, shared_sources};
+        let allowed = id == TileId::Obsidian
+            && snap.reading == ServiceReading::Answering
+            && snap.durable == "confirmed"
+            && !snap.others.is_empty();
+        let card = allowed && snap.obsidian == Some(State::Off);
+        let facts = allowed
+            && matches!(
+                snap.obsidian,
+                Some(
+                    State::On
+                        | State::Paused
+                        | State::NeedsAttention
+                        | State::WaitingForJournalUpdate
+                )
+            );
+        self.known_vaults.set_visible(card);
+        self.also_on.set_visible(facts);
+        if !card && !facts {
+            return;
+        }
+        let groups = shared_sources::by_device(&snap.others);
+        let heading = shared_sources::heading(&snap.others);
+        let mut content = vec![card.to_string(), heading.clone()];
+        for group in &groups {
+            content.push(group[0].cid.clone());
+            content.push(group[0].device_type.clone().unwrap_or_default());
+            content.extend(group.iter().map(|r| r.line(true)));
+        }
+        if *self.vault_content.borrow() == content {
+            return;
+        }
+        *self.vault_content.borrow_mut() = content;
+        let container = if card {
+            &self.known_vaults
+        } else {
+            &self.also_on
+        };
+        while let Some(child) = container.first_child() {
+            container.remove(&child);
+        }
+        if card {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let marker = mark_widget();
+            apply_mark_kind(&marker, MarkKind::OtherDevice);
+            row.append(&marker);
+            row.append(&note_label(Some(&heading)));
+            container.append(&row);
+        }
+        for (index, vaults) in groups.iter().enumerate() {
+            let device = vaults[0];
+            if facts {
+                let label = if index == 0 {
+                    text!("linux.sharedsources.also")
+                } else {
+                    ""
+                };
+                let (row, value) = fact_row(label);
+                value.set_text(&device.line(false));
+                container.append(&row);
+                continue;
+            }
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let glyph = match device.device_type.as_deref().or(device.platform.as_deref()) {
+                Some("phone" | "iphone" | "android" | "ios") => "phone-symbolic",
+                Some("tablet" | "ipad") => "tablet-symbolic",
+                Some("laptop") => "computer-laptop-symbolic",
+                _ => "computer-symbolic",
+            };
+            let image = gtk::Image::from_icon_name(glyph);
+            image.set_valign(gtk::Align::Start);
+            row.append(&image);
+            let lines = gtk::Box::new(gtk::Orientation::Vertical, 3);
+            lines.append(&note_label(Some(&device.device)));
+            for vault in vaults {
+                let line = vault.detail_line(true);
+                if !line.is_empty() {
+                    lines.append(&note_label(Some(&line)));
+                }
+            }
+            row.append(&lines);
+            container.append(&row);
+        }
     }
 
     fn show_tile(&self, id: TileId, view: &View) {
@@ -896,6 +997,7 @@ impl Page {
         self.screen_extra
             .set_visible(screen && view.service == ServiceReading::Answering);
         self.browsers_extra.set_visible(id == TileId::Browsers);
+        self.show_remote_vaults(id, &snap);
         self.obsidian_extra
             .set_visible(id == TileId::Obsidian && view.service == ServiceReading::Answering);
         // The screenshots page lays out its own reason, sentence and facts.
@@ -1307,6 +1409,11 @@ fn make_source_page(status: gtk::Box) -> Page {
     page_top.append(&close);
     page_box.append(&page_top);
 
+    let known_vaults = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    known_vaults.add_css_class("sol-remote-card");
+    known_vaults.set_visible(false);
+    page_box.append(&known_vaults);
+
     let verdict = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let mark = mark_widget();
     let word = gtk::Label::new(None);
@@ -1355,6 +1462,9 @@ fn make_source_page(status: gtk::Box) -> Page {
     let obsidian_extra = obsidian_settings();
     page_box.append(&screen_extra);
     page_box.append(&browsers_extra);
+    let also_on = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    also_on.set_visible(false);
+    page_box.append(&also_on);
     page_box.append(&obsidian_extra);
     let screenshots = crate::screenshots_page::ScreenshotsSection::new();
     page_box.append(&screenshots.root);
@@ -1394,6 +1504,9 @@ fn make_source_page(status: gtk::Box) -> Page {
         screen_extra,
         browsers_extra,
         obsidian_extra,
+        known_vaults,
+        also_on,
+        vault_content: RefCell::new(Vec::new()),
         screenshots,
         browsers_names,
         activity,
@@ -2330,9 +2443,30 @@ fn apply_view(ui: &Ui, view: &View) {
     let subs = tile_subs(view);
     for (tile, (word, sub)) in ui.tiles.iter().zip(words.into_iter().zip(subs)) {
         let word = view.service.source_word().unwrap_or(word);
-        tile.word.set_text(shell_model::state_label(word));
+        let elsewhere = tile.id == TileId::Obsidian
+            && snap.reading == ServiceReading::Answering
+            && snap.durable == "confirmed"
+            && snap.obsidian == Some(solstone_linux::obsidian::State::Off)
+            && !snap.others.is_empty();
+        let sub = if elsewhere {
+            tile.word
+                .set_text(&solstone_linux::shared_sources::heading(&snap.others));
+            Some(snap.others[0].line(false))
+        } else {
+            tile.word.set_text(shell_model::state_label(word));
+            sub
+        };
         paint_word(&tile.word, word);
-        paint_mark(&tile.mark, word);
+        if elsewhere {
+            apply_mark_kind(&tile.mark, MarkKind::OtherDevice);
+        } else {
+            paint_mark(&tile.mark, word);
+        }
+        tile.sub.set_ellipsize(if elsewhere {
+            gtk::pango::EllipsizeMode::Middle
+        } else {
+            gtk::pango::EllipsizeMode::None
+        });
         match sub {
             Some(text) => {
                 tile.sub.set_text(&text);
@@ -3250,6 +3384,7 @@ button.sol-action:focus-visible, button.sol-glyph:focus-visible, button.sol-back
   outline: 2px solid #E8913A;\
   outline-offset: 2px;\
 }\
+.sol-remote-card { border: 1px solid alpha(currentColor,0.18); border-radius: 10px; padding: 12px; }\
 .sol-quiet { font-size: 12.5px; }\
 .sol-shelf.sol-shelf-over {\
   background-color: #FEFCF8;\
@@ -3435,6 +3570,7 @@ enum MarkKind {
     Dot,
     /// The status pill when the journal is caught up. Source tiles stay orange.
     Good,
+    OtherDevice,
     Ring,
     Diamond,
     Bars,
@@ -3472,6 +3608,7 @@ fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
         "sol-mark-on",
         "sol-mark-good",
         "sol-mark-ring",
+        "sol-mark-other",
         "sol-mark-attn",
         "sol-mark-paused",
     ] {
@@ -3481,6 +3618,7 @@ fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
         MarkKind::Dot => "sol-mark-on",
         MarkKind::Good => "sol-mark-good",
         MarkKind::Ring => "sol-mark-ring",
+        MarkKind::OtherDevice => "sol-mark-other",
         MarkKind::Diamond => "sol-mark-attn",
         MarkKind::Bars => "sol-mark-paused",
     };
@@ -3489,7 +3627,9 @@ fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
 }
 
 fn draw_mark(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, height: i32) {
-    let kind = if area.has_css_class("sol-mark-attn") {
+    let kind = if area.has_css_class("sol-mark-other") {
+        MarkKind::OtherDevice
+    } else if area.has_css_class("sol-mark-attn") {
         MarkKind::Diamond
     } else if area.has_css_class("sol-mark-paused") {
         MarkKind::Bars
@@ -3518,6 +3658,15 @@ fn draw_mark(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, heig
             // tokens.md `--success`
             cr.set_source_rgb(63.0 / 255.0, 157.0 / 255.0, 106.0 / 255.0);
             cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+        MarkKind::OtherDevice => {
+            let (r, g, b) = ink_rgb(dark);
+            cr.set_source_rgba(r, g, b, 0.70);
+            cr.set_line_width(1.4);
+            cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+            let _ = cr.stroke();
+            cr.arc(cx, cy, radius * 0.38, 0.0, std::f64::consts::TAU);
             let _ = cr.fill();
         }
         MarkKind::Ring => {
@@ -3982,6 +4131,7 @@ fn apply_document(
         last_sync: doc.last_delivery.as_ref().and_then(|item| item.at),
         queue: doc.queue_count,
         imports: None,
+        others: Vec::new(),
         obsidian: decoded.as_ref().map(|document| document.status.state),
         obsidian_vault: decoded
             .as_ref()
@@ -3993,6 +4143,19 @@ fn apply_document(
     })
 }
 
+fn request_source_refresh(detail: bool) {
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(client) = solstone_linux::dbus_client::ControlClient::session().await
+            && let Ok(owner) = client.get_owner().await
+        {
+            let _ = client
+                .expect_owner(owner)
+                .refresh_known_sources(detail)
+                .await;
+        }
+    });
+}
+
 async fn fetch_service() -> Result<ServiceSnap, ControlClientError> {
     let client = solstone_linux::dbus_client::ControlClient::session().await?;
     let owner = client.get_owner().await?;
@@ -4002,6 +4165,17 @@ async fn fetch_service() -> Result<ServiceSnap, ControlClientError> {
     let screenshots = client.screenshots_state().await.ok();
     let mut snap = apply_document(&state, obsidian.as_deref(), screenshots.as_deref())
         .ok_or_else(|| ControlClientError::Call("invalid control state".into()))?;
+    if snap.durable == "confirmed" {
+        snap.others = client
+            .known_vaults()
+            .await
+            .ok()
+            .and_then(|s| {
+                serde_json::from_str::<solstone_linux::shared_sources::VaultView>(&s).ok()
+            })
+            .map(|v| v.rows)
+            .unwrap_or_default();
+    }
     snap.imports = client
         .import_state()
         .await

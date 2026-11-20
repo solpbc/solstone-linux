@@ -31,6 +31,7 @@ pub struct Observer1<C: Clock, O: ObserverCommands> {
     pub clock: C,
     pub commands: O,
     pub window_control: crate::window_control::WindowControlHandler,
+    pub shared: crate::shared_sources::Refresh,
     pub obsidian: crate::obsidian::ObsidianHandle,
     pub screenshots: crate::screenshots::ScreenshotsHandle,
     pub imports: crate::import::ImportHandle,
@@ -213,6 +214,20 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     }
     async fn open_journal_at_path(&self, path: String) -> String {
         self.window_control.open_journal_at_path(&path).await
+    }
+    fn refresh_known_sources(&self, detail: bool) -> String {
+        self.shared.request(detail);
+        "ok".into()
+    }
+    fn known_vaults(&self) -> String {
+        let refused = crate::sync_health::load_facts_with_liveness(
+            &self.config.state_dir(),
+            crate::private_link::PrivateStateLockLiveness::LiveOwner,
+        )
+        .link
+        .is_some_and(|l| l.terminal_revocation || l.journal_mark_held || l.pairing_required);
+        serde_json::to_string(&crate::shared_sources::visible(&self.config, refused))
+            .unwrap_or_default()
     }
     fn obsidian_state(&self) -> String {
         self.obsidian.state_json()
@@ -430,6 +445,7 @@ mod tests {
                 clock: TestClock(clock.clone()),
                 commands: commands.clone(),
                 window_control: crate::window_control::WindowControlHandler::default(),
+                shared: Default::default(),
                 obsidian: crate::obsidian::ObsidianHandle::default(),
                 screenshots: crate::screenshots::ScreenshotsHandle::default(),
                 imports: crate::import::ImportHandle::default(),
@@ -520,6 +536,7 @@ mod tests {
             clock: TestClock(Arc::new(std::sync::atomic::AtomicU64::new(0))),
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
+            shared: Default::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),
@@ -559,6 +576,7 @@ mod tests {
             clock: TestClock(now.clone()),
             commands: Commands::default(),
             window_control: crate::window_control::WindowControlHandler::default(),
+            shared: Default::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),

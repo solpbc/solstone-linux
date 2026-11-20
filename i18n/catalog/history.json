@@ -10450,6 +10450,97 @@
       "selector": null
     },
     {
+      "id": "linux.sharedsources.also",
+      "resource": "m6c696e75782e736861726564736f75726365732e616c736f",
+      "namespace": "linux.sharedsources",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.sharedsources.cli",
+      "resource": "m6c696e75782e736861726564736f75726365732e636c69",
+      "namespace": "linux.sharedsources",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "state",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.sharedsources.many",
+      "resource": "m6c696e75782e736861726564736f75726365732e6d616e79",
+      "namespace": "linux.sharedsources",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.sharedsources.one",
+      "resource": "m6c696e75782e736861726564736f75726365732e6f6e65",
+      "namespace": "linux.sharedsources",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.sharedsources.pair",
+      "resource": "m6c696e75782e736861726564736f75726365732e70616972",
+      "namespace": "linux.sharedsources",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "first",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "second",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.shell.activitystillon",
       "resource": "m6c696e75782e7368656c6c2e61637469766974797374696c6c6f6e",
       "namespace": "linux.shell",

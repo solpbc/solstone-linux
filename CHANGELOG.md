@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- if Obsidian is off or you haven't set it up on this computer, its tile can show another device by name. open the tile to see the full list or choose a vault on this computer.
+
 ## [2.0.48] - 2026-11-20
 
 ### Added

@@ -1637,6 +1637,12 @@ fn unreachable_folder_is_unknown(walked: &Walked, rows: &BTreeMap<String, Row>) 
     })
 }
 
+/// Read the configured vault without opening its delivery queue or starting a scan.
+pub fn configured_vault(root: &Path) -> Option<(String, Option<Phase>)> {
+    let source = load_source(&root.join("source.json")).ok()?;
+    Some((source.vault_name?, source.enabled.then_some(source.phase)))
+}
+
 fn load_source(path: &Path) -> io::Result<SourceState> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),

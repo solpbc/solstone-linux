@@ -4594,6 +4594,41 @@
       "locales": []
     },
     {
+      "id": "linux.sharedsources.also",
+      "source": "18f8a9aa0c250af9f697d1fe8f537e37e9f6fef7bf876f448e95b4f8766225e8",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.sharedsources.cli",
+      "source": "9c172193717bda065e01e6c3b16a57899d7ea886d6e7ee1dba02925e4cbb57f1",
+      "contract": "97435f38fb526ab350c22e69ad8c5bc5a0e0fe781fd7cc60f014e0cee38f2cef",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.sharedsources.many",
+      "source": "d21b9000eb56e0ca439057bf6292b94ae7f40c31fe70be3d898c1d740b8dcc1c",
+      "contract": "19e7d110b0675a598f9a9e24dfeb3bbb9e32c316ba52b9871ff2708989a5ef3e",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.sharedsources.one",
+      "source": "b777be79e4118ed6948dd1bb1b27baadef51b4b7a5f728fda4ea763eb566547a",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.sharedsources.pair",
+      "source": "8f11f33cdede688b7d2bb60699e4e84644e72e9326a9c130fe7361fe5d931454",
+      "contract": "b8dccc8ff945faee740b4baa844624e80f8d11cf9619470359b8f9ce76707f90",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.shell.activitystillon",
       "source": "fe1c8257df4cf364b03b141a01a28b809dd5fad4d60cbd7257f2deba73fa7d73",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",

@@ -255,6 +255,13 @@ impl ControlClient {
             .await
     }
 
+    pub async fn known_vaults(&self) -> Result<String, ControlClientError> {
+        self.call_method("KnownVaults", &(), DEFAULT_TIMEOUT).await
+    }
+    pub async fn refresh_known_sources(&self, detail: bool) -> Result<String, ControlClientError> {
+        self.call_method("RefreshKnownSources", &(detail,), DEFAULT_TIMEOUT)
+            .await
+    }
     pub async fn obsidian_state(&self) -> Result<String, ControlClientError> {
         self.call_method("ObsidianState", &(), DEFAULT_TIMEOUT)
             .await

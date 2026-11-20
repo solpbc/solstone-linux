@@ -1,0 +1,26 @@
+{
+  "description": "Two source details displayed together, such as a device and elapsed time.",
+  "context": "Two source details displayed together, such as a device and elapsed time.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "first",
+      "type": "string"
+    },
+    {
+      "name": "second",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 80,
+  "source_revision": "8f11f33cdede688b7d2bb60699e4e84644e72e9326a9c130fe7361fe5d931454",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

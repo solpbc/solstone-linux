@@ -508,7 +508,9 @@ fn run_capture(
         supervisor.attach_live_settings(Arc::clone(&live_settings));
         let restart_obsidian = obsidian.clone();
         let restart_screenshots = screenshots.clone();
+        let source_cache_dir = config.state_dir();
         supervisor.attach_new_pairing(Arc::new(move || {
+            crate::shared_sources::forget(&source_cache_dir);
             restart_obsidian.restart_send();
             restart_screenshots.restart_setup();
         }));
@@ -587,6 +589,8 @@ fn run_capture(
     // The desktop shell drops its handler as it stops, so hold one until sync has drained
     // the final segment over that link (runtime order step 7).
     let window_control_until_linked_stage = window_control.clone();
+    let shared =
+        crate::shared_sources::Worker::start(runtime, observer.config.clone(), Arc::clone(&upload));
     let desktop_shell = crate::shell::start(
         runtime,
         ShellInputs {
@@ -602,6 +606,7 @@ fn run_capture(
             commands,
             open_journal: open_journal.clone(),
             window_control,
+            shared: shared.refresh.clone(),
             obsidian: obsidian.clone(),
             screenshots: screenshots.clone(),
             imports: sync.import_handle(),
@@ -619,6 +624,21 @@ fn run_capture(
     drop(startup_heartbeat);
     let mut disconnected = false;
     while run_result.is_ok() && !stopped.load(Ordering::Acquire) {
+        let browser_connected = browser.is_some()
+            && crate::browser::status::read_running(
+                &crate::browser::custody::Layout::new(&observer.config.base_dir),
+                jiff::Timestamp::now().as_millisecond(),
+            )
+            .is_some_and(|b| !b.browsers.is_empty());
+        shared.update(crate::shared_sources::local(
+            &observer.config,
+            observer.state.cached_activity.session,
+            observer.state.paused,
+            &obsidian,
+            &screenshots,
+            terminal_sync.is_enabled(),
+            browser_connected,
+        ));
         let now = Instant::now();
         let wake = if disconnected {
             thread::sleep(next_tick.saturating_duration_since(now));
@@ -653,6 +673,7 @@ fn run_capture(
             }
         }
     }
+    runtime.block_on(shared.stop());
     observer.stop_activity_intake();
     if let Err(error) = notifier.stopping() {
         tracing::warn!(%error, "Failed to notify systemd stopping state");

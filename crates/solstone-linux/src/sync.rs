@@ -156,6 +156,9 @@ impl LinkFactPersistence {
         if last_persisted.as_ref() == Some(&snapshot) {
             return;
         }
+        if snapshot.terminal_revocation {
+            crate::shared_sources::forget(&self.state_dir);
+        }
         facts.link = Some(snapshot.clone());
         if let Err(error) = save_facts(&self.state_dir, &facts) {
             if self.failures.fetch_add(1, Ordering::AcqRel) == 0 {

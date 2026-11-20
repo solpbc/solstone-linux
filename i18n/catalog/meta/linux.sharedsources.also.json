@@ -1,0 +1,17 @@
+{
+  "description": "Heading for devices that also supply a locally configured source.",
+  "context": "Heading for devices that also supply a locally configured source.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 80,
+  "source_revision": "18f8a9aa0c250af9f697d1fe8f537e37e9f6fef7bf876f448e95b4f8766225e8",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

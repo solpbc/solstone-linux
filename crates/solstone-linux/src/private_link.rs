@@ -1386,6 +1386,21 @@ impl LinkFacts {
         Some(action())
     }
 
+    pub(crate) fn with_source_access<R>(
+        &self,
+        epoch: u64,
+        action: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if self.association_epoch() != epoch
+            || state.terminal_revocation
+            || state.journal_mark_held
+            || state.pairing_required
+        {
+            return None;
+        }
+        Some(action())
+    }
     pub(crate) fn publish_if_association_current(&self, fact: LinkFact, epoch: u64) -> bool {
         static OPEN: AtomicBool = AtomicBool::new(false);
         let generation = self.snapshot().dial_generation;
@@ -2132,6 +2147,16 @@ impl PrivateLinkCapability {
         builder: RequestBuilder,
         timeout: Duration,
     ) -> LinkOutcome {
+        self.send_optional_bounded(builder, timeout, 64 * 1024)
+            .await
+    }
+
+    async fn send_optional_bounded(
+        &self,
+        builder: RequestBuilder,
+        timeout: Duration,
+        limit: usize,
+    ) -> LinkOutcome {
         match builder.timeout(timeout).send().await {
             Ok(response) => {
                 let status = response.status();
@@ -2142,7 +2167,7 @@ impl PrivateLinkCapability {
                     return LinkOutcome::LocalRejected { status };
                 }
                 if let Some(len) = response.content_length()
-                    && len > 65536
+                    && len > limit as u64
                 {
                     return LinkOutcome::LocalRejected {
                         status: StatusCode::PAYLOAD_TOO_LARGE,
@@ -2154,7 +2179,7 @@ impl PrivateLinkCapability {
                 while let Some(chunk) = stream.next().await {
                     match chunk {
                         Ok(bytes) => {
-                            if body.len() + bytes.len() > 65536 {
+                            if bytes.len() > limit - body.len() {
                                 return LinkOutcome::LocalRejected {
                                     status: StatusCode::PAYLOAD_TOO_LARGE,
                                 };
@@ -2168,6 +2193,57 @@ impl PrivateLinkCapability {
             }
             Err(_) => LinkOutcome::TransportUnavailable,
         }
+    }
+
+    fn observe_source_status(&self, json: &serde_json::Value) {
+        use crate::shared_sources::Advertisement;
+        let supported = capabilities_from_status(json)
+            .iter()
+            .any(|c| c == "shared_sources");
+        let state = if supported {
+            Advertisement::Available(json["sources_rev"].as_str().map(str::to_owned))
+        } else {
+            Advertisement::Unsupported
+        };
+        let mut ad = self
+            .inner
+            .writer
+            .sources
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        ad.0 = ad.0.wrapping_add(1);
+        ad.1 = state;
+    }
+
+    pub(crate) fn sources_advertisement(&self) -> (u64, crate::shared_sources::Advertisement) {
+        self.inner
+            .writer
+            .sources
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub(crate) async fn shared_source_request(
+        &self,
+        entries: Option<&[crate::shared_sources::Entry]>,
+    ) -> LinkOutcome {
+        let path = if entries.is_some() {
+            "/app/network/api/clients/self/sources"
+        } else {
+            "/app/network/api/sources"
+        };
+        let Ok(url) = confine_path(&self.inner.optional_origin, path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        let request = match entries {
+            Some(entries) => self.inner.optional_client.put(url).json(entries),
+            None => self.inner.optional_client.get(url),
+        };
+        self.send_optional_bounded(request, SYSTEM_STATUS_TIMEOUT, 4 * 1024 * 1024)
+            .await
     }
 
     pub(crate) async fn clients_self_get(&self, timeout: Duration) -> LinkOutcome {
@@ -2515,6 +2591,7 @@ impl PrivateLinkCapability {
                         status,
                         body: Vec::new(),
                     })?;
+                self.observe_source_status(&json);
                 Ok(capabilities_from_status(&json))
             }
             other => Err(other),
@@ -2558,6 +2635,7 @@ impl PrivateLinkCapability {
                 let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) else {
                     return Ok(None);
                 };
+                self.observe_source_status(&json);
                 let Some(raw_version) = json
                     .get("version")
                     .and_then(|v| v.get("current"))
@@ -2599,6 +2677,7 @@ impl PrivateLinkCapability {
                 let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) else {
                     return Ok(None);
                 };
+                self.observe_source_status(&json);
                 let Some(raw_version) = json
                     .get("version")
                     .and_then(|v| v.get("current"))
@@ -2872,6 +2951,7 @@ impl OptionalAttemptLease {
 }
 
 pub(crate) struct OrderedCredentialWriter {
+    sources: Mutex<(u64, crate::shared_sources::Advertisement)>,
     config_root: PathBuf,
     pairing_id: String,
     identity_key: String,
@@ -2900,6 +2980,7 @@ impl OrderedCredentialWriter {
     ) -> Self {
         let pairing_id = compute_pairing_id(&credential.client_cert_pem);
         Self {
+            sources: Mutex::default(),
             config_root,
             pairing_id,
             identity_key: journal_identity_key(&credential),

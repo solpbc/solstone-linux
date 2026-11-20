@@ -46,6 +46,13 @@
       <method name="ObsidianContinue">
           <arg direction="out" type="s" />
         </method>
+      <method name="KnownVaults">
+          <arg direction="out" type="s" />
+        </method>
+      <method name="RefreshKnownSources">
+          <arg direction="in" name="detail" type="b" />
+          <arg direction="out" type="s" />
+        </method>
       <method name="ObsidianState">
           <arg direction="out" type="s" />
         </method>

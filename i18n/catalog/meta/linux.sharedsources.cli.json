@@ -1,0 +1,22 @@
+{
+  "description": "Obsidian source status in the command line.",
+  "context": "Obsidian source status in the command line.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "state",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 80,
+  "source_revision": "9c172193717bda065e01e6c3b16a57899d7ea886d6e7ee1dba02925e4cbb57f1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

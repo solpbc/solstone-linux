@@ -683,6 +683,11 @@ pub enum MessageId {
     m6c696e75782e7368617265642e706169722e77616974696e67666f72796f75746f636f6e6669726d796f75726a6f75726e616c736d61726b6e6f746869,
     m6c696e75782e7368617265642e706169722e796f75726a6f75726e616c736d61726b6973616c7265616479636f6e6669726d65646e6f7468696e67746f,
     m6c696e75782e7368617265642e747261792e6f66666c696e65,
+    m6c696e75782e736861726564736f75726365732e616c736f,
+    m6c696e75782e736861726564736f75726365732e636c69,
+    m6c696e75782e736861726564736f75726365732e6d616e79,
+    m6c696e75782e736861726564736f75726365732e6f6e65,
+    m6c696e75782e736861726564736f75726365732e70616972,
     m6c696e75782e7368656c6c2e61637469766974797374696c6c6f6e,
     m6c696e75782e7368656c6c2e61667465726e6f6f6e,
     m6c696e75782e7368656c6c2e616d6f756e7473696e6365,
@@ -1547,6 +1552,11 @@ pub fn render_dotted_with_options(locale: &str, dotted_id: &str, args: &[(&str, 
         "linux.shared.pair.waitingforyoutoconfirmyourjournalsmarknothi" => MessageId::m6c696e75782e7368617265642e706169722e77616974696e67666f72796f75746f636f6e6669726d796f75726a6f75726e616c736d61726b6e6f746869,
         "linux.shared.pair.yourjournalsmarkisalreadyconfirmednothingto" => MessageId::m6c696e75782e7368617265642e706169722e796f75726a6f75726e616c736d61726b6973616c7265616479636f6e6669726d65646e6f7468696e67746f,
         "linux.shared.tray.offline" => MessageId::m6c696e75782e7368617265642e747261792e6f66666c696e65,
+        "linux.sharedsources.also" => MessageId::m6c696e75782e736861726564736f75726365732e616c736f,
+        "linux.sharedsources.cli" => MessageId::m6c696e75782e736861726564736f75726365732e636c69,
+        "linux.sharedsources.many" => MessageId::m6c696e75782e736861726564736f75726365732e6d616e79,
+        "linux.sharedsources.one" => MessageId::m6c696e75782e736861726564736f75726365732e6f6e65,
+        "linux.sharedsources.pair" => MessageId::m6c696e75782e736861726564736f75726365732e70616972,
         "linux.shell.activitystillon" => MessageId::m6c696e75782e7368656c6c2e61637469766974797374696c6c6f6e,
         "linux.shell.afternoon" => MessageId::m6c696e75782e7368656c6c2e61667465726e6f6f6e,
         "linux.shell.amountsince" => MessageId::m6c696e75782e7368656c6c2e616d6f756e7473696e6365,
@@ -10183,6 +10193,85 @@ pub fn render_with_options(locale: &str, id: MessageId, args: &[(&str, Value)], 
             #[allow(unused_mut)]
             let mut f_args = FluentArgs::new();
             ("m6c696e75782e7368617265642e747261792e6f66666c696e65".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e736861726564736f75726365732e616c736f => {
+            const DECLARED: &[&str] = &[];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            ("m6c696e75782e736861726564736f75726365732e616c736f".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e736861726564736f75726365732e636c69 => {
+            const DECLARED: &[&str] = &["state"];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            let val_v0 = args.iter().find(|(n, _)| *n == "state").ok_or_else(|| RenderError::MissingArgument("state".to_string()))?.1.clone();
+            let v0 = match val_v0 {
+                Value::String(s) => s.to_string(),
+                _ => return Err(RenderError::InvalidArgumentType("state".to_string())),
+            };
+            f_args.set("state", FluentValue::from(v0.clone()));
+            ("m6c696e75782e736861726564736f75726365732e636c69".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e736861726564736f75726365732e6d616e79 => {
+            const DECLARED: &[&str] = &["count"];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            let val_v0 = args.iter().find(|(n, _)| *n == "count").ok_or_else(|| RenderError::MissingArgument("count".to_string()))?.1.clone();
+            let v0 = match val_v0 {
+                Value::String(s) => s.to_string(),
+                _ => return Err(RenderError::InvalidArgumentType("count".to_string())),
+            };
+            f_args.set("count", FluentValue::from(v0.clone()));
+            ("m6c696e75782e736861726564736f75726365732e6d616e79".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e736861726564736f75726365732e6f6e65 => {
+            const DECLARED: &[&str] = &[];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            ("m6c696e75782e736861726564736f75726365732e6f6e65".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e736861726564736f75726365732e70616972 => {
+            const DECLARED: &[&str] = &["first", "second"];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            let val_v0 = args.iter().find(|(n, _)| *n == "first").ok_or_else(|| RenderError::MissingArgument("first".to_string()))?.1.clone();
+            let v0 = match val_v0 {
+                Value::String(s) => s.to_string(),
+                _ => return Err(RenderError::InvalidArgumentType("first".to_string())),
+            };
+            f_args.set("first", FluentValue::from(v0.clone()));
+            let val_v1 = args.iter().find(|(n, _)| *n == "second").ok_or_else(|| RenderError::MissingArgument("second".to_string()))?.1.clone();
+            let v1 = match val_v1 {
+                Value::String(s) => s.to_string(),
+                _ => return Err(RenderError::InvalidArgumentType("second".to_string())),
+            };
+            f_args.set("second", FluentValue::from(v1.clone()));
+            ("m6c696e75782e736861726564736f75726365732e70616972".to_string(), f_args)
         }
         MessageId::m6c696e75782e7368656c6c2e61637469766974797374696c6c6f6e => {
             const DECLARED: &[&str] = &[];

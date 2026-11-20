@@ -1065,6 +1065,7 @@ pub fn paired_journal_path(state_dir: &Path) -> PathBuf {
 /// Drop the remembered journal version. Pairing again must not remove the rest
 /// of the state directory: the intake counter lives there too.
 pub(crate) fn forget_paired_journal(state_dir: &Path) {
+    crate::shared_sources::forget(state_dir);
     let _ = fs::remove_file(paired_journal_path(state_dir));
 }
 

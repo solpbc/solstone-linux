@@ -56,6 +56,7 @@ pub mod screenshots;
 pub mod segment;
 pub mod service;
 pub mod session_env;
+pub mod shared_sources;
 mod shell;
 pub mod shell_model;
 pub mod source_intake;

@@ -308,6 +308,22 @@ impl UploadClient {
             .with_association_current(captured.epoch, action)
     }
 
+    pub(crate) fn with_sources_current<R>(
+        &self,
+        captured: &CapturedAssociation,
+        action: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let _installed = self
+            .inner
+            .capability
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        if !self.association_is_current(captured) {
+            return None;
+        }
+        captured.facts.with_source_access(captured.epoch, action)
+    }
+
     pub(crate) fn prepare_new_owner(&self) {
         let previous = {
             let mut installed = self

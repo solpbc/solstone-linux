@@ -909,3 +909,8 @@ linux.clipboard.agentinstructions = solstone app for linux (repo: { $repo })
     Logs: { $logs }
     Service: { $service }
 linux.window.choosenewdownloadname = choose a new name to keep the existing file
+linux.sharedsources.one = from another device
+linux.sharedsources.many = from { $count } other devices
+linux.sharedsources.also = also on
+linux.sharedsources.pair = { $first } · { $second }
+linux.sharedsources.cli = Obsidian: { $state }

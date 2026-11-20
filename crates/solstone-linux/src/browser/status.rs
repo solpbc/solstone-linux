@@ -80,7 +80,7 @@ pub fn load_running(path: &Path) -> Option<Running> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-fn read_running(layout: &Layout, now_ms: i64) -> Option<Running> {
+pub(crate) fn read_running(layout: &Layout, now_ms: i64) -> Option<Running> {
     let status: Running =
         serde_json::from_slice(&fs::read(layout.root.join(RUNNING_FILE)).ok()?).ok()?;
     (now_ms - status.updated_at_ms < RUNNING_STALE_MS).then_some(status)

@@ -1,0 +1,22 @@
+{
+  "description": "State line when Obsidian comes from two or more distinct paired devices.",
+  "context": "State line when Obsidian comes from two or more distinct paired devices.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 80,
+  "source_revision": "d21b9000eb56e0ca439057bf6292b94ae7f40c31fe70be3d898c1d740b8dcc1c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

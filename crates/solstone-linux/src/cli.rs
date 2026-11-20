@@ -1322,6 +1322,39 @@ fn discard_browser_pages_at(
     }
 }
 
+fn live_vaults(
+    config: &crate::config::Config,
+) -> Option<(
+    Option<crate::shell_model::StateWord>,
+    Vec<crate::shared_sources::OtherVault>,
+)> {
+    let id = crate::shared_sources::pairing_id(config)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async {
+        let client = crate::dbus_client::ControlClient::session().await.ok()?;
+        let owner = client.get_owner().await.ok()?;
+        let client = client.expect_owner(owner);
+        let view: crate::shared_sources::VaultView =
+            serde_json::from_str(&client.known_vaults().await.ok()?).ok()?;
+        if view.pairing_id.as_ref() != Some(&id) {
+            return None;
+        }
+        let word = crate::obsidian::decode_document(&client.obsidian_state().await.ok()?).map(
+            |document| {
+                crate::shell_model::obsidian_tile(crate::shell_model::ObsidianFacts {
+                    state: document.status.state,
+                    vaults_found: document.status.vault.is_some(),
+                    vault_chosen: document.status.vault.is_some(),
+                })
+            },
+        );
+        Some((word, view.rows))
+    })
+}
+
 fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -> i32 {
     let loaded = load_config(paths);
     let config = loaded.config;
@@ -1437,6 +1470,72 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
             .unwrap_or(i64::MAX);
             for line in crate::browser::status::status_lines(&config.base_dir, now_ms) {
                 write_line(output, line)?;
+            }
+        }
+        let (live_word, others) = live_vaults(&config).unwrap_or_default();
+        let live = live_word.is_some() || liveness == PrivateStateLockLiveness::LiveOwner;
+        let local = solstone_vault::engine::configured_vault(&config.base_dir.join("obsidian"));
+        let has_local = local.as_ref().is_some_and(|(_, phase)| phase.is_some());
+        let mid_setup = matches!(
+            &local,
+            Some((
+                _,
+                Some(solstone_vault::Phase::Checking | solstone_vault::Phase::Confirm { .. })
+            ))
+        );
+        let others = if mid_setup { Vec::new() } else { others };
+        let was_off = matches!(&local, Some((_, None)));
+        let status = if let Some((vault, Some(phase))) = local {
+            use crate::shell_model::StateWord;
+            let word = live_word.unwrap_or(match phase {
+                _ if !live => StateWord::NotRunning,
+                solstone_vault::Phase::Checking => StateWord::Checking,
+                solstone_vault::Phase::Confirm { .. } => StateWord::SettingUp,
+                solstone_vault::Phase::Active => StateWord::Checking,
+            });
+            Some(crate::shared_sources::pair(
+                crate::shell_model::state_label(word),
+                &vault,
+            ))
+        } else if !others.is_empty() {
+            let heading = crate::shared_sources::heading(&others);
+            Some(if was_off {
+                crate::shared_sources::pair(
+                    crate::shell_model::state_label(crate::shell_model::StateWord::Off),
+                    &heading,
+                )
+            } else {
+                heading
+            })
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            write_line(output, message!("linux.sharedsources.cli","state"=>status))?;
+            if has_local {
+                for (index, group) in crate::shared_sources::by_device(&others).iter().enumerate() {
+                    let label = if index == 0 {
+                        text!("linux.sharedsources.also")
+                    } else {
+                        ""
+                    };
+                    write_line(
+                        output,
+                        format!(
+                            "    {}{}",
+                            if label.is_empty() {
+                                String::new()
+                            } else {
+                                format!("{label} ")
+                            },
+                            group[0].line(false)
+                        ),
+                    )?;
+                }
+            } else {
+                for other in others {
+                    write_line(output, format!("    {}", other.line(true)))?;
+                }
             }
         }
         let terminal_config = crate::terminal::control::config_for_status(&config, runner);
