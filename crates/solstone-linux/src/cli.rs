@@ -1472,7 +1472,17 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 write_line(output, line)?;
             }
         }
-        let (live_word, others) = live_vaults(&config).unwrap_or_default();
+        let (live_word, others) = live_vaults(&config).unwrap_or_else(|| {
+            let refused = facts.link.as_ref().is_none_or(|link| {
+                link.terminal_revocation || link.journal_mark_held || link.pairing_required
+            });
+            let rows = if liveness == PrivateStateLockLiveness::LiveOwner {
+                crate::shared_sources::visible(&config, refused).rows
+            } else {
+                Vec::new()
+            };
+            (None, rows)
+        });
         let live = live_word.is_some() || liveness == PrivateStateLockLiveness::LiveOwner;
         let local = solstone_vault::engine::configured_vault(&config.base_dir.join("obsidian"));
         let has_local = local.as_ref().is_some_and(|(_, phase)| phase.is_some());
