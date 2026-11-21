@@ -230,26 +230,33 @@ impl OtherVault {
     }
 
     pub fn detail_line(&self, include_detail: bool) -> String {
-        let mut text = if include_detail {
-            self.vault.clone().unwrap_or_default()
-        } else {
-            String::new()
-        };
+        self.detail_parts(include_detail)
+            .iter()
+            .fold(String::new(), |text, part| pair(&text, part))
+    }
+
+    /// The vault (when asked for), the device's state when it is paused or needs
+    /// attention, and the relative time, in that order. Absent parts are left out.
+    pub fn detail_parts(&self, include_detail: bool) -> Vec<String> {
+        let mut parts = Vec::new();
+        if include_detail && let Some(vault) = self.vault.as_ref().filter(|v| !v.is_empty()) {
+            parts.push(vault.clone());
+        }
         let state = match self.state.as_deref() {
             Some("paused") => Some(crate::shell_model::StateWord::Paused),
             Some("needs_attention") => Some(crate::shell_model::StateWord::NeedsAttention),
             _ => None,
         };
         if let Some(state) = state {
-            text = pair(&text, crate::shell_model::state_label(state));
+            parts.push(crate::shell_model::state_label(state).to_owned());
         }
         if let Some(stamp) = &self.at {
-            text = pair(
-                &text,
-                &crate::shell_model::format_relative(stamp, &crate::local_time::now()),
-            );
+            parts.push(crate::shell_model::format_relative(
+                stamp,
+                &crate::local_time::now(),
+            ));
         }
-        text
+        parts
     }
 }
 

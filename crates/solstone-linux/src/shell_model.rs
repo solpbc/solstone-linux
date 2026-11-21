@@ -731,6 +731,17 @@ fn month_name(month: u32) -> &'static str {
     }
 }
 
+/// `format_relative` for a Unix time in milliseconds, against now.
+#[must_use]
+pub fn format_relative_millis(ms: i64) -> String {
+    crate::local_time::at_millis(ms).map_or_else(String::new, |at| {
+        format_relative(
+            &crate::local_time::rfc3339(&at, crate::local_time::Precision::Secs, true),
+            &crate::local_time::now(),
+        )
+    })
+}
+
 #[must_use]
 pub fn format_relative(last: &str, now: &ZonedDateTime) -> String {
     let Some(parsed) = crate::local_time::parse_rfc3339(last) else {

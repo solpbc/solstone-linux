@@ -905,11 +905,15 @@ impl Page {
             container.remove(&child);
         }
         if card {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            // The card's first line reads like the tile's state line: the same
+            // marker, the same weight.
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             let marker = mark_widget();
             apply_mark_kind(&marker, MarkKind::OtherDevice);
             row.append(&marker);
-            row.append(&note_label(Some(&heading)));
+            let line = note_label(Some(&heading));
+            line.add_css_class("sol-state");
+            row.append(&line);
             container.append(&row);
         }
         for (index, vaults) in groups.iter().enumerate() {
@@ -925,22 +929,29 @@ impl Page {
                 container.append(&row);
                 continue;
             }
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let glyph = match device.device_type.as_deref().or(device.platform.as_deref()) {
-                Some("phone" | "iphone" | "android" | "ios") => "phone-symbolic",
-                Some("tablet" | "ipad") => "tablet-symbolic",
-                Some("laptop") => "computer-laptop-symbolic",
-                _ => "computer-symbolic",
-            };
-            let image = gtk::Image::from_icon_name(glyph);
-            image.set_valign(gtk::Align::Start);
-            row.append(&image);
-            let lines = gtk::Box::new(gtk::Orientation::Vertical, 3);
-            lines.append(&note_label(Some(&device.device)));
+            if index > 0 {
+                container.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            }
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            // The app's own glyphs: an icon theme may not carry a laptop or a
+            // tablet, and a missing icon draws as a broken image.
+            let glyph = glyph_widget_px(remote_device_glyph(device), 18);
+            glyph.set_valign(gtk::Align::Start);
+            glyph.set_margin_top(1);
+            glyph.set_opacity(0.62);
+            row.append(&glyph);
+            let lines = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            let name = note_label(Some(&device.device));
+            name.remove_css_class("sol-faint");
+            name.add_css_class("sol-ink");
+            name.add_css_class("sol-remote-device");
+            lines.append(&name);
             for vault in vaults {
                 let line = vault.detail_line(true);
                 if !line.is_empty() {
-                    lines.append(&note_label(Some(&line)));
+                    let label = note_label(Some(&line));
+                    label.add_css_class("sol-quiet");
+                    lines.append(&label);
                 }
             }
             row.append(&lines);
@@ -1070,6 +1081,26 @@ impl Page {
     }
 }
 
+/// The tile's line for the most recent other device. A narrow tile wraps it at
+/// a separator, never inside the name, the state or the time, and a very long
+/// name gives way first, so the state and the time always show whole.
+fn elsewhere_sub(device: &solstone_linux::shared_sources::OtherVault) -> String {
+    const NAME_CHARS: usize = 20;
+    let name = if device.device.chars().count() > NAME_CHARS {
+        let kept: String = device.device.chars().take(NAME_CHARS - 1).collect();
+        format!("{}\u{2026}", kept.trim_end())
+    } else {
+        device.device.clone()
+    };
+    std::iter::once(name)
+        .chain(device.detail_parts(false))
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .reduce(|line, part| solstone_linux::shared_sources::pair(&line, &part))
+        .unwrap_or_default()
+        // A separator stays with the part before it, so no line starts with one.
+        .replace(" \u{b7}", "\u{a0}\u{b7}")
+}
+
 fn paint_switch(switch: &gtk::Switch, active: bool) {
     // Even setting the current value cancels GTK's pending toggle animation,
     // before it can emit state-set and mark the owner's edit. Leave it running.
@@ -1168,9 +1199,11 @@ fn make_tile(
         None
     });
     sub.add_css_class("sol-faint");
-    sub.set_halign(gtk::Align::Start);
     sub.set_xalign(0.0);
+    // Fill the tile's width, so a wrapping line uses all of it.
+    sub.set_halign(gtk::Align::Fill);
     sub.set_wrap(true);
+    sub.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     sub.set_visible(dashed);
     root.append(&top);
     root.append(&title);
@@ -2451,7 +2484,7 @@ fn apply_view(ui: &Ui, view: &View) {
         let sub = if elsewhere {
             tile.word
                 .set_text(&solstone_linux::shared_sources::heading(&snap.others));
-            Some(snap.others[0].line(false))
+            Some(elsewhere_sub(&snap.others[0]))
         } else {
             tile.word.set_text(shell_model::state_label(word));
             sub
@@ -2462,11 +2495,6 @@ fn apply_view(ui: &Ui, view: &View) {
         } else {
             paint_mark(&tile.mark, word);
         }
-        tile.sub.set_ellipsize(if elsewhere {
-            gtk::pango::EllipsizeMode::Middle
-        } else {
-            gtk::pango::EllipsizeMode::None
-        });
         match sub {
             Some(text) => {
                 tile.sub.set_text(&text);
@@ -3169,6 +3197,10 @@ const GLYPH_HOME: &str = r#"<path d="M4 11l8-7 8 7v8a1.5 1.5 0 0 1-1.5 1.5h-13A1
 const GLYPH_JOURNAL: &str = r#"<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3"/>"#;
 const GLYPH_DEVICE: &str =
     r#"<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2.5 19.5h19"/>"#;
+const GLYPH_PHONE: &str =
+    r#"<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>"#;
+const GLYPH_TABLET: &str =
+    r#"<rect x="4.5" y="3" width="15" height="18" rx="2.5"/><path d="M11 18h2"/>"#;
 const GLYPH_UPDATES: &str =
     r#"<path d="M12 4v10M8 10.5l4 4 4-4"/><path d="M4 12a8 8 0 1 0 16 0"/>"#;
 const GLYPH_HELP: &str = r#"<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.6 2.3c-.8.4-1.1 1-1.1 1.7M12 17h.01"/>"#;
@@ -3384,7 +3416,9 @@ button.sol-action:focus-visible, button.sol-glyph:focus-visible, button.sol-back
   outline: 2px solid #E8913A;\
   outline-offset: 2px;\
 }\
-.sol-remote-card { border: 1px solid alpha(currentColor,0.18); border-radius: 10px; padding: 12px; }\
+.sol-remote-card { border: 1px solid alpha(currentColor,0.18); border-radius: 10px; padding: 12px 14px; }\
+.sol-remote-card separator { margin: 2px 0 2px 28px; background-color: alpha(currentColor,0.12); }\
+.sol-remote-device { font-weight: 600; }\
 .sol-quiet { font-size: 12.5px; }\
 .sol-shelf.sol-shelf-over {\
   background-color: #FEFCF8;\
@@ -3516,11 +3550,34 @@ fn place_pane(body: &gtk::Box, pane: &gtk::Box) {
     }
 }
 
+/// The glyph for another paired device: phone, tablet, or a computer, drawn
+/// with the same laptop as "this computer".
+fn remote_device_glyph(device: &solstone_linux::shared_sources::OtherVault) -> &'static str {
+    let kinds = [device.device_type.as_deref(), device.platform.as_deref()];
+    let is = |names: &[&str]| {
+        kinds
+            .iter()
+            .flatten()
+            .any(|kind| names.iter().any(|name| kind.eq_ignore_ascii_case(name)))
+    };
+    if is(&["tablet", "ipad", "ipados"]) {
+        GLYPH_TABLET
+    } else if is(&["phone", "iphone", "android", "ios"]) {
+        GLYPH_PHONE
+    } else {
+        GLYPH_DEVICE
+    }
+}
+
 fn glyph_widget(paths: &str) -> gtk::Widget {
+    glyph_widget_px(paths, 24)
+}
+
+fn glyph_widget_px(paths: &str, size: i32) -> gtk::Widget {
     let area = gtk::DrawingArea::new();
-    area.set_size_request(24, 24);
-    area.set_content_width(24);
-    area.set_content_height(24);
+    area.set_size_request(size, size);
+    area.set_content_width(size);
+    area.set_content_height(size);
     area.set_halign(gtk::Align::Start);
     area.set_valign(gtk::Align::Center);
     area.set_can_focus(false);

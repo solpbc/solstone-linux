@@ -2586,7 +2586,14 @@ fn create_obsidian_section(
             on_box.set_visible(status.state != State::Off && status.state != State::Confirm);
             let lines = map_obsidian(&status);
             state_label.set_text(lines.state.unwrap_or_default());
-            state_label.set_visible(lines.state.is_some());
+            // The page's verdict above already names on, paused and needs attention.
+            state_label.set_visible(
+                lines.state.is_some()
+                    && !matches!(
+                        status.state,
+                        State::On | State::Paused | State::NeedsAttention
+                    ),
+            );
             detail_label.set_text(lines.detail.unwrap_or_default());
             detail_label.set_visible(lines.detail.is_some());
             // The section's heading already says `vault`.
@@ -2605,18 +2612,20 @@ fn create_obsidian_section(
             }
             match status.last_checked_ms {
                 Some(ms) => {
+                    let when = solstone_linux::shell_model::format_relative_millis(ms);
                     last_checked_label.set_text(&format!(
                         "{}: {}",
                         solstone_linux::copy::obsidian_last_checked(),
-                        format_timestamp(ms as f64 / 1000.0)
+                        when
                     ));
-                    last_checked_label.set_visible(true);
+                    last_checked_label.set_visible(!when.is_empty());
                 }
                 None => last_checked_label.set_visible(false),
             }
             waiting_label.set_text(&solstone_linux::copy::obsidian_waiting(&format_note_count(
                 status.waiting,
             )));
+            waiting_label.set_visible(status.waiting > 0);
             not_on_device_label.set_text(&format!(
                 "{}: {}",
                 solstone_linux::copy::obsidian_not_on_device(),
