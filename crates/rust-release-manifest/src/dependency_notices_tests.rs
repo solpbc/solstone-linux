@@ -5,8 +5,8 @@ use crate::{
     RepoRoot,
     dependency_notices::{
         DependencyNoticesIndex, DependencyNoticesPaths, NOTICES_HEADER, PrebuiltScanTarget,
-        check_dependency_notices, scan_non_test_prebuilts, verify_covered_population,
-        verify_prebuilts_allowlist,
+        check_dependency_notices, license_election, scan_non_test_prebuilts,
+        verify_covered_population, verify_prebuilts_allowlist,
     },
 };
 use std::{collections::BTreeSet, fs};
@@ -283,5 +283,80 @@ fn covered_platform_crates_must_all_be_in_the_notices_population() {
             "dependency notices coverage mismatch: package arm-only 1.0.0 is in the aarch64-unknown-linux-gnu closure"
         ),
         "{error}"
+    );
+}
+
+#[test]
+fn index_records_the_permissive_option_elected() {
+    let root = RepoRoot::resolve().unwrap();
+    let index: DependencyNoticesIndex = serde_json::from_str(
+        &fs::read_to_string(
+            root.path()
+                .join("licensing/rust-dependency-notices.index.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let self_cell = index
+        .packages
+        .iter()
+        .find(|package| package.name == "self_cell")
+        .expect("self_cell is in the shipped closure");
+    assert_eq!(self_cell.license_election.as_deref(), Some("Apache-2.0"));
+
+    for (expression, expected) in [
+        ("Apache-2.0 OR GPL-2.0-only", Some("Apache-2.0")),
+        ("MIT/Apache-2.0", Some("MIT")),
+        (
+            "(GPL-3.0-only OR Apache-2.0) AND Unicode-3.0",
+            Some("Apache-2.0 AND Unicode-3.0"),
+        ),
+        (
+            "Apache-2.0 WITH LLVM-exception OR MIT",
+            Some("Apache-2.0 WITH LLVM-exception"),
+        ),
+        ("MIT", None),
+        ("MPL-2.0", None),
+        ("LGPL-2.1-only OR GPL-2.0-only", None),
+    ] {
+        assert_eq!(
+            license_election(Some(expression)).as_deref(),
+            expected,
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn forged_license_election_fails_validation() {
+    let root = RepoRoot::resolve().unwrap();
+    let temp = tempdir().unwrap();
+    let forged_index_path = temp.path().join("index.json");
+    let mut index_data: DependencyNoticesIndex = serde_json::from_str(
+        &fs::read_to_string(
+            root.path()
+                .join("licensing/rust-dependency-notices.index.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let package = index_data
+        .packages
+        .iter_mut()
+        .find(|package| package.name == "self_cell")
+        .unwrap();
+    package.license_election = Some("GPL-2.0-only".to_owned());
+    fs::write(
+        &forged_index_path,
+        serde_json::to_string(&index_data).unwrap(),
+    )
+    .unwrap();
+
+    let mut paths = DependencyNoticesPaths::from_workspace_root(root.path());
+    paths.index = forged_index_path;
+    let msg = check_dependency_notices(&paths).unwrap_err().to_string();
+    assert!(
+        msg.contains("license election mismatch"),
+        "expected license election mismatch, actual: {msg}"
     );
 }

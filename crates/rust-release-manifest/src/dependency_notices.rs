@@ -87,7 +87,170 @@ pub struct PackageNoticesEntry {
     pub version: String,
     pub source: String,
     pub license: Option<String>,
+    /// When the declared SPDX expression offers a choice (`OR`, or the legacy
+    /// `/`), the wholly permissive terms the crate is used under: the first
+    /// wholly permissive option at each choice. Null when the expression offers
+    /// no choice, or no wholly permissive way through; a crate of the latter
+    /// kind is admitted by name in deny.toml after legal review.
+    pub license_election: Option<String>,
     pub members: Vec<NoticeMemberEntry>,
+}
+
+/// Licenses that impose only attribution, notice or license-text duties.
+const WHOLLY_PERMISSIVE: &[&str] = &[
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+];
+
+#[derive(Debug)]
+enum SpdxExpr {
+    Term(String),
+    Or(Vec<SpdxExpr>),
+    And(Vec<SpdxExpr>),
+}
+
+fn spdx_tokens(expression: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in expression.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '+' | '-') {
+            current.push(ch);
+            continue;
+        }
+        if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+        match ch {
+            '(' | ')' | '/' => tokens.push(ch.to_string()),
+            c if c.is_whitespace() => {}
+            _ => return None,
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
+
+fn is_operator(token: &str) -> bool {
+    matches!(token, "AND" | "OR" | "WITH" | "(" | ")" | "/")
+}
+
+struct SpdxParser {
+    tokens: Vec<String>,
+    cursor: usize,
+}
+
+impl SpdxParser {
+    fn peek(&self) -> Option<&str> {
+        self.tokens.get(self.cursor).map(String::as_str)
+    }
+
+    fn take(&mut self) -> Option<String> {
+        let token = self.tokens.get(self.cursor).cloned();
+        self.cursor += 1;
+        token
+    }
+
+    fn or(&mut self) -> Option<SpdxExpr> {
+        let mut children = vec![self.and()?];
+        while matches!(self.peek(), Some("OR" | "/")) {
+            self.take();
+            children.push(self.and()?);
+        }
+        Some(if children.len() == 1 {
+            children.remove(0)
+        } else {
+            SpdxExpr::Or(children)
+        })
+    }
+
+    fn and(&mut self) -> Option<SpdxExpr> {
+        let mut children = vec![self.term()?];
+        while self.peek() == Some("AND") {
+            self.take();
+            children.push(self.term()?);
+        }
+        Some(if children.len() == 1 {
+            children.remove(0)
+        } else {
+            SpdxExpr::And(children)
+        })
+    }
+
+    fn term(&mut self) -> Option<SpdxExpr> {
+        if self.peek() == Some("(") {
+            self.take();
+            let inner = self.or()?;
+            return (self.take().as_deref() == Some(")")).then_some(inner);
+        }
+        let license = self.take().filter(|token| !is_operator(token))?;
+        if self.peek() == Some("WITH") {
+            self.take();
+            let exception = self.take().filter(|token| !is_operator(token))?;
+            return Some(SpdxExpr::Term(format!("{license} WITH {exception}")));
+        }
+        Some(SpdxExpr::Term(license))
+    }
+}
+
+fn parse_spdx(expression: &str) -> Option<SpdxExpr> {
+    let tokens = spdx_tokens(expression)?;
+    let mut parser = SpdxParser { tokens, cursor: 0 };
+    let tree = parser.or()?;
+    (parser.cursor == parser.tokens.len()).then_some(tree)
+}
+
+fn spdx_has_choice(tree: &SpdxExpr) -> bool {
+    match tree {
+        SpdxExpr::Term(_) => false,
+        SpdxExpr::Or(_) => true,
+        SpdxExpr::And(children) => children.iter().any(spdx_has_choice),
+    }
+}
+
+/// The terms required after taking the first wholly permissive option at every
+/// OR, or None when no wholly permissive way through exists.
+fn permissive_path(tree: &SpdxExpr) -> Option<Vec<String>> {
+    match tree {
+        SpdxExpr::Term(term) => WHOLLY_PERMISSIVE
+            .contains(&term.as_str())
+            .then(|| vec![term.clone()]),
+        SpdxExpr::Or(children) => children.iter().find_map(permissive_path),
+        SpdxExpr::And(children) => {
+            let mut terms: Vec<String> = Vec::new();
+            for child in children {
+                for term in permissive_path(child)? {
+                    if !terms.contains(&term) {
+                        terms.push(term);
+                    }
+                }
+            }
+            Some(terms)
+        }
+    }
+}
+
+/// The license election recorded beside a crate's row in the notices index.
+pub(crate) fn license_election(expression: Option<&str>) -> Option<String> {
+    let tree = parse_spdx(expression?)?;
+    if !spdx_has_choice(&tree) {
+        return None;
+    }
+    permissive_path(&tree).map(|terms| terms.join(" AND "))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +820,7 @@ pub fn generate_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()>
             name: pkg.name,
             version: pkg.version,
             source: pkg.source,
+            license_election: license_election(pkg.license.as_deref()),
             license: pkg.license,
             members: member_entries,
         });
@@ -847,6 +1011,14 @@ pub fn check_dependency_notices(paths: &DependencyNoticesPaths) -> Result<()> {
             return Err(Error::new(format!(
                 "source mismatch for {} {}: metadata '{}', index '{}'",
                 live_pkg.name, live_pkg.version, live_pkg.source, index_pkg.source
+            )));
+        }
+
+        let live_election = license_election(live_pkg.license.as_deref());
+        if live_election != index_pkg.license_election {
+            return Err(Error::new(format!(
+                "license election mismatch for {} {}: live {:?}, index {:?}\nrepair: regenerate dependency notices",
+                live_pkg.name, live_pkg.version, live_election, index_pkg.license_election
             )));
         }
 

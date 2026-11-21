@@ -14,8 +14,13 @@ ignore = [
 ]
 
 [licenses]
+# Only wholly permissive licenses are allowed globally. An SPDX `OR` passes when
+# any one option is on this list; the crate is used under a permissive option,
+# and the notices index records that option as `license_election`. Copyleft,
+# weak-copyleft, source-available and unknown licenses (MPL, LGPL, GPL, AGPL,
+# ...) are not allowed globally: a new crate that has no permissive option fails
+# this gate until legal review clears it by name in `exceptions`.
 allow = [
-    "AGPL-3.0-only",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
@@ -24,12 +29,24 @@ allow = [
     "ISC",
     "MIT",
     "MIT-0",
-    "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
 ]
 confidence-threshold = 0.8
+exceptions = [
+    # Our own AGPL-3.0-only daemon crate; it does not set `publish = false`.
+    { crate = "solstone-linux", allow = ["AGPL-3.0-only"] },
+    # Our own AGPL-3.0-only protocol crates, from the pinned spl-rust git source.
+    { crate = "spl-core", allow = ["AGPL-3.0-only"] },
+    { crate = "spl-home", allow = ["AGPL-3.0-only"] },
+    { crate = "spl-transport", allow = ["AGPL-3.0-only"] },
+]
+
+# Workspace and vendored path crates marked `publish = false` are our own
+# AGPL-3.0-only code (see LICENSE).
+[licenses.private]
+ignore = true
 
 [bans]
 multiple-versions = "warn"
