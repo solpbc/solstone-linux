@@ -7,7 +7,7 @@ use crate::private_file::{atomic_write_bytes, ensure_private_directory};
 use crate::private_link::{LinkOutcome, PrivateLinkCapability};
 use crate::upload::{CapturedAssociation, UploadClient};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use solstone_i18n::{message, text};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -78,6 +78,34 @@ struct Item {
     may_have_saved: bool,
     saved: Option<Saved>,
     refusal: Option<Refusal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<Handoff>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Handoff {
+    pub area: String,
+    pub context: serde_json::Map<String, Value>,
+}
+
+enum PickedFile {
+    Path(String),
+    Open(String, File),
+}
+
+impl PickedFile {
+    fn name(&self) -> &Path {
+        match self {
+            Self::Path(path) | Self::Open(path, _) => Path::new(path),
+        }
+    }
+    fn open(self) -> io::Result<File> {
+        match self {
+            Self::Path(path) => regular_file(Path::new(&path)),
+            Self::Open(_, file) if file.metadata()?.is_file() => Ok(file),
+            Self::Open(..) => Err(ioe("not a regular file")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -164,6 +192,8 @@ struct Store {
     observed: Option<CapturedAssociation>,
     version: Option<String>,
     delivered_journal: Option<String>,
+    receipts: std::collections::VecDeque<(String, Option<String>)>,
+    sent_bytes: BTreeMap<String, u64>,
     addition: Option<String>,
     intake_refused: Vec<IntakeRefusal>,
     interrupted: bool,
@@ -398,6 +428,7 @@ impl ImportHandle {
                         phase: Phase::Refused,
                         may_have_saved: true,
                         saved: None,
+                        handoff: None,
                         refusal: Some(local_refusal("this couldn't be read. add it again")),
                     },
                 };
@@ -491,49 +522,125 @@ impl ImportHandle {
     }
 
     pub async fn add_files(&self, paths: Vec<String>) -> bool {
-        if self.root.is_none() || self.adding.swap(true, Ordering::AcqRel) {
-            return false;
+        let result = self
+            .add_selected(paths.into_iter().map(PickedFile::Path).collect(), None)
+            .await;
+        matches!(result["outcome"].as_str(), Some("queued" | "refused"))
+            && result["store_error"] != true
+    }
+
+    pub(crate) async fn add_open_files(
+        &self,
+        files: Vec<(String, File)>,
+        handoff: Handoff,
+    ) -> Value {
+        self.add_selected(
+            files
+                .into_iter()
+                .map(|(name, file)| PickedFile::Open(name, file))
+                .collect(),
+            Some(handoff),
+        )
+        .await
+    }
+
+    async fn add_selected(&self, files: Vec<PickedFile>, handoff: Option<Handoff>) -> Value {
+        if self.root.is_none() {
+            return json!({"outcome":"refused","reason":store_error(),"store_error":true});
+        }
+        if self.adding.swap(true, Ordering::AcqRel) {
+            return json!({"outcome":"busy"});
         }
         let handle = self.clone();
         let result = tokio::task::spawn_blocking(move || {
-            handle.restore()?;
-            let total = paths.len();
-            let mut accepted = 0;
+            let mut accepted = Vec::new();
+            let mut refused = Vec::new();
+            let mut store_failed = false;
+            let restored = handle.restore().is_ok();
+            let total = files.len();
             handle
                 .state
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .intake_refused
                 .clear();
-            for (index, path) in paths.into_iter().enumerate() {
+            for (index, file) in files.into_iter().enumerate() {
+                let name = file
+                    .name()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 handle
                     .state
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .addition =
                     Some(message!("linux.import.saving", "saved" => index + 1, "total" => total));
-                if handle.copy_one(Path::new(&path))? {
-                    accepted += 1;
+                let result = if restored {
+                    handle.copy_one(file, handoff.clone())
+                } else {
+                    Err(ioe("store unavailable"))
+                };
+                match result {
+                    Ok(Ok(item)) => {
+                        accepted.push(json!({"item":item.id,"name":item.name,"size":item.size}))
+                    }
+                    Ok(Err(reason)) => refused.push(IntakeRefusal { name, reason }),
+                    Err(_) => {
+                        store_failed = true;
+                        refused.push(IntakeRefusal {
+                            name,
+                            reason: store_error().to_owned(),
+                        });
+                    }
                 }
             }
-            handle
-                .state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .addition = Some(if accepted == 0 {
-                text!("linux.import.nothingwassaved").to_owned()
-            } else {
-                message!("linux.import.saved", "count" => accepted)
-            });
-            Ok::<_, io::Error>(())
+            {
+                let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
+                state.intake_refused.clone_from(&refused);
+                state.addition = Some(if accepted.is_empty() {
+                    text!("linux.import.nothingwassaved").to_owned()
+                } else {
+                    message!("linux.import.saved", "count" => accepted.len())
+                });
+            }
+            handle.adding.store(false, Ordering::Release);
+            handle.wake();
+            json!({"outcome":if accepted.is_empty() {"refused"} else {"queued"},
+                   "items":accepted,"refused":refused,"store_error":store_failed})
         })
         .await;
-        self.adding.store(false, Ordering::Release);
-        self.wake();
-        matches!(result, Ok(Ok(())))
+        result.unwrap_or_else(|_| {
+            self.adding.store(false, Ordering::Release);
+            json!({"outcome":"refused","reason":store_error(),"store_error":true})
+        })
     }
 
-    fn copy_one(&self, path: &Path) -> io::Result<bool> {
+    pub(crate) fn handoff_status(&self, id: &str) -> Value {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((_, row)) = state.receipts.iter().find(|(item, _)| item == id) {
+            return json!({"state":"delivered","import_id":row});
+        }
+        let Some(item) = state.items.get(id) else {
+            return json!({"state":"gone"});
+        };
+        if let Some(refusal) = &item.refusal {
+            return json!({"state":"attention","reason":refusal.reason,"import_id":item.saved.as_ref().map(|saved| &saved.timestamp)});
+        }
+        if state.busy.contains(id) {
+            return json!({"state":"uploading","bytes":state.sent_bytes.get(id).copied().unwrap_or(0),"size":item.size});
+        }
+        json!({"state":"waiting"})
+    }
+
+    fn copy_one(
+        &self,
+        selected: PickedFile,
+        handoff: Option<Handoff>,
+    ) -> io::Result<Result<Item, String>> {
+        let path_buf = selected.name().to_owned();
+        let path = path_buf.as_path();
         let root = self
             .root
             .as_ref()
@@ -560,13 +667,11 @@ impl ImportHandle {
             may_have_saved: false,
             saved: None,
             refusal: None,
+            handoff,
         };
         self.publish(item.clone())?;
         let copied = (|| {
-            if !convertible && file_mime(path).is_none() {
-                return Err(ioe("unsupported"));
-            }
-            let mut source = regular_file(path)?;
+            let mut source = selected.open()?;
             let size = source.metadata()?.len();
             if size > FILE_LIMIT {
                 return Err(ioe("too_large"));
@@ -638,8 +743,8 @@ impl ImportHandle {
                 }
                 item.size = size;
                 item.phase = Phase::Pending;
-                self.publish(item)?;
-                Ok(true)
+                self.publish(item.clone())?;
+                Ok(Ok(item))
             }
             Err(error) => {
                 let reason = match error.to_string().as_str() {
@@ -651,14 +756,6 @@ impl ImportHandle {
                     }
                     _ => "this couldn't be read. add it again",
                 };
-                self.state
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .intake_refused
-                    .push(IntakeRefusal {
-                        name: original_name,
-                        reason: reason.to_owned(),
-                    });
                 // Nothing was taken, so the pre-copy record goes the way a removal does:
                 // a tombstone first, so a crash during cleanup never brings it back.
                 let id = item.id.clone();
@@ -670,7 +767,7 @@ impl ImportHandle {
                     .unwrap_or_else(|p| p.into_inner())
                     .items
                     .remove(&id);
-                Ok(false)
+                Ok(Err(reason.to_owned()))
             }
         }
     }
@@ -802,6 +899,14 @@ impl ImportHandle {
                 return Ok(false);
             }
             let mut next = item.clone();
+            if next.refusal.as_ref().is_some_and(|refusal| {
+                matches!(
+                    refusal.reason_code.as_deref(),
+                    Some("import_preview_required" | "import_not_found")
+                )
+            }) {
+                next.saved = None;
+            }
             next.refusal = None;
             next.phase = Phase::Pending;
             handle.persist(&next)?;
@@ -1141,17 +1246,39 @@ impl ImportHandle {
             item.saved = None;
             self.publish(item.clone())?;
             let file = tokio::fs::File::from_std(payload);
+            let state = self.state.clone();
+            let upload_id = item.id.clone();
+            let mut sent = 0;
+            let stream =
+                futures_util::TryStreamExt::inspect_ok(ReaderStream::new(file), move |chunk| {
+                    sent += chunk.len() as u64;
+                    state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .sent_bytes
+                        .insert(upload_id.clone(), sent);
+                });
             let part = reqwest::multipart::Part::stream_with_length(
-                reqwest::Body::wrap_stream(ReaderStream::new(file)),
+                reqwest::Body::wrap_stream(stream),
                 item.size,
             )
             .file_name(item.name.clone())
             .mime_str(&item.mime)
             .map_err(ioe)?;
-            let form = reqwest::multipart::Form::new()
+            let mut form = reqwest::multipart::Form::new()
                 .text("client_item_id", item.id.clone())
-                .text("imported_via", "desktop")
+                .text("imported_via", "linux")
                 .part("file", part);
+            if let Some(handoff) = &item.handoff {
+                form = form.text("area", handoff.area.clone());
+                if !matches!(handoff.area.as_str(), "quick" | "recording") {
+                    form = form.text("source_hint", handoff.area.clone());
+                }
+                form = form.text(
+                    "context",
+                    serde_json::to_string(&handoff.context).map_err(ioe)?,
+                );
+            }
             let Some(outcome) =
                 guarded(client, association, running, capability.import_save(form)).await
             else {
@@ -1172,8 +1299,8 @@ impl ImportHandle {
                         .saved_current
                         .insert(item.id.clone(), association.clone());
                 }
-                Answer::Delivered => {
-                    return self.delivered(item, capability.writer().identity_key());
+                Answer::Delivered(row) => {
+                    return self.delivered(item, capability.writer().identity_key(), row);
                 }
                 other => return self.retain_answer(item, other, binding, version),
             }
@@ -1197,7 +1324,7 @@ impl ImportHandle {
         };
         self.auth_answer(client, association, &outcome);
         match parse_reply(outcome, true) {
-            Answer::Delivered => self.delivered(item, capability.writer().identity_key()),
+            Answer::Delivered(row) => self.delivered(item, capability.writer().identity_key(), row),
             other => self.retain_answer(item, other, binding, version),
         }
     }
@@ -1219,7 +1346,7 @@ impl ImportHandle {
         Ok(())
     }
 
-    fn delivered(&self, mut item: Item, journal: &str) -> io::Result<()> {
+    fn delivered(&self, mut item: Item, journal: &str, row: Option<String>) -> io::Result<()> {
         item.phase = Phase::Delivered;
         self.publish(item.clone())?;
         let root = self
@@ -1234,6 +1361,16 @@ impl ImportHandle {
         {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.delivered_journal = Some(journal.to_owned());
+            if item.handoff.is_some() {
+                if state.receipts.len() >= 1024 {
+                    state.receipts.pop_front();
+                }
+                state.receipts.push_back((
+                    item.id.clone(),
+                    row.or_else(|| item.saved.as_ref().map(|saved| saved.timestamp.clone())),
+                ));
+            }
+            state.sent_bytes.remove(&item.id);
             state.items.remove(&item.id);
             state.saved_current.remove(&item.id);
         }
@@ -1247,12 +1384,11 @@ struct Sending {
 }
 impl Drop for Sending {
     fn drop(&mut self) {
-        self.handle
-            .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .busy
-            .remove(&self.id);
+        {
+            let mut state = self.handle.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.busy.remove(&self.id);
+            state.sent_bytes.remove(&self.id);
+        }
         self.handle.publish_status();
     }
 }
@@ -1295,7 +1431,7 @@ async fn guarded<T>(
 #[derive(Debug)]
 enum Answer {
     Saved { path: String, timestamp: String },
-    Delivered,
+    Delivered(Option<String>),
     Retry,
     Refused(Refusal),
 }
@@ -1318,7 +1454,7 @@ fn parse_reply(outcome: LinkOutcome, start: bool) -> Answer {
         && root["reason_code"] == "invalid_operation_for_state"
         && root["kind"] == "already_imported"
     {
-        return Answer::Delivered;
+        return Answer::Delivered(string("import_id"));
     }
     if status.as_u16() == 200 {
         if start
@@ -1326,7 +1462,7 @@ fn parse_reply(outcome: LinkOutcome, start: bool) -> Answer {
             && string("task_id").is_some()
             && string("import_id").is_some()
         {
-            return Answer::Delivered;
+            return Answer::Delivered(string("import_id"));
         }
         if !start
             && root["status"] == "staged"
@@ -1405,7 +1541,7 @@ mod tests {
                     },
                     start
                 ),
-                Answer::Delivered
+                Answer::Delivered(_)
             ));
             for status in [200, 409, 500] {
                 assert!(!matches!(
@@ -1416,7 +1552,7 @@ mod tests {
                         },
                         start
                     ),
-                    Answer::Delivered
+                    Answer::Delivered(_)
                 ));
             }
             assert!(matches!(
@@ -1432,6 +1568,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "full-tests")]
     fn store_entries(root: &Path) -> Vec<String> {
         fs::read_dir(root)
             .unwrap()
@@ -1440,58 +1577,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_file_is_named_under_the_result_and_leaves_nothing() {
+    async fn arbitrary_files_reach_custody_with_their_original_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let handle = ImportHandle {
+            root: Some(temp.path().join("import")),
+            ..ImportHandle::default()
+        };
+        let source = temp.path().join("extensionless");
+        fs::write(&source, b"file bytes").unwrap();
+        assert!(handle.add_files(vec![source.display().to_string()]).await);
+        let state = handle.state.lock().unwrap();
+        let item = state.items.values().next().unwrap();
+        assert_eq!(item.name, "extensionless");
+        assert_eq!(item.mime, "application/octet-stream");
+        assert_eq!(item.phase, Phase::Pending);
+    }
+
+    #[tokio::test]
+    async fn handoff_owns_selected_descriptor_and_preserves_context_across_restart() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("import");
         let handle = ImportHandle {
             root: Some(root.clone()),
             ..ImportHandle::default()
         };
-        let source = temp.path().join("unsupported.mp4");
-        fs::write(&source, b"not an import").unwrap();
-        assert!(handle.add_files(vec![source.display().to_string()]).await);
-        assert!(handle.state.lock().unwrap().items.is_empty());
-        assert!(store_entries(&root).is_empty());
-        let document = handle.document();
-        assert!(document.rows.is_empty());
-        assert!(!document.held);
-        assert!(!document.interrupted);
+        let file = temp.path().join("source");
+        fs::write(&file, b"selected bytes").unwrap();
+        let selected = File::open(&file).unwrap();
+        fs::remove_file(&file).unwrap();
+        let handoff: Handoff =
+            serde_json::from_value(json!({"area":"document","context":{"future":{"nested":true}}}))
+                .unwrap();
+        let result = handle
+            .add_open_files(vec![("notes.txt".into(), selected)], handoff)
+            .await;
+        assert_eq!(result["outcome"], "queued", "{result}");
+        let id = result["items"][0]["item"].as_str().unwrap();
         assert_eq!(
-            document.addition.as_deref(),
-            Some("nothing was saved on this device.")
+            fs::read(root.join(id).join("payload")).unwrap(),
+            b"selected bytes"
         );
-        assert_eq!(
-            document.intake_refused,
-            vec![IntakeRefusal {
-                name: "unsupported.mp4".to_owned(),
-                reason: "your journal can't take this kind of file".to_owned(),
-            }]
-        );
-        assert_eq!(
-            document.intake_refused[0].line(),
-            "unsupported.mp4: your journal can't take this kind of file"
-        );
-        let reopened = ImportHandle {
-            root: Some(root.clone()),
+        let restored = ImportHandle {
+            root: Some(root),
             ..ImportHandle::default()
         };
-        reopened.restore().unwrap();
-        assert!(reopened.document().rows.is_empty());
-        assert!(!reopened.document().interrupted);
-        // The next addition starts its own result.
-        let other = temp.path().join("other.mov");
-        fs::write(&other, b"not an import either").unwrap();
-        assert!(handle.add_files(vec![other.display().to_string()]).await);
-        let names: Vec<_> = handle
-            .document()
-            .intake_refused
-            .into_iter()
-            .map(|r| r.name)
-            .collect();
-        assert_eq!(names, vec!["other.mov"]);
-        // An unreadable store shows only its own sentence.
-        handle.state.lock().unwrap().failed = true;
-        assert!(handle.document().intake_refused.is_empty());
+        restored.restore().unwrap();
+        assert_eq!(restored.handoff_status(id)["state"], "waiting");
+        let state = restored.state.lock().unwrap();
+        let kept = state.items[id].handoff.as_ref().unwrap();
+        assert_eq!(kept.area, "document");
+        assert_eq!(kept.context["future"]["nested"], true);
     }
 
     #[test]
@@ -1829,7 +1964,7 @@ mod tests {
             assert!(save.body.windows(bytes.len()).any(|window| window == bytes));
             let text = String::from_utf8_lossy(&save.body);
             assert!(
-                text.contains(&id) && text.contains("client_item_id") && text.contains("desktop")
+                text.contains(&id) && text.contains("client_item_id") && text.contains("linux")
             );
             let start = requests
                 .iter()

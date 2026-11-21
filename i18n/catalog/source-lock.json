@@ -3601,7 +3601,7 @@
     },
     {
       "id": "linux.import.explanation",
-      "source": "7acec85b43b9b1348df74a3c84de00d43e4ef683ccef95d721cad51e6822d824",
+      "source": "b557179ae59519fcf4e623dfdb2107fb7262d6b25d1fde2eb84ed23ab3087d0f",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
       "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
       "locales": []
@@ -3644,6 +3644,13 @@
     {
       "id": "linux.import.journalrefusal",
       "source": "d435c8631acda1d4319822137cb42e685b303dbbcb653f4fd2928cb8c3fae451",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.import.moreimports",
+      "source": "7de9a06c950f205d3d25ee4d45bcb8a612a294696a1c7d90b271f33f63df7a82",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
       "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
       "locales": []

@@ -12,6 +12,7 @@ and this project adheres to Semantic Versioning.
 
 ### Added
 
+- choose more imports to open your journal's import page. you can close that window while your files are on their way.
 - if Obsidian is off or you haven't set it up on this computer, its tile can show another device by name. open the tile to see the full list or choose a vault on this computer.
 
 ## [2.0.48] - 2026-11-20

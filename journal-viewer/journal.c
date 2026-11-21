@@ -18,6 +18,14 @@ typedef struct {
     GtkWindow *window;
     WebKitWebView *view;
     GSocket *refusal_socket;
+    GDBusConnection *bus;
+    char *nonce;
+    char *document_id;
+    guint64 document_generation;
+    gboolean import_ready;
+    gboolean import_busy;
+    GListStore *drop_files;
+    char *drop_token;
     int port;
     gboolean pending;
 } Journal;
@@ -29,6 +37,8 @@ static gboolean journal_uri(Journal *journal, GUri *uri)
         g_strcmp0(g_uri_get_host(uri), "127.0.0.1") == 0 &&
         g_uri_get_port(uri) == journal->port;
 }
+
+#include "import.c.inc"
 
 static gboolean external_uri(GUri *uri)
 {
@@ -130,6 +140,13 @@ static gboolean decide(WebKitWebView *view, WebKitPolicyDecision *decision,
 static void loaded(WebKitWebView *view, WebKitLoadEvent event, gpointer data)
 {
     Journal *journal = data;
+    if (event == WEBKIT_LOAD_STARTED) {
+        journal->document_generation++;
+        g_clear_pointer(&journal->document_id, g_free);
+        journal->import_ready = FALSE;
+        g_clear_object(&journal->drop_files);
+        g_clear_pointer(&journal->drop_token, g_free);
+    }
     if (event != WEBKIT_LOAD_COMMITTED || !journal->pending)
         return;
     g_autoptr(GUri) uri = g_uri_parse(webkit_web_view_get_uri(view), G_URI_FLAGS_NONE, NULL);
@@ -376,12 +393,26 @@ static gboolean create_view(Journal *journal)
         WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
     webkit_user_content_manager_add_script(manager, init);
     webkit_user_script_unref(init);
+    journal->bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (journal->bus && webkit_user_content_manager_register_script_message_handler_with_reply(
+            manager, "journalImport", NULL)) {
+        g_signal_connect(manager, "script-message-with-reply-received::journalImport",
+            G_CALLBACK(import_message), journal);
+        journal->nonce = g_uuid_string_random();
+        g_autofree char *source = g_strdup_printf("(%s)(%s,'%s','%s')",
+            IMPORT_SCRIPT, IMPORT_CONTRACT, journal->nonce, host);
+        // Match the dynamic loopback port inside the top-document script.
+        WebKitUserScript *import = webkit_user_script_new(source,
+            WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+        webkit_user_content_manager_add_script(manager, import);
+        webkit_user_script_unref(import);
+    }
     // WebKit applies this policy in addition to the journal's own HTTP policy.
     // Inline journal scripts/styles and local media blobs still work.
     g_autofree char *policy = g_strdup_printf(
         "default-src %1$s; connect-src %1$s; script-src %1$s 'unsafe-inline'; "
         "style-src %1$s 'unsafe-inline'; img-src %1$s data: blob:; font-src %1$s data:; "
-        "media-src %1$s blob: data:; worker-src %1$s blob:; frame-src %1$s; "
+        "media-src %1$s blob: data:; worker-src %1$s blob:; frame-src 'none'; "
         "form-action %1$s; base-uri %1$s; object-src 'none'", host);
     journal->view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
         "web-context", context, "network-session", session, "user-content-manager", manager,
@@ -393,6 +424,11 @@ static gboolean create_view(Journal *journal)
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
     g_signal_connect(keys, "key-pressed", G_CALLBACK(key_pressed), journal->view);
     gtk_widget_add_controller(GTK_WIDGET(journal->window), keys);
+    GtkDropTarget *drops = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(drops), GTK_PHASE_CAPTURE);
+    g_signal_connect(drops, "accept", G_CALLBACK(accept_drop), journal);
+    g_signal_connect(drops, "drop", G_CALLBACK(native_drop), journal);
+    gtk_widget_add_controller(GTK_WIDGET(journal->view), GTK_EVENT_CONTROLLER(drops));
     gtk_window_set_child(journal->window, GTK_WIDGET(journal->view));
     g_signal_connect(session, "download-started", G_CALLBACK(download_started), journal);
     g_signal_connect(journal->window, "close-request", G_CALLBACK(closed), journal);
@@ -474,6 +510,11 @@ int main(void)
     g_autoptr(GIOChannel) input = g_io_channel_unix_new(STDIN_FILENO);
     g_io_add_watch(input, G_IO_IN | G_IO_HUP | G_IO_ERR, incoming, &journal);
     g_main_loop_run(journal.loop);
+    g_clear_object(&journal.bus);
+    g_clear_object(&journal.drop_files);
+    g_free(journal.drop_token);
+    g_free(journal.nonce);
+    g_free(journal.document_id);
     g_clear_object(&journal.refusal_socket);
     g_main_loop_unref(journal.loop);
     return 0;

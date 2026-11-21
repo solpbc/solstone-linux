@@ -548,6 +548,7 @@ pub enum MessageId {
     m6c696e75782e696d706f72742e66696c65746f6f6c61726765,
     m6c696e75782e696d706f72742e68656c64,
     m6c696e75782e696d706f72742e6a6f75726e616c7265667573616c,
+    m6c696e75782e696d706f72742e6d6f7265696d706f727473,
     m6c696e75782e696d706f72742e6e616d65647265667573616c,
     m6c696e75782e696d706f72742e6e6f726f6f6d,
     m6c696e75782e696d706f72742e6e6f7468696e677761737361766564,
@@ -1417,6 +1418,7 @@ pub fn render_dotted_with_options(locale: &str, dotted_id: &str, args: &[(&str, 
         "linux.import.filetoolarge" => MessageId::m6c696e75782e696d706f72742e66696c65746f6f6c61726765,
         "linux.import.held" => MessageId::m6c696e75782e696d706f72742e68656c64,
         "linux.import.journalrefusal" => MessageId::m6c696e75782e696d706f72742e6a6f75726e616c7265667573616c,
+        "linux.import.moreimports" => MessageId::m6c696e75782e696d706f72742e6d6f7265696d706f727473,
         "linux.import.namedrefusal" => MessageId::m6c696e75782e696d706f72742e6e616d65647265667573616c,
         "linux.import.noroom" => MessageId::m6c696e75782e696d706f72742e6e6f726f6f6d,
         "linux.import.nothingwassaved" => MessageId::m6c696e75782e696d706f72742e6e6f7468696e677761737361766564,
@@ -8460,6 +8462,17 @@ pub fn render_with_options(locale: &str, id: MessageId, args: &[(&str, Value)], 
             #[allow(unused_mut)]
             let mut f_args = FluentArgs::new();
             ("m6c696e75782e696d706f72742e6a6f75726e616c7265667573616c".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e696d706f72742e6d6f7265696d706f727473 => {
+            const DECLARED: &[&str] = &[];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            ("m6c696e75782e696d706f72742e6d6f7265696d706f727473".to_string(), f_args)
         }
         MessageId::m6c696e75782e696d706f72742e6e616d65647265667573616c => {
             const DECLARED: &[&str] = &["name", "reason"];

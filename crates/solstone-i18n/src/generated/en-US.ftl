@@ -1041,7 +1041,7 @@ m6c696e75782e696d706f72742e63616e6e6f74636f6e76657274 = this device can't conver
 
 m6c696e75782e696d706f72742e64656c697665726564 = in your journal.
 
-m6c696e75782e696d706f72742e6578706c616e6174696f6e = adds PDFs, audio, images and text you choose here.
+m6c696e75782e696d706f72742e6578706c616e6174696f6e = choose files to bring into your journal.
 
 m6c696e75782e696d706f72742e66696c656b696e64 = your journal can't take this kind of file
 
@@ -1054,6 +1054,8 @@ m6c696e75782e696d706f72742e66696c65746f6f6c61726765 = it's larger than your jour
 m6c696e75782e696d706f72742e68656c64 = not going to your journal right now. each one says why.
 
 m6c696e75782e696d706f72742e6a6f75726e616c7265667573616c = your journal couldn't accept this.
+
+m6c696e75782e696d706f72742e6d6f7265696d706f727473 = more imports
 
 m6c696e75782e696d706f72742e6e616d65647265667573616c = { $name }: { $reason }
 

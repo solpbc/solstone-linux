@@ -92,6 +92,9 @@ impl ImportPage {
         let recent = label(text!("linux.window.checkingyourjournal"));
         let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
         widget.append(&choose);
+        let more = gtk::Button::with_label(text!("linux.import.moreimports"));
+        more.set_halign(gtk::Align::Start);
+        widget.append(&more);
         widget.append(&addition);
         widget.append(&intake_refused);
         widget.append(&error);
@@ -117,6 +120,25 @@ impl ImportPage {
             model: Rc::default(),
             chooser: Rc::default(),
         };
+        let opener = page.clone();
+        more.connect_clicked(move |_| {
+            let page = opener.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let opened = match ControlClient::session().await {
+                    Ok(client) => client
+                        .open_journal_at_path("/app/import/")
+                        .await
+                        .ok()
+                        .is_some_and(|reply| {
+                            crate::copy_map::map_open_journal_outcome(&reply).is_none()
+                        }),
+                    Err(_) => false,
+                };
+                if !opened {
+                    page.fail(solstone_linux::import::step_error());
+                }
+            });
+        });
         let picked = page.clone();
         page.choose.connect_clicked(move |button| {
             if picked.chooser.borrow().is_some() {
@@ -133,22 +155,6 @@ impl ImportPage {
                 Some(text!("linux.window.cancel")),
             );
             chooser.set_select_multiple(true);
-            let filter = gtk::FileFilter::new();
-            filter.set_name(Some(text!("linux.window.files")));
-            for mime in [
-                "application/pdf",
-                "audio/*",
-                "image/png",
-                "image/jpeg",
-                "image/gif",
-                "image/webp",
-                "image/heic",
-                "image/heif",
-                "text/plain",
-            ] {
-                filter.add_mime_type(mime);
-            }
-            chooser.add_filter(&filter);
             let page = picked.clone();
             let chooser_for_close = picked.chooser.clone();
             chooser.connect_response(move |chooser, response| {

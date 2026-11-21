@@ -130,6 +130,53 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     async fn import_files(&self, paths: Vec<String>) -> String {
         serde_json::json!({"ok":self.imports.add_files(paths).await}).to_string()
     }
+    async fn import_picked(
+        &self,
+        files: Vec<(String, zbus::zvariant::OwnedFd)>,
+        options: String,
+    ) -> String {
+        let refused = || {
+            serde_json::json!({"outcome":"refused","reason":crate::import::step_error()})
+                .to_string()
+        };
+        if options.len() > 32 * 1024 {
+            return refused();
+        }
+        let Ok(handoff) = serde_json::from_str::<crate::import::Handoff>(&options) else {
+            return refused();
+        };
+        if files.is_empty()
+            || files.len() > 64
+            || handoff.area.is_empty()
+            || serde_json::to_vec(&handoff.context).map_or(true, |bytes| bytes.len() > 16 * 1024)
+            || handoff.area.len() > 96
+            || !handoff
+                .area
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return refused();
+        }
+        let mut selected = Vec::with_capacity(files.len());
+        for (name, fd) in files {
+            if std::path::Path::new(&name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                != Some(name.as_str())
+            {
+                return refused();
+            }
+            let fd: std::os::fd::OwnedFd = fd.into();
+            selected.push((name, std::fs::File::from(fd)));
+        }
+        self.imports
+            .add_open_files(selected, handoff)
+            .await
+            .to_string()
+    }
+    fn import_item_status(&self, id: String) -> String {
+        self.imports.handoff_status(&id).to_string()
+    }
     async fn import_retry(&self, id: String) -> String {
         serde_json::json!({"ok":self.imports.retry(id).await}).to_string()
     }

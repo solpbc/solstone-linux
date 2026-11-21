@@ -2534,7 +2534,7 @@ impl WindowControlHandler {
     }
 
     pub async fn open_journal_at_path(&self, path: &str) -> String {
-        if !crate::journal_link::valid_path(path) {
+        if path != "/app/import/" && !crate::journal_link::valid_path(path) {
             return self.fallback_unavailable();
         }
         self.request_open_journal(path).await
