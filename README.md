@@ -140,6 +140,8 @@ The vendored `manifest.json` declares observer protocol version 3. That version 
 
 See `contracts/README.md` for the verified import ritual and public provenance record.
 
+The tmux frames the terminal source writes are described in [`crates/solstone-terminal/FORMAT.md`](crates/solstone-terminal/FORMAT.md).
+
 ## License
 
 AGPL-3.0-only. Copyright (c) 2026 sol pbc.
