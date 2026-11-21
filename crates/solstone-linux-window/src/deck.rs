@@ -924,8 +924,9 @@ impl Page {
                 } else {
                     ""
                 };
-                let (row, value) = fact_row(label);
-                value.set_text(&device.line(false));
+                // The label stays on one line beside a long value.
+                let (row, value) = fact_row(&label.replace(' ', "\u{a0}"));
+                value.set_text(&drawn_line(device, Some(&device.device), false));
                 container.append(&row);
                 continue;
             }
@@ -947,7 +948,7 @@ impl Page {
             name.add_css_class("sol-remote-device");
             lines.append(&name);
             for vault in vaults {
-                let line = vault.detail_line(true);
+                let line = drawn_line(vault, None, true);
                 if !line.is_empty() {
                     let label = note_label(Some(&line));
                     label.add_css_class("sol-quiet");
@@ -1079,6 +1080,28 @@ impl Page {
         self.status.set_visible(false);
         self.box_.set_visible(true);
     }
+}
+
+/// A line on the page for another device, as drawn: the state and the time
+/// never split, and a separator ends a line rather than starting one. The
+/// device and vault names keep their own spaces, so a long name may wrap.
+fn drawn_line(
+    device: &solstone_linux::shared_sources::OtherVault,
+    name: Option<&str>,
+    include_detail: bool,
+) -> String {
+    let mut parts = device.detail_parts(include_detail);
+    let named =
+        usize::from(include_detail && device.vault.as_deref().is_some_and(|v| !v.is_empty()));
+    for part in parts.iter_mut().skip(named) {
+        *part = part.replace(' ', "\u{a0}");
+    }
+    name.map(str::to_owned)
+        .into_iter()
+        .chain(parts)
+        .reduce(|line, part| solstone_linux::shared_sources::pair(&line, &part))
+        .unwrap_or_default()
+        .replace(" \u{b7}", "\u{a0}\u{b7}")
 }
 
 /// The tile's line for the most recent other device. A narrow tile wraps it at
@@ -4319,6 +4342,36 @@ mod tests {
     use super::*;
     use solstone_linux::copy::CopyKey;
     use solstone_linux::service::ServicePresence;
+
+    #[test]
+    fn a_page_line_for_another_device_breaks_only_after_a_separator() {
+        let device = solstone_linux::shared_sources::OtherVault {
+            cid: "c".into(),
+            device: "work laptop in the downstairs office".into(),
+            device_type: Some("laptop".into()),
+            platform: None,
+            vault: Some("field notes".into()),
+            state: Some("needs_attention".into()),
+            observed: false,
+            at: None,
+        };
+        let card = drawn_line(&device, None, true);
+        let also = drawn_line(&device, Some(&device.device), false);
+        // Names keep their own spaces, so a long one may wrap. After the name,
+        // the only place left to break is right after a separator.
+        for (line, name) in [(&card, "field notes"), (&also, device.device.as_str())] {
+            let rest = line.strip_prefix(name).expect("the name leads, whole");
+            let chars: Vec<char> = rest.chars().collect();
+            for (i, c) in chars.iter().enumerate() {
+                if *c == ' ' {
+                    assert_eq!(chars[i - 1], '\u{b7}', "{line:?} breaks inside a part");
+                }
+            }
+        }
+        // The words are the same as the undrawn line.
+        assert_eq!(also.replace('\u{a0}', " "), device.line(false));
+        assert_eq!(card.replace('\u{a0}', " "), device.detail_line(true));
+    }
 
     #[test]
     fn a_missed_poll_withdraws_a_live_snapshot_until_the_app_answers_again() {
