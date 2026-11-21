@@ -199,9 +199,18 @@ runtime dependency list, and `RUST_DEPENDENCY_NOTICES.txt`, reproducing third-pa
 
 ### Update a release
 
-If you installed the quick way, update with the same command and `--upgrade`.
-If the app is running, it restarts on the new version. From version 2.0.45, an
-app you quit stays quit:
+With automatic updates on, the app updates along with your journal when the
+solstone installer set up both for your account on this computer, in either
+order, and neither with `--route package`. From journal 2.0.82, your journal
+checks once a day: a running app that changed restarts on the new version, and an
+app you quit stays quit.
+`solstone update --automatic status` shows whether it's on.
+
+Otherwise, update with the same command and `--upgrade`. That covers an install
+the installer set up with automatic updates off, and an app the installer set up
+on its own, such as one from the quick way above on a computer where it didn't
+set up your journal. If the app is running, it restarts on the new version. From
+version 2.0.45, an app you quit stays quit:
 
 ```bash
 curl -fsSL https://solstone.app/install.sh | sh -s -- --components desktop --upgrade

@@ -2251,7 +2251,9 @@ fn computer_page() -> (gtk::Box, gtk::Switch, gtk::Switch, gtk::Label, gtk::Labe
 }
 
 /// The app's version, the paired journal's version when it is known, and how to
-/// update. There is no updater here: the installer's `--upgrade` updates the app.
+/// update. There is no updater here: the installer updates the app, by itself
+/// when the app is on the same install as a journal with automatic updates on,
+/// or when run again with `--upgrade`.
 fn updates_page() -> (gtk::Box, gtk::Box, gtk::Label) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.add_css_class("sol-pane");

@@ -9,6 +9,7 @@ and this project adheres to Semantic Versioning.
 ### Fixed
 
 - fixed an issue on Btrfs filesystems where `solstone-linux status` and `solstone-linux doctor` could report that the app was not running while it was running.
+- the updates page no longer says the app doesn't update itself. with automatic updates on, the app updates along with your journal when the solstone installer set up both on this computer. otherwise the installer's `--upgrade` still updates it.
 
 ### Added
 

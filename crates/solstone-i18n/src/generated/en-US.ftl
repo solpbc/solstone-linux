@@ -677,7 +677,7 @@ m6c696e75782e636f70792e7475726e6f6666 = turn off
 
 m6c696e75782e636f70792e756e617661696c61626c65 = unavailable
 
-m6c696e75782e636f70792e75706461746573686f77 = the app doesn't update itself. to update, run the solstone installer again with --upgrade.
+m6c696e75782e636f70792e75706461746573686f77 = with automatic updates on, the app updates along with your journal when the solstone installer set up both on this computer. otherwise, run the solstone installer again with --upgrade.
 
 m6c696e75782e636f70792e757064617465736a6f75726e616c76657273696f6e = journal version
 
