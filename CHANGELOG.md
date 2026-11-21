@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- fixed an issue on Btrfs filesystems where `solstone-linux status` and `solstone-linux doctor` could report that the app was not running while it was running.
+
 ### Added
 
 - if Obsidian is off or you haven't set it up on this computer, its tile can show another device by name. open the tile to see the full list or choose a vault on this computer.

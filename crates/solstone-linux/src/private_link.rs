@@ -350,8 +350,6 @@ pub(crate) enum PrivateStateLockLiveness {
 pub(crate) enum PrivateStateProbeError {
     InvalidTarget,
     Inspect,
-    LocksUnavailable,
-    LocksMalformed,
 }
 
 impl PrivateStateLock {
@@ -382,52 +380,11 @@ impl PrivateStateLock {
         {
             return Err(PrivateStateProbeError::InvalidTarget);
         }
-        let descriptor = match rustix::fs::openat(
-            &root,
-            PRIVATE_STATE_LOCK_FILENAME,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
-            rustix::fs::Mode::empty(),
-        ) {
-            Ok(descriptor) => descriptor,
-            Err(rustix::io::Errno::NOENT) => {
-                return Ok(PrivateStateLockLiveness::NoLiveOwner);
-            }
-            Err(_) => return Err(PrivateStateProbeError::Inspect),
-        };
-        let file = File::from(descriptor);
-        let stat = rustix::fs::fstat(&file).map_err(|_| PrivateStateProbeError::Inspect)?;
-        let expected_mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
-        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
-            || rustix::fs::Mode::from_raw_mode(stat.st_mode) != expected_mode
-            || stat.st_uid != rustix::process::geteuid().as_raw()
-        {
-            return Err(PrivateStateProbeError::InvalidTarget);
-        }
-        let readiness_stat = rustix::fs::openat(
-            &root,
-            PRIVATE_STATE_READY_LOCK_FILENAME,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
-            rustix::fs::Mode::empty(),
-        )
-        .ok()
-        .and_then(|descriptor| rustix::fs::fstat(File::from(descriptor)).ok())
-        .filter(|readiness_stat| {
-            rustix::fs::FileType::from_raw_mode(readiness_stat.st_mode)
-                == rustix::fs::FileType::RegularFile
-                && rustix::fs::Mode::from_raw_mode(readiness_stat.st_mode) == expected_mode
-                && readiness_stat.st_uid == rustix::process::geteuid().as_raw()
-        });
-        let locks = fs::read_to_string("/proc/locks")
-            .map_err(|_| PrivateStateProbeError::LocksUnavailable)?;
-        if !probe_lock_table(&locks, stat.st_dev, stat.st_ino)? {
+        if !probe_private_lock(&root, PRIVATE_STATE_LOCK_FILENAME)? {
             return Ok(PrivateStateLockLiveness::NoLiveOwner);
         }
-        let readiness_live = match readiness_stat {
-            Some(readiness_stat) => {
-                probe_lock_table(&locks, readiness_stat.st_dev, readiness_stat.st_ino)?
-            }
-            None => false,
-        };
+        let readiness_live =
+            probe_private_lock(&root, PRIVATE_STATE_READY_LOCK_FILENAME).unwrap_or(false);
         if readiness_live {
             Ok(PrivateStateLockLiveness::LiveOwner)
         } else {
@@ -494,7 +451,7 @@ impl PrivateStateLock {
             },
         )?;
         verify_private_lock(&file)?;
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        match lock_private_state(&file) {
             Ok(()) => {}
             Err(rustix::io::Errno::WOULDBLOCK) => return Err(PrivateStateError::LockContended),
             Err(source) => {
@@ -538,8 +495,7 @@ impl PrivateStateLock {
         rustix::fs::fchmod(&file, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
             .map_err(|_| PrivateStateError::HealthInitializationFailed)?;
         verify_private_lock(&file).map_err(|_| PrivateStateError::HealthInitializationFailed)?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| PrivateStateError::HealthInitializationFailed)?;
+        lock_private_state(&file).map_err(|_| PrivateStateError::HealthInitializationFailed)?;
         self.readiness_file = Some(file);
         Ok(())
     }
@@ -613,52 +569,52 @@ impl Drop for PrivateStateLock {
     }
 }
 
-fn linux_device_major(device: u64) -> u64 {
-    ((device >> 8) & 0xfff) | ((device >> 32) & 0xffff_f000)
-}
+fn probe_private_lock(
+    root: &rustix::fd::OwnedFd,
+    name: &str,
+) -> Result<bool, PrivateStateProbeError> {
+    let descriptor = match rustix::fs::openat(
+        root,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(false),
+        Err(_) => return Err(PrivateStateProbeError::Inspect),
+    };
+    let file = File::from(descriptor);
+    verify_private_lock(&file).map_err(|error| match error {
+        PrivateStateError::InvalidTarget { .. } => PrivateStateProbeError::InvalidTarget,
+        _ => PrivateStateProbeError::Inspect,
+    })?;
 
-fn linux_device_minor(device: u64) -> u64 {
-    (device & 0xff) | ((device >> 12) & 0xffff_ff00)
-}
-
-fn probe_lock_table(locks: &str, device: u64, inode: u64) -> Result<bool, PrivateStateProbeError> {
-    let expected_major = linux_device_major(device);
-    let expected_minor = linux_device_minor(device);
-    for line in locks.lines() {
-        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
-        let offset = usize::from(fields.get(1) == Some(&"->"));
-        if fields.len() < 8 + offset
-            || !fields[0].ends_with(':')
-            || !matches!(fields[1 + offset], "FLOCK" | "POSIX" | "OFDLCK")
-        {
-            return Err(PrivateStateProbeError::LocksMalformed);
+    // Ask the kernel about this file directly. The device number in /proc/locks
+    // can differ from fstat's (for example, on Btrfs subvolumes).
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
+        Ok(()) => {
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::Unlock)
+                .map_err(|_| PrivateStateProbeError::Inspect)?;
+            Ok(false)
         }
-        let Some(identity) = fields.get(5 + offset) else {
-            return Err(PrivateStateProbeError::LocksMalformed);
-        };
-        let mut parts = identity.split(':');
-        let (Some(major), Some(minor), Some(candidate_inode), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return Err(PrivateStateProbeError::LocksMalformed);
-        };
-        let major =
-            u64::from_str_radix(major, 16).map_err(|_| PrivateStateProbeError::LocksMalformed)?;
-        let minor =
-            u64::from_str_radix(minor, 16).map_err(|_| PrivateStateProbeError::LocksMalformed)?;
-        let candidate_inode = candidate_inode
-            .parse::<u64>()
-            .map_err(|_| PrivateStateProbeError::LocksMalformed)?;
-        if fields[1 + offset] == "FLOCK"
-            && fields[3 + offset] == "WRITE"
-            && major == expected_major
-            && minor == expected_minor
-            && candidate_inode == inode
-        {
-            return Ok(true);
-        }
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+        Err(_) => Err(PrivateStateProbeError::Inspect),
     }
-    Ok(false)
+}
+
+fn lock_private_state(file: &File) -> rustix::io::Result<()> {
+    let operation = rustix::fs::FlockOperation::NonBlockingLockExclusive;
+    let result = rustix::fs::flock(file, operation);
+    if result == Err(rustix::io::Errno::WOULDBLOCK) {
+        // A diagnostic may have just sampled a free lock. Give its shared
+        // lock time to clear before refusing startup or readiness.
+        std::thread::sleep(Duration::from_millis(20));
+        return rustix::fs::flock(file, operation);
+    }
+    result
 }
 
 fn verify_private_lock(file: &File) -> Result<(), PrivateStateError> {
@@ -5135,8 +5091,20 @@ pub(crate) mod tests {
             PrivateStateLock::try_probe(temp.path()).unwrap(),
             PrivateStateLockLiveness::NoLiveOwner
         );
-        let reacquired = PrivateStateLock::acquire(temp.path()).unwrap();
-        drop(reacquired);
+        // Another diagnostic's shared lock is not a daemon owner.
+        let reader = File::open(lock_path).unwrap();
+        rustix::fs::flock(&reader, rustix::fs::FlockOperation::NonBlockingLockShared).unwrap();
+        assert_eq!(
+            PrivateStateLock::try_probe(temp.path()).unwrap(),
+            PrivateStateLockLiveness::NoLiveOwner
+        );
+        drop(reader);
+        let _reacquired = PrivateStateLock::acquire(temp.path()).unwrap();
+        assert!(temp.path().join(PRIVATE_STATE_READY_LOCK_FILENAME).exists());
+        assert_eq!(
+            PrivateStateLock::try_probe(temp.path()).unwrap(),
+            PrivateStateLockLiveness::LiveOwnerNotReady
+        );
     }
 
     #[test]
@@ -5165,7 +5133,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn read_only_probe_is_conservative_for_missing_invalid_and_malformed_inputs() {
+    fn read_only_probe_is_conservative_for_missing_and_invalid_targets() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing");
         assert_eq!(
@@ -5192,11 +5160,6 @@ pub(crate) mod tests {
             Err(PrivateStateProbeError::InvalidTarget)
         ));
         assert_eq!(fs::read(&lock_path).unwrap(), before);
-        assert!(matches!(
-            probe_lock_table("not a lock table", 0, 0),
-            Err(PrivateStateProbeError::LocksMalformed)
-        ));
-        assert!(!probe_lock_table("1: POSIX ADVISORY READ 1 00:00:1 0 EOF\n", 0, 2).unwrap());
     }
 
     #[test]
