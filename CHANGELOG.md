@@ -6,14 +6,16 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
-### Fixed
-
-- fixed an issue on Btrfs filesystems where `solstone-linux status` and `solstone-linux doctor` could report that the app was not running while it was running.
+## [2.0.49] - 2026-11-21
 
 ### Added
 
-- choose more imports to open your journal's import page. you can close that window while your files are on their way.
-- if Obsidian is off or you haven't set it up on this computer, its tile can show another device by name. open the tile to see the full list or choose a vault on this computer.
+- on the app's import page, choose "more imports" to open your journal's import page. with your journal up to date, files you pick or drop there keep going into your journal after you close its window.
+- if Obsidian is off or you haven't set it up on this computer, its tile can name another device that has Obsidian set up for your journal, and show its state. open the tile to see the full list or choose a vault on this computer.
+
+### Fixed
+
+- on Btrfs, `solstone-linux status` and `solstone-linux doctor` could say the app wasn't running when it was. this release resolves that.
 
 ## [2.0.48] - 2026-11-20
 
