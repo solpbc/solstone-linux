@@ -198,7 +198,7 @@ impl DesktopComponent {
 
 /// Opens a file or link with the owner's handler, giving it the display this app
 /// may have learned only after it started.
-fn open_detached(target: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
+pub(crate) fn open_detached(target: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
     let mut last = None;
     for mut command in open::commands(target) {
         command

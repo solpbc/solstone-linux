@@ -21,6 +21,9 @@ import_bytes = (here / "import-host-contract.json").read_bytes()
 if hashlib.sha256(import_bytes).hexdigest() != "f346f9b9dbb09f7390dfa775ea7eeaf70f630080a3fc6149968dae1e8b39686d":
     raise SystemExit("journal import host contract differs from its pin")
 import_contract = json.loads(import_bytes)
+auth_contract = json.loads((here / "auth-host-contract.json").read_bytes())
+if auth_contract["version"] != 2 or auth_contract["capability"] != import_contract["capability"]:
+    raise SystemExit("unsupported journal auth host contract")
 contract = json.loads((here / "host-contract.json").read_bytes())
 if contract["version"] != 1:
     raise SystemExit("unsupported journal host contract")
@@ -41,6 +44,12 @@ with tempfile.TemporaryDirectory() as tmp:
               "IMPORT_PICK": import_contract["pick"], "IMPORT_REPLY": import_contract["reply"], "HOST_PRODUCT": product, "HOST_VERSION": version,
               "HOST_INIT": contract["initialization_script"],
               "IMPORT_CONTRACT": json.dumps(import_contract),
+              "AUTH_CONTRACT": json.dumps(auth_contract),
+              "AUTH_PREPARE": auth_contract["prepare"],
+              "AUTH_PREPARED": auth_contract["prepared"],
+              "AUTH_AUTHORIZE": auth_contract["authorize"],
+              "AUTH_CANCEL": auth_contract["cancel"],
+              "AUTH_RESULT": auth_contract["result"],
               "IMPORT_SCRIPT": (here / "import-host.js").read_text()}
     (Path(tmp) / "host-contract.h").write_text("".join(
         f"#define {name} {json.dumps(value)}\n" for name, value in values.items()

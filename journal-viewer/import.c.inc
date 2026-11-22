@@ -11,6 +11,11 @@ typedef struct {
     char *options;
     GPtrArray *unreadable;
     gboolean intake;
+    gboolean auth;
+    int timeout_ms;
+    const char *auth_fallback_type;
+    const char *auth_fallback_outcome;
+    const char *auth_fallback_reason;
     guint64 document_generation;
 } ImportCall;
 
@@ -66,6 +71,22 @@ static void daemon_replied(GObject *source, GAsyncResult *result, gpointer data)
     ImportCall *call = data;
     g_autoptr(GVariant) answer = g_dbus_connection_call_with_unix_fd_list_finish(
         G_DBUS_CONNECTION(source), NULL, result, NULL);
+    if (!answer && call->auth) {
+        g_autoptr(JSCValue) obj = jsc_value_new_object(call->context, NULL, NULL);
+        g_autoptr(JSCValue) type = jsc_value_new_string(call->context, call->auth_fallback_type);
+        g_autoptr(JSCValue) id = jsc_value_new_string(call->context, call->id ? call->id : "");
+        g_autoptr(JSCValue) outcome = jsc_value_new_string(call->context, call->auth_fallback_outcome);
+        jsc_value_object_set_property(obj, "type", type);
+        jsc_value_object_set_property(obj, "id", id);
+        jsc_value_object_set_property(obj, "outcome", outcome);
+        if (call->auth_fallback_reason) {
+            g_autoptr(JSCValue) reason = jsc_value_new_string(call->context, call->auth_fallback_reason);
+            jsc_value_object_set_property(obj, "reason", reason);
+        }
+        g_autofree char *encoded = jsc_value_to_json(obj, 0);
+        finish_import(call, encoded ? encoded : "{}");
+        return;
+    }
     const char *json = call->intake ? "{\"outcome\":\"refused\"}" : "{\"state\":\"gone\"}";
     if (answer) g_variant_get(answer, "(&s)", &json);
     finish_import(call, json);
@@ -73,10 +94,21 @@ static void daemon_replied(GObject *source, GAsyncResult *result, gpointer data)
 
 static void daemon_call(ImportCall *call, const char *method, GVariant *args, GUnixFDList *fds)
 {
+    int timeout = call->timeout_ms > 0 ? call->timeout_ms : (call->intake ? G_MAXINT : 5000);
     g_dbus_connection_call_with_unix_fd_list(call->journal->bus, "org.solpbc.solstone.Observer1",
         "/org/solpbc/solstone/Observer1", "org.solpbc.solstone.Observer1", method,
         args, G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NO_AUTO_START,
-        call->intake ? G_MAXINT : 5000, fds, NULL, daemon_replied, call);
+        timeout, fds, NULL, daemon_replied, call);
+}
+
+static void cancel_auth_session(Journal *journal)
+{
+    if (!journal->bus) return;
+    g_dbus_connection_call(journal->bus, "org.solpbc.solstone.Observer1",
+        "/org/solpbc/solstone/Observer1", "org.solpbc.solstone.Observer1", "AuthCancel",
+        g_variant_new("(s)", "{\"type\":\"auth.cancel\",\"id\":\"teardown\"}"),
+        G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NO_AUTO_START,
+        2000, NULL, NULL, NULL);
 }
 
 static void import_files(ImportCall *call, GListModel *files)
@@ -170,6 +202,41 @@ static gboolean import_message(WebKitUserContentManager *manager, JSCValue *pack
         g_autofree char *item = string_field(msg, "item");
         if (!item || strlen(item) != 32) finish_import(call, "{\"state\":\"gone\"}");
         else daemon_call(call, "ImportItemStatus", g_variant_new("(s)", item), NULL);
+        return TRUE;
+    }
+    if (g_strcmp0(type, AUTH_PREPARE) == 0 || g_strcmp0(type, AUTH_AUTHORIZE) == 0
+        || g_strcmp0(type, AUTH_CANCEL) == 0) {
+        if (!call->id || !*call->id || strlen(call->id) > 128) {
+            finish_import(call, "{\"type\":\"unsupported\",\"id\":\"\"}");
+            return TRUE;
+        }
+        g_autofree char *payload = jsc_value_to_json(msg, 0);
+        if (!payload) {
+            finish_import(call, "{\"type\":\"unsupported\",\"id\":\"\"}");
+            return TRUE;
+        }
+        call->auth = TRUE;
+        const char *method = NULL;
+        if (g_strcmp0(type, AUTH_PREPARE) == 0) {
+            method = "AuthPrepare";
+            call->timeout_ms = 10000;
+            call->auth_fallback_type = AUTH_PREPARED;
+            call->auth_fallback_outcome = "unavailable";
+            call->auth_fallback_reason = "host_unavailable";
+        } else if (g_strcmp0(type, AUTH_AUTHORIZE) == 0) {
+            method = "AuthAuthorize";
+            call->timeout_ms = G_MAXINT;
+            call->auth_fallback_type = AUTH_RESULT;
+            call->auth_fallback_outcome = "error";
+            call->auth_fallback_reason = "host_unavailable";
+        } else {
+            method = "AuthCancel";
+            call->timeout_ms = 10000;
+            call->auth_fallback_type = AUTH_RESULT;
+            call->auth_fallback_outcome = "cancelled";
+            call->auth_fallback_reason = NULL;
+        }
+        daemon_call(call, method, g_variant_new("(s)", payload), NULL);
         return TRUE;
     }
     if (g_strcmp0(type, IMPORT_PICK) != 0 || !call->id || strlen(call->id) > 128) {

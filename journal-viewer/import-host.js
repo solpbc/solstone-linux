@@ -2,13 +2,16 @@
 // Copyright (c) 2026 sol pbc
 
 // This function is installed by the viewer only in the journal's top document.
-(contract, nonce, origin) => {
+(contract, auth, nonce, origin) => {
   if (window !== window.top || location.origin !== origin) return;
   const native = window.webkit.messageHandlers.journalImport;
   const documentId = crypto.randomUUID();
   const sendPacket = async message => JSON.parse(await native.postMessage(JSON.stringify({nonce, documentId, message})));
   const attached = sendPacket({type:'host.attach'});
   const post = async message => { await attached; return sendPacket(message); };
+  const authTypes = auth && auth.version === contract.version && auth.capability === contract.capability
+    ? [auth.prepare, auth.authorize, auth.cancel]
+    : [];
   const items = new Map();
   let timer;
   async function update() {
@@ -28,9 +31,10 @@
     timer = items.size ? setTimeout(update, 400) : undefined;
   }
   Object.defineProperty(window, contract.capability, {value:Object.freeze({
-    version:contract.version, types:Object.freeze([contract.pick]),
+    version:contract.version, types:Object.freeze([contract.pick, ...authTypes]),
     async send(message) {
       if (!message || typeof message.id !== 'string' || typeof message.type !== 'string') throw new TypeError();
+      if (authTypes.includes(message.type)) return await post(message);
       if (message.type !== contract.pick) return {type:contract.unsupported, id:message.id};
       const reply = await post(message);
       for (const item of reply.items || []) items.set(item.item, {id:message.id, name:item.name});

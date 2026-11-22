@@ -35,6 +35,7 @@ pub struct Observer1<C: Clock, O: ObserverCommands> {
     pub obsidian: crate::obsidian::ObsidianHandle,
     pub screenshots: crate::screenshots::ScreenshotsHandle,
     pub imports: crate::import::ImportHandle,
+    pub auth: crate::auth_broker::AuthHandle,
 }
 impl<C: Clock, O: ObserverCommands> Observer1<C, O> {
     fn with_snapshot<R>(&self, f: impl FnOnce(&StateSnapshot) -> R) -> R {
@@ -233,6 +234,71 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
         self.imports.dismiss_interrupted();
         "ok".to_owned()
     }
+    async fn auth_prepare(
+        &self,
+        payload: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> String {
+        let Some(owner) = header.sender().map(|owner| owner.to_string()) else {
+            return serde_json::json!({
+                "type": "auth.prepared",
+                "id": "",
+                "outcome": "unavailable",
+                "reason": "missing_sender"
+            })
+            .to_string();
+        };
+        let (reply, prepared_session) = self.auth.prepare(&owner, &payload).await;
+        if prepared_session.is_some()
+            && !watch_auth_owner(self.auth.clone(), connection.clone(), owner.clone()).await
+        {
+            self.auth.cancel_owner(&owner).await;
+            let id = serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_owned))
+                .unwrap_or_default();
+            return serde_json::json!({
+                "type": "auth.prepared",
+                "id": id,
+                "outcome": "unavailable",
+                "reason": "owner_gone"
+            })
+            .to_string();
+        }
+        reply
+    }
+    async fn auth_authorize(
+        &self,
+        payload: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> String {
+        let Some(owner) = header.sender().map(|owner| owner.to_string()) else {
+            return serde_json::json!({
+                "type": "auth.result",
+                "id": "",
+                "outcome": "refused",
+                "reason": "missing_sender"
+            })
+            .to_string();
+        };
+        self.auth.authorize(&owner, &payload).await
+    }
+    async fn auth_cancel(
+        &self,
+        payload: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> String {
+        let Some(owner) = header.sender().map(|owner| owner.to_string()) else {
+            return serde_json::json!({
+                "type": "auth.result",
+                "id": "",
+                "outcome": "cancelled"
+            })
+            .to_string();
+        };
+        self.auth.cancel(&owner, &payload).await
+    }
     async fn begin_pairing(&self, link: String) -> String {
         self.window_control.begin_pairing(link).await
     }
@@ -408,6 +474,42 @@ async fn watch_remove_owner(
     waiting.await.unwrap_or(false)
 }
 
+async fn watch_auth_owner(
+    handle: crate::auth_broker::AuthHandle,
+    connection: zbus::Connection,
+    owner: String,
+) -> bool {
+    use futures_util::StreamExt;
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut ready = Some(ready);
+        let _: Result<(), zbus::Error> = async {
+            let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
+            let mut changes = proxy
+                .receive_name_owner_changed_with_args(&[(0, owner.as_str())])
+                .await?;
+            let name = zbus::names::BusName::try_from(owner.as_str())
+                .map_err(|e| zbus::Error::Failure(e.to_string()))?;
+            if !proxy.name_has_owner(name).await? {
+                return Ok(());
+            }
+            let _ = ready.take().expect("readiness sent once").send(true);
+            while let Some(change) = changes.next().await {
+                if change.args()?.new_owner().is_none() {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Some(ready) = ready {
+            let _ = ready.send(false);
+        }
+        handle.cancel_owner(&owner).await;
+    });
+    waiting.await.unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +598,7 @@ mod tests {
                 obsidian: crate::obsidian::ObsidianHandle::default(),
                 screenshots: crate::screenshots::ScreenshotsHandle::default(),
                 imports: crate::import::ImportHandle::default(),
+                auth: crate::auth_broker::AuthHandle::default(),
             },
             commands,
             clock,
@@ -587,6 +690,7 @@ mod tests {
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),
+            auth: crate::auth_broker::AuthHandle::default(),
         };
         let mut xml = String::new();
         service.introspect_to_writer(&mut xml, 0);
@@ -627,6 +731,7 @@ mod tests {
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),
+            auth: crate::auth_broker::AuthHandle::default(),
         };
         let first = service.segment_timer();
         now.store(101, std::sync::atomic::Ordering::Release);

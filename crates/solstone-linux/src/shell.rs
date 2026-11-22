@@ -205,6 +205,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
             obsidian,
             screenshots,
             imports,
+            auth: crate::auth_broker::AuthHandle::default(),
         },
         tray_health,
     )

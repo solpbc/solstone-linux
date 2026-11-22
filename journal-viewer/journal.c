@@ -141,6 +141,7 @@ static void loaded(WebKitWebView *view, WebKitLoadEvent event, gpointer data)
 {
     Journal *journal = data;
     if (event == WEBKIT_LOAD_STARTED) {
+        cancel_auth_session(journal);
         journal->document_generation++;
         g_clear_pointer(&journal->document_id, g_free);
         journal->import_ready = FALSE;
@@ -169,6 +170,7 @@ static void terminated(WebKitWebView *view, WebKitWebProcessTerminationReason re
 {
     (void)view; (void)reason;
     Journal *journal = data;
+    cancel_auth_session(journal);
     answer(journal, FALSE);
     g_main_loop_quit(journal->loop);
 }
@@ -176,7 +178,9 @@ static void terminated(WebKitWebView *view, WebKitWebProcessTerminationReason re
 static gboolean closed(GtkWindow *window, gpointer data)
 {
     (void)window;
-    g_main_loop_quit(((Journal *)data)->loop);
+    Journal *journal = data;
+    cancel_auth_session(journal);
+    g_main_loop_quit(journal->loop);
     return FALSE;
 }
 
@@ -399,8 +403,8 @@ static gboolean create_view(Journal *journal)
         g_signal_connect(manager, "script-message-with-reply-received::journalImport",
             G_CALLBACK(import_message), journal);
         journal->nonce = g_uuid_string_random();
-        g_autofree char *source = g_strdup_printf("(%s)(%s,'%s','%s')",
-            IMPORT_SCRIPT, IMPORT_CONTRACT, journal->nonce, host);
+        g_autofree char *source = g_strdup_printf("(%s)(%s,%s,'%s','%s')",
+            IMPORT_SCRIPT, IMPORT_CONTRACT, AUTH_CONTRACT, journal->nonce, host);
         // Match the dynamic loopback port inside the top-document script.
         WebKitUserScript *import = webkit_user_script_new(source,
             WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);

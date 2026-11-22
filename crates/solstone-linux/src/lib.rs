@@ -11,6 +11,7 @@ pub mod activity_prefs;
 pub mod activity_source;
 pub mod activity_writer;
 pub mod audio;
+pub mod auth_broker;
 pub mod bounded_process;
 pub mod browser;
 mod browser_launch;
