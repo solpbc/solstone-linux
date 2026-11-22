@@ -6,9 +6,16 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.50] - 2026-11-22
+
+### Added
+
+- with your journal up to date, signing in to ChatGPT on the thinking page in your journal's window now finishes on its own after you sign in through your browser, even when your journal runs on a different computer. there's no address to copy and paste.
+
 ### Fixed
 
 - the updates page no longer says the app doesn't update itself. with automatic updates on, the app updates along with your journal when the solstone installer set up both on this computer. otherwise the installer's `--upgrade` still updates it.
+- on the Obsidian page, another device's state and the time beside it no longer split across two lines when the device's name is long.
 
 ## [2.0.49] - 2026-11-21
 
