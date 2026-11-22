@@ -506,9 +506,28 @@ static gboolean incoming(GIOChannel *channel, GIOCondition condition, gpointer d
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean sandbox_available(void)
+{
+    g_autofree char *restricted = NULL;
+    g_autofree char *profile = NULL;
+    if (!g_file_get_contents("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", &restricted, NULL, NULL) ||
+        g_strcmp0(g_strstrip(restricted), "1") != 0 ||
+        !g_file_get_contents("/proc/self/attr/current", &profile, NULL, NULL) ||
+        g_strcmp0(g_strstrip(profile), "unconfined") != 0)
+        return TRUE;
+
+    // Under Ubuntu's default namespace restriction, WebKit aborts if bubblewrap
+    // cannot start. Let the daemon open the journal in the browser in that case.
+    char *args[] = { "/usr/bin/bwrap", "--unshare-user", "--ro-bind", "/", "/", "--", "/usr/bin/true", NULL };
+    int status;
+    return g_spawn_sync(NULL, args, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                        NULL, NULL, NULL, NULL, &status, NULL) &&
+        g_spawn_check_wait_status(status, NULL);
+}
+
 int main(void)
 {
-    if (!gtk_init_check())
+    if (!sandbox_available() || !gtk_init_check())
         return 1;
     Journal journal = { .loop = g_main_loop_new(NULL, FALSE) };
     g_autoptr(GIOChannel) input = g_io_channel_unix_new(STDIN_FILENO);
