@@ -1,0 +1,17 @@
+{
+  "description": "Footer link opening full import history in the journal.",
+  "context": "Footer link opening full import history in the journal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 50,
+  "source_revision": "c6a2f1c801f821a3f133465688943056da9de68e008adb87ec8afd8609a3b8ff",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

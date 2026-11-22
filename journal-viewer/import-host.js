@@ -14,21 +14,40 @@
     : [];
   const items = new Map();
   let timer;
+  let updating = false;
+  let pendingNew = false;
   async function update() {
-    for (const [item, record] of items) {
-      try {
-        const status = await post({type:'host.status', id:record.id, item});
-        const serial = JSON.stringify(status);
-        if (record.last !== serial) {
-          record.last = serial;
-          window.dispatchEvent(new CustomEvent(contract.event, {detail:{
-            ...status, type:contract.status, item, name:record.name, id:record.id,
-          }}));
+    updating = true;
+    timer = undefined;
+    pendingNew = false;
+    let nextDelay;
+    try {
+      for (const [item, record] of [...items]) {
+        try {
+          const status = await post({type:'host.status', id:record.id, item});
+          const serial = JSON.stringify(status);
+          if (record.last !== serial) {
+            record.last = serial;
+            window.dispatchEvent(new CustomEvent(contract.event, {detail:{
+              ...status, type:contract.status, item, name:record.name, id:record.id,
+            }}));
+          }
+          const keepPollingReview = status.state === 'attention' && status.review_required === true;
+          if (status.state === 'delivered' || status.state === 'gone'
+              || (status.state === 'attention' && !keepPollingReview)) {
+            items.delete(item);
+          } else {
+            const delay = keepPollingReview ? 2000 : 400;
+            nextDelay = nextDelay === undefined ? delay : Math.min(nextDelay, delay);
+          }
+        } catch (_) {
+          nextDelay = nextDelay === undefined ? 400 : Math.min(nextDelay, 400);
         }
-        if (['attention', 'delivered', 'gone'].includes(status.state)) items.delete(item);
-      } catch (_) { /* Retry the status read while the document is open. */ }
+      }
+    } finally {
+      updating = false;
+      timer = items.size ? setTimeout(update, pendingNew ? 0 : (nextDelay ?? 400)) : undefined;
     }
-    timer = items.size ? setTimeout(update, 400) : undefined;
   }
   Object.defineProperty(window, contract.capability, {value:Object.freeze({
     version:contract.version, types:Object.freeze([contract.pick, ...authTypes]),
@@ -37,8 +56,14 @@
       if (authTypes.includes(message.type)) return await post(message);
       if (message.type !== contract.pick) return {type:contract.unsupported, id:message.id};
       const reply = await post(message);
-      for (const item of reply.items || []) items.set(item.item, {id:message.id, name:item.name});
-      if (items.size && !timer) timer = setTimeout(update, 0);
+      for (const item of reply.items || []) {
+        items.set(item.item, {id:message.id, name:item.name});
+        pendingNew = true;
+      }
+      if (items.size && !updating) {
+        clearTimeout(timer);
+        timer = setTimeout(update, 0);
+      }
       return reply;
     }
   })});

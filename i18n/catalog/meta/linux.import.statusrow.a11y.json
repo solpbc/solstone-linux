@@ -1,0 +1,22 @@
+{
+  "description": "Accessible label for the status pane import row.",
+  "context": "Accessible label for the status pane import row.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "detail",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 100,
+  "source_revision": "f240b78890a299d49afe2470e1ae9dbaeee09a06a4ab4953a3c0c33ad81f2300",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

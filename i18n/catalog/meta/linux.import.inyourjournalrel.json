@@ -1,0 +1,22 @@
+{
+  "description": "Recent receipt subtitle with relative delivery time.",
+  "context": "Recent receipt subtitle with relative delivery time.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "when",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 50,
+  "source_revision": "30396885a2f0a681df51909047d13dd6843af920c7f7704a768f31fe27bdfbdc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

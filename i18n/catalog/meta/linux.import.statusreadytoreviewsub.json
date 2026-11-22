@@ -1,0 +1,17 @@
+{
+  "description": "Status pane sub-line when imports are ready to review.",
+  "context": "Status pane sub-line when imports are ready to review.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 60,
+  "source_revision": "e4e08e1c000af2959f97ccdecc04c047df15eba54535e2e5db036641bb582026",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -2471,6 +2471,22 @@ impl PrivateLinkCapability {
         .await
     }
 
+    pub(crate) async fn import_status(&self, import_id: &str) -> LinkOutcome {
+        if !crate::import::valid_import_id(import_id) {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        }
+        let path = format!("/app/import/api/{import_id}");
+        let Ok(url) = confine_path(&self.inner.origin, &path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import(self.inner.client.get(url), INGEST_TIMEOUT)
+            .await
+    }
+
     fn ingest_v3_url(&self, suffix: &str) -> Result<Url, LinkOutcome> {
         confine_path(&self.inner.origin, &format!("{INGEST_PATH}{suffix}")).map_err(|_| {
             LinkOutcome::LocalRejected {

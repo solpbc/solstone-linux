@@ -1,0 +1,17 @@
+{
+  "description": "Confirmation dialog body when removing a ready-to-review file.",
+  "context": "Confirmation dialog body when removing a ready-to-review file.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 160,
+  "source_revision": "08ce8b8d493997d6c962e942363bbd51aa56c48403981ef3c63c3a14204ecc1e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

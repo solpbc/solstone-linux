@@ -25,12 +25,17 @@ use tokio_util::io::ReaderStream;
 
 const FILE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const BATCH: usize = 16;
+const RECENT_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+const RECENT_MAX_ITEMS: usize = 5;
 /// The window binary converts a HEIC/HEIF photo into a JPEG with the desktop's
 /// own gdk-pixbuf loaders, preserving EXIF metadata.
 pub const CONVERT_PHOTO_ARG: &str = "--convert-photo";
 const CONVERT_DEADLINE: Duration = Duration::from_secs(120);
 pub fn explanation() -> &'static str {
     text!("linux.import.explanation")
+}
+pub fn explanation_no_drop() -> &'static str {
+    text!("linux.import.explanationnodrop")
 }
 pub fn store_error() -> &'static str {
     text!("linux.import.storeerror")
@@ -42,11 +47,28 @@ pub fn remove_error() -> &'static str {
     text!("linux.import.removeerror")
 }
 
+/// Strict ASCII `YYYYMMDD_HHMMSS` import timestamp validation (never Unicode digits).
+pub fn valid_import_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 15
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && bytes[8] == b'_'
+        && bytes[9..].iter().all(u8::is_ascii_digit)
+}
+
+fn is_confirmation_required_kind(kind: Option<&str>) -> bool {
+    matches!(
+        kind,
+        Some("body_confirmation_required" | "confirmation_required")
+    ) || kind.is_some_and(|k| k.ends_with("_confirmation_required"))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
     Copying,
     Pending,
+    ReadyToReview,
     Refused,
     Delivered,
 }
@@ -56,6 +78,18 @@ struct Saved {
     binding: String,
     path: String,
     timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct Review {
+    import_id: String,
+    reason_code: String,
+    kind: String,
+    instance_id: String,
+    #[serde(default)]
+    expired: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -66,6 +100,21 @@ struct Refusal {
     binding: Option<String>,
     version: Option<String>,
     retryable: bool,
+}
+
+impl Refusal {
+    fn applies_to(&self, current_binding: Option<&str>, current_version: Option<&str>) -> bool {
+        if self.binding.is_none() {
+            return true;
+        }
+        if self.binding.as_deref() != current_binding {
+            return false;
+        }
+        if self.reason_code.as_deref() == Some("import_preview_required") {
+            return true;
+        }
+        self.version.as_deref() == current_version
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -79,7 +128,26 @@ struct Item {
     saved: Option<Saved>,
     refusal: Option<Refusal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    review: Option<Review>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     handoff: Option<Handoff>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RecentReceipt {
+    pub filename: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_id: Option<String>,
+    pub instance_id: String,
+    pub delivered_at_epoch_ms: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct RecentFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    journal: Option<String>,
+    #[serde(default)]
+    receipts: Vec<RecentReceipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -119,6 +187,16 @@ pub struct ImportRow {
     pub missing: bool,
     #[serde(default)]
     pub can_remove: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_kind: Option<String>,
+    #[serde(default)]
+    pub review_expired: bool,
+    #[serde(default)]
+    pub size_bytes: u64,
 }
 
 /// A file the app didn't take at intake. Nothing of it is kept on this device, so it is
@@ -160,14 +238,30 @@ pub struct ImportDocument {
     pub waiting: u64,
     pub held: bool,
     pub sending: bool,
+    #[serde(default)]
+    pub ready_to_review: u64,
+    #[serde(default)]
+    pub needs_attention: u64,
+    #[serde(default)]
+    pub paired_confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_hold: Option<String>,
+    #[serde(default)]
+    pub recent_receipts: Vec<RecentReceipt>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ImportSummary {
     pub waiting: u64,
     pub held: bool,
     pub sending: bool,
     pub recent: String,
+    #[serde(default)]
+    pub ready_to_review: u64,
+    #[serde(default)]
+    pub needs_attention: u64,
+    #[serde(default)]
+    pub store_error: bool,
 }
 
 impl From<ImportDocument> for ImportSummary {
@@ -177,6 +271,9 @@ impl From<ImportDocument> for ImportSummary {
             held: document.held,
             sending: document.sending,
             recent: document.recent,
+            ready_to_review: document.ready_to_review,
+            needs_attention: document.needs_attention,
+            store_error: document.store_error,
         }
     }
 }
@@ -192,6 +289,7 @@ struct Store {
     observed: Option<CapturedAssociation>,
     version: Option<String>,
     delivered_journal: Option<String>,
+    recent_receipts: Vec<RecentReceipt>,
     receipts: std::collections::VecDeque<(String, Option<String>)>,
     sent_bytes: BTreeMap<String, u64>,
     addition: Option<String>,
@@ -246,13 +344,17 @@ impl PhotoConverter {
 #[derive(Clone, Default)]
 pub struct ImportHandle {
     root: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
     state: Arc<Mutex<Store>>,
     adding: Arc<AtomicBool>,
     client: Weak<UploadClient>,
     trigger: Option<crate::sync::SyncTrigger>,
     status_sink: Option<Arc<dyn Fn(ImportSummary) + Send + Sync>>,
     status_lock: Arc<Mutex<()>>,
+    recent_lock: Arc<Mutex<()>>,
     photo_converter: PhotoConverter,
+    #[cfg(all(test, feature = "full-tests"))]
+    clock_ms: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
 }
 
 fn ioe(error: impl std::fmt::Display) -> io::Error {
@@ -344,6 +446,48 @@ impl ImportHandle {
         self
     }
 
+    pub(crate) fn with_state_dir(mut self, state_dir: PathBuf) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    #[cfg(all(test, feature = "full-tests"))]
+    pub(crate) fn with_clock_ms(mut self, clock: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        self.clock_ms = Some(clock);
+        self
+    }
+
+    fn now_ms(&self) -> i64 {
+        #[cfg(all(test, feature = "full-tests"))]
+        if let Some(clock) = &self.clock_ms {
+            return clock();
+        }
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn has_review_items(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.items.values().any(|item| {
+            item.phase == Phase::ReadyToReview
+                && item
+                    .review
+                    .as_ref()
+                    .is_some_and(|r| !r.expired && valid_import_id(&r.import_id))
+        })
+    }
+
+    pub(crate) fn request_reconcile(&self) {
+        if self.has_review_items()
+            && let Some(trigger) = &self.trigger
+        {
+            trigger.trigger();
+        }
+    }
+
     pub(crate) fn publish_status(&self) {
         if let Some(sink) = &self.status_sink {
             let _order = self.status_lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -386,6 +530,7 @@ impl ImportHandle {
         let Some(root) = &self.root else {
             return Ok(());
         };
+        let now_ms = self.now_ms();
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.loaded {
             return if state.failed {
@@ -401,7 +546,9 @@ impl ImportHandle {
             let recent = root.join("recent.json");
             if recent.exists() {
                 let value: Value = serde_json::from_reader(regular_file(&recent)?).map_err(ioe)?;
-                state.delivered_journal = value["journal"].as_str().map(str::to_owned);
+                let parsed = parse_recent_file(value, now_ms)?;
+                state.delivered_journal = parsed.journal;
+                state.recent_receipts = parsed.receipts;
             }
             for entry in fs::read_dir(root)? {
                 let entry = entry?;
@@ -429,6 +576,7 @@ impl ImportHandle {
                         may_have_saved: true,
                         saved: None,
                         handoff: None,
+                        review: None,
                         refusal: Some(local_refusal("this couldn't be read. add it again")),
                     },
                 };
@@ -443,12 +591,26 @@ impl ImportHandle {
                 if item.phase == Phase::Copying {
                     state.interrupted = true;
                     item.phase = Phase::Refused;
+                    item.review = None;
                     item.refusal = Some(local_refusal("this couldn't be read. add it again"));
                     self.persist(&item)?;
-                } else if (item.phase == Phase::Pending || item.may_have_saved)
+                } else if item.phase == Phase::ReadyToReview
+                    && item
+                        .review
+                        .as_ref()
+                        .is_none_or(|r| !valid_import_id(&r.import_id) || r.instance_id.is_empty())
+                {
+                    item.phase = Phase::Refused;
+                    item.review = None;
+                    item.refusal = Some(local_refusal("this couldn't be read. add it again"));
+                    self.persist(&item)?;
+                } else if (item.phase == Phase::Pending
+                    || item.phase == Phase::ReadyToReview
+                    || item.may_have_saved)
                     && regular_file(&entry.path().join("payload")).is_err()
                 {
                     item.phase = Phase::Refused;
+                    item.review = None;
                     item.refusal = Some(local_refusal("the copy on this device is missing"));
                     self.persist(&item)?;
                 }
@@ -625,13 +787,64 @@ impl ImportHandle {
         let Some(item) = state.items.get(id) else {
             return json!({"state":"gone"});
         };
+        if item.phase == Phase::ReadyToReview
+            && let Some(review) = &item.review
+        {
+            if review.expired {
+                return json!({
+                    "state": "attention",
+                    "review_required": false,
+                    "review_expired": true,
+                    "reason_code": review.reason_code,
+                    "kind": review.kind,
+                    "import_id": review.import_id,
+                    "retryable": true,
+                    "reason": text!("linux.import.reviewexpireddetail"),
+                    "device_noun": "computer",
+                    "size_bytes": item.size,
+                });
+            }
+            return json!({
+                "state": "attention",
+                "review_required": true,
+                "review_expired": false,
+                "reason_code": review.reason_code,
+                "kind": review.kind,
+                "import_id": review.import_id,
+                "retryable": false,
+                "reason": text!("linux.import.reviewdetail"),
+                "device_noun": "computer",
+                "size_bytes": item.size,
+            });
+        }
         if let Some(refusal) = &item.refusal {
-            return json!({"state":"attention","reason":refusal.reason,"import_id":item.saved.as_ref().map(|saved| &saved.timestamp)});
+            return json!({
+                "state": "attention",
+                "review_required": false,
+                "review_expired": false,
+                "reason_code": refusal.reason_code,
+                "kind": refusal.kind,
+                "retryable": refusal.retryable,
+                "reason": refusal.reason,
+                "import_id": item.saved.as_ref().map(|saved| &saved.timestamp),
+                "device_noun": "computer",
+                "size_bytes": item.size,
+            });
         }
         if state.busy.contains(id) {
-            return json!({"state":"uploading","bytes":state.sent_bytes.get(id).copied().unwrap_or(0),"size":item.size});
+            return json!({
+                "state": "uploading",
+                "bytes": state.sent_bytes.get(id).copied().unwrap_or(0),
+                "size": item.size,
+                "size_bytes": item.size,
+                "device_noun": "computer",
+            });
         }
-        json!({"state":"waiting"})
+        json!({
+            "state": "waiting",
+            "size_bytes": item.size,
+            "device_noun": "computer",
+        })
     }
 
     fn copy_one(
@@ -667,6 +880,7 @@ impl ImportHandle {
             may_have_saved: false,
             saved: None,
             refusal: None,
+            review: None,
             handoff,
         };
         self.publish(item.clone())?;
@@ -744,6 +958,9 @@ impl ImportHandle {
                 item.size = size;
                 item.phase = Phase::Pending;
                 self.publish(item.clone())?;
+                if let Some(state_dir) = &self.state_dir {
+                    crate::source_intake::add_import(state_dir, &item.id);
+                }
                 Ok(Ok(item))
             }
             Err(error) => {
@@ -780,6 +997,7 @@ impl ImportHandle {
                 ..ImportDocument::default()
             };
         }
+        let now_ms = self.now_ms();
         let client = self.client.upgrade();
         let capability = client.as_ref().and_then(|c| c.capability());
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -801,12 +1019,16 @@ impl ImportHandle {
                     || f.pairing_required
             })
             && !client.as_ref().is_some_and(|c| c.is_revoked());
+        let current_instance_id = capability
+            .as_ref()
+            .map(|c| c.writer().identity_key().to_owned());
         let mut document = ImportDocument {
             v: 1,
             addition: state.addition.clone(),
             adding: self.adding.load(Ordering::Acquire),
             interrupted: state.interrupted,
             store_error: state.failed,
+            paired_confirmed: ready,
             ..ImportDocument::default()
         };
         if state.failed {
@@ -819,12 +1041,51 @@ impl ImportHandle {
         let current_binding = capability.as_ref().map(binding);
         for item in state.items.values().filter(|i| i.phase != Phase::Delivered) {
             let sending = state.busy.contains(&item.id);
-            let refusal = item.refusal.as_ref().filter(|r| {
-                r.binding.is_none()
-                    || (r.binding == current_binding && r.version.as_deref() == version)
-            });
+            let matching_review = if item.phase == Phase::ReadyToReview {
+                item.review.as_ref().filter(|r| {
+                    ready
+                        && current_instance_id.as_deref() == Some(r.instance_id.as_str())
+                        && valid_import_id(&r.import_id)
+                })
+            } else {
+                None
+            };
+            if let Some(review) = matching_review {
+                document.ready_to_review += 1;
+                let row_state = if review.expired {
+                    "review expired"
+                } else {
+                    "ready to review"
+                };
+                document.rows.push(ImportRow {
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    state: row_state.to_owned(),
+                    reason: review
+                        .expired
+                        .then(|| text!("linux.import.reviewexpireddetail").to_owned()),
+                    can_retry: review.expired
+                        && !sending
+                        && !state.confirmations.contains_key(&item.id),
+                    may_have_saved: true,
+                    missing: false,
+                    can_remove: !sending && !state.confirmations.contains_key(&item.id),
+                    import_id: Some(review.import_id.clone()),
+                    reason_code: Some(review.reason_code.clone()),
+                    review_kind: Some(review.kind.clone()),
+                    review_expired: review.expired,
+                    size_bytes: item.size,
+                });
+                continue;
+            }
+            let refusal = item
+                .refusal
+                .as_ref()
+                .filter(|r| r.applies_to(current_binding.as_deref(), version));
             let attention = refusal.is_some();
-            if ready && supported && !attention && item.phase != Phase::Copying {
+            if attention {
+                document.needs_attention += 1;
+            } else if ready && supported && item.phase != Phase::Copying {
                 document.waiting += 1;
             }
             document.sending |= sending;
@@ -848,41 +1109,108 @@ impl ImportHandle {
                 can_remove: !sending
                     && item.phase != Phase::Copying
                     && !state.confirmations.contains_key(&item.id),
+                import_id: item
+                    .saved
+                    .as_ref()
+                    .map(|s| s.timestamp.clone())
+                    .filter(|ts| valid_import_id(ts)),
+                reason_code: refusal.and_then(|r| r.reason_code.clone()),
+                review_kind: refusal.and_then(|r| r.kind.clone()),
+                review_expired: false,
+                size_bytes: item.size,
             });
         }
+        if ready && let Some(inst) = current_instance_id.as_deref() {
+            let mut filtered: Vec<RecentReceipt> = state
+                .recent_receipts
+                .iter()
+                .filter(|r| r.instance_id == inst)
+                .cloned()
+                .collect();
+            prune_recent_receipts(&mut filtered, now_ms);
+            document.recent_receipts = filtered;
+        }
+        document.queue_hold = if capability.is_none() {
+            Some(text!("linux.import.waitforjournal").to_owned())
+        } else if facts.as_ref().is_some_and(|f| f.journal_mark_held) {
+            Some(text!("linux.import.waitformark").to_owned())
+        } else if !ready {
+            Some(text!("linux.import.pairagain").to_owned())
+        } else if current && !supported {
+            Some(text!("linux.import.waitforupdate").to_owned())
+        } else {
+            None
+        };
         document.held =
             state.failed || !state.loaded || !document.rows.is_empty() || document.adding;
         document.recent = if capability.is_none() {
-            text!("linux.import.waitforjournal")
+            text!("linux.import.waitforjournal").to_owned()
         } else if facts.as_ref().is_some_and(|f| f.journal_mark_held) {
-            text!("linux.import.waitformark")
+            text!("linux.import.waitformark").to_owned()
         } else if !ready {
-            text!("linux.import.pairagain")
+            text!("linux.import.pairagain").to_owned()
         } else if !document.rows.is_empty() && !supported {
-            text!("linux.import.waitforupdate")
+            text!("linux.import.waitforupdate").to_owned()
         } else if document.sending {
-            text!("linux.import.sendingtojournal")
+            text!("linux.import.sendingtojournal").to_owned()
         } else if document.waiting > 0
             || document.adding
             || state.items.values().any(|i| i.phase == Phase::Copying)
         {
-            text!("linux.import.waitingforjournal")
+            text!("linux.import.waitingforjournal").to_owned()
+        } else if document.needs_attention > 0 {
+            text!("linux.import.held").to_owned()
+        } else if document.ready_to_review > 0 {
+            message!(
+                "linux.import.readytoreviewcount",
+                "count" => document.ready_to_review
+            )
         } else if !document.rows.is_empty() {
-            text!("linux.import.held")
-        } else if capability
-            .as_ref()
-            .is_some_and(|c| state.delivered_journal.as_deref() == Some(c.writer().identity_key()))
+            text!("linux.import.held").to_owned()
+        } else if !document.recent_receipts.is_empty()
+            || capability.as_ref().is_some_and(|c| {
+                state.delivered_journal.as_deref() == Some(c.writer().identity_key())
+            })
         {
-            text!("linux.import.delivered")
+            text!("linux.import.delivered").to_owned()
         } else {
-            text!("linux.import.nothingyet")
-        }
-        .to_owned();
+            text!("linux.import.nothingyet").to_owned()
+        };
         document
     }
 
     pub fn state_json(&self) -> String {
         serde_json::to_string(&self.document()).expect("import document serializes")
+    }
+
+    pub async fn send_again(&self, id: String) -> bool {
+        let handle = self.clone();
+        let ok = tokio::task::spawn_blocking(move || {
+            let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.busy.contains(&id) || state.confirmations.contains_key(&id) || state.failed {
+                return Ok::<_, io::Error>(false);
+            }
+            let Some(item) = state.items.get(&id) else {
+                return Ok(false);
+            };
+            if item.phase != Phase::ReadyToReview
+                || !item.review.as_ref().is_some_and(|r| r.expired)
+            {
+                return Ok(false);
+            }
+            let mut next = item.clone();
+            next.saved = None;
+            next.review = None;
+            next.refusal = None;
+            next.phase = Phase::Pending;
+            handle.persist(&next)?;
+            state.items.insert(id.clone(), next);
+            state.saved_current.remove(&id);
+            Ok(true)
+        })
+        .await;
+        self.wake();
+        matches!(ok, Ok(Ok(true)))
     }
 
     pub async fn retry(&self, id: String) -> bool {
@@ -892,25 +1220,33 @@ impl ImportHandle {
             if state.busy.contains(&id) || state.confirmations.contains_key(&id) || state.failed {
                 return Ok::<_, io::Error>(false);
             }
-            let Some(item) = state.items.get_mut(&id) else {
+            let Some(item) = state.items.get(&id) else {
                 return Ok(false);
             };
-            if !item.refusal.as_ref().is_some_and(|r| r.retryable) {
+            let is_expired_review = item.phase == Phase::ReadyToReview
+                && item.review.as_ref().is_some_and(|r| r.expired);
+            let is_retryable_refusal =
+                item.phase == Phase::Refused && item.refusal.as_ref().is_some_and(|r| r.retryable);
+            if !is_expired_review && !is_retryable_refusal {
                 return Ok(false);
             }
             let mut next = item.clone();
-            if next.refusal.as_ref().is_some_and(|refusal| {
-                matches!(
-                    refusal.reason_code.as_deref(),
-                    Some("import_preview_required" | "import_not_found")
-                )
-            }) {
+            if is_expired_review
+                || next.refusal.as_ref().is_some_and(|refusal| {
+                    matches!(
+                        refusal.reason_code.as_deref(),
+                        Some("import_preview_required" | "import_not_found")
+                    )
+                })
+            {
                 next.saved = None;
             }
+            next.review = None;
             next.refusal = None;
             next.phase = Phase::Pending;
             handle.persist(&next)?;
-            *item = next;
+            state.items.insert(id.clone(), next);
+            state.saved_current.remove(&id);
             Ok(true)
         })
         .await;
@@ -937,11 +1273,24 @@ impl ImportHandle {
         let row = ImportRow {
             id: item.id.clone(),
             name: item.name.clone(),
+            state: match item.phase {
+                Phase::ReadyToReview if item.review.as_ref().is_some_and(|r| r.expired) => {
+                    "review expired"
+                }
+                Phase::ReadyToReview => "ready to review",
+                Phase::Refused => "needs attention",
+                _ => "waiting",
+            }
+            .to_owned(),
             may_have_saved: item.may_have_saved,
             missing: self
                 .root
                 .as_ref()
                 .is_none_or(|root| regular_file(&root.join(id).join("payload")).is_err()),
+            import_id: item.review.as_ref().map(|r| r.import_id.clone()),
+            review_kind: item.review.as_ref().map(|r| r.kind.clone()),
+            review_expired: item.review.as_ref().is_some_and(|r| r.expired),
+            size_bytes: item.size,
             ..ImportRow::default()
         };
         let token = new_id()?;
@@ -1080,6 +1429,213 @@ impl ImportHandle {
         }
     }
 
+    fn reset_foreign_reviews(&self, current_instance_id: &str) -> io::Result<()> {
+        let mut changed = false;
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let foreign_ids: Vec<String> = state
+                .items
+                .iter()
+                .filter(|(id, item)| {
+                    item.phase == Phase::ReadyToReview
+                        && !state.busy.contains(*id)
+                        && !state.confirmations.contains_key(*id)
+                        && item
+                            .review
+                            .as_ref()
+                            .is_none_or(|r| r.instance_id != current_instance_id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in foreign_ids {
+                if let Some(item) = state.items.get(&id) {
+                    let mut next = item.clone();
+                    next.phase = Phase::Pending;
+                    next.saved = None;
+                    next.review = None;
+                    next.refusal = None;
+                    next.may_have_saved = false;
+                    self.persist(&next)?;
+                    state.items.insert(id.clone(), next);
+                    state.saved_current.remove(&id);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.publish_status();
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn reconcile_reviews(&self, client: &Arc<UploadClient>, running: &AtomicBool) {
+        if self.root.is_none() || !running.load(Ordering::Acquire) || client.is_revoked() {
+            return;
+        }
+        let association = client.capture_association();
+        let Some(capability) = association.capability.clone() else {
+            return;
+        };
+        let facts = capability.facts().snapshot();
+        if facts.journal_mark_held
+            || facts.terminal_revocation
+            || facts.private_state_invalid
+            || facts.config_sanitation_failed
+            || facts.pairing_required
+        {
+            return;
+        }
+        let current_instance_id = capability.writer().identity_key().to_owned();
+        if self.reset_foreign_reviews(&current_instance_id).is_err() {
+            return;
+        }
+        let candidates: Vec<(String, String, String)> = {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.failed {
+                return;
+            }
+            state
+                .items
+                .values()
+                .filter_map(|item| {
+                    if item.phase != Phase::ReadyToReview
+                        || state.busy.contains(&item.id)
+                        || state.confirmations.contains_key(&item.id)
+                    {
+                        return None;
+                    }
+                    let review = item.review.as_ref()?;
+                    if review.expired
+                        || review.instance_id != current_instance_id
+                        || !valid_import_id(&review.import_id)
+                    {
+                        return None;
+                    }
+                    Some((
+                        item.id.clone(),
+                        review.import_id.clone(),
+                        review.instance_id.clone(),
+                    ))
+                })
+                .collect()
+        };
+        for (item_id, saved_import_id, saved_instance_id) in candidates {
+            if !running.load(Ordering::Acquire)
+                || client.is_revoked()
+                || !client.association_is_current(&association)
+                || self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .auth_status
+                    .is_some()
+            {
+                break;
+            }
+            let Some(outcome) = guarded(
+                client,
+                &association,
+                running,
+                capability.import_status(&saved_import_id),
+            )
+            .await
+            else {
+                break;
+            };
+            if outcome
+                .status_code()
+                .is_some_and(|code| matches!(code, 401 | 403))
+            {
+                self.auth_answer(client, &association, &outcome);
+                break;
+            }
+            let LinkOutcome::Success { status, body } = outcome else {
+                continue;
+            };
+            match status.as_u16() {
+                404 => {
+                    let updated = {
+                        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                        let matches = state.items.get(&item_id).is_some_and(|item| {
+                            !state.busy.contains(&item_id)
+                                && !state.confirmations.contains_key(&item_id)
+                                && item.phase == Phase::ReadyToReview
+                                && item.review.as_ref().is_some_and(|r| {
+                                    !r.expired
+                                        && r.import_id == saved_import_id
+                                        && r.instance_id == saved_instance_id
+                                })
+                        });
+                        if matches {
+                            let mut next = state.items[&item_id].clone();
+                            if let Some(review) = &mut next.review {
+                                review.expired = true;
+                            }
+                            if self.persist(&next).is_ok() {
+                                state.items.insert(item_id.clone(), next);
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    if updated {
+                        self.publish_status();
+                    }
+                }
+                200 => {
+                    let Ok(root) = serde_json::from_slice::<Value>(&body) else {
+                        continue;
+                    };
+                    if classify_reconcile_200(&root) == ReconcileDecision::Confirmed
+                        && let Err(error) = self.confirm_reconciled_delivery(
+                            &item_id,
+                            &saved_import_id,
+                            &saved_instance_id,
+                        )
+                    {
+                        tracing::warn!(%error, "import reconciliation retained after local storage failure");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn confirm_reconciled_delivery(
+        &self,
+        item_id: &str,
+        saved_import_id: &str,
+        saved_instance_id: &str,
+    ) -> io::Result<()> {
+        let item = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.busy.contains(item_id) || state.confirmations.contains_key(item_id) {
+                return Ok(());
+            }
+            let Some(item) = state.items.get(item_id) else {
+                return Ok(());
+            };
+            if item.phase != Phase::ReadyToReview
+                || !item.review.as_ref().is_some_and(|r| {
+                    r.import_id == saved_import_id && r.instance_id == saved_instance_id
+                })
+            {
+                return Ok(());
+            }
+            let cloned = item.clone();
+            state.busy.insert(item_id.to_owned());
+            cloned
+        };
+        let _reservation = Sending {
+            handle: self.clone(),
+            id: item_id.to_owned(),
+        };
+        self.delivered(item, saved_instance_id, Some(saved_import_id.to_owned()))
+    }
+
     pub(crate) async fn deliver(&self, client: &Arc<UploadClient>, running: &AtomicBool) {
         if self.root.is_none() || !running.load(Ordering::Acquire) || client.is_revoked() {
             return;
@@ -1097,7 +1653,34 @@ impl ImportHandle {
         {
             return;
         }
-        if self.document().rows.is_empty() {
+        if self
+            .reset_foreign_reviews(capability.writer().identity_key())
+            .is_err()
+        {
+            return;
+        }
+        self.reconcile_reviews(client, running).await;
+        if !running.load(Ordering::Acquire)
+            || client.is_revoked()
+            || !client.association_is_current(&association)
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .auth_status
+                .is_some()
+        {
+            return;
+        }
+        let has_deliverable = {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            !state.failed
+                && state
+                    .items
+                    .values()
+                    .any(|item| !matches!(item.phase, Phase::Delivered | Phase::ReadyToReview))
+        };
+        if !has_deliverable {
             return;
         }
         {
@@ -1171,13 +1754,15 @@ impl ImportHandle {
                 let Some(item) = state.items.get(&id) else {
                     continue;
                 };
-                if matches!(item.phase, Phase::Copying | Phase::Delivered)
-                    || state.busy.contains(&id)
+                if matches!(
+                    item.phase,
+                    Phase::Copying | Phase::Delivered | Phase::ReadyToReview
+                ) || state.busy.contains(&id)
                     || state.confirmations.contains_key(&id)
-                    || item.refusal.as_ref().is_some_and(|r| {
-                        r.binding.is_none()
-                            || (r.binding.as_deref() == Some(&binding) && r.version == version)
-                    })
+                    || item
+                        .refusal
+                        .as_ref()
+                        .is_some_and(|r| r.applies_to(Some(&binding), version.as_deref()))
                 {
                     continue;
                 }
@@ -1228,10 +1813,12 @@ impl ImportHandle {
             Ok(file) if file.metadata()?.len() == item.size => file,
             _ => {
                 item.phase = Phase::Refused;
+                item.review = None;
                 item.refusal = Some(local_refusal("the copy on this device is missing"));
                 return self.publish(item);
             }
         };
+        let instance_id = capability.writer().identity_key().to_owned();
         let reuse = self
             .state
             .lock()
@@ -1243,6 +1830,7 @@ impl ImportHandle {
             item.may_have_saved = true;
             item.phase = Phase::Pending;
             item.refusal = None;
+            item.review = None;
             item.saved = None;
             self.publish(item.clone())?;
             let file = tokio::fs::File::from_std(payload);
@@ -1285,12 +1873,13 @@ impl ImportHandle {
                 return Ok(());
             };
             self.auth_answer(client, association, &outcome);
-            match parse_reply(outcome, false) {
+            match parse_reply(outcome, false, None) {
                 Answer::Saved { path, timestamp } => {
                     item.saved = Some(Saved {
                         binding: binding.to_owned(),
                         path,
                         timestamp,
+                        instance_id: Some(instance_id.clone()),
                     });
                     self.publish(item.clone())?;
                     self.state
@@ -1300,9 +1889,9 @@ impl ImportHandle {
                         .insert(item.id.clone(), association.clone());
                 }
                 Answer::Delivered(row) => {
-                    return self.delivered(item, capability.writer().identity_key(), row);
+                    return self.delivered(item, &instance_id, row);
                 }
-                other => return self.retain_answer(item, other, binding, version),
+                other => return self.retain_answer(item, other, binding, version, &instance_id),
             }
         }
         if !client.association_is_current(association) || !running.load(Ordering::Acquire) {
@@ -1311,7 +1900,8 @@ impl ImportHandle {
         let saved = item
             .saved
             .as_ref()
-            .ok_or_else(|| ioe("missing import save progress"))?;
+            .ok_or_else(|| ioe("missing import save progress"))?
+            .clone();
         let Some(outcome) = guarded(
             client,
             association,
@@ -1323,9 +1913,9 @@ impl ImportHandle {
             return Ok(());
         };
         self.auth_answer(client, association, &outcome);
-        match parse_reply(outcome, true) {
-            Answer::Delivered(row) => self.delivered(item, capability.writer().identity_key(), row),
-            other => self.retain_answer(item, other, binding, version),
+        match parse_reply(outcome, true, Some(&saved.timestamp)) {
+            Answer::Delivered(row) => self.delivered(item, &instance_id, row),
+            other => self.retain_answer(item, other, binding, version, &instance_id),
         }
     }
 
@@ -1335,47 +1925,150 @@ impl ImportHandle {
         answer: Answer,
         binding: &str,
         version: Option<&str>,
+        instance_id: &str,
     ) -> io::Result<()> {
-        if let Answer::Refused(mut refusal) = answer {
-            refusal.binding = Some(binding.to_owned());
-            refusal.version = version.map(str::to_owned);
-            item.phase = Phase::Refused;
-            item.refusal = Some(refusal);
-            self.publish(item)?;
+        match answer {
+            Answer::ReadyToReview {
+                import_id,
+                reason_code,
+                kind,
+            } => {
+                item.phase = Phase::ReadyToReview;
+                item.may_have_saved = true;
+                item.refusal = None;
+                item.review = Some(Review {
+                    import_id,
+                    reason_code,
+                    kind,
+                    instance_id: instance_id.to_owned(),
+                    expired: false,
+                });
+                self.publish(item)?;
+            }
+            Answer::Refused(mut refusal) => {
+                refusal.binding = Some(binding.to_owned());
+                refusal.version = version.map(str::to_owned);
+                item.phase = Phase::Refused;
+                item.review = None;
+                item.refusal = Some(refusal);
+                self.publish(item)?;
+            }
+            Answer::Saved { .. } | Answer::Delivered(_) | Answer::Retry => {}
         }
         Ok(())
     }
 
     fn delivered(&self, mut item: Item, journal: &str, row: Option<String>) -> io::Result<()> {
-        item.phase = Phase::Delivered;
-        self.publish(item.clone())?;
         let root = self
             .root
             .as_ref()
             .ok_or_else(|| ioe("import store unavailable"))?;
-        atomic_write_bytes(
-            &root.join("recent.json"),
-            &encode(&serde_json::json!({"journal":journal}))?,
-        )
-        .map_err(ioe)?;
+        let now_ms = self.now_ms();
+        let resolved_row = row.or_else(|| item.saved.as_ref().map(|saved| saved.timestamp.clone()));
+        let valid_row = resolved_row
+            .as_ref()
+            .filter(|id| valid_import_id(id))
+            .cloned();
+
+        // Persist the 24h recent receipt durably BEFORE deleting local payload bytes.
+        let updated_receipts = {
+            let _recent_guard = self.recent_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut receipts = self
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .recent_receipts
+                .clone();
+            receipts.insert(
+                0,
+                RecentReceipt {
+                    filename: item.name.clone(),
+                    import_id: valid_row.clone(),
+                    instance_id: journal.to_owned(),
+                    delivered_at_epoch_ms: now_ms,
+                },
+            );
+            prune_recent_receipts(&mut receipts, now_ms);
+            let file = RecentFile {
+                journal: Some(journal.to_owned()),
+                receipts: receipts.clone(),
+            };
+            atomic_write_bytes(&root.join("recent.json"), &encode(&file)?).map_err(ioe)?;
+            receipts
+        };
+
+        // Tombstone item.json so a crash before cleanup never resurrects it.
+        item.phase = Phase::Delivered;
+        item.review = None;
+        self.persist(&item)?;
         {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.delivered_journal = Some(journal.to_owned());
+            state.recent_receipts = updated_receipts;
             if item.handoff.is_some() {
                 if state.receipts.len() >= 1024 {
                     state.receipts.pop_front();
                 }
-                state.receipts.push_back((
-                    item.id.clone(),
-                    row.or_else(|| item.saved.as_ref().map(|saved| saved.timestamp.clone())),
-                ));
+                state.receipts.push_back((item.id.clone(), resolved_row));
             }
             state.sent_bytes.remove(&item.id);
             state.items.remove(&item.id);
             state.saved_current.remove(&item.id);
         }
-        self.cleanup(&item.id)
+        self.cleanup(&item.id)?;
+        self.publish_status();
+        Ok(())
     }
+}
+
+fn parse_recent_file(value: Value, now_ms: i64) -> io::Result<RecentFile> {
+    let mut file = match value {
+        Value::String(journal) => RecentFile {
+            journal: (!journal.is_empty()).then_some(journal),
+            receipts: Vec::new(),
+        },
+        Value::Object(_) => serde_json::from_value::<RecentFile>(value).map_err(ioe)?,
+        _ => return Err(ioe("invalid recent.json")),
+    };
+    prune_recent_receipts(&mut file.receipts, now_ms);
+    Ok(file)
+}
+
+fn prune_recent_receipts(receipts: &mut Vec<RecentReceipt>, now_ms: i64) {
+    receipts.retain(|r| {
+        !r.filename.is_empty()
+            && !r.instance_id.is_empty()
+            && now_ms.saturating_sub(r.delivered_at_epoch_ms) <= RECENT_WINDOW_MS
+    });
+    for receipt in receipts.iter_mut() {
+        receipt.import_id = receipt.import_id.take().filter(|id| valid_import_id(id));
+    }
+    receipts.sort_by_key(|r| std::cmp::Reverse(r.delivered_at_epoch_ms));
+    receipts.truncate(RECENT_MAX_ITEMS);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconcileDecision {
+    Confirmed,
+    Keep,
+}
+
+fn classify_reconcile_200(root: &Value) -> ReconcileDecision {
+    if matches!(
+        root.get("status").and_then(Value::as_str),
+        Some("running" | "success" | "failed" | "unconfirmed" | "noted" | "unavailable")
+    ) {
+        return ReconcileDecision::Confirmed;
+    }
+    if let Some(saved_start) = root.get("saved_start") {
+        if saved_start.get("active").and_then(Value::as_bool) == Some(true) {
+            return ReconcileDecision::Confirmed;
+        }
+        if saved_start.get("state").and_then(Value::as_str) == Some("consumed") {
+            return ReconcileDecision::Confirmed;
+        }
+    }
+    ReconcileDecision::Keep
 }
 
 struct Sending {
@@ -1430,13 +2123,21 @@ async fn guarded<T>(
 
 #[derive(Debug)]
 enum Answer {
-    Saved { path: String, timestamp: String },
+    Saved {
+        path: String,
+        timestamp: String,
+    },
     Delivered(Option<String>),
+    ReadyToReview {
+        import_id: String,
+        reason_code: String,
+        kind: String,
+    },
     Retry,
     Refused(Refusal),
 }
 
-fn parse_reply(outcome: LinkOutcome, start: bool) -> Answer {
+fn parse_reply(outcome: LinkOutcome, start: bool, fallback_timestamp: Option<&str>) -> Answer {
     let LinkOutcome::Success { status, body } = outcome else {
         return Answer::Retry;
     };
@@ -1477,6 +2178,29 @@ fn parse_reply(outcome: LinkOutcome, start: bool) -> Answer {
     }
     let reason_code = string("reason_code");
     let kind = string("kind");
+    if start && status.as_u16() == 409 && reason_code.as_deref() == Some("import_preview_required")
+    {
+        let candidate_id = string("import_id").or_else(|| fallback_timestamp.map(str::to_owned));
+        if is_confirmation_required_kind(kind.as_deref())
+            && let Some(import_id) = candidate_id.filter(|id| valid_import_id(id))
+        {
+            return Answer::ReadyToReview {
+                import_id,
+                reason_code: "import_preview_required".to_owned(),
+                kind: kind.unwrap_or_default(),
+            };
+        }
+        let retryable = matches!(kind.as_deref(), Some("source_changed" | "already_running"));
+        return Answer::Refused(Refusal {
+            reason: string("error")
+                .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned()),
+            reason_code,
+            kind,
+            binding: None,
+            version: None,
+            retryable,
+        });
+    }
     let retryable = !matches!(
         reason_code.as_deref(),
         Some(
@@ -1488,7 +2212,13 @@ fn parse_reply(outcome: LinkOutcome, start: bool) -> Answer {
         )
     ) && !matches!(
         kind.as_deref(),
-        Some("client_item_conflict" | "nothing_to_import")
+        Some(
+            "client_item_conflict"
+                | "nothing_to_import"
+                | "plan_failed"
+                | "invalid_request"
+                | "not_found"
+        )
     );
     Answer::Refused(Refusal {
         reason: string("error").unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned()),
@@ -1505,6 +2235,8 @@ pub fn display_import_status(value: &str) -> &str {
     match value {
         "sending" => text!("linux.import.sending"),
         "waiting" => text!("linux.import.waiting"),
+        "ready to review" => text!("linux.import.readytoreview"),
+        "review expired" => text!("linux.import.expired"),
         "needs attention" => text!("linux.import.attention"),
         "this couldn't be read. add it again" => text!("linux.import.filenotread"),
         "the copy on this device is missing" => text!("linux.import.filemissing"),
@@ -1539,7 +2271,8 @@ mod tests {
                         status: StatusCode::BAD_REQUEST,
                         body: replay.to_vec()
                     },
-                    start
+                    start,
+                    None,
                 ),
                 Answer::Delivered(_)
             ));
@@ -1550,7 +2283,8 @@ mod tests {
                             status: StatusCode::from_u16(status).unwrap(),
                             body: replay.to_vec()
                         },
-                        start
+                        start,
+                        None,
                     ),
                     Answer::Delivered(_)
                 ));
@@ -1561,11 +2295,222 @@ mod tests {
                         status: StatusCode::OK,
                         body: b"{\"status\":\"ok\"}".to_vec()
                     },
-                    start
+                    start,
+                    None,
                 ),
                 Answer::Retry
             ));
         }
+    }
+
+    #[test]
+    fn valid_import_id_enforces_strict_ascii_timestamp() {
+        assert!(valid_import_id("20261121_181500"));
+        assert!(valid_import_id("00000000_000000"));
+        for bad in [
+            "",
+            "20261121_18150",
+            "20261121_1815000",
+            "20261121-181500",
+            "not-a-timestamp",
+            "../settings",
+            "20261121_181500?x=1",
+            "20261121_181500#frag",
+            "２０２６１１２１_１８１５００",
+        ] {
+            assert!(!valid_import_id(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn preview_required_classification_allows_only_explicit_confirmation_kinds() {
+        for kind in [
+            "body_confirmation_required",
+            "confirmation_required",
+            "evernote_confirmation_required",
+        ] {
+            let body = serde_json::json!({
+                "reason_code": "import_preview_required",
+                "kind": kind,
+                "import_id": "20261121_181500",
+                "error": "preview required"
+            })
+            .to_string();
+            assert!(
+                matches!(
+                    parse_reply(
+                        LinkOutcome::Success {
+                            status: StatusCode::CONFLICT,
+                            body: body.into_bytes(),
+                        },
+                        true,
+                        None,
+                    ),
+                    Answer::ReadyToReview { import_id, .. } if import_id == "20261121_181500"
+                ),
+                "expected ReadyToReview for {kind}"
+            );
+        }
+        // Fallback to persisted /save timestamp when response omits import_id.
+        let fallback_body = serde_json::json!({
+            "reason_code": "import_preview_required",
+            "kind": "body_confirmation_required",
+        })
+        .to_string();
+        assert!(matches!(
+            parse_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::CONFLICT,
+                    body: fallback_body.into_bytes(),
+                },
+                true,
+                Some("20261121_181501"),
+            ),
+            Answer::ReadyToReview { import_id, .. } if import_id == "20261121_181501"
+        ));
+        // Invalid import_id (even with valid fallback) or missing valid id must NOT enter ReadyToReview.
+        let bad_id_body = serde_json::json!({
+            "reason_code": "import_preview_required",
+            "kind": "body_confirmation_required",
+            "import_id": "../bad"
+        })
+        .to_string();
+        assert!(matches!(
+            parse_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::CONFLICT,
+                    body: bad_id_body.into_bytes(),
+                },
+                true,
+                Some("20261121_181501"),
+            ),
+            Answer::Refused(Refusal {
+                retryable: false,
+                ..
+            })
+        ));
+        // All non-confirmation kinds enter Refused, never ReadyToReview.
+        for (kind, expect_retryable) in [
+            (Some("plan_failed"), false),
+            (Some("nothing_to_import"), false),
+            (Some("invalid_request"), false),
+            (Some("not_found"), false),
+            (Some("source_changed"), true),
+            (Some("already_running"), true),
+            (Some("unknown_kind"), false),
+            (None, false),
+        ] {
+            let mut obj = serde_json::json!({
+                "reason_code": "import_preview_required",
+                "import_id": "20261121_181500",
+                "error": "refused"
+            });
+            if let Some(k) = kind {
+                obj["kind"] = json!(k);
+            }
+            match parse_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::CONFLICT,
+                    body: obj.to_string().into_bytes(),
+                },
+                true,
+                Some("20261121_181500"),
+            ) {
+                Answer::Refused(r) => {
+                    assert_eq!(
+                        r.retryable, expect_retryable,
+                        "retryable mismatch for {kind:?}"
+                    );
+                }
+                other => panic!("expected Refused for {kind:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reconcile_200_classification_is_conservative_and_exact() {
+        for status in [
+            "running",
+            "success",
+            "failed",
+            "unconfirmed",
+            "noted",
+            "unavailable",
+        ] {
+            assert_eq!(
+                classify_reconcile_200(&json!({"status": status})),
+                ReconcileDecision::Confirmed,
+                "expected Confirmed for status {status}"
+            );
+        }
+        assert_eq!(
+            classify_reconcile_200(
+                &json!({"status": "pending", "saved_start": {"active": true, "state": "eligible"}})
+            ),
+            ReconcileDecision::Confirmed
+        );
+        assert_eq!(
+            classify_reconcile_200(
+                &json!({"status": "pending", "saved_start": {"active": false, "state": "consumed"}})
+            ),
+            ReconcileDecision::Confirmed
+        );
+        for keep in [
+            json!({"status": "pending", "saved_start": {"active": false, "state": "eligible"}}),
+            json!({"status": "pending", "saved_start": {"active": false, "state": "unknown"}}),
+            json!({"status": "pending", "saved_start": null}),
+            json!({"status": "pending"}),
+            json!({}),
+        ] {
+            assert_eq!(
+                classify_reconcile_200(&keep),
+                ReconcileDecision::Keep,
+                "must keep for {keep}"
+            );
+        }
+    }
+
+    #[test]
+    fn recent_json_decodes_legacy_string_and_prunes_24h_cap_5() {
+        let now = 2_000_000_000_000i64;
+        // Legacy bare JSON string format
+        let bare = parse_recent_file(json!("inst-a:abcd"), now).unwrap();
+        assert_eq!(bare.journal.as_deref(), Some("inst-a:abcd"));
+        assert!(bare.receipts.is_empty());
+
+        // Legacy object without receipts
+        let legacy_obj = parse_recent_file(json!({"journal": "inst-a:abcd"}), now).unwrap();
+        assert_eq!(legacy_obj.journal.as_deref(), Some("inst-a:abcd"));
+        assert!(legacy_obj.receipts.is_empty());
+
+        // Pruning >24h, capping to 5 newest, sanitizing invalid import_id
+        let mut list = vec![RecentReceipt {
+            filename: "expired.zip".into(),
+            import_id: Some("20261120_100000".into()),
+            instance_id: "inst-a".into(),
+            delivered_at_epoch_ms: now - RECENT_WINDOW_MS - 1,
+        }];
+        for i in 0..7 {
+            list.push(RecentReceipt {
+                filename: format!("file-{i}.zip"),
+                import_id: if i == 6 {
+                    Some("not-valid".into())
+                } else {
+                    Some(format!("20261121_12000{i}"))
+                },
+                instance_id: "inst-a".into(),
+                delivered_at_epoch_ms: now - (7 - i as i64) * 1000,
+            });
+        }
+        prune_recent_receipts(&mut list, now);
+        assert_eq!(list.len(), 5);
+        assert_eq!(list[0].filename, "file-6.zip");
+        assert_eq!(
+            list[0].import_id, None,
+            "invalid import_id must be sanitized"
+        );
+        assert_eq!(list[4].filename, "file-2.zip");
+        assert_eq!(list[4].import_id.as_deref(), Some("20261121_120002"));
     }
 
     #[cfg(feature = "full-tests")]
@@ -2348,6 +3293,404 @@ mod tests {
             let count = h.saves();
             h.pass().await;
             assert_eq!(h.saves(), count);
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn ready_to_review_reconciles_expires_send_again_and_resets_on_repair() {
+            let now = Arc::new(std::sync::atomic::AtomicI64::new(1_800_000_000_000));
+            let mut h = Harness::new().await;
+            let state_dir = h.temp.path().join("state");
+            let now_read = Arc::clone(&now);
+            h.handle = h
+                .handle
+                .with_state_dir(state_dir.clone())
+                .with_clock_ms(Arc::new(move || now_read.load(Ordering::Acquire)));
+
+            // 1. Apple Health confirmation-required 409 enters ready_to_review, keeps bytes, not retried on version bump.
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/20261121_181500/export.zip","timestamp":"20261121_181500"}"#
+                    .to_vec(),
+            );
+            h.peer.set_route(
+                "/app/import/api/start",
+                409,
+                br#"{"reason_code":"import_preview_required","kind":"body_confirmation_required","import_id":"20261121_181500","error":"confirm body import"}"#
+                    .to_vec(),
+            );
+            let handoff: Handoff =
+                serde_json::from_value(json!({"area":"apple_health","context":{}})).unwrap();
+            let src = h.temp.path().join("export.zip");
+            fs::write(&src, b"apple health bytes").unwrap();
+            let opened = File::open(&src).unwrap();
+            let added = h
+                .handle
+                .add_open_files(vec![("export.zip".into(), opened)], handoff)
+                .await;
+            let id = added["items"][0]["item"].as_str().unwrap().to_owned();
+            // Counter incremented once on intake.
+            let crate::source_intake::IntakeFile::Rows(intake) =
+                crate::source_intake::read_rows(&crate::source_intake::path(&state_dir))
+            else {
+                panic!("intake rows expected");
+            };
+            assert_eq!(intake.imports.total, 1);
+
+            h.pass().await;
+            let doc = h.handle.document();
+            assert_eq!(doc.waiting, 0);
+            assert_eq!(doc.ready_to_review, 1);
+            assert_eq!(doc.needs_attention, 0);
+            assert_eq!(doc.rows.len(), 1);
+            assert_eq!(doc.rows[0].state, "ready to review");
+            assert!(!doc.rows[0].can_retry);
+            assert_eq!(doc.rows[0].import_id.as_deref(), Some("20261121_181500"));
+            assert_eq!(
+                doc.rows[0].review_kind.as_deref(),
+                Some("body_confirmation_required")
+            );
+            assert!(
+                h.handle
+                    .root
+                    .as_ref()
+                    .unwrap()
+                    .join(&id)
+                    .join("payload")
+                    .exists()
+            );
+
+            // Handoff bridge emits additive v2 fields.
+            let bridge = h.handle.handoff_status(&id);
+            assert_eq!(bridge["state"], "attention");
+            assert_eq!(bridge["review_required"], true);
+            assert_eq!(bridge["review_expired"], false);
+            assert_eq!(bridge["reason_code"], "import_preview_required");
+            assert_eq!(bridge["kind"], "body_confirmation_required");
+            assert_eq!(bridge["import_id"], "20261121_181500");
+            assert_eq!(bridge["retryable"], false);
+            assert_eq!(bridge["device_noun"], "computer");
+            assert_eq!(bridge["size_bytes"], 18);
+
+            // Version bump does NOT auto-retry ready_to_review, and pending+unknown/eligible preserves bytes.
+            h.peer.set_route(
+                "/api/system/status",
+                200,
+                json!({"version":{"current":"2.0.55"}})
+                    .to_string()
+                    .into_bytes(),
+            );
+            for keep_body in [
+                br#"{"status":"pending","saved_start":{"active":false,"state":"eligible"}}"#
+                    .to_vec(),
+                br#"{"status":"pending","saved_start":{"active":false,"state":"unknown"}}"#
+                    .to_vec(),
+                br#"{"status":"pending"}"#.to_vec(),
+                b"not-json".to_vec(),
+            ] {
+                h.peer
+                    .set_route("/app/import/api/20261121_181500", 200, keep_body);
+                h.pass().await;
+                assert_eq!(h.saves(), 1, "ready_to_review must never auto-reupload");
+                assert_eq!(h.handle.document().ready_to_review, 1);
+                assert!(
+                    h.handle
+                        .root
+                        .as_ref()
+                        .unwrap()
+                        .join(&id)
+                        .join("payload")
+                        .exists()
+                );
+            }
+            for transient in [400u16, 429, 500, 503] {
+                h.peer
+                    .set_route("/app/import/api/20261121_181500", transient, b"{}".to_vec());
+                h.pass().await;
+                assert_eq!(h.handle.document().ready_to_review, 1);
+                assert!(!h.handle.document().rows[0].review_expired);
+            }
+
+            // 2. 404 marks review expired keeping local bytes; send_again clears saved state & re-uploads without double-counting.
+            h.peer
+                .set_route("/app/import/api/20261121_181500", 404, b"{}".to_vec());
+            h.pass().await;
+            let expired_doc = h.handle.document();
+            assert_eq!(expired_doc.rows[0].state, "review expired");
+            assert!(expired_doc.rows[0].review_expired);
+            assert!(expired_doc.rows[0].can_retry);
+            assert!(
+                h.handle
+                    .root
+                    .as_ref()
+                    .unwrap()
+                    .join(&id)
+                    .join("payload")
+                    .exists()
+            );
+            let expired_bridge = h.handle.handoff_status(&id);
+            assert_eq!(expired_bridge["state"], "attention");
+            assert_eq!(expired_bridge["review_required"], false);
+            assert_eq!(expired_bridge["review_expired"], true);
+            assert_eq!(expired_bridge["retryable"], true);
+
+            assert!(h.handle.send_again(id.clone()).await);
+            // Counter must NOT double-count on send_again!
+            let crate::source_intake::IntakeFile::Rows(intake_after) =
+                crate::source_intake::read_rows(&crate::source_intake::path(&state_dir))
+            else {
+                panic!("intake rows expected");
+            };
+            assert_eq!(intake_after.imports.total, 1);
+
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/20261121_190000/export.zip","timestamp":"20261121_190000"}"#
+                    .to_vec(),
+            );
+            h.peer.set_route(
+                "/app/import/api/start",
+                409,
+                br#"{"reason_code":"import_preview_required","kind":"body_confirmation_required","import_id":"20261121_190000"}"#
+                    .to_vec(),
+            );
+            h.pass().await;
+            assert_eq!(h.saves(), 2);
+            assert_eq!(
+                h.handle.document().rows[0].import_id.as_deref(),
+                Some("20261121_190000")
+            );
+
+            // 3. Reconcile 200 running deletes local bytes, writes durable 24h receipt, and updates handoff lookup to delivered.
+            h.peer.set_route(
+                "/app/import/api/20261121_190000",
+                200,
+                br#"{"status":"running","saved_start":{"active":true,"state":"consumed"}}"#
+                    .to_vec(),
+            );
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert!(!h.handle.root.as_ref().unwrap().join(&id).exists());
+            assert_eq!(h.handle.handoff_status(&id)["state"], "delivered");
+            assert_eq!(h.handle.handoff_status(&id)["import_id"], "20261121_190000");
+            let doc = h.handle.document();
+            assert_eq!(doc.recent_receipts.len(), 1);
+            assert_eq!(doc.recent_receipts[0].filename, "export.zip");
+            assert_eq!(
+                doc.recent_receipts[0].import_id.as_deref(),
+                Some("20261121_190000")
+            );
+
+            // Persists across reload and expires after 24h.
+            let reloaded = ImportHandle::new(
+                h.handle.root.clone().unwrap(),
+                &h.client,
+                SyncTrigger::default(),
+            )
+            .with_clock_ms({
+                let now_read = Arc::clone(&now);
+                Arc::new(move || now_read.load(Ordering::Acquire))
+            });
+            reloaded.restore().unwrap();
+            assert_eq!(reloaded.document().recent_receipts.len(), 1);
+            now.fetch_add(RECENT_WINDOW_MS + 1000, Ordering::AcqRel);
+            assert!(reloaded.document().recent_receipts.is_empty());
+
+            // 4. plan_failed enters non-retryable needs_attention and is NEVER retried on version bump.
+            let bad_id = h.add(b"unknown binary").await;
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/20261121_200000/note.txt","timestamp":"20261121_200000"}"#
+                    .to_vec(),
+            );
+            h.peer.set_route(
+                "/app/import/api/start",
+                409,
+                br#"{"reason_code":"import_preview_required","kind":"plan_failed","import_id":"20261121_200000","error":"could not read file"}"#
+                    .to_vec(),
+            );
+            h.pass().await;
+            let doc = h.handle.document();
+            assert_eq!(doc.ready_to_review, 0);
+            assert_eq!(doc.needs_attention, 1);
+            assert_eq!(doc.rows[0].state, "needs attention");
+            assert!(!doc.rows[0].can_retry);
+            let saves_before_bump = h.saves();
+            h.peer.set_route(
+                "/api/system/status",
+                200,
+                json!({"version":{"current":"2.0.99"}})
+                    .to_string()
+                    .into_bytes(),
+            );
+            h.pass().await;
+            assert_eq!(
+                h.saves(),
+                saves_before_bump,
+                "plan_failed must not retry on version bump"
+            );
+            assert_eq!(h.handle.remove(bad_id, true).await, "removed");
+
+            // 5. Re-pair to Journal B resets Journal A ready_to_review item to Pending & never queries Journal B with Journal A's import_id.
+            let repair_id = h.add(b"cross journal").await;
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/20261121_210000/note.txt","timestamp":"20261121_210000"}"#
+                    .to_vec(),
+            );
+            h.peer.set_route(
+                "/app/import/api/start",
+                409,
+                br#"{"reason_code":"import_preview_required","kind":"body_confirmation_required","import_id":"20261121_210000"}"#
+                    .to_vec(),
+            );
+            h.pass().await;
+            assert_eq!(h.handle.document().ready_to_review, 1);
+
+            let peer_b = PrivateLinkPeer::start().await;
+            peer_b.set_route(
+                "/api/system/status",
+                200,
+                json!({"version":{"current":"2.0.55"}})
+                    .to_string()
+                    .into_bytes(),
+            );
+            peer_b.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/20261121_210500/note.txt","timestamp":"20261121_210500"}"#
+                    .to_vec(),
+            );
+            peer_b.set_route(
+                "/app/import/api/start",
+                200,
+                br#"{"status":"ok","task_id":"t2","import_id":"20261121_210500"}"#.to_vec(),
+            );
+            let session_b = start_private_link_session(
+                &h.temp.path().join("link-b"),
+                peer_b.credential(),
+                "desktop",
+            )
+            .await
+            .unwrap();
+            h.client.prepare_new_owner();
+            h.client.install_capability(session_b.capability());
+            // Old Journal A receipts must be hidden on Journal B.
+            assert!(h.handle.document().recent_receipts.is_empty());
+            h.pass().await;
+            assert!(
+                !peer_b
+                    .requests()
+                    .iter()
+                    .any(|r| r.path == "/app/import/api/20261121_210000"),
+                "must NEVER query Journal B with Journal A's import_id"
+            );
+            assert!(h.handle.document().rows.is_empty());
+            assert!(!h.handle.root.as_ref().unwrap().join(&repair_id).exists());
+            assert_eq!(h.handle.document().recent_receipts.len(), 1);
+            assert_eq!(
+                h.handle.document().recent_receipts[0].import_id.as_deref(),
+                Some("20261121_210500")
+            );
+
+            let _ = session_b.shutdown().await;
+            peer_b.shutdown().await;
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn reconcile_403_halts_batch_records_refusal_and_keeps_bytes() {
+            let h = Harness::new().await;
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/20261121_220000/note.txt","timestamp":"20261121_220000"}"#
+                    .to_vec(),
+            );
+            h.peer.set_route(
+                "/app/import/api/start",
+                409,
+                br#"{"reason_code":"import_preview_required","kind":"confirmation_required","import_id":"20261121_220000"}"#
+                    .to_vec(),
+            );
+            let id1 = h.add(b"first").await;
+            let id2 = h.add(b"second").await;
+            h.pass().await;
+            assert_eq!(h.handle.document().ready_to_review, 2);
+
+            h.peer
+                .set_route("/app/import/api/20261121_220000", 403, b"{}".to_vec());
+            h.handle.reconcile_reviews(&h.client, &h.running).await;
+            assert!(h.client.is_revoked());
+            assert_eq!(h.handle.take_auth_status(), Some(403));
+            let gets = h
+                .peer
+                .requests()
+                .iter()
+                .filter(|r| r.method == "GET" && r.path == "/app/import/api/20261121_220000")
+                .count();
+            assert_eq!(gets, 1, "403 must halt reconcile batch on first refusal");
+            assert!(
+                h.handle
+                    .root
+                    .as_ref()
+                    .unwrap()
+                    .join(&id1)
+                    .join("payload")
+                    .exists()
+            );
+            assert!(
+                h.handle
+                    .root
+                    .as_ref()
+                    .unwrap()
+                    .join(&id2)
+                    .join("payload")
+                    .exists()
+            );
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn high_cap_handoff_lookup_survives_batch_above_ui_recent_cap() {
+            let h = Harness::new().await;
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/20261121_230000/f.txt","timestamp":"20261121_230000"}"#
+                    .to_vec(),
+            );
+            h.peer.set_route(
+                "/app/import/api/start",
+                200,
+                br#"{"status":"ok","task_id":"task","import_id":"20261121_230000"}"#.to_vec(),
+            );
+            let mut ids = Vec::new();
+            for i in 0..8 {
+                let p = h.temp.path().join(format!("batch-{i}.txt"));
+                fs::write(&p, format!("bytes-{i}")).unwrap();
+                let handoff: Handoff =
+                    serde_json::from_value(json!({"area":"quick","context":{}})).unwrap();
+                let res = h
+                    .handle
+                    .add_open_files(
+                        vec![(format!("batch-{i}.txt"), File::open(&p).unwrap())],
+                        handoff,
+                    )
+                    .await;
+                ids.push(res["items"][0]["item"].as_str().unwrap().to_owned());
+            }
+            h.pass().await;
+            // UI recent receipts capped at 5 newest.
+            assert_eq!(h.handle.document().recent_receipts.len(), 5);
+            // All 8 handoff items still resolve as delivered (never gone).
+            for id in &ids {
+                assert_eq!(h.handle.handoff_status(id)["state"], "delivered");
+            }
             h.close().await;
         }
     }

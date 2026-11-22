@@ -571,6 +571,11 @@ pub fn screenshots_so_far(file: &IntakeFile) -> ShownTotal {
     so_far(file, |rows| &rows.screenshots, TotalUnit::Screenshots)
 }
 
+#[must_use]
+pub fn imports_so_far(file: &IntakeFile) -> ShownTotal {
+    so_far(file, |rows| &rows.imports, TotalUnit::Items)
+}
+
 fn so_far(
     file: &IntakeFile,
     pick: impl Fn(&IntakeRows) -> &Counter,
@@ -654,6 +659,7 @@ enum TotalUnit {
     Pages,
     Notes,
     Screenshots,
+    Items,
 }
 
 fn format_total(total: u64, unit: TotalUnit) -> String {
@@ -662,6 +668,7 @@ fn format_total(total: u64, unit: TotalUnit) -> String {
         TotalUnit::Pages => format_count(total, "linux.shell.pagecount"),
         TotalUnit::Notes => format_count(total, "linux.shell.notecount"),
         TotalUnit::Screenshots => format_count(total, "linux.shell.screenshotcount"),
+        TotalUnit::Items => format_count(total, "linux.shell.itemcount"),
     }
 }
 
@@ -796,6 +803,292 @@ pub fn relative_unix_now(at: f64) -> Option<String> {
     relative_unix(at, &crate::local_time::now())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportTileState {
+    Idle,
+    Waiting,
+    Sending,
+    ReadyToReview,
+    NeedsAttention,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportTileModel {
+    pub state: ImportTileState,
+    pub state_label: Option<&'static str>,
+    pub sub_line: String,
+    pub accessible_label: String,
+}
+
+/// Worst-signal-wins status for the home `import` tile:
+/// `needs attention` > `ready to review` > `sending` > `waiting` > idle (quiet).
+/// When `doc` is `None` (daemon not running / unavailable), stays quiet without a live state word.
+#[must_use]
+pub fn import_tile_model(
+    doc: Option<&crate::import::ImportDocument>,
+    offline: bool,
+) -> ImportTileModel {
+    let files = text!("linux.window.files").to_owned();
+    let Some(doc) = doc else {
+        return ImportTileModel {
+            state: ImportTileState::Idle,
+            state_label: None,
+            sub_line: files.clone(),
+            accessible_label: format!("{}, {files}", text!("linux.window.import")),
+        };
+    };
+    let attention_rows: Vec<&crate::import::ImportRow> = doc
+        .rows
+        .iter()
+        .filter(|r| r.state == "needs attention")
+        .collect();
+    if doc.store_error || doc.needs_attention > 0 || !attention_rows.is_empty() {
+        let count = doc.needs_attention.max(attention_rows.len() as u64);
+        let sub_line = if attention_rows.len() == 1 && !doc.store_error {
+            attention_rows[0].name.clone()
+        } else if count > 1 {
+            format_count(count, "linux.shell.itemcount")
+        } else if let Some(first) = attention_rows.first() {
+            first.name.clone()
+        } else {
+            files
+        };
+        let state_label = text!("linux.import.attention");
+        return ImportTileModel {
+            state: ImportTileState::NeedsAttention,
+            state_label: Some(state_label),
+            accessible_label: message!(
+                "linux.import.tile.a11y",
+                "state" => state_label,
+                "detail" => sub_line
+            ),
+            sub_line,
+        };
+    }
+
+    let review_rows: Vec<&crate::import::ImportRow> = doc
+        .rows
+        .iter()
+        .filter(|r| matches!(r.state.as_str(), "ready to review" | "review expired"))
+        .collect();
+    if doc.ready_to_review > 0 || !review_rows.is_empty() {
+        let count = doc.ready_to_review.max(review_rows.len() as u64);
+        let sub_line = if count == 1
+            && let Some(first) = review_rows.first()
+        {
+            first.name.clone()
+        } else {
+            message!("linux.import.nreadyinjournal", "count" => count)
+        };
+        let state_label = text!("linux.import.readytoreview");
+        return ImportTileModel {
+            state: ImportTileState::ReadyToReview,
+            state_label: Some(state_label),
+            accessible_label: message!(
+                "linux.import.tile.a11y",
+                "state" => state_label,
+                "detail" => sub_line
+            ),
+            sub_line,
+        };
+    }
+
+    let active_rows: Vec<&crate::import::ImportRow> = doc
+        .rows
+        .iter()
+        .filter(|r| matches!(r.state.as_str(), "sending" | "waiting"))
+        .collect();
+    if doc.sending || active_rows.iter().any(|r| r.state == "sending") {
+        let sending_rows: Vec<&crate::import::ImportRow> = active_rows
+            .iter()
+            .copied()
+            .filter(|r| r.state == "sending")
+            .collect();
+        let total = active_rows.len() as u64;
+        let sub_line = if total <= 1
+            && let Some(first) = sending_rows.first().or_else(|| active_rows.first())
+        {
+            first.name.clone()
+        } else {
+            message!("linux.import.nfiles", "count" => total.max(1))
+        };
+        let state_label = text!("linux.import.sending");
+        return ImportTileModel {
+            state: ImportTileState::Sending,
+            state_label: Some(state_label),
+            accessible_label: message!(
+                "linux.import.tile.a11y",
+                "state" => state_label,
+                "detail" => sub_line
+            ),
+            sub_line,
+        };
+    }
+
+    if !active_rows.is_empty() || doc.waiting > 0 || doc.adding {
+        let count = doc.waiting.max(active_rows.len() as u64).max(1);
+        let sub_line = if offline || !doc.paired_confirmed {
+            text!("linux.import.waitingforjournalshort").to_owned()
+        } else {
+            message!("linux.import.nwaiting", "count" => count)
+        };
+        let state_label = text!("linux.import.waiting");
+        return ImportTileModel {
+            state: ImportTileState::Waiting,
+            state_label: Some(state_label),
+            accessible_label: message!(
+                "linux.import.tile.a11y",
+                "state" => state_label,
+                "detail" => sub_line
+            ),
+            sub_line,
+        };
+    }
+
+    ImportTileModel {
+        state: ImportTileState::Idle,
+        state_label: None,
+        sub_line: files.clone(),
+        accessible_label: format!("{}, {files}", text!("linux.window.import")),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportStatusSurface {
+    pub pill_label: String,
+    pub pill_mark: ImportPillMark,
+    pub lead: String,
+    pub soft: Option<String>,
+    pub row_sub: Option<String>,
+    pub row_accessible: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportPillMark {
+    Good,
+    Ring,
+    Review,
+    Sending,
+}
+
+/// Precedence for the paired, online status pill and status pane when `waiting == 0`
+/// (and while imports are sending or waiting):
+/// `needs attention` (non-green `connected`, no fault text in pill) >
+/// `ready to review` (`{n} ready to review` with orange bullseye) >
+/// `sending` > `waiting` > `connected` (green).
+#[must_use]
+pub fn import_status_surface(doc: Option<&crate::import::ImportDocument>) -> ImportStatusSurface {
+    let Some(doc) = doc else {
+        return ImportStatusSurface {
+            pill_label: text!("linux.window.connected").to_owned(),
+            pill_mark: ImportPillMark::Good,
+            lead: text!("linux.window.allcaughtup").to_owned(),
+            soft: Some(text!("linux.window.everythinginyourjournal").to_owned()),
+            row_sub: None,
+            row_accessible: None,
+        };
+    };
+    let has_attention = doc.store_error
+        || doc.needs_attention > 0
+        || doc.rows.iter().any(|r| r.state == "needs attention");
+    if has_attention {
+        let row_sub = text!("linux.import.statusneedsyou").to_owned();
+        let row_accessible = message!("linux.import.statusrow.a11y", "detail" => row_sub);
+        return ImportStatusSurface {
+            pill_label: text!("linux.window.connected").to_owned(),
+            pill_mark: ImportPillMark::Ring,
+            lead: text!("linux.import.statusneedsyou").to_owned(),
+            soft: Some(text!("linux.import.statusneedsyousub").to_owned()),
+            row_sub: Some(row_sub),
+            row_accessible: Some(row_accessible),
+        };
+    }
+    let review_count = doc.ready_to_review.max(
+        doc.rows
+            .iter()
+            .filter(|r| matches!(r.state.as_str(), "ready to review" | "review expired"))
+            .count() as u64,
+    );
+    if review_count > 0 && doc.waiting == 0 && !doc.sending {
+        let pill_label = message!("linux.import.readytoreviewcount", "count" => review_count);
+        let lead = solstone_i18n::cardinal(
+            "linux.import.statusreadytoreview",
+            review_count.min(i64::MAX as u64) as i64,
+            &[(
+                "display",
+                solstone_i18n::Value::String(&grouped(review_count)),
+            )],
+        );
+        let row_accessible = message!("linux.import.statusrow.a11y", "detail" => pill_label);
+        return ImportStatusSurface {
+            pill_label: pill_label.clone(),
+            pill_mark: ImportPillMark::Review,
+            lead,
+            soft: Some(text!("linux.import.statusreadytoreviewsub").to_owned()),
+            row_sub: Some(pill_label),
+            row_accessible: Some(row_accessible),
+        };
+    }
+    if doc.sending {
+        let row_sub = text!("linux.import.sendingellipsis").to_owned();
+        let row_accessible = message!("linux.import.statusrow.a11y", "detail" => row_sub);
+        return ImportStatusSurface {
+            pill_label: text!("linux.window.connected").to_owned(),
+            pill_mark: ImportPillMark::Sending,
+            lead: row_sub.clone(),
+            soft: None,
+            row_sub: Some(row_sub),
+            row_accessible: Some(row_accessible),
+        };
+    }
+    if doc.held {
+        let row_sub = text!("linux.import.waitingdetail").to_owned();
+        let row_accessible = message!("linux.import.statusrow.a11y", "detail" => row_sub);
+        return ImportStatusSurface {
+            pill_label: text!("linux.window.connected").to_owned(),
+            pill_mark: ImportPillMark::Ring,
+            lead: doc.recent.clone(),
+            soft: None,
+            row_sub: Some(row_sub),
+            row_accessible: Some(row_accessible),
+        };
+    }
+    ImportStatusSurface {
+        pill_label: text!("linux.window.connected").to_owned(),
+        pill_mark: ImportPillMark::Good,
+        lead: text!("linux.window.allcaughtup").to_owned(),
+        soft: Some(text!("linux.window.everythinginyourjournal").to_owned()),
+        row_sub: None,
+        row_accessible: None,
+    }
+}
+
+/// Per-file accessible button labels for the import pane (shared & unit-tested).
+#[must_use]
+pub fn import_review_a11y(name: &str) -> String {
+    message!("linux.import.reviewinjournal.a11y", "name" => name)
+}
+
+#[must_use]
+pub fn import_send_again_a11y(name: &str) -> String {
+    message!("linux.import.sendagain.a11y", "name" => name)
+}
+
+#[must_use]
+pub fn import_remove_a11y(name: &str) -> String {
+    message!("linux.import.remove.a11y", "name" => name)
+}
+
+#[must_use]
+pub fn import_try_now_a11y(name: &str) -> String {
+    message!("linux.import.trynow.a11y", "name" => name)
+}
+
+#[must_use]
+pub fn import_recent_row_a11y(name: &str, when: &str) -> String {
+    message!("linux.import.recentrow.a11y", "name" => name, "when" => when)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,6 +1138,11 @@ mod tests {
                 last: None,
             },
             screenshots: Counter {
+                total: 0,
+                started: None,
+                last: None,
+            },
+            imports: Counter {
                 total: 0,
                 started: None,
                 last: None,
@@ -924,6 +1222,11 @@ mod tests {
                 started: None,
                 last: None,
             },
+            imports: Counter {
+                total: 1,
+                started: None,
+                last: None,
+            },
         }));
         assert_eq!(
             browsers_so_far(&one),
@@ -932,6 +1235,10 @@ mod tests {
         assert_eq!(
             obsidian_so_far(&one),
             ShownTotal::Amount("1 note".to_owned())
+        );
+        assert_eq!(
+            imports_so_far(&one),
+            ShownTotal::Amount("1 item".to_owned())
         );
         let many = IntakeFile::Rows(Box::new(IntakeRows {
             audio: empty(),
@@ -956,6 +1263,11 @@ mod tests {
                 started: None,
                 last: None,
             },
+            imports: Counter {
+                total: 1204,
+                started: None,
+                last: None,
+            },
         }));
         assert_eq!(
             browsers_so_far(&many),
@@ -965,7 +1277,178 @@ mod tests {
             obsidian_so_far(&many),
             ShownTotal::Amount("412 notes".to_owned())
         );
+        assert_eq!(
+            imports_so_far(&many),
+            ShownTotal::Amount("1,204 items".to_owned())
+        );
         assert_eq!(terminal_so_far(&many), ShownTotal::NothingYet);
+    }
+
+    #[test]
+    fn import_tile_and_status_pill_follow_worst_signal_wins() {
+        use crate::import::{ImportDocument, ImportRow};
+
+        // Daemon unavailable or idle -> quiet, no state word.
+        let unavailable = import_tile_model(None, false);
+        assert_eq!(unavailable.state, ImportTileState::Idle);
+        assert_eq!(unavailable.state_label, None);
+        assert_eq!(unavailable.sub_line, "files");
+
+        let idle_doc = ImportDocument {
+            v: 1,
+            paired_confirmed: true,
+            ..Default::default()
+        };
+        let idle = import_tile_model(Some(&idle_doc), false);
+        assert_eq!(idle.state, ImportTileState::Idle);
+        assert_eq!(idle.state_label, None);
+        assert_eq!(idle.sub_line, "files");
+        let idle_status = import_status_surface(Some(&idle_doc));
+        assert_eq!(idle_status.pill_label, "connected");
+        assert_eq!(idle_status.pill_mark, ImportPillMark::Good);
+        assert_eq!(idle_status.row_sub, None);
+
+        // Waiting -> online shows count, offline/unpaired shows waiting for your journal.
+        let waiting_doc = ImportDocument {
+            v: 1,
+            paired_confirmed: true,
+            waiting: 2,
+            held: true,
+            rows: vec![
+                ImportRow {
+                    id: "1".into(),
+                    name: "a.pdf".into(),
+                    state: "waiting".into(),
+                    ..Default::default()
+                },
+                ImportRow {
+                    id: "2".into(),
+                    name: "b.pdf".into(),
+                    state: "waiting".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            import_tile_model(Some(&waiting_doc), false).sub_line,
+            "2 waiting"
+        );
+        assert_eq!(
+            import_tile_model(Some(&waiting_doc), true).sub_line,
+            "waiting for your journal"
+        );
+
+        // Sending beats waiting.
+        let sending_doc = ImportDocument {
+            v: 1,
+            paired_confirmed: true,
+            sending: true,
+            held: true,
+            rows: vec![ImportRow {
+                id: "1".into(),
+                name: "chatgpt-export.zip".into(),
+                state: "sending".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let sending_tile = import_tile_model(Some(&sending_doc), false);
+        assert_eq!(sending_tile.state, ImportTileState::Sending);
+        assert_eq!(sending_tile.state_label, Some("sending"));
+        assert_eq!(sending_tile.sub_line, "chatgpt-export.zip");
+        assert_eq!(
+            sending_tile.accessible_label,
+            "import, sending. chatgpt-export.zip."
+        );
+
+        // Ready to review beats sending, shows non-green orange bullseye pill.
+        let review_doc = ImportDocument {
+            v: 1,
+            paired_confirmed: true,
+            ready_to_review: 1,
+            held: true,
+            rows: vec![ImportRow {
+                id: "1".into(),
+                name: "export.zip".into(),
+                state: "ready to review".into(),
+                import_id: Some("20261121_181500".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let review_tile = import_tile_model(Some(&review_doc), false);
+        assert_eq!(review_tile.state, ImportTileState::ReadyToReview);
+        assert_eq!(review_tile.state_label, Some("ready to review"));
+        assert_eq!(review_tile.sub_line, "export.zip");
+        assert_eq!(
+            review_tile.accessible_label,
+            "import, ready to review. export.zip."
+        );
+        let review_status = import_status_surface(Some(&review_doc));
+        assert_eq!(review_status.pill_label, "1 ready to review");
+        assert_eq!(review_status.pill_mark, ImportPillMark::Review);
+        assert_eq!(review_status.lead, "1 import ready to review");
+        assert_eq!(
+            review_status.soft.as_deref(),
+            Some("open import to review and start.")
+        );
+        assert_eq!(review_status.row_sub.as_deref(), Some("1 ready to review"));
+
+        // Needs attention beats ready to review; pill avoids green connected without rolling up fault text.
+        let attn_doc = ImportDocument {
+            v: 1,
+            paired_confirmed: true,
+            ready_to_review: 1,
+            needs_attention: 1,
+            held: true,
+            rows: vec![
+                ImportRow {
+                    id: "1".into(),
+                    name: "export.zip".into(),
+                    state: "ready to review".into(),
+                    ..Default::default()
+                },
+                ImportRow {
+                    id: "2".into(),
+                    name: "holiday.mov".into(),
+                    state: "needs attention".into(),
+                    reason: Some("your journal couldn't accept this.".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let attn_tile = import_tile_model(Some(&attn_doc), false);
+        assert_eq!(attn_tile.state, ImportTileState::NeedsAttention);
+        assert_eq!(attn_tile.state_label, Some("needs attention"));
+        assert_eq!(attn_tile.sub_line, "holiday.mov");
+        assert_eq!(
+            attn_tile.accessible_label,
+            "import, needs attention. holiday.mov."
+        );
+        let attn_status = import_status_surface(Some(&attn_doc));
+        assert_eq!(attn_status.pill_label, "connected");
+        assert_eq!(attn_status.pill_mark, ImportPillMark::Ring);
+        assert_eq!(attn_status.lead, "imports need you");
+        assert_eq!(attn_status.soft.as_deref(), Some("open import to see why."));
+        assert_eq!(attn_status.row_sub.as_deref(), Some("imports need you"));
+
+        // Per-file accessible button labels
+        assert_eq!(
+            import_review_a11y("export.zip"),
+            "review export.zip in your journal"
+        );
+        assert_eq!(
+            import_send_again_a11y("export.zip"),
+            "send export.zip again to review"
+        );
+        assert_eq!(import_remove_a11y("holiday.mov"), "remove holiday.mov");
+        assert_eq!(import_try_now_a11y("holiday.mov"), "try holiday.mov now");
+        assert_eq!(
+            import_recent_row_a11y("notes.pdf", "4 min ago"),
+            "notes.pdf, in your journal, 4 min ago. open in your journal."
+        );
     }
 
     #[test]

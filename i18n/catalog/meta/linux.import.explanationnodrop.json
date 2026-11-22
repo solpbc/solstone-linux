@@ -1,0 +1,17 @@
+{
+  "description": "Shown in the import source when drop is unavailable.",
+  "context": "Shown in the import source when drop is unavailable.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 120,
+  "source_revision": "8bf3e9288e65e0ff218d6895ff7ae35f315c4faa566b8eb1d291213689770dcd",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

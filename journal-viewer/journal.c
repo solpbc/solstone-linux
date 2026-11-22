@@ -180,6 +180,9 @@ static gboolean closed(GtkWindow *window, gpointer data)
     (void)window;
     Journal *journal = data;
     cancel_auth_session(journal);
+    reconcile_imports(journal);
+    if (journal->bus)
+        g_dbus_connection_flush_sync(journal->bus, NULL, NULL);
     g_main_loop_quit(journal->loop);
     return FALSE;
 }

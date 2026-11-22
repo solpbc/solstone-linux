@@ -111,6 +111,15 @@ static void cancel_auth_session(Journal *journal)
         2000, NULL, NULL, NULL);
 }
 
+static void reconcile_imports(Journal *journal)
+{
+    if (!journal->bus) return;
+    g_dbus_connection_call(journal->bus, "org.solpbc.solstone.Observer1",
+        "/org/solpbc/solstone/Observer1", "org.solpbc.solstone.Observer1", "ImportReconcile",
+        NULL, G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NO_AUTO_START,
+        2000, NULL, NULL, NULL);
+}
+
 static void import_files(ImportCall *call, GListModel *files)
 {
     g_autoptr(GUnixFDList) fds = g_unix_fd_list_new();

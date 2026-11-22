@@ -834,7 +834,7 @@ linux.shell.month.september = september
 linux.shell.month.october = october
 linux.shell.month.november = november
 linux.shell.month.december = december
-linux.import.explanation = choose files to bring into your journal.
+linux.import.explanation = adds any file you choose here or drop on this window. your journal works out what it is.
 linux.import.storeerror = couldn't read imports on this device. nothing has been removed. restart the solstone app to try again.
 linux.import.steperror = this step couldn't finish. try again.
 linux.import.removeerror = couldn't remove this. try again.
@@ -915,3 +915,42 @@ linux.sharedsources.also = also on
 linux.sharedsources.pair = { $first } · { $second }
 linux.sharedsources.cli = Obsidian: { $state }
 linux.import.moreimports = more imports
+linux.import.explanationnodrop = adds any file you choose here. your journal works out what it is.
+linux.import.moreimportssub = guides, options, and import history in your journal
+linux.import.waitingforyourreview = waiting for your review
+linux.import.readytoreview = ready to review
+linux.import.expired = expired
+linux.import.reviewdetail = saved in your journal. preview and confirm to start.
+linux.import.reviewdetailhour = saved in your journal. review within an hour before your journal removes the waiting copy.
+linux.import.reviewexpireddetail = the waiting copy in your journal expired. this device still holds the file.
+linux.import.reviewinjournal = review in your journal
+linux.import.reviewinjournal.a11y = review { $name } in your journal
+linux.import.sendagain = send again to review
+linux.import.sendagain.a11y = send { $name } again to review
+linux.import.remove.a11y = remove { $name }
+linux.import.trynow.a11y = try { $name } now
+linux.import.removereadytoreview = this removes the copy on this device. the waiting copy in your journal stays there until you discard it or it expires.
+linux.import.waitingreconnect = waiting for your journal to reconnect.
+linux.import.sendingellipsis = sending to your journal…
+linux.import.waitingdetail = waiting to go to your journal
+linux.import.waitingforjournalshort = waiting for your journal
+linux.import.inyourjournalrel = in your journal · { $when }
+linux.import.recentrow.a11y = { $name }, in your journal, { $when }. open in your journal.
+linux.import.allhistory = all import history in your journal
+linux.import.readytoreviewcount = { $count } ready to review
+linux.import.statusreadytoreview = { $count ->
+    [one] { $display } import ready to review
+   *[other] { $display } imports ready to review
+}
+linux.import.statusreadytoreviewsub = open import to review and start.
+linux.import.statusneedsyou = imports need you
+linux.import.statusneedsyousub = open import to see why.
+linux.import.nwaiting = { $count } waiting
+linux.import.nfiles = { $count } files
+linux.import.nreadyinjournal = { $count } ready in your journal
+linux.import.tile.a11y = import, { $state }. { $detail }.
+linux.import.statusrow.a11y = import, { $detail }.
+linux.shell.itemcount = { $count ->
+    [one] { $display } item
+   *[other] { $display } items
+}

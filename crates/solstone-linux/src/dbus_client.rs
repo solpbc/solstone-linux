@@ -314,6 +314,11 @@ impl ControlClient {
             .await
     }
 
+    pub async fn import_reconcile(&self) -> Result<String, ControlClientError> {
+        self.call_method("ImportReconcile", &(), DEFAULT_TIMEOUT)
+            .await
+    }
+
     pub async fn screenshots_state(&self) -> Result<String, ControlClientError> {
         self.call_method("ScreenshotsState", &(), DEFAULT_TIMEOUT)
             .await

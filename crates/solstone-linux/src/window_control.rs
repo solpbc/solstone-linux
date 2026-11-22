@@ -2534,7 +2534,7 @@ impl WindowControlHandler {
     }
 
     pub async fn open_journal_at_path(&self, path: &str) -> String {
-        if path != "/app/import/" && !crate::journal_link::valid_path(path) {
+        if !valid_journal_path(path) {
             return self.fallback_unavailable();
         }
         self.request_open_journal(path).await
@@ -2564,6 +2564,14 @@ impl WindowControlHandler {
     fn fallback_unavailable(&self) -> String {
         "{\"v\":1,\"durable\":\"unavailable\",\"owner\":\"absent\",\"attempt\":null,\"health\":\"not-reported\",\"capture\":\"\",\"settings\":{\"draw_cursor\":true,\"start_paused\":false,\"segment_interval\":300},\"restart_required\":null,\"open_journal\":null,\"fault\":null}".to_string()
     }
+}
+
+pub fn valid_journal_path(path: &str) -> bool {
+    path == "/app/import/"
+        || path
+            .strip_prefix("/app/import/")
+            .is_some_and(crate::import::valid_import_id)
+        || crate::journal_link::valid_path(path)
 }
 
 #[cfg(test)]
@@ -4767,6 +4775,37 @@ mod tests {
         handler.open_journal_at_path("//other.example/").await;
         handler.open_journal_at_path("/app/open/opaque?x").await;
         assert_eq!(opened.lock().unwrap().len(), 2);
+
+        let import_doc = handler
+            .open_journal_at_path("/app/import/20261121_181500")
+            .await;
+        assert_eq!(
+            decode_control_str(&import_doc)
+                .unwrap()
+                .open_journal
+                .as_deref(),
+            Some("opened")
+        );
+        assert_eq!(
+            opened.lock().unwrap().last().map(String::as_str),
+            Some("https://journal.example/app/import/20261121_181500")
+        );
+        let before_rejects = opened.lock().unwrap().len();
+        for bad in [
+            "/app/import/not-a-timestamp",
+            "/app/import/../settings",
+            "/app/import/20261121_181500?x=1",
+            "/app/import/20261121_181500#frag",
+            "/app/import/20261121_181500/",
+            "/app/import/20261121_181500/extra",
+            "/app/import/２０２６１１２１_１８１５００",
+            "/app/import",
+        ] {
+            assert!(!valid_journal_path(bad), "expected reject for {bad}");
+            let rejected = handler.open_journal_at_path(bad).await;
+            assert_eq!(decode_control_str(&rejected).unwrap().open_journal, None);
+        }
+        assert_eq!(opened.lock().unwrap().len(), before_rejects);
         harness.shutdown().await;
     }
 

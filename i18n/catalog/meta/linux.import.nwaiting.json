@@ -1,0 +1,22 @@
+{
+  "description": "Import tile sub-line showing count of waiting files.",
+  "context": "Import tile sub-line showing count of waiting files.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 30,
+  "source_revision": "e31bb63b92a5e854970156300d6ebec0344243e1886f908129988721920f2137",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

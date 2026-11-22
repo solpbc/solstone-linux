@@ -1,0 +1,17 @@
+{
+  "description": "State word when a staged import waiting copy expired.",
+  "context": "State word when a staged import waiting copy expired.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 20,
+  "source_revision": "66955023749c19d861e677c73ac155f49a57546420c7453839ca69f7dda345b6",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

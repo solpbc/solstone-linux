@@ -1,0 +1,22 @@
+{
+  "description": "Accessible button label to send a specific expired file again.",
+  "context": "Accessible button label to send a specific expired file again.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "name",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 100,
+  "source_revision": "b45f29ad663c514f157606db365cce4b6fccd7b9fbc0ab9f77703db91519e855",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

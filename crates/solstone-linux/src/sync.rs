@@ -41,6 +41,8 @@ pub const CIRCUIT_COOLDOWN_MAX: f64 = 300.0;
 pub const CONTACT_FLUSH_INTERVAL: f64 = 30.0;
 /// A reconciliation pass runs this often when nothing triggers one sooner.
 const PASS_INTERVAL: f64 = 60.0;
+/// Periodic check for staged imports awaiting owner confirmation, even when waiting == 0.
+const REVIEW_RECONCILE_INTERVAL: f64 = 10.0;
 /// The shortest sleep between worker turns, so no state can make the loop spin.
 const MIN_WAKE: f64 = 0.5;
 pub const METADATA_FILENAME: &str = ".metadata";
@@ -385,6 +387,7 @@ fn import_custody(
 ) -> crate::import::ImportHandle {
     let state_dir = config.state_dir();
     let imports = crate::import::ImportHandle::new(config.base_dir.join("import"), client, trigger)
+        .with_state_dir(state_dir.clone())
         .with_status_sink(Arc::new(move |summary| {
             let mut facts = facts.lock().unwrap_or_else(|p| p.into_inner());
             if facts.imports.as_ref() == Some(&summary) {
@@ -757,6 +760,7 @@ struct SyncWorker {
     circuit_open_since: f64,
     circuit_cooldown: f64,
     last_contact_flush: f64,
+    last_review_reconcile: f64,
     draining_shutdown: bool,
     retry_floors: HashMap<PathBuf, f64>,
     /// When a refused segment of the old terminal spool may be sent again.
@@ -822,6 +826,7 @@ impl SyncWorker {
             circuit_open_since: 0.0,
             circuit_cooldown: CIRCUIT_COOLDOWN_INITIAL,
             last_contact_flush: 0.0,
+            last_review_reconcile: f64::NEG_INFINITY,
             draining_shutdown: false,
             retry_floors: HashMap::new(),
             legacy_retry: HashMap::new(),
@@ -889,6 +894,18 @@ impl SyncWorker {
                 if fresh_check || self.check_due() {
                     self.check_journal().await;
                 }
+                if self.imports.has_review_items()
+                    && self.clock.monotonic_seconds() - self.last_review_reconcile
+                        >= REVIEW_RECONCILE_INTERVAL
+                {
+                    self.last_review_reconcile = self.clock.monotonic_seconds();
+                    self.imports
+                        .reconcile_reviews(&self.client, &self.running)
+                        .await;
+                    if let Some(status) = self.imports.take_auth_status() {
+                        self.record_failure(Some(ErrorType::Auth), Some(i64::from(status)));
+                    }
+                }
                 continue;
             }
             if completion_pending {
@@ -945,7 +962,13 @@ impl SyncWorker {
                 .min(self.since_checked());
             STATUS_CHECK_INTERVAL - quiet_for
         };
-        Duration::from_secs_f64(until_pass.min(until_check).clamp(MIN_WAKE, PASS_INTERVAL))
+        let mut wake = until_pass.min(until_check);
+        if self.imports.has_review_items() && !self.circuit_open_permanent && !self.circuit_open {
+            let until_review = REVIEW_RECONCILE_INTERVAL
+                - (self.clock.monotonic_seconds() - self.last_review_reconcile);
+            wake = wake.min(until_review);
+        }
+        Duration::from_secs_f64(wake.clamp(MIN_WAKE, PASS_INTERVAL))
     }
 
     /// Asks the journal whether it is there. An answer is heard evidence. A transient failure
@@ -996,6 +1019,7 @@ impl SyncWorker {
             self.circuit_open_since = 0.0;
             self.circuit_cooldown = CIRCUIT_COOLDOWN_INITIAL;
             self.last_contact_flush = 0.0;
+            self.last_review_reconcile = f64::NEG_INFINITY;
             self.retry_floors.clear();
         }
     }
@@ -1008,6 +1032,7 @@ impl SyncWorker {
         self.sync_pass().await;
         self.takeover_drain().await;
         if self.is_running() {
+            self.last_review_reconcile = self.clock.monotonic_seconds();
             self.imports.deliver(&self.client, &self.running).await;
             if let Some(status) = self.imports.take_auth_status() {
                 self.record_failure(Some(ErrorType::Auth), Some(i64::from(status)));

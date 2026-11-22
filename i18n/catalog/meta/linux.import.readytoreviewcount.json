@@ -1,0 +1,22 @@
+{
+  "description": "Status pill and row count of imports ready to review.",
+  "context": "Status pill and row count of imports ready to review.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "ab6c5916df10763704c9c6003e065e73b6846be32498c690d476feb593a2d1b1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

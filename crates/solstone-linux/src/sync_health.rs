@@ -496,7 +496,17 @@ pub(crate) fn apply_import_health(health: &mut SyncHealth, facts: &SyncFacts) {
         && !facts.in_progress
         && matches!(health.state, HealthState::Connected | HealthState::Syncing)
     {
-        let text = imports.recent.clone();
+        let has_fault = imports.store_error || imports.needs_attention > 0;
+        let review_only =
+            !has_fault && imports.ready_to_review > 0 && imports.waiting == 0 && !imports.sending;
+        let text = if review_only && imports.recent.is_empty() {
+            message!(
+                "linux.import.readytoreviewcount",
+                "count" => imports.ready_to_review
+            )
+        } else {
+            imports.recent.clone()
+        };
         health.header_recording = text.clone();
         health.header_idle = text.clone();
         health.sync_line = text.clone();
@@ -509,8 +519,9 @@ pub(crate) fn apply_import_health(health: &mut SyncHealth, facts: &SyncFacts) {
             health.state = HealthState::Connected;
             health.dbus = "connected".to_owned();
             health.icon = "healthy".to_owned();
+            health.sni_status = "Active".to_owned();
         }
-        if imports.waiting == 0 && !imports.sending {
+        if has_fault || (imports.waiting == 0 && !imports.sending && !review_only) {
             health.icon = "attention".to_owned();
             health.sni_status = "NeedsAttention".to_owned();
         }
@@ -950,6 +961,9 @@ pub(crate) fn load_facts_with_liveness(
                 held: true,
                 sending: false,
                 recent: "needs attention".to_owned(),
+                ready_to_review: 0,
+                needs_attention: 1,
+                store_error: false,
             })
         }),
         last_successful_sync: optional_float(&data, "last_successful_sync"),
@@ -1220,6 +1234,7 @@ mod tests {
             held: true,
             sending: false,
             recent: String::new(),
+            ..Default::default()
         };
         for pending in [None, Some(-1)] {
             let facts = SyncFacts {
@@ -1236,6 +1251,57 @@ mod tests {
         };
         assert_eq!(facts.with_import_counts().pending_confirmed, Some(4));
         assert_eq!(facts.pending_confirmed, Some(3));
+    }
+
+    #[test]
+    fn ready_to_review_is_non_fault_and_needs_attention_rolls_up_to_tray_icon() {
+        let base_link = Some(LinkFactState {
+            carrier_proven: true,
+            observer_registered: true,
+            ..Default::default()
+        });
+        let review_only = SyncFacts {
+            last_successful_contact: Some(100.0),
+            pending_confirmed: Some(0),
+            link: base_link.clone(),
+            imports: Some(crate::import::ImportSummary {
+                waiting: 0,
+                held: true,
+                sending: false,
+                recent: "1 ready to review".to_owned(),
+                ready_to_review: 1,
+                needs_attention: 0,
+                store_error: false,
+            }),
+            ..SyncFacts::default()
+        };
+        let health = derive_health(&review_only, 100.0, DEFAULT_SYNC_STALE_THRESHOLD as f64);
+        assert_eq!(health.state, HealthState::Connected);
+        assert_eq!(health.icon, "healthy");
+        assert_eq!(health.sni_status, "Active");
+        assert_eq!(health.waiting_count, None);
+        assert_eq!(health.sync_line, "1 ready to review");
+
+        let fault_and_review = SyncFacts {
+            imports: Some(crate::import::ImportSummary {
+                waiting: 0,
+                held: true,
+                sending: false,
+                recent: "not going to your journal right now. each one says why.".to_owned(),
+                ready_to_review: 1,
+                needs_attention: 1,
+                store_error: false,
+            }),
+            ..review_only
+        };
+        let fault_health = derive_health(
+            &fault_and_review,
+            100.0,
+            DEFAULT_SYNC_STALE_THRESHOLD as f64,
+        );
+        assert_eq!(fault_health.icon, "attention");
+        assert_eq!(fault_health.sni_status, "NeedsAttention");
+        assert_eq!(fault_health.waiting_count, None);
     }
     use crate::config::DEFAULT_SYNC_STALE_THRESHOLD;
     use crate::private_link::LinkFactState;
@@ -1477,6 +1543,7 @@ mod tests {
                 held: true,
                 sending: false,
                 recent: "waiting".to_owned(),
+                ..Default::default()
             }),
             last_successful_sync: Some(100.5),
             last_successful_contact: Some(200.5),

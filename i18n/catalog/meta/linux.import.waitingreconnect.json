@@ -1,0 +1,17 @@
+{
+  "description": "Queue hold line when offline.",
+  "context": "Queue hold line when offline.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 60,
+  "source_revision": "8d27a89b42c01f542f85abcdef4f83f160ad167c36e2617363af6c999ff30280",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

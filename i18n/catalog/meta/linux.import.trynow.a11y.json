@@ -1,0 +1,22 @@
+{
+  "description": "Accessible button label to retry a specific queued file.",
+  "context": "Accessible button label to retry a specific queued file.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "name",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 80,
+  "source_revision": "82ee5c665a4f21a179d0df42a84f288cadd8e739f5957408eae54d830dfa8f05",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

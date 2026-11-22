@@ -234,6 +234,10 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
         self.imports.dismiss_interrupted();
         "ok".to_owned()
     }
+    fn import_reconcile(&self) -> String {
+        self.imports.request_reconcile();
+        "ok".to_owned()
+    }
     async fn auth_prepare(
         &self,
         payload: String,

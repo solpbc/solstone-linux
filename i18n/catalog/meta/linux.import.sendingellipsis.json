@@ -1,0 +1,17 @@
+{
+  "description": "Detail line while sending a file to the journal.",
+  "context": "Detail line while sending a file to the journal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "34597557dc2c2c015053f1c47749a0545cec827bafa7065176c790f2a833ca34",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

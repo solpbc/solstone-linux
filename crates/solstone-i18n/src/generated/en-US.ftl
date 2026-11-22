@@ -1035,13 +1035,19 @@ m6c696e75782e6865616c74682e7570746f646174656174 = sync health: up to date at { $
 
 m6c696e75782e6865616c74682e77616974696e67666f72796f75746f636f6e6669726d796f75726a6f75726e616c736d61726b6e6f746869 = waiting for you to confirm your journal's mark. nothing waiting goes into your journal until you do.{ "\u000a" }when you're ready, run: { "solstone-linux confirm" }
 
+m6c696e75782e696d706f72742e616c6c686973746f7279 = all import history in your journal
+
 m6c696e75782e696d706f72742e617474656e74696f6e = needs attention
 
 m6c696e75782e696d706f72742e63616e6e6f74636f6e76657274 = this device can't convert this photo
 
 m6c696e75782e696d706f72742e64656c697665726564 = in your journal.
 
-m6c696e75782e696d706f72742e6578706c616e6174696f6e = choose files to bring into your journal.
+m6c696e75782e696d706f72742e65787069726564 = expired
+
+m6c696e75782e696d706f72742e6578706c616e6174696f6e = adds any file you choose here or drop on this window. your journal works out what it is.
+
+m6c696e75782e696d706f72742e6578706c616e6174696f6e6e6f64726f70 = adds any file you choose here. your journal works out what it is.
 
 m6c696e75782e696d706f72742e66696c656b696e64 = your journal can't take this kind of file
 
@@ -1053,11 +1059,17 @@ m6c696e75782e696d706f72742e66696c65746f6f6c61726765 = it's larger than your jour
 
 m6c696e75782e696d706f72742e68656c64 = not going to your journal right now. each one says why.
 
+m6c696e75782e696d706f72742e696e796f75726a6f75726e616c72656c = in your journal · { $when }
+
 m6c696e75782e696d706f72742e6a6f75726e616c7265667573616c = your journal couldn't accept this.
 
 m6c696e75782e696d706f72742e6d6f7265696d706f727473 = more imports
 
+m6c696e75782e696d706f72742e6d6f7265696d706f727473737562 = guides, options, and import history in your journal
+
 m6c696e75782e696d706f72742e6e616d65647265667573616c = { $name }: { $reason }
+
+m6c696e75782e696d706f72742e6e66696c6573 = { $count } files
 
 m6c696e75782e696d706f72742e6e6f726f6f6d = there isn't enough room on this device
 
@@ -1065,21 +1077,68 @@ m6c696e75782e696d706f72742e6e6f7468696e677761737361766564 = nothing was saved on
 
 m6c696e75782e696d706f72742e6e6f7468696e67796574 = nothing yet.
 
+m6c696e75782e696d706f72742e6e7265616479696e6a6f75726e616c = { $count } ready in your journal
+
+m6c696e75782e696d706f72742e6e77616974696e67 = { $count } waiting
+
 m6c696e75782e696d706f72742e70616972616761696e = your journal stopped accepting this device. imports wait here until you pair again.
 
+m6c696e75782e696d706f72742e7265616479746f726576696577 = ready to review
+
+m6c696e75782e696d706f72742e7265616479746f726576696577636f756e74 = { $count } ready to review
+
+m6c696e75782e696d706f72742e726563656e74726f772e61313179 = { $name }, in your journal, { $when }. open in your journal.
+
+m6c696e75782e696d706f72742e72656d6f76652e61313179 = remove { $name }
+
 m6c696e75782e696d706f72742e72656d6f76656572726f72 = couldn't remove this. try again.
+
+m6c696e75782e696d706f72742e72656d6f76657265616479746f726576696577 = this removes the copy on this device. the waiting copy in your journal stays there until you discard it or it expires.
+
+m6c696e75782e696d706f72742e72657669657764657461696c = saved in your journal. preview and confirm to start.
+
+m6c696e75782e696d706f72742e72657669657764657461696c686f7572 = saved in your journal. review within an hour before your journal removes the waiting copy.
+
+m6c696e75782e696d706f72742e7265766965776578706972656464657461696c = the waiting copy in your journal expired. this device still holds the file.
+
+m6c696e75782e696d706f72742e726576696577696e6a6f75726e616c = review in your journal
+
+m6c696e75782e696d706f72742e726576696577696e6a6f75726e616c2e61313179 = review { $name } in your journal
 
 m6c696e75782e696d706f72742e7361766564 = saved on this device: { $count }
 
 m6c696e75782e696d706f72742e736176696e67 = saving on this device: { $saved } of { $total }
 
+m6c696e75782e696d706f72742e73656e64616761696e = send again to review
+
+m6c696e75782e696d706f72742e73656e64616761696e2e61313179 = send { $name } again to review
+
 m6c696e75782e696d706f72742e73656e64696e67 = sending
 
+m6c696e75782e696d706f72742e73656e64696e67656c6c6970736973 = sending to your journal…
+
 m6c696e75782e696d706f72742e73656e64696e67746f6a6f75726e616c = sending to your journal.
+
+m6c696e75782e696d706f72742e7374617475736e65656473796f75 = imports need you
+
+m6c696e75782e696d706f72742e7374617475736e65656473796f75737562 = open import to see why.
+
+m6c696e75782e696d706f72742e7374617475737265616479746f726576696577 = { $i18nCategory ->
+    [one] { $display } import ready to review
+   *[other] { $display } imports ready to review
+}
+
+m6c696e75782e696d706f72742e7374617475737265616479746f726576696577737562 = open import to review and start.
+
+m6c696e75782e696d706f72742e737461747573726f772e61313179 = import, { $detail }.
 
 m6c696e75782e696d706f72742e737465706572726f72 = this step couldn't finish. try again.
 
 m6c696e75782e696d706f72742e73746f72656572726f72 = couldn't read imports on this device. nothing has been removed. restart the solstone app to try again.
+
+m6c696e75782e696d706f72742e74696c652e61313179 = import, { $state }. { $detail }.
+
+m6c696e75782e696d706f72742e7472796e6f772e61313179 = try { $name } now
 
 m6c696e75782e696d706f72742e77616974666f726a6f75726e616c = imports wait on this device until you connect a journal.
 
@@ -1089,7 +1148,15 @@ m6c696e75782e696d706f72742e77616974666f72757064617465 = imports wait until your 
 
 m6c696e75782e696d706f72742e77616974696e67 = waiting
 
+m6c696e75782e696d706f72742e77616974696e6764657461696c = waiting to go to your journal
+
 m6c696e75782e696d706f72742e77616974696e67666f726a6f75726e616c = waiting to go to your journal.
+
+m6c696e75782e696d706f72742e77616974696e67666f726a6f75726e616c73686f7274 = waiting for your journal
+
+m6c696e75782e696d706f72742e77616974696e67666f72796f7572726576696577 = waiting for your review
+
+m6c696e75782e696d706f72742e77616974696e677265636f6e6e656374 = waiting for your journal to reconnect.
 
 m6c696e75782e6a6f75726e616c6d61726b2e6a6f75726e616c = journal: { $value1 }·{ $value2 }
 
@@ -1374,6 +1441,11 @@ m6c696e75782e7368656c6c2e686f75727361676f = { $i18nCategory ->
 }
 
 m6c696e75782e7368656c6c2e696e74616b65756e7265616461626c65 = the record of how much has been taken in could not be read.
+
+m6c696e75782e7368656c6c2e6974656d636f756e74 = { $i18nCategory ->
+    [one] { $display } item
+   *[other] { $display } items
+}
 
 m6c696e75782e7368656c6c2e6c6573737468616e6d696e757465 = less than a minute
 

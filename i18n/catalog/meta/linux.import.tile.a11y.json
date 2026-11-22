@@ -1,0 +1,26 @@
+{
+  "description": "Accessible label for the home import tile when active.",
+  "context": "Accessible label for the home import tile when active.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "state",
+      "type": "string"
+    },
+    {
+      "name": "detail",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 120,
+  "source_revision": "21e90111f1f16a66f8731a7dab218b191cd32e7ef6e907a515b4ee2d06d6cb5c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

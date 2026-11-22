@@ -39,6 +39,7 @@
       <method name="ImportRetry"><arg name="id" direction="in" type="s" /><arg direction="out" type="s" /></method>
       <method name="ImportRemove"><arg name="id" direction="in" type="s" /><arg name="token" direction="in" type="s" /><arg name="may_have_saved" direction="in" type="b" /><arg direction="out" type="s" /></method>
       <method name="ImportDismissInterrupted"><arg direction="out" type="s" /></method>
+      <method name="ImportReconcile"><arg direction="out" type="s" /></method>
       <method name="AuthPrepare"><arg name="payload" direction="in" type="s" /><arg direction="out" type="s" /></method>
       <method name="AuthAuthorize"><arg name="payload" direction="in" type="s" /><arg direction="out" type="s" /></method>
       <method name="AuthCancel"><arg name="payload" direction="in" type="s" /><arg direction="out" type="s" /></method>

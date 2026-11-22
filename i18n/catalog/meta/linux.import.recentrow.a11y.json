@@ -1,0 +1,26 @@
+{
+  "description": "Accessible label for a clickable recent import receipt row.",
+  "context": "Accessible label for a clickable recent import receipt row.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "name",
+      "type": "string"
+    },
+    {
+      "name": "when",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 120,
+  "source_revision": "082c8f018a094b90e12a6fb592b3c9fac73e323d0ae0aae417a02a9a02638c8e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

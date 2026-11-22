@@ -17,7 +17,8 @@ use solstone_linux::desktop_session::SessionPresence;
 use solstone_linux::pause_hold::{self, HeldPause};
 use solstone_linux::service::ServicePresence;
 use solstone_linux::shell_model::{
-    self, BrowserHost, ObsidianFacts, PauseFor, PauseLeft, ScreenSub, StateWord, TileId, WidthClass,
+    self, BrowserHost, ImportPillMark, ImportTileModel, ImportTileState, ObsidianFacts, PauseFor,
+    PauseLeft, ScreenSub, StateWord, TileId, WidthClass,
 };
 use solstone_linux::source_intake::{self, IntakeFile, IntakeRows};
 use solstone_linux::terminal::state::{EngineState, TerminalState};
@@ -197,6 +198,7 @@ struct TileWidgets {
     sub: gtk::Label,
     mark: gtk::DrawingArea,
     switch: Option<gtk::Switch>,
+    a11y: Option<gtk::Label>,
     id: TileId,
 }
 
@@ -298,7 +300,8 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     import.3.set_visible(false);
     import.2.set_text(text!("linux.window.files"));
     import.2.set_visible(true);
-    let (add_more, _, _, _, _) = make_tile(text!("linux.window.addmore"), GLYPH_PLUS, None, true);
+    let (add_more, _, _, _, _, _) =
+        make_tile(text!("linux.window.addmore"), GLYPH_PLUS, None, true);
     let tiles = vec![
         tile_widgets(screen, TileId::Screen),
         tile_widgets(terminal, TileId::Terminal),
@@ -419,6 +422,9 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         unread: built.unread,
         page: built.page,
         import_attention: built.import_attention,
+        import_attention_sub: built.import_attention_sub,
+        import_attention_mark: built.import_attention_mark,
+        import_attention_a11y: built.import_attention_a11y,
         shelf_rows,
         journal,
         journal_label,
@@ -440,11 +446,17 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
             {
                 request_source_refresh(true);
             }
+            if id == TileId::Import {
+                request_import_reconcile();
+            }
             row.set(ShelfRow::Home);
             selected.set(Some(id));
             page_open.set(true);
             ui.page.show_tile(id, &view.borrow());
             apply_layout(&ui, &selected, &row, &shelf_open, &page_open);
+            if id == TileId::Import {
+                focus_import_pane(&ui);
+            }
         });
         let click = gtk::GestureClick::new();
         let open_click = Rc::clone(&open);
@@ -486,6 +498,22 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         let back_home = Rc::clone(&back);
         let home = ui.page.home.clone();
         home.connect_clicked(move |_| back_home());
+        let escape = gtk::EventControllerKey::new();
+        let escape_ui = Rc::clone(&ui);
+        let escape_selected = Rc::clone(&selected);
+        let escape_back = Rc::clone(&back);
+        escape.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape && escape_selected.get() == Some(TileId::Import) {
+                escape_back();
+                if let Some(tile) = escape_ui.tiles.iter().find(|t| t.id == TileId::Import) {
+                    tile.root.grab_focus();
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.add_controller(escape);
         wire_page_switch(&ui, &view, &seen_report, &daemon_up, &selected);
         SHOW_HOME.with(|slot| *slot.borrow_mut() = Some(back));
     }
@@ -498,11 +526,13 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         let shelf_open = shelf_open.clone();
         let view = view.clone();
         let open_import: Rc<dyn Fn()> = Rc::new(move || {
+            request_import_reconcile();
             row.set(ShelfRow::Home);
             selected.set(Some(TileId::Import));
             page_open.set(true);
             ui_open.page.show_tile(TileId::Import, &view.borrow());
             apply_layout(&ui_open, &selected, &row, &shelf_open, &page_open);
+            focus_import_pane(&ui_open);
         });
         let status_open = open_import.clone();
         ui.import_attention.connect_clicked(move |_| status_open());
@@ -600,6 +630,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     focus_window.connect_is_active_notify(|window| {
         if window.is_active() {
             request_source_refresh(false);
+            request_import_reconcile();
         }
     });
     focus_window.connect_map(move |window| {
@@ -800,6 +831,9 @@ struct Ui {
     unread: gtk::Label,
     page: Page,
     import_attention: gtk::Button,
+    import_attention_sub: gtk::Label,
+    import_attention_mark: gtk::DrawingArea,
+    import_attention_a11y: gtk::Label,
     shelf_rows: Vec<ShelfWidgets>,
     journal: gtk::Box,
     journal_label: gtk::Label,
@@ -983,9 +1017,11 @@ impl Page {
         self.title.set_text(shell_model::tile_name(id));
         self.verdict.set_visible(id != TileId::Import);
         let snap = current_snap();
-        self.imports
-            .widget
-            .set_visible(id == TileId::Import && snap.imports.is_some());
+        let imports_shown = id == TileId::Import && snap.imports.is_some();
+        self.imports.widget.set_visible(imports_shown);
+        if imports_shown && let Some(imports) = &snap.imports {
+            self.imports.refresh(imports, view.offline, &view.intake);
+        }
         self.word.set_text(shell_model::state_label(word));
         paint_word(&self.word, word);
         paint_mark(&self.mark, word);
@@ -1039,9 +1075,10 @@ impl Page {
         let (so_far, last) = page_facts(id, &view.intake);
         set_fact(&self.so_far, so_far.as_deref());
         self.so_far_row
-            .set_visible(so_far.is_some() && !screenshots);
+            .set_visible(so_far.is_some() && !screenshots && !imports_shown);
         set_fact(&self.last, last.as_deref());
-        self.last_row.set_visible(last.is_some() && !screenshots);
+        self.last_row
+            .set_visible(last.is_some() && !screenshots && !imports_shown);
         // Browsers has no switch here, and Obsidian is turned on by choosing a vault
         // below, so neither shows one. Screenshots shows one once it has been on:
         // while it's set up, the confirm is what turns it on.
@@ -1139,6 +1176,7 @@ fn tile_widgets(
         gtk::Label,
         gtk::DrawingArea,
         Option<gtk::Switch>,
+        Option<gtk::Label>,
     ),
     id: TileId,
 ) -> TileWidgets {
@@ -1148,6 +1186,7 @@ fn tile_widgets(
         sub: built.2,
         mark: built.3,
         switch: built.4,
+        a11y: built.5,
         id,
     }
 }
@@ -1163,18 +1202,25 @@ fn make_tile(
     gtk::Label,
     gtk::DrawingArea,
     Option<gtk::Switch>,
+    Option<gtk::Label>,
 ) {
-    let root = if dashed {
-        gtk::Box::new(gtk::Orientation::Vertical, 6)
+    let (root, a11y) = if dashed {
+        (gtk::Box::new(gtk::Orientation::Vertical, 6), None)
+    } else if name == text!("linux.window.import") {
+        let (box_, sr) = labelled_box_button();
+        (box_, Some(sr))
     } else {
         // A source tile opens its page, so keyboard and assistive tech reach it
         // as a button.
-        gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(6)
-            .accessible_role(gtk::AccessibleRole::Button)
-            .focusable(true)
-            .build()
+        (
+            gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(6)
+                .accessible_role(gtk::AccessibleRole::Button)
+                .focusable(true)
+                .build(),
+            None,
+        )
     };
     root.add_css_class("sol-tile");
     if dashed {
@@ -1228,11 +1274,14 @@ fn make_tile(
     sub.set_wrap(true);
     sub.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     sub.set_visible(dashed);
+    if let Some(sr) = &a11y {
+        root.append(sr);
+    }
     root.append(&top);
     root.append(&title);
     root.append(&state);
     root.append(&sub);
-    (root, word, sub, mark, switch)
+    (root, word, sub, mark, switch, a11y)
 }
 
 struct BuiltPane {
@@ -1250,6 +1299,9 @@ struct BuiltPane {
     unread: gtk::Label,
     page: Page,
     import_attention: gtk::Button,
+    import_attention_sub: gtk::Label,
+    import_attention_mark: gtk::DrawingArea,
+    import_attention_a11y: gtk::Label,
 }
 
 fn make_pane() -> BuiltPane {
@@ -1335,9 +1387,34 @@ fn make_pane() -> BuiltPane {
         facts.push(FactWidgets { so_far, last });
     }
 
-    let import_attention = gtk::Button::with_label(text!("linux.window.import"));
-    import_attention.add_css_class("sol-back");
-    import_attention.set_halign(gtk::Align::Start);
+    let (import_attention, import_attention_a11y) = labelled_button_dynamic();
+    import_attention.add_css_class("sol-status-import");
+    import_attention.set_has_frame(false);
+    import_attention.set_halign(gtk::Align::Fill);
+    let import_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    import_row.append(&import_attention_a11y);
+    import_row.append(&glyph_widget(GLYPH_IMPORT));
+    let import_lines = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    import_lines.set_hexpand(true);
+    let import_title = gtk::Label::new(Some(text!("linux.window.import")));
+    import_title.add_css_class("sol-ink");
+    import_title.set_halign(gtk::Align::Start);
+    import_title.set_xalign(0.0);
+    let import_attention_sub = gtk::Label::new(None);
+    import_attention_sub.add_css_class("sol-faint");
+    import_attention_sub.add_css_class("sol-quiet");
+    import_attention_sub.set_halign(gtk::Align::Start);
+    import_attention_sub.set_xalign(0.0);
+    import_attention_sub.set_wrap(true);
+    import_lines.append(&import_title);
+    import_lines.append(&import_attention_sub);
+    let import_attention_mark = mark_widget();
+    let import_chevron = gtk::Label::new(Some("›"));
+    import_chevron.add_css_class("sol-faint");
+    import_row.append(&import_lines);
+    import_row.append(&import_attention_mark);
+    import_row.append(&import_chevron);
+    import_attention.set_child(Some(&import_row));
     import_attention.set_visible(false);
     status.append(&import_attention);
 
@@ -1408,7 +1485,50 @@ fn make_pane() -> BuiltPane {
         unread,
         page,
         import_attention,
+        import_attention_sub,
+        import_attention_mark,
+        import_attention_a11y,
     }
+}
+
+/// GTK 4.6 dynamic accessible label via a hidden `labelled-by` target label.
+fn labelled_box_button() -> (gtk::Box, gtk::Label) {
+    let interface = r#"<interface>
+      <object class="GtkLabel" id="sr"><property name="visible">false</property></object>
+      <object class="GtkBox" id="box">
+        <property name="orientation">vertical</property>
+        <property name="spacing">6</property>
+        <property name="accessible-role">button</property>
+        <property name="focusable">true</property>
+        <accessibility><relation name="labelled-by">sr</relation></accessibility>
+      </object>
+    </interface>"#;
+    let builder = gtk::Builder::from_string(interface);
+    let box_: gtk::Box = builder
+        .object("box")
+        .expect("labelled box interface names its box");
+    let sr: gtk::Label = builder
+        .object("sr")
+        .expect("labelled box interface names its sr label");
+    (box_, sr)
+}
+
+/// GTK 4.6 dynamic accessible label for a button whose accessible name updates in place.
+fn labelled_button_dynamic() -> (gtk::Button, gtk::Label) {
+    let interface = r#"<interface>
+      <object class="GtkLabel" id="sr"><property name="visible">false</property></object>
+      <object class="GtkButton" id="button">
+        <accessibility><relation name="labelled-by">sr</relation></accessibility>
+      </object>
+    </interface>"#;
+    let builder = gtk::Builder::from_string(interface);
+    let button: gtk::Button = builder
+        .object("button")
+        .expect("labelled button interface names its button");
+    let sr: gtk::Label = builder
+        .object("sr")
+        .expect("labelled button interface names its sr label");
+    (button, sr)
 }
 
 /// GTK 4.6 can set an explicit accessible name through GtkBuilder.
@@ -1423,6 +1543,24 @@ fn named_icon_button(name: &str) -> gtk::Button {
         .object("button")
         .expect("the icon button interface names its only object");
     button.set_tooltip_text(Some(name));
+    button
+}
+
+/// A button whose visible caption and explicit accessible name differ (e.g. per-file
+/// `review in your journal` -> `review export.zip in your journal`).
+pub(crate) fn labeled_button(visible_label: &str, accessible_label: &str) -> gtk::Button {
+    let a11y = gtk::glib::markup_escape_text(accessible_label);
+    let interface = format!(
+        r#"<interface><object class="GtkButton" id="button">
+          <accessibility><property name="label">{a11y}</property></accessibility>
+        </object></interface>"#
+    );
+    let button: gtk::Button = gtk::Builder::from_string(&interface)
+        .object("button")
+        .expect("the labeled button interface names its only object");
+    if !visible_label.is_empty() {
+        button.set_label(visible_label);
+    }
     button
 }
 
@@ -1703,7 +1841,7 @@ fn page_facts(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>)
         TileId::Browsers => shell_model::browsers_so_far(file),
         TileId::Obsidian => shell_model::obsidian_so_far(file),
         TileId::Screenshots => shell_model::screenshots_so_far(file),
-        TileId::Import => return (None, None),
+        TileId::Import => shell_model::imports_so_far(file),
     };
     let started = match file {
         IntakeFile::Rows(rows) => match id {
@@ -1712,7 +1850,7 @@ fn page_facts(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>)
             TileId::Browsers => rows.browsers.started.as_deref(),
             TileId::Obsidian => rows.obsidian.started.as_deref(),
             TileId::Screenshots => rows.screenshots.started.as_deref(),
-            TileId::Import => None,
+            TileId::Import => rows.imports.started.as_deref(),
         },
         IntakeFile::Missing | IntakeFile::Refused => None,
     };
@@ -2480,14 +2618,25 @@ fn apply_view(ui: &Ui, view: &View) {
     paint_pairing(ui, view);
     let snap = current_snap();
     if let Some(imports) = &snap.imports {
-        ui.page.imports.refresh(imports);
+        ui.page.imports.refresh(imports, view.offline, &view.intake);
     }
-    ui.import_attention
-        .set_visible(snap.imports.as_ref().is_some_and(|imports| {
-            imports.store_error
-                || imports.rows.iter().any(|row| row.reason.is_some())
-                || (!imports.rows.is_empty() && imports.waiting == 0 && !imports.sending)
-        }));
+    let import_doc = (view.service == ServiceReading::Answering)
+        .then_some(snap.imports.as_ref())
+        .flatten();
+    let import_surface = shell_model::import_status_surface(import_doc);
+    if let Some(sub) = &import_surface.row_sub {
+        ui.import_attention_sub.set_text(sub);
+        apply_mark_kind(
+            &ui.import_attention_mark,
+            status_row_mark_kind(import_doc, import_surface.pill_mark),
+        );
+        if let Some(a11y) = &import_surface.row_accessible {
+            ui.import_attention_a11y.set_text(a11y);
+        }
+        ui.import_attention.set_visible(true);
+    } else {
+        ui.import_attention.set_visible(false);
+    }
     ui.page
         .screenshots
         .update(snap.screenshots.as_ref(), &view.intake);
@@ -2540,6 +2689,10 @@ fn apply_view(ui: &Ui, view: &View) {
             }
         }
     }
+    if let Some(import_tile) = ui.tiles.iter().find(|tile| tile.id == TileId::Import) {
+        let model = shell_model::import_tile_model(import_doc, view.offline);
+        paint_import_tile(import_tile, &model);
+    }
     let ids = [
         TileId::Screen,
         TileId::Terminal,
@@ -2590,6 +2743,7 @@ fn apply_view(ui: &Ui, view: &View) {
 }
 
 fn paint_word(label: &gtk::Label, word: StateWord) {
+    label.remove_css_class("sol-review-word");
     if word == StateWord::NeedsAttention {
         label.add_css_class("sol-attn");
         label.remove_css_class("sol-faint");
@@ -2597,6 +2751,79 @@ fn paint_word(label: &gtk::Label, word: StateWord) {
         label.add_css_class("sol-faint");
         label.remove_css_class("sol-attn");
     }
+}
+
+fn import_mark_kind(state: ImportTileState) -> MarkKind {
+    match state {
+        ImportTileState::NeedsAttention => MarkKind::Diamond,
+        ImportTileState::ReadyToReview => MarkKind::Review,
+        ImportTileState::Sending => MarkKind::Dot,
+        ImportTileState::Waiting | ImportTileState::Idle => MarkKind::Ring,
+    }
+}
+
+fn pill_mark_kind(mark: ImportPillMark) -> MarkKind {
+    match mark {
+        ImportPillMark::Good => MarkKind::Good,
+        ImportPillMark::Ring => MarkKind::Ring,
+        ImportPillMark::Review => MarkKind::Review,
+        ImportPillMark::Sending => MarkKind::Dot,
+    }
+}
+
+fn status_row_mark_kind(
+    doc: Option<&solstone_linux::import::ImportDocument>,
+    pill_mark: ImportPillMark,
+) -> MarkKind {
+    if doc.is_some_and(|d| {
+        d.store_error
+            || d.needs_attention > 0
+            || d.rows.iter().any(|r| r.state == "needs attention")
+    }) {
+        MarkKind::Diamond
+    } else {
+        pill_mark_kind(pill_mark)
+    }
+}
+
+fn paint_import_tile(tile: &TileWidgets, model: &ImportTileModel) {
+    if let Some(a11y) = &tile.a11y {
+        a11y.set_text(&model.accessible_label);
+    }
+    tile.sub.set_text(&model.sub_line);
+    tile.sub.set_visible(true);
+    tile.word.remove_css_class("sol-attn");
+    tile.word.remove_css_class("sol-faint");
+    tile.word.remove_css_class("sol-review-word");
+    match model.state_label {
+        Some(word) => {
+            tile.word.set_text(word);
+            tile.word.set_visible(true);
+            tile.mark.set_visible(true);
+            apply_mark_kind(&tile.mark, import_mark_kind(model.state));
+            match model.state {
+                ImportTileState::NeedsAttention => tile.word.add_css_class("sol-attn"),
+                ImportTileState::ReadyToReview => tile.word.add_css_class("sol-review-word"),
+                ImportTileState::Sending | ImportTileState::Waiting | ImportTileState::Idle => {
+                    tile.word.add_css_class("sol-faint");
+                }
+            }
+        }
+        None => {
+            tile.word.set_visible(false);
+            tile.mark.set_visible(false);
+        }
+    }
+}
+
+fn focus_import_pane(ui: &Rc<Ui>) {
+    let imports = ui.page.imports.clone();
+    let home = ui.page.home.clone();
+    glib::idle_add_local_once(move || {
+        if !imports.focus_entry() {
+            home.grab_focus();
+        }
+    });
 }
 
 fn facts_for(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>) {
@@ -2626,7 +2853,7 @@ fn counter_last(rows: &IntakeRows, id: TileId) -> Option<&str> {
         TileId::Browsers => &rows.browsers,
         TileId::Obsidian => &rows.obsidian,
         TileId::Screenshots => &rows.screenshots,
-        TileId::Import => return None,
+        TileId::Import => &rows.imports,
     };
     counter.last.as_deref()
 }
@@ -3525,6 +3752,105 @@ button.sol-back, button.sol-back:hover, button.sol-back:active, button.sol-back:
   color: #E8913A;\
   font-weight: 600;\
 }\
+.sol-review-card {\
+  background-color: rgba(232, 145, 58, 0.11);\
+  border: 1px solid rgba(232, 145, 58, 0.42);\
+  border-radius: 14px;\
+  padding: 12px 14px;\
+}\
+window.sol-dark .sol-review-card {\
+  background-color: rgba(232, 145, 58, 0.14);\
+  border-color: rgba(232, 145, 58, 0.45);\
+}\
+.sol-review-card separator {\
+  background-color: rgba(232, 145, 58, 0.24);\
+  margin: 2px 0;\
+}\
+.sol-review-word {\
+  color: #B45B0A;\
+}\
+window.sol-dark .sol-review-word {\
+  color: #F4A95B;\
+}\
+button.sol-action.sol-primary,\
+button.sol-action.sol-primary:hover,\
+button.sol-action.sol-primary:active,\
+window.sol-dark button.sol-action.sol-primary,\
+window.sol-dark button.sol-action.sol-primary:hover,\
+window.sol-dark button.sol-action.sol-primary:active {\
+  background-color: #E8913A;\
+  background-image: none;\
+  border-color: #D17B24;\
+  color: #24180F;\
+}\
+button.sol-action.sol-primary:hover,\
+window.sol-dark button.sol-action.sol-primary:hover {\
+  background-color: #DF8328;\
+}\
+.sol-import-name { font-weight: 600; }\
+.sol-more-sub { font-size: 12px; }\
+.sol-import-row {\
+  padding-bottom: 6px;\
+  border-bottom: 1px solid rgba(58, 46, 36, 0.10);\
+}\
+window.sol-dark .sol-import-row {\
+  border-bottom-color: rgba(255, 244, 230, 0.12);\
+}\
+button.sol-recent-row {\
+  background: none;\
+  background-image: none;\
+  border: none;\
+  border-bottom: 1px solid rgba(58, 46, 36, 0.10);\
+  border-radius: 0;\
+  box-shadow: none;\
+  padding: 7px 0;\
+  min-height: 0;\
+  min-width: 0;\
+}\
+button.sol-recent-row:hover {\
+  background-color: rgba(58, 46, 36, 0.05);\
+}\
+window.sol-dark button.sol-recent-row {\
+  border-bottom-color: rgba(255, 244, 230, 0.12);\
+}\
+window.sol-dark button.sol-recent-row:hover {\
+  background-color: rgba(255, 244, 230, 0.07);\
+}\
+button.sol-recent-row:focus, button.sol-status-import:focus {\
+  outline: none;\
+  box-shadow: none;\
+}\
+button.sol-recent-row:focus-visible, button.sol-status-import:focus-visible {\
+  outline: 2px solid #E8913A;\
+  outline-offset: 2px;\
+}\
+.sol-recent-row-static {\
+  border-bottom: 1px solid rgba(58, 46, 36, 0.10);\
+  padding: 7px 0;\
+}\
+window.sol-dark .sol-recent-row-static {\
+  border-bottom-color: rgba(255, 244, 230, 0.12);\
+}\
+button.sol-status-import {\
+  background: none;\
+  background-image: none;\
+  border: none;\
+  border-bottom: 1px solid rgba(58, 46, 36, 0.14);\
+  border-radius: 0;\
+  box-shadow: none;\
+  padding: 7px 0;\
+  min-height: 0;\
+  min-width: 0;\
+}\
+button.sol-status-import:hover {\
+  background-color: rgba(58, 46, 36, 0.05);\
+}\
+window.sol-dark button.sol-status-import {\
+  border-bottom-color: rgba(255, 244, 230, 0.16);\
+}\
+window.sol-dark button.sol-status-import:hover {\
+  background-color: rgba(255, 244, 230, 0.07);\
+}\
 ";
 
 fn install_deck_css(window: &gtk::ApplicationWindow) {
@@ -3647,18 +3973,22 @@ fn raster_glyph(paths: &str, dark: bool, px: i32) -> Option<gtk::cairo::ImageSur
     gtk::cairo::ImageSurface::create_for_data(data, gtk::cairo::Format::ARgb32, px, px, stride).ok()
 }
 
-#[derive(Clone, Copy)]
-enum MarkKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkKind {
     Dot,
     /// The status pill when the journal is caught up. Source tiles stay orange.
     Good,
     OtherDevice,
+    /// Brand-orange bullseye for `ready to review` (distinct shape + color).
+    Review,
+    /// Brand-orange dashed ring for `review expired`.
+    Expired,
     Ring,
     Diamond,
     Bars,
 }
 
-fn mark_widget() -> gtk::DrawingArea {
+pub(crate) fn mark_widget() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_size_request(12, 12);
     area.set_content_width(12);
@@ -3685,12 +4015,14 @@ fn paint_mark(area: &gtk::DrawingArea, word: StateWord) {
     apply_mark_kind(area, kind);
 }
 
-fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
+pub(crate) fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
     for class in [
         "sol-mark-on",
         "sol-mark-good",
         "sol-mark-ring",
         "sol-mark-other",
+        "sol-mark-review",
+        "sol-mark-expired",
         "sol-mark-attn",
         "sol-mark-paused",
     ] {
@@ -3701,6 +4033,8 @@ fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
         MarkKind::Good => "sol-mark-good",
         MarkKind::Ring => "sol-mark-ring",
         MarkKind::OtherDevice => "sol-mark-other",
+        MarkKind::Review => "sol-mark-review",
+        MarkKind::Expired => "sol-mark-expired",
         MarkKind::Diamond => "sol-mark-attn",
         MarkKind::Bars => "sol-mark-paused",
     };
@@ -3711,6 +4045,10 @@ fn apply_mark_kind(area: &gtk::DrawingArea, kind: MarkKind) {
 fn draw_mark(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, height: i32) {
     let kind = if area.has_css_class("sol-mark-other") {
         MarkKind::OtherDevice
+    } else if area.has_css_class("sol-mark-review") {
+        MarkKind::Review
+    } else if area.has_css_class("sol-mark-expired") {
+        MarkKind::Expired
     } else if area.has_css_class("sol-mark-attn") {
         MarkKind::Diamond
     } else if area.has_css_class("sol-mark-paused") {
@@ -3750,6 +4088,24 @@ fn draw_mark(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, heig
             let _ = cr.stroke();
             cr.arc(cx, cy, radius * 0.38, 0.0, std::f64::consts::TAU);
             let _ = cr.fill();
+        }
+        MarkKind::Review => {
+            let outer = side * 0.36;
+            cr.set_source_rgb(ORANGE.0, ORANGE.1, ORANGE.2);
+            cr.set_line_width(1.5);
+            cr.arc(cx, cy, outer, 0.0, std::f64::consts::TAU);
+            let _ = cr.stroke();
+            cr.arc(cx, cy, outer * 0.42, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+        MarkKind::Expired => {
+            let outer = side * 0.36;
+            cr.set_source_rgb(ORANGE.0, ORANGE.1, ORANGE.2);
+            cr.set_line_width(1.5);
+            cr.set_dash(&[2.4, 2.0], 0.0);
+            cr.arc(cx, cy, outer, 0.0, std::f64::consts::TAU);
+            let _ = cr.stroke();
+            cr.set_dash(&[], 0.0);
         }
         MarkKind::Ring => {
             let (red, green, blue) = ink_rgb(dark);
@@ -3935,29 +4291,11 @@ fn paint_pairing(ui: &Ui, view: &View) {
         apply_mark_kind(&ui.pill_mark, MarkKind::Ring);
         return;
     }
-    ui.pill_label.set_text(text!("linux.window.connected"));
-    if let Some(imports) = current_snap().imports
-        && imports.held
-    {
-        ui.lead.set_text(&imports.recent);
-        show_connect(ui, false, None);
-        apply_mark_kind(
-            &ui.pill_mark,
-            if imports.sending {
-                MarkKind::Good
-            } else {
-                MarkKind::Ring
-            },
-        );
-        return;
-    }
-    ui.lead.set_text(text!("linux.window.allcaughtup"));
-    show_connect(
-        ui,
-        false,
-        Some(text!("linux.window.everythinginyourjournal")),
-    );
-    apply_mark_kind(&ui.pill_mark, MarkKind::Good);
+    let surface = shell_model::import_status_surface(current_snap().imports.as_ref());
+    ui.pill_label.set_text(&surface.pill_label);
+    ui.lead.set_text(&surface.lead);
+    show_connect(ui, false, surface.soft.as_deref());
+    apply_mark_kind(&ui.pill_mark, pill_mark_kind(surface.pill_mark));
 }
 
 fn show_connect(ui: &Ui, show_button: bool, text: Option<&str>) {
@@ -4238,6 +4576,16 @@ fn request_source_refresh(detail: bool) {
     });
 }
 
+fn request_import_reconcile() {
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(client) = solstone_linux::dbus_client::ControlClient::session().await
+            && let Ok(owner) = client.get_owner().await
+        {
+            let _ = client.expect_owner(owner).import_reconcile().await;
+        }
+    });
+}
+
 async fn fetch_service() -> Result<ServiceSnap, ControlClientError> {
     let client = solstone_linux::dbus_client::ControlClient::session().await?;
     let owner = client.get_owner().await?;
@@ -4430,5 +4778,58 @@ mod tests {
             start_keys(Some(ServicePresence::Inactive), StartFlight::Failed),
             Some((CopyKey::ActionStart, CopyKey::StatusStartFailed, true))
         );
+    }
+
+    #[test]
+    fn import_tile_and_status_marks_are_distinct_and_non_green_when_review_or_attention() {
+        assert_eq!(
+            import_mark_kind(ImportTileState::NeedsAttention),
+            MarkKind::Diamond
+        );
+        assert_eq!(
+            import_mark_kind(ImportTileState::ReadyToReview),
+            MarkKind::Review
+        );
+        assert_eq!(import_mark_kind(ImportTileState::Sending), MarkKind::Dot);
+        assert_eq!(import_mark_kind(ImportTileState::Waiting), MarkKind::Ring);
+
+        assert_eq!(pill_mark_kind(ImportPillMark::Good), MarkKind::Good);
+        assert_eq!(pill_mark_kind(ImportPillMark::Review), MarkKind::Review);
+        assert_eq!(pill_mark_kind(ImportPillMark::Ring), MarkKind::Ring);
+        assert_eq!(pill_mark_kind(ImportPillMark::Sending), MarkKind::Dot);
+
+        let attention_doc = solstone_linux::import::ImportDocument {
+            needs_attention: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            status_row_mark_kind(Some(&attention_doc), ImportPillMark::Ring),
+            MarkKind::Diamond
+        );
+    }
+
+    #[test]
+    fn page_facts_includes_imports_so_far_and_last_taken_in() {
+        let empty = solstone_linux::source_intake::Counter {
+            total: 0,
+            started: None,
+            last: None,
+        };
+        let rows = IntakeFile::Rows(Box::new(IntakeRows {
+            audio: empty.clone(),
+            screen: empty.clone(),
+            terminal: empty.clone(),
+            browsers: empty.clone(),
+            obsidian: empty.clone(),
+            screenshots: empty,
+            imports: solstone_linux::source_intake::Counter {
+                total: 3,
+                started: Some("2026-11-01".into()),
+                last: Some("2026-11-22T12:00:00Z".into()),
+            },
+        }));
+        let (so_far, last) = page_facts(TileId::Import, &rows);
+        assert!(so_far.as_deref().is_some_and(|s| s.starts_with("3 items")));
+        assert!(last.is_some());
     }
 }

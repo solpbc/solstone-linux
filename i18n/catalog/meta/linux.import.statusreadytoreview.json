@@ -1,0 +1,31 @@
+{
+  "description": "Status pane lead headline for imports ready to review.",
+  "context": "Status pane lead headline for imports ready to review.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "cardinal",
+      "numeric_style": "ungrouped"
+    },
+    {
+      "name": "display",
+      "type": "string"
+    }
+  ],
+  "format_intent": "cardinal",
+  "max_length": 48,
+  "source_revision": "5ed525d70e3222e11c6ad612b0a2cf1464f14ca73b3fa908f2ed6fcf554a3358",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [],
+  "selector": {
+    "name": "count",
+    "type": "cardinal"
+  }
+}

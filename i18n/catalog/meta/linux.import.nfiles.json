@@ -1,0 +1,22 @@
+{
+  "description": "Import tile sub-line showing count of sending files.",
+  "context": "Import tile sub-line showing count of sending files.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 30,
+  "source_revision": "91001cfeb6f59f38db379a8098f5d4ad7acd0608da253e869d89964aef3b5965",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

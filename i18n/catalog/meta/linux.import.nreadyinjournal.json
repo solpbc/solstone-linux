@@ -1,0 +1,22 @@
+{
+  "description": "Import tile sub-line showing count of files ready in the journal.",
+  "context": "Import tile sub-line showing count of files ready in the journal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "60e4b5b55ed46e94b80c8d4523e6b7f0c618dc91a93031dd2b0d0a284af8d16d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

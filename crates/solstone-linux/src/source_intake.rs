@@ -40,7 +40,7 @@ const LOCK_NAME: &str = "source-intake.lock";
 const FILE_VERSION: u64 = 2;
 const SEEN_TAIL_LIMIT: usize = 32;
 /// The sources whose counted keys are only ever added.
-const SEEN_SOURCES: [&str; 2] = ["terminal", "screenshots"];
+const SEEN_SOURCES: [&str; 3] = ["terminal", "screenshots", "imports"];
 
 pub(crate) fn path(state_dir: &Path) -> PathBuf {
     state_dir.join(FILENAME)
@@ -98,6 +98,29 @@ fn add_screenshot_at(state_dir: &Path, id: &str, stamp: &ClockStamp) {
             return false;
         };
         source["screenshots"] = json!(total.saturating_add(1));
+        source["last"] = json!(stamp.at.clone());
+        if let Some(seen) = source["seen"].as_array_mut() {
+            seen.push(json!(id));
+        }
+        true
+    });
+}
+
+/// An imported item taken in, by its custody identity. The same item counts once.
+pub(crate) fn add_import(state_dir: &Path, id: &str) {
+    add_import_at(state_dir, id, &ClockStamp::now());
+}
+
+fn add_import_at(state_dir: &Path, id: &str, stamp: &ClockStamp) {
+    let _ = update(state_dir, stamp, |file, seen| {
+        if seen.counted(file, "imports", id) {
+            return false;
+        }
+        let source = &mut file["imports"];
+        let Some(total) = source.get("items").and_then(Value::as_u64) else {
+            return false;
+        };
+        source["items"] = json!(total.saturating_add(1));
         source["last"] = json!(stamp.at.clone());
         if let Some(seen) = source["seen"].as_array_mut() {
             seen.push(json!(id));
@@ -916,6 +939,7 @@ fn parse_file(bytes: &[u8]) -> Option<Value> {
         ("browsers", "pages"),
         ("obsidian", "notes"),
         ("screenshots", "screenshots"),
+        ("imports", "items"),
     ] {
         if !total_field_ok(&value, source, field) {
             return None;
@@ -927,6 +951,7 @@ fn parse_file(bytes: &[u8]) -> Option<Value> {
     if !string_array_ok(&value["terminal"], "seen")
         || !string_array_ok(&value["obsidian"], "paths")
         || !string_array_ok(&value["screenshots"], "seen")
+        || !string_array_ok(&value["imports"], "seen")
     {
         return None;
     }
@@ -991,6 +1016,7 @@ fn fresh_file(stamp: &ClockStamp) -> Value {
         "browsers": pages_object(stamp),
         "obsidian": notes_object(stamp),
         "screenshots": screenshots_object(stamp),
+        "imports": imports_object(stamp),
         "carried": [],
     })
 }
@@ -1018,10 +1044,17 @@ fn ensure_sources(file: &mut Value, stamp: &ClockStamp) {
     if !file.get("screenshots").is_some_and(Value::is_object) {
         file["screenshots"] = screenshots_object(stamp);
     }
+    if !file.get("imports").is_some_and(Value::is_object) {
+        file["imports"] = imports_object(stamp);
+    }
     fill_source(file, "obsidian", "notes", stamp);
     fill_source(file, "screenshots", "screenshots", stamp);
+    fill_source(file, "imports", "items", stamp);
     if !file["screenshots"]["seen"].is_array() {
         file["screenshots"]["seen"] = json!([]);
+    }
+    if !file["imports"]["seen"].is_array() {
+        file["imports"]["seen"] = json!([]);
     }
     if !file["terminal"]["seen"].is_array() {
         file["terminal"]["seen"] = json!([]);
@@ -1109,6 +1142,16 @@ fn screenshots_object(stamp: &ClockStamp) -> Value {
     })
 }
 
+fn imports_object(stamp: &ClockStamp) -> Value {
+    json!({
+        "items": 0,
+        "started": stamp.started,
+        "started_at": stamp.at,
+        "last": Value::Null,
+        "seen": [],
+    })
+}
+
 fn notes_object(stamp: &ClockStamp) -> Value {
     json!({
         "notes": 0,
@@ -1129,7 +1172,7 @@ pub struct Counter {
     pub last: Option<String>,
 }
 
-/// The five counters, read and not written.
+/// The counters, read and not written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IntakeRows {
     pub audio: Counter,
@@ -1138,6 +1181,7 @@ pub struct IntakeRows {
     pub browsers: Counter,
     pub obsidian: Counter,
     pub screenshots: Counter,
+    pub imports: Counter,
 }
 
 /// A read of `source-intake.json`. Missing stays missing. A refused file is not zeros.
@@ -1166,6 +1210,7 @@ pub fn read_rows(path: &Path) -> IntakeFile {
         browsers: counter_of(&value, "browsers", "pages"),
         obsidian: counter_of(&value, "obsidian", "notes"),
         screenshots: counter_of(&value, "screenshots", "screenshots"),
+        imports: counter_of(&value, "imports", "items"),
     }))
 }
 
@@ -3300,6 +3345,27 @@ mod read_rows_tests {
         assert_eq!(rows.audio.total, 0);
         assert_eq!(rows.screen.started.as_deref(), Some("2025-03-03"));
         assert_eq!(rows.screen.last, None);
+        assert_eq!(rows.imports.total, 0);
         assert_eq!(fs::read(&path).unwrap(), body.as_bytes());
+    }
+
+    #[test]
+    fn imports_counter_upgrades_v1_and_counts_each_intake_id_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("source-intake.json");
+        fs::write(&file, sample(60, 0, "null")).unwrap();
+        let IntakeFile::Rows(before) = read_rows(&file) else {
+            panic!("legacy v1 file without imports must decode");
+        };
+        assert_eq!(before.imports.total, 0);
+        super::add_import(temp.path(), "item-1");
+        super::add_import(temp.path(), "item-1");
+        super::add_import(temp.path(), "item-2");
+        let IntakeFile::Rows(after) = read_rows(&file) else {
+            panic!("upgraded file must decode");
+        };
+        assert_eq!(after.imports.total, 2);
+        assert!(after.imports.last.is_some());
+        assert_eq!(after.screen.total, 60);
     }
 }

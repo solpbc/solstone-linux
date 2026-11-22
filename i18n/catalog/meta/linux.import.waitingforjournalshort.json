@@ -1,0 +1,17 @@
+{
+  "description": "Short sub-line on import tile when waiting offline or unpaired.",
+  "context": "Short sub-line on import tile when waiting offline or unpaired.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "aed7b9720bdbea424dadfcc1eded216c855d92d0700f24a19d1d2cbc53aceb35",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}
