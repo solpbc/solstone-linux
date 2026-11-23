@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "e26432aa24f8d19f7305f33ff5cfd89bfd91686a32b07b593465509593817b6e",
+  "cargo_lock_sha256": "1be158797f902041deb4ca888434d2c2f888e4fac97ebdfb6adc2a27c4e821ab",
   "notices_sha256": "61ae08b6c45545ed68f50573b43595a4e78a96d363d86ad409ae1127956b7cb2",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux-window",

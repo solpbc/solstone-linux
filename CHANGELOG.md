@@ -6,6 +6,21 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.51] - 2026-11-23
+
+### Added
+
+- the import tile on the app's home now shows how your imports are going while something is happening: waiting, sending, ready to review, or needs attention. when nothing is going on, it stays quiet.
+- the app's import page now lists your latest files that reached your journal in the last day under recent. choose one to see its import in your journal.
+
+### Changed
+
+- with your journal up to date, a file your journal asks you to check before its import starts, like an Apple Health export, now waits on the app's import page as ready to review instead of showing a problem to try again. choose "review in your journal" to preview and start it there. if the copy waiting in your journal expires, choose "send again to review".
+
+### Fixed
+
+- on Ubuntu, when the system stops your journal's window from starting, the app now opens your journal in your browser instead.
+
 ## [2.0.50] - 2026-11-22
 
 ### Added
