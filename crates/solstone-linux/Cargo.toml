@@ -45,7 +45,7 @@ solstone-folder-sync = { version = "0.1.0", path = "../solstone-folder-sync" }
 solstone-vault = { version = "0.1.0", path = "../solstone-vault" }
 solstone-terminal = { version = "2.0.0", path = "../solstone-terminal" }
 native-browser-frame = { version = "1.0.0", path = "../../vendor/crates/native-browser-frame" }
-url = "=2.5.8"
+url = "=2.5.9"
 roxmltree = "0.21"
 
 [features]

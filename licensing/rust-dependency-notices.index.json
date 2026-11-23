@@ -1,6 +1,6 @@
 {
   "schema": "solstone-linux.rust-dependency-notices.v1",
-  "cargo_lock_sha256": "167673947727d29c258a7767b6e9a45e84d06e1c31242115c4a2dc2ff8147ca5",
+  "cargo_lock_sha256": "c9f31c32bb113bf9b50101dbd5389271d3079884393fb17a89aacd9d630de0d3",
   "notices_sha256": "61ae08b6c45545ed68f50573b43595a4e78a96d363d86ad409ae1127956b7cb2",
   "population_query": "cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-unknown-linux-gnu",
   "root_package": "solstone-linux-window",
@@ -2444,7 +2444,7 @@
     },
     {
       "name": "form_urlencoded",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "MIT OR Apache-2.0",
       "license_election": "MIT",
@@ -8221,7 +8221,7 @@
     },
     {
       "name": "url",
-      "version": "2.5.8",
+      "version": "2.5.9",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "license": "MIT OR Apache-2.0",
       "license_election": "MIT",
