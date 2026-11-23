@@ -325,38 +325,45 @@ fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
         );
     }
     let Ok(current) = crate::service::current_executable() else {
-        return launch_window(false, false);
+        return launch_window(false, false, &[]);
     };
     let error = Command::new(current).arg("window").exec();
     eprintln!("{error}");
-    launch_window(false, false)
+    launch_window(false, false, &[])
 }
 
+// The service may have started at login, before the desktop imported its display, so a
+// window it opens is given the desktop's display as the user manager holds it now.
 pub(crate) fn spawn_window_from_tray() {
     thread::spawn(|| {
-        let _ = launch_window(false, false);
+        let display = crate::desktop_session::display_environment_for_children();
+        let _ = launch_window(false, false, &display);
     });
 }
 
 pub(crate) fn spawn_settings_window_from_tray() {
     thread::spawn(|| {
-        let _ = launch_window(false, true);
+        let display = crate::desktop_session::display_environment_for_children();
+        let _ = launch_window(false, true, &display);
     });
 }
 
-fn launch_window(in_scope: bool, settings: bool) -> i32 {
+/// `display` overrides the display variables this process would hand down. A launch
+/// from the desktop passes none: its own environment is the desktop's.
+fn launch_window(in_scope: bool, settings: bool, display: &[(&'static str, String)]) -> i32 {
     let current = match crate::service::current_executable() {
         Ok(exe) => exe,
         Err(error) => return handle_window_failure(&error.to_string(), false),
     };
     if !in_scope {
-        // A scope inherits this desktop's environment and survives capture-service restarts.
+        // A scope runs with this process's environment and survives capture-service restarts.
         // Its descendants (including a newly started browser) may finish independently.
         return match Command::new("systemd-run")
             .args(["--user", "--scope", "--collect", "--quiet", "--"])
             .arg(&current)
             .args(["window", "--in-scope"])
             .args(settings.then_some(WINDOW_SETTINGS_ARG))
+            .envs(display.iter().map(|(name, value)| (*name, value)))
             .status()
         {
             Ok(status) if status.success() => 0,
@@ -462,17 +469,17 @@ pub fn run() -> i32 {
         });
     }
     if arguments.len() == 2 && arguments[0] == "window" && arguments[1] == "--in-scope" {
-        return launch_window(true, false);
+        return launch_window(true, false, &[]);
     }
     if arguments.len() == 3
         && arguments[0] == "window"
         && arguments[1] == "--in-scope"
         && arguments[2] == WINDOW_SETTINGS_ARG
     {
-        return launch_window(true, true);
+        return launch_window(true, true, &[]);
     }
     if arguments.len() == 1 && arguments[0] == "window" {
-        return launch_window(false, false);
+        return launch_window(false, false, &[]);
     }
     // The desktop hands a clicked link here. It's parked for the window and this process
     // re-runs without it, so it doesn't sit on a command line for as long as the window is open.

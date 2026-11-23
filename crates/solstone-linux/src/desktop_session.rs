@@ -343,9 +343,11 @@ pub fn reread_manager_environment() {
     }
 }
 
-/// The display variables a program this app launches needs. An app that started
-/// before the desktop did was not given them in its own environment.
+/// The display variables a program this app launches needs, read from the user
+/// manager at launch time. An app started at login, before the desktop imported
+/// them, was not given them in its own environment and is not given them later.
 pub fn display_environment_for_children() -> Vec<(&'static str, String)> {
+    reread_manager_environment();
     let environment = startup_environment();
     [
         ("DISPLAY", environment.display),

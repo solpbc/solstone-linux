@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-use solstone_i18n::text;
+use solstone_i18n::{message, text};
 use std::{
     env, io,
     path::PathBuf,
@@ -1350,7 +1350,9 @@ impl VideoCapture for VideoBackend {
         // for as long as the start blocks the tick thread.
         let notifier = Arc::clone(&self.notifier);
         with_watchdog(notifier, STARTUP_WATCHDOG_INTERVAL, || {
-            match self.follow_target()? {
+            let active = self.follow_target()?;
+            screen_elements_present(active)?;
+            match active {
                 ActiveVideo::Portal(value) => value.start(directory, draw_cursor),
                 ActiveVideo::X11(value) => value.start(directory, draw_cursor),
             }
@@ -1370,6 +1372,45 @@ impl VideoCapture for VideoBackend {
             None => true,
         }
     }
+}
+
+static SCREEN_ELEMENTS_NOTICE_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// A screen pipeline can't be built while a GStreamer element it uses is missing, and a
+/// retry won't change that until the owner installs it. Checked before the desktop is
+/// asked to share the screen, and the owner is told once per run.
+fn screen_elements_present(active: &ActiveVideo) -> Result<(), String> {
+    let output = std::path::Path::new("screen.webm");
+    let description = match active {
+        ActiveVideo::Portal(_) => crate::pipeline::pipeline_description(0, 0, output),
+        ActiveVideo::X11(_) => crate::pipeline::ximagesrc_pipeline_description(
+            ":0",
+            &crate::positions::BoxGeometry {
+                x1: 0,
+                y1: 0,
+                x2: 1,
+                y2: 1,
+            },
+            false,
+            output,
+        ),
+    };
+    let missing = crate::video::gstreamer::missing_elements(&description);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let elements = missing.join(", ");
+    if !SCREEN_ELEMENTS_NOTICE_SHOWN.swap(true, std::sync::atomic::Ordering::AcqRel)
+        && let Err(error) = notify_rust::Notification::new()
+            .appname(text!("linux.metadata.name"))
+            .summary(text!("linux.panel.solstoneapp"))
+            .body(&message!("linux.notification.screenelementsmissing", "elements" => elements.as_str()))
+            .show()
+    {
+        tracing::warn!(%error, "could not show the missing screen elements notice");
+    }
+    Err(format!("missing GStreamer element(s) {elements}"))
 }
 
 /// Keeps the systemd watchdog fed while `work` blocks the tick thread.

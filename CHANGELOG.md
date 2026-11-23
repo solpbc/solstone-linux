@@ -8,6 +8,8 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- opening the app's window or its settings from the panel icon now works after your computer restarts. before, it said "the window couldn't start" until you restarted the app.
+- the deb and rpm now recommend GStreamer's PipeWire plugin, which screen intake needs on Wayland, so installing the deb with apt, or the rpm with dnf, brings it along. if a plugin screen intake needs is still missing, the app now tells you once per run, before your desktop asks you to share the screen, instead of failing quietly.
 - empty audio and screen recordings left behind when intake stops early or the solstone app recovers after an interruption are now removed so they don't go into your journal.
 
 ## [2.0.51] - 2026-11-23

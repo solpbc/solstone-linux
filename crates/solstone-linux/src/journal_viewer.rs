@@ -23,7 +23,9 @@ impl JournalViewer {
         channel.set_write_timeout(timeout)?;
         let input = OwnedFd::from(peer.try_clone()?);
         let output = OwnedFd::from(peer);
+        // Started by the running app, which may predate the desktop's display.
         let process = Command::new(program)
+            .envs(crate::desktop_session::display_environment_for_children())
             .env("SOLSTONE_JOURNAL_LANGUAGE", solstone_i18n::locale())
             .env(
                 "SOLSTONE_JOURNAL_NEW_NAME",

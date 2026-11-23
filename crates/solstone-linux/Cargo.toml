@@ -105,8 +105,9 @@ depends = "libc6 (>= 2.35), libgcc-s1, libglib2.0-0 | libglib2.0-0t64, libgstrea
 suggests = "gnome-shell-extension-appindicator, tmux"
 # The panel icon's "copy" hands its text to wl-copy on Wayland and xclip on X11: a
 # background app can't set a Wayland clipboard by itself. Recommended, so a missing
-# tool costs only the copy, never the install.
-recommends = "libgtk-4-1 (>= 4.6), wl-clipboard, xclip, bubblewrap, xdg-dbus-proxy, libsoup-3.0-0, libharfbuzz-icu0, libwebpdemux2, libwebpmux3, libxslt1.1, libenchant-2-2, libhyphen0, libsecret-1-0, libgles2, libegl1, libgudev-1.0-0, libevdev2, libatomic1, libwayland-server0, gstreamer1.0-gl, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav"
+# tool costs only the copy, never the install. Wayland screen frames need
+# gstreamer1.0-pipewire (pipewiresrc), recommended for the same reason.
+recommends = "libgtk-4-1 (>= 4.6), wl-clipboard, xclip, bubblewrap, xdg-dbus-proxy, libsoup-3.0-0, libharfbuzz-icu0, libwebpdemux2, libwebpmux3, libxslt1.1, libenchant-2-2, libhyphen0, libsecret-1-0, libgles2, libegl1, libgudev-1.0-0, libevdev2, libatomic1, libwayland-server0, gstreamer1.0-gl, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-pipewire, gstreamer1.0-plugins-bad, gstreamer1.0-libav"
 section = "utils"
 priority = "optional"
 assets = [
@@ -355,6 +356,10 @@ xdg-dbus-proxy = "*"
 "libevdev.so.2()(64bit)" = "*"
 "gstreamer1-plugins-good" = "*"
 "gstreamer-plugins-good" = "*"
+# Wayland screen frames come through pipewiresrc. Fedora names it pipewire-gstreamer,
+# openSUSE gstreamer-plugin-pipewire.
+"pipewire-gstreamer" = "*"
+"gstreamer-plugin-pipewire" = "*"
 "gstreamer1-plugin-openh264" = "*"
 "gstreamer1-plugins-bad-free" = "*"
 "gstreamer1-plugin-libav" = "*"

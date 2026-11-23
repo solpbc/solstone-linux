@@ -9320,6 +9320,37 @@
       "selector": null
     },
     {
+      "id": "linux.notification.screenelementsmissing",
+      "resource": "m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67",
+      "namespace": "linux.notification",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "elements",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [
+        {
+          "name": "literal1",
+          "kind": "command",
+          "value": "GStreamer"
+        },
+        {
+          "name": "literal2",
+          "kind": "command",
+          "value": "PipeWire"
+        }
+      ],
+      "selector": null
+    },
+    {
       "id": "linux.pair.cancel",
       "resource": "m6c696e75782e706169722e63616e63656c",
       "namespace": "linux.pair",

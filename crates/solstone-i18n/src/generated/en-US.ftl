@@ -1206,6 +1206,8 @@ m6c696e75782e6d657461646174612e73657276696365 = solstone app for linux
 
 m6c696e75782e6e6f74696669636174696f6e2e636f70696564 = copied
 
+m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67 = screen intake can't start: { "GStreamer" } is missing { $elements }. install the { "GStreamer" } { "PipeWire" }, good and base plugins with your package manager, then restart the solstone app.
+
 m6c696e75782e706169722e63616e63656c = cancel
 
 m6c696e75782e706169722e636f6e74696e7565 = continue

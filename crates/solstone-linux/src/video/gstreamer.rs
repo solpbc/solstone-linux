@@ -135,6 +135,21 @@ pub fn ensure_initialized() -> Result<(), String> {
     gst::init().map_err(|error| format!("failed to initialize GStreamer: {error}"))
 }
 
+/// The elements of `description` this computer's GStreamer can't load, each named once.
+/// Empty when GStreamer itself won't start: building the pipeline reports that.
+pub fn missing_elements(description: &PipelineDescription) -> Vec<String> {
+    if ensure_initialized().is_err() {
+        return Vec::new();
+    }
+    let mut missing: Vec<String> = Vec::new();
+    for spec in &description.elements {
+        if gst::ElementFactory::find(&spec.factory).is_none() && !missing.contains(&spec.factory) {
+            missing.push(spec.factory.clone());
+        }
+    }
+    missing
+}
+
 impl PipelineFactory for GstreamerPipelineFactory {
     fn build(
         &mut self,

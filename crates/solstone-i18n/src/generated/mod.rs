@@ -622,6 +622,7 @@ pub enum MessageId {
     m6c696e75782e6d657461646174612e7061636b61676573756d6d617279,
     m6c696e75782e6d657461646174612e73657276696365,
     m6c696e75782e6e6f74696669636174696f6e2e636f70696564,
+    m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67,
     m6c696e75782e706169722e63616e63656c,
     m6c696e75782e706169722e636f6e74696e7565,
     m6c696e75782e706169722e6f6e656d6f726573746570636865636b796f75726a6f75726e616c736d61726b796f75726a6f75726e616c,
@@ -1525,6 +1526,7 @@ pub fn render_dotted_with_options(locale: &str, dotted_id: &str, args: &[(&str, 
         "linux.metadata.packagesummary" => MessageId::m6c696e75782e6d657461646174612e7061636b61676573756d6d617279,
         "linux.metadata.service" => MessageId::m6c696e75782e6d657461646174612e73657276696365,
         "linux.notification.copied" => MessageId::m6c696e75782e6e6f74696669636174696f6e2e636f70696564,
+        "linux.notification.screenelementsmissing" => MessageId::m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67,
         "linux.pair.cancel" => MessageId::m6c696e75782e706169722e63616e63656c,
         "linux.pair.continue" => MessageId::m6c696e75782e706169722e636f6e74696e7565,
         "linux.pair.onemorestepcheckyourjournalsmarkyourjournal" => MessageId::m6c696e75782e706169722e6f6e656d6f726573746570636865636b796f75726a6f75726e616c736d61726b796f75726a6f75726e616c,
@@ -9482,6 +9484,23 @@ pub fn render_with_options(locale: &str, id: MessageId, args: &[(&str, Value)], 
             #[allow(unused_mut)]
             let mut f_args = FluentArgs::new();
             ("m6c696e75782e6e6f74696669636174696f6e2e636f70696564".to_string(), f_args)
+        }
+        MessageId::m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67 => {
+            const DECLARED: &[&str] = &["elements"];
+            for (name, _) in args {
+                if !DECLARED.contains(name) {
+                    return Err(RenderError::UnknownArgument((*name).to_string()));
+                }
+            }
+            #[allow(unused_mut)]
+            let mut f_args = FluentArgs::new();
+            let val_v0 = args.iter().find(|(n, _)| *n == "elements").ok_or_else(|| RenderError::MissingArgument("elements".to_string()))?.1.clone();
+            let v0 = match val_v0 {
+                Value::String(s) => s.to_string(),
+                _ => return Err(RenderError::InvalidArgumentType("elements".to_string())),
+            };
+            f_args.set("elements", FluentValue::from(v0.clone()));
+            ("m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67".to_string(), f_args)
         }
         MessageId::m6c696e75782e706169722e63616e63656c => {
             const DECLARED: &[&str] = &[];

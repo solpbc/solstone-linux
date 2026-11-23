@@ -771,6 +771,7 @@ linux.cli.turnterminaloff = turn terminal off
 linux.cli.moveexistingsolstonetmuxinto = move an existing solstone for { $command0 } into this app
 linux.cli.agreewithoutbeingasked = agree without being asked
 linux.notification.copied = copied
+linux.notification.screenelementsmissing = screen intake can't start: { $literal1 } is missing { $elements }. install the { $literal1 } { $literal2 }, good and base plugins with your package manager, then restart the solstone app.
 linux.window.everythinginyourjournal = everything is in your journal
 linux.window.kilobytes = { $size } KB
 linux.window.megabytes = { $size } MB

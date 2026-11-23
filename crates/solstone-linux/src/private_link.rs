@@ -1900,7 +1900,8 @@ impl OpenJournalCapability {
                     ])
                     .arg(executable)
                     .arg("open-journal-in-scope")
-                    .arg(target),
+                    .arg(target)
+                    .envs(crate::desktop_session::display_environment_for_children()),
                 Some(std::time::Duration::from_secs(5)),
                 4096,
             )
