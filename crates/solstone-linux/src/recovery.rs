@@ -56,6 +56,25 @@ fn stream_duration(samples: Option<u64>, sample_rate: u32) -> Option<f64> {
     Some(samples? as f64 / f64::from(sample_rate))
 }
 
+fn is_zero_sample_flac(path: &Path) -> bool {
+    if !path
+        .extension()
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case("flac"))
+    {
+        return false;
+    }
+    let Ok(mut reader) = FlacReader::open(path) else {
+        return false;
+    };
+    if reader.streaminfo().samples == Some(0) {
+        return true;
+    }
+    if reader.streaminfo().samples.is_none() {
+        return matches!(reader.blocks().read_next_or_eof(Vec::new()), Ok(None));
+    }
+    false
+}
+
 #[derive(Serialize)]
 struct SegmentMetadataFile {
     start_timestamp: f64,
@@ -278,15 +297,31 @@ fn recover_segment(
     let Ok(entries) = fs::read_dir(segment_dir) else {
         return mark_failed(segment_dir, now);
     };
-    // Unlike observer._finalize_segment, every non-sidecar entry counts, including subdirectories.
-    let contents: Vec<_> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| !is_segment_sidecar(name))
-        })
-        .collect();
+    // Unlike observer._finalize_segment, every non-sidecar entry counts, including subdirectories,
+    // except zero-byte files and zero-sample FLAC headers left by an interrupted write.
+    let mut contents = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .is_some_and(|name| !is_segment_sidecar(name))
+        {
+            continue;
+        }
+        if path.is_file() {
+            let empty_file = fs::metadata(&path).is_ok_and(|meta| meta.len() == 0);
+            let empty_flac = is_zero_sample_flac(&path)
+                || (path
+                    .extension()
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case("flac"))
+                    && probe.duration(&path) == Some(0.0));
+            if empty_file || empty_flac {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+        }
+        contents.push(path);
+    }
     if contents.is_empty() {
         tracing::warn!("Empty incomplete segment: {name}");
         let _ = fs::remove_file(segment_dir.join(CAPTURE_ZONE_FILENAME));
@@ -455,6 +490,47 @@ mod tests {
             0
         );
         assert!(path.with_file_name("140000.failed").exists());
+    }
+
+    #[test]
+    fn zero_byte_and_zero_sample_media_are_removed_and_empty_segment_fails() {
+        let t = tempfile::tempdir().unwrap();
+        let path = incomplete(t.path(), "140000", 1000.0);
+        fs::write(path.join("screen.webm"), b"").unwrap();
+        fs::write(path.join("audio.flac"), b"").unwrap();
+        age(&path, 1000.0);
+        assert_eq!(
+            recover_incomplete_segments(t.path(), 300, 1000.0, &ClaxonMediaDurationProbe),
+            0
+        );
+        let failed = path.with_file_name("140000.failed");
+        assert!(failed.exists());
+        assert!(!failed.join("screen.webm").exists());
+        assert!(!failed.join("audio.flac").exists());
+
+        // A valid zero-sample FLAC header alongside a real screen file is dropped
+        // without aborting recovery of the sibling media.
+        let t2 = tempfile::tempdir().unwrap();
+        let path2 = incomplete(t2.path(), "150000", 1000.0);
+        let encoder = flac_bound::FlacEncoder::new()
+            .unwrap()
+            .sample_rate(16_000)
+            .bits_per_sample(16)
+            .channels(1)
+            .init_file(&path2.join("audio.flac"))
+            .unwrap();
+        encoder.finish().unwrap();
+        assert!(path2.join("audio.flac").metadata().unwrap().len() > 0);
+        write_segment_metadata(&path2, 940.0);
+        age(&path2, 1000.0);
+        assert_eq!(
+            recover_incomplete_segments(t2.path(), 300, 1000.0, &ClaxonMediaDurationProbe),
+            1
+        );
+        let recovered = path2.with_file_name("150000_60");
+        assert!(recovered.exists());
+        assert!(!recovered.join("audio.flac").exists());
+        assert!(recovered.join("screen.webm").exists());
     }
     // tests/test_sync.py::TestRecovery::test_mark_failed_stamps_quarantine_mtime
     #[test]

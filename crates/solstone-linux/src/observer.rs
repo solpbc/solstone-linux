@@ -943,8 +943,21 @@ where
         let Some(dir) = self.state.segment_dir.take() else {
             return Ok(());
         };
-        let nonempty = fs::read_dir(&dir)?
-            .any(|e| e.is_ok_and(|x| x.path().is_file() && !is_segment_sidecar(&x.file_name())));
+        let mut nonempty = false;
+        for entry in fs::read_dir(&dir)? {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if !path.is_file() || is_segment_sidecar(&entry.file_name()) {
+                continue;
+            }
+            if fs::metadata(&path).is_ok_and(|meta| meta.len() == 0) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            nonempty = true;
+        }
         if !nonempty {
             let _ = fs::remove_file(dir.join(".metadata"));
             let _ = fs::remove_file(dir.join(CAPTURE_ZONE_FILENAME));
@@ -4005,5 +4018,17 @@ pub(crate) mod tests {
         f.mono.set(f.mono.get() + 5.0);
         f.observer.tick().unwrap();
         assert_eq!(f.starts.get(), 2, "on takes in again");
+    }
+
+    #[test]
+    fn finalize_removes_zero_byte_files_and_empty_segment_dir() {
+        let mut f = fixture(false);
+        let dir = f.observer.start_segment_at(1000.0, 100.0).unwrap();
+        fs::write(dir.join("screen.webm"), b"").unwrap();
+        fs::write(dir.join("audio.flac"), b"").unwrap();
+        f.observer.finalize_segment().unwrap();
+        assert!(!dir.exists());
+        assert_eq!(segment_dirs(&f), 0);
+        assert!(f.events.completed.borrow().is_empty());
     }
 }

@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- empty audio and screen recordings left behind when intake stops early or the solstone app recovers after an interruption are now removed so they don't go into your journal.
+
 ## [2.0.51] - 2026-11-23
 
 ### Added

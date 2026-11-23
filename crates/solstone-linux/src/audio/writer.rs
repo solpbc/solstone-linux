@@ -21,6 +21,9 @@ impl AudioWriter for FlacAudioWriter {
         plan: &AudioOutputPlan,
         directory: &Path,
     ) -> Result<(), String> {
+        if frames.is_empty() {
+            return Ok(());
+        }
         for file in &plan.files {
             let samples: Vec<i32> = match file.source {
                 AudioFileSource::StereoInterleaved => frames
@@ -88,5 +91,20 @@ mod tests {
                 .unwrap()
                 .starts_with(b"fLaC")
         );
+    }
+
+    #[test]
+    fn empty_frames_writes_no_flac_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut writer = FlacAudioWriter;
+        writer
+            .write(&[], &audio_output_plan(false), temp.path())
+            .unwrap();
+        assert!(!temp.path().join("audio.flac").exists());
+        writer
+            .write(&[], &audio_output_plan(true), temp.path())
+            .unwrap();
+        assert!(!temp.path().join("mic_audio.flac").exists());
+        assert!(!temp.path().join("sys_audio.flac").exists());
     }
 }
