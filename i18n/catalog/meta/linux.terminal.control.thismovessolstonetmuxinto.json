@@ -11,8 +11,8 @@
   "format_intent": "text",
   "max_length": 283,
   "source_revision": "ee3d0b444a48f67dad3a1daefc5b190668b0a9f86997f6598d7cf279dfe34d97",
-  "risk": "consent",
-  "auto_merge": false,
+  "risk": "routine",
+  "auto_merge": true,
   "protected_slots": [
     {
       "name": "literal1",
