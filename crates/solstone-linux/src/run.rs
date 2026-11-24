@@ -369,6 +369,8 @@ fn run_capture(
         session: first_target.presence,
         activity_through_pause: false,
         away: false,
+        screen_start_failure: None,
+        screen_retry_seq: 0,
     };
     let snapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
     let (states, tray_receiver) = WatchStateSink::channel(initial_snapshot);
@@ -632,8 +634,15 @@ fn run_capture(
             .is_some_and(|b| !b.browsers.is_empty());
         shared.update(crate::shared_sources::local(
             &observer.config,
-            observer.state.cached_activity.session,
-            observer.state.paused,
+            crate::shared_sources::LocalDesktop {
+                session: observer.state.cached_activity.session,
+                paused: observer.state.paused,
+                screen_needs_attention: observer
+                    .state
+                    .screen_start_failure
+                    .as_ref()
+                    .is_some_and(crate::observer::ScreenStartFailure::needs_attention),
+            },
             &obsidian,
             &screenshots,
             terminal_sync.is_enabled(),
@@ -935,6 +944,11 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
                 tracing::warn!(?error, "Failed to apply the desktop capture switch");
             }
         }
+        ObserverAction::RetryScreen => {
+            if let Err(error) = observer.retry_screen() {
+                tracing::warn!(?error, "Failed to retry screen intake");
+            }
+        }
         ObserverAction::Quit => {
             if let Err(error) = crate::service::stop_for_window(&crate::cli::SystemRunner) {
                 tracing::warn!(%error, "quit could not stop the user service");
@@ -989,6 +1003,7 @@ enum ObserverAction {
     Pause(u64),
     Resume,
     SetDesktopCapture(bool),
+    RetryScreen,
     Quit,
     Desktop(TrayCommand),
 }
@@ -999,6 +1014,7 @@ fn route_command(command: TrayCommand) -> ObserverAction {
         TrayCommand::PauseIndefinite => ObserverAction::Pause(0),
         TrayCommand::Resume => ObserverAction::Resume,
         TrayCommand::SetDesktopCapture(enabled) => ObserverAction::SetDesktopCapture(enabled),
+        TrayCommand::RetryScreen => ObserverAction::RetryScreen,
         TrayCommand::Quit => ObserverAction::Quit,
         command => ObserverAction::Desktop(command),
     }
@@ -1176,6 +1192,14 @@ impl VideoCapture for CaptureVideo {
     fn release(&mut self) {
         if let Self::Live(video) = self {
             video.active = None;
+            video.last_failure = None;
+        }
+    }
+
+    fn last_start_failure_kind(&self) -> Option<crate::observer::ScreenStartFailureKind> {
+        match self {
+            Self::Live(video) => video.last_start_failure_kind(),
+            Self::Idle => None,
         }
     }
 }
@@ -1249,6 +1273,7 @@ struct VideoBackend {
     restore_token_path: std::path::PathBuf,
     portal_startup_cancellation: CancellationToken,
     notifier: Arc<dyn ServiceNotifier>,
+    last_failure: Option<crate::observer::ScreenStartFailureKind>,
 }
 
 fn backend_kind(target: &CaptureTarget) -> BackendKind {
@@ -1277,6 +1302,7 @@ impl VideoBackend {
             restore_token_path: config.restore_token_path(),
             portal_startup_cancellation,
             notifier,
+            last_failure: None,
         }
     }
 
@@ -1346,12 +1372,21 @@ impl VideoCapture for VideoBackend {
         directory: &std::path::Path,
         draw_cursor: bool,
     ) -> Result<Vec<VideoStream>, String> {
+        self.last_failure = None;
         // A portal consent prompt can outlast the watchdog: this keeps feeding it
         // for as long as the start blocks the tick thread.
         let notifier = Arc::clone(&self.notifier);
         with_watchdog(notifier, STARTUP_WATCHDOG_INTERVAL, || {
             let active = self.follow_target()?;
-            screen_elements_present(active)?;
+            if let Err((elements, pipewire)) = screen_elements_present(active) {
+                let joined = elements.join(", ");
+                self.last_failure =
+                    Some(crate::observer::ScreenStartFailureKind::MissingElements {
+                        elements,
+                        pipewire,
+                    });
+                return Err(format!("missing GStreamer element(s) {joined}"));
+            }
             match active {
                 ActiveVideo::Portal(value) => value.start(directory, draw_cursor),
                 ActiveVideo::X11(value) => value.start(directory, draw_cursor),
@@ -1372,28 +1407,40 @@ impl VideoCapture for VideoBackend {
             None => true,
         }
     }
+    fn last_start_failure_kind(&self) -> Option<crate::observer::ScreenStartFailureKind> {
+        if let Some(failure) = &self.last_failure {
+            return Some(failure.clone());
+        }
+        match &self.active {
+            Some(ActiveVideo::Portal(value)) => value.last_start_failure_kind(),
+            Some(ActiveVideo::X11(_)) | None => None,
+        }
+    }
 }
 
 static SCREEN_ELEMENTS_NOTICE_SHOWN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// A screen pipeline can't be built while a GStreamer element it uses is missing, and a
-/// retry won't change that until the owner installs it. Checked before the desktop is
-/// asked to share the screen, and the owner is told once per run.
-fn screen_elements_present(active: &ActiveVideo) -> Result<(), String> {
+/// A screen pipeline can't be built while a GStreamer element it uses is missing.
+/// Checked before the desktop is asked to share the screen, and the owner is told
+/// once per run.
+fn screen_elements_present(active: &ActiveVideo) -> Result<(), (Vec<String>, bool)> {
     let output = std::path::Path::new("screen.webm");
-    let description = match active {
-        ActiveVideo::Portal(_) => crate::pipeline::pipeline_description(0, 0, output),
-        ActiveVideo::X11(_) => crate::pipeline::ximagesrc_pipeline_description(
-            ":0",
-            &crate::positions::BoxGeometry {
-                x1: 0,
-                y1: 0,
-                x2: 1,
-                y2: 1,
-            },
+    let (description, pipewire) = match active {
+        ActiveVideo::Portal(_) => (crate::pipeline::pipeline_description(0, 0, output), true),
+        ActiveVideo::X11(_) => (
+            crate::pipeline::ximagesrc_pipeline_description(
+                ":0",
+                &crate::positions::BoxGeometry {
+                    x1: 0,
+                    y1: 0,
+                    x2: 1,
+                    y2: 1,
+                },
+                false,
+                output,
+            ),
             false,
-            output,
         ),
     };
     let missing = crate::video::gstreamer::missing_elements(&description);
@@ -1401,16 +1448,21 @@ fn screen_elements_present(active: &ActiveVideo) -> Result<(), String> {
         return Ok(());
     }
     let elements = missing.join(", ");
+    let body = if pipewire {
+        message!("linux.notification.screenelementsmissing", "elements" => elements.as_str())
+    } else {
+        message!("linux.notification.screenelementsmissingx11", "elements" => elements.as_str())
+    };
     if !SCREEN_ELEMENTS_NOTICE_SHOWN.swap(true, std::sync::atomic::Ordering::AcqRel)
         && let Err(error) = notify_rust::Notification::new()
             .appname(text!("linux.metadata.name"))
             .summary(text!("linux.panel.solstoneapp"))
-            .body(&message!("linux.notification.screenelementsmissing", "elements" => elements.as_str()))
+            .body(&body)
             .show()
     {
         tracing::warn!(%error, "could not show the missing screen elements notice");
     }
-    Err(format!("missing GStreamer element(s) {elements}"))
+    Err((missing, pipewire))
 }
 
 /// Keeps the systemd watchdog fed while `work` blocks the tick thread.
@@ -1682,6 +1734,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         };
         let (states, receiver) = WatchStateSink::channel(snapshot.clone());
         (
@@ -1907,6 +1961,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         };
         let health = crate::sync_health::derive_health(
             &crate::sync_health::SyncFacts::default(),

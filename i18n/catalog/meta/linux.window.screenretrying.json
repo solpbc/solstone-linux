@@ -1,0 +1,17 @@
+{
+  "description": "Reason line on the screen page after the first screen start failure while an automatic retry is pending.",
+  "context": "Shown beneath checking\u2026 on the screen detail page.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 100,
+  "source_revision": "912e4f5b27cf04a8ad7860395ee78722cecc19ce3fed1c08d7ef662b2551512a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

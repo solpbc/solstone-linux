@@ -311,6 +311,8 @@ pub(crate) fn window_launch_notice(
 
 /// The window's own argument for opening on its settings tab.
 pub const WINDOW_SETTINGS_ARG: &str = "--settings";
+/// The window's own argument for opening directly on the screen page.
+pub const WINDOW_SCREEN_ARG: &str = "--screen";
 
 fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
     use std::os::unix::process::CommandExt;
@@ -325,11 +327,11 @@ fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
         );
     }
     let Ok(current) = crate::service::current_executable() else {
-        return launch_window(false, false, &[]);
+        return launch_window(false, None, &[]);
     };
     let error = Command::new(current).arg("window").exec();
     eprintln!("{error}");
-    launch_window(false, false, &[])
+    launch_window(false, None, &[])
 }
 
 // The service may have started at login, before the desktop imported its display, so a
@@ -337,20 +339,31 @@ fn open_window_with_argument(argument: &std::ffi::OsStr) -> i32 {
 pub(crate) fn spawn_window_from_tray() {
     thread::spawn(|| {
         let display = crate::desktop_session::display_environment_for_children();
-        let _ = launch_window(false, false, &display);
+        let _ = launch_window(false, None, &display);
     });
 }
 
 pub(crate) fn spawn_settings_window_from_tray() {
     thread::spawn(|| {
         let display = crate::desktop_session::display_environment_for_children();
-        let _ = launch_window(false, true, &display);
+        let _ = launch_window(false, Some(WINDOW_SETTINGS_ARG), &display);
+    });
+}
+
+pub(crate) fn spawn_screen_window_from_tray() {
+    thread::spawn(|| {
+        let display = crate::desktop_session::display_environment_for_children();
+        let _ = launch_window(false, Some(WINDOW_SCREEN_ARG), &display);
     });
 }
 
 /// `display` overrides the display variables this process would hand down. A launch
 /// from the desktop passes none: its own environment is the desktop's.
-fn launch_window(in_scope: bool, settings: bool, display: &[(&'static str, String)]) -> i32 {
+fn launch_window(
+    in_scope: bool,
+    page_arg: Option<&'static str>,
+    display: &[(&'static str, String)],
+) -> i32 {
     let current = match crate::service::current_executable() {
         Ok(exe) => exe,
         Err(error) => return handle_window_failure(&error.to_string(), false),
@@ -362,7 +375,7 @@ fn launch_window(in_scope: bool, settings: bool, display: &[(&'static str, Strin
             .args(["--user", "--scope", "--collect", "--quiet", "--"])
             .arg(&current)
             .args(["window", "--in-scope"])
-            .args(settings.then_some(WINDOW_SETTINGS_ARG))
+            .args(page_arg)
             .envs(display.iter().map(|(name, value)| (*name, value)))
             .status()
         {
@@ -379,8 +392,7 @@ fn launch_window(in_scope: bool, settings: bool, display: &[(&'static str, Strin
         return handle_window_failure(text!("linux.cli.missingexecutabledirectory"), false);
     };
     let result = crate::bounded_process::run(
-        Command::new(parent.join("solstone-linux-window"))
-            .args(settings.then_some(WINDOW_SETTINGS_ARG)),
+        Command::new(parent.join("solstone-linux-window")).args(page_arg),
         None,
         64 * 1024,
     );
@@ -469,17 +481,24 @@ pub fn run() -> i32 {
         });
     }
     if arguments.len() == 2 && arguments[0] == "window" && arguments[1] == "--in-scope" {
-        return launch_window(true, false, &[]);
+        return launch_window(true, None, &[]);
     }
     if arguments.len() == 3
         && arguments[0] == "window"
         && arguments[1] == "--in-scope"
         && arguments[2] == WINDOW_SETTINGS_ARG
     {
-        return launch_window(true, true, &[]);
+        return launch_window(true, Some(WINDOW_SETTINGS_ARG), &[]);
+    }
+    if arguments.len() == 3
+        && arguments[0] == "window"
+        && arguments[1] == "--in-scope"
+        && arguments[2] == WINDOW_SCREEN_ARG
+    {
+        return launch_window(true, Some(WINDOW_SCREEN_ARG), &[]);
     }
     if arguments.len() == 1 && arguments[0] == "window" {
-        return launch_window(false, false, &[]);
+        return launch_window(false, None, &[]);
     }
     // The desktop hands a clicked link here. It's parked for the window and this process
     // re-runs without it, so it doesn't sit on a command line for as long as the window is open.
@@ -4270,6 +4289,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         });
         let handle = crate::browser::server::start(crate::browser::server::ServerConfig {
             base_dir: running_config.base_dir.clone(),

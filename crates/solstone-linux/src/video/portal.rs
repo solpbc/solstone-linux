@@ -29,7 +29,7 @@ use tracing::warn;
 use crate::{
     config::Config,
     matching::{PortalStream, match_streams_to_monitors},
-    observer::{StoppedStream, VideoCapture, VideoStream},
+    observer::{ScreenStartFailureKind, StoppedStream, VideoCapture, VideoStream},
     pipeline::pipeline_description,
     positions::Monitor,
     restore_token::{load_restore_token, save_restore_token},
@@ -104,6 +104,10 @@ pub trait PortalOps: Send + 'static {
     fn start(&mut self) -> PortalFuture<'_, PortalStartResult>;
     fn open_pipe_wire_remote(&mut self) -> PortalFuture<'_, OwnedFd>;
     fn close(&mut self) -> PortalFuture<'_, ()>;
+    /// True when the latest portal request failed because screen sharing was cancelled.
+    fn was_declined(&self) -> bool {
+        false
+    }
 }
 
 pub trait TokenStore: Send + 'static {
@@ -224,6 +228,7 @@ async fn open_session<O: PortalOps, T: TokenStore, G: PortalGeometry>(
 pub struct AshpdPortalOps {
     proxy: Option<Screencast>,
     session: Option<Session<Screencast>>,
+    declined: bool,
 }
 
 impl AshpdPortalOps {
@@ -231,7 +236,16 @@ impl AshpdPortalOps {
         Self {
             proxy: None,
             session: None,
+            declined: false,
         }
+    }
+
+    fn is_cancelled(error: &ashpd::Error) -> bool {
+        matches!(
+            error,
+            ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
+                | ashpd::Error::Portal(ashpd::PortalError::Cancelled(_))
+        )
     }
 }
 
@@ -244,6 +258,7 @@ impl Default for AshpdPortalOps {
 impl PortalOps for AshpdPortalOps {
     fn create_session(&mut self) -> PortalFuture<'_, ()> {
         Box::pin(async move {
+            self.declined = false;
             let proxy = tokio::time::timeout(
                 portal_timeout(PortalOperation::CreateSession),
                 Screencast::new(),
@@ -289,8 +304,18 @@ impl PortalOps for AshpdPortalOps {
             )
             .await
             .map_err(|_| "SelectSources timed out".to_owned())?
-            .map_err(|error| error.to_string())?;
-            request.response().map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                if Self::is_cancelled(&error) {
+                    self.declined = true;
+                }
+                error.to_string()
+            })?;
+            request.response().map_err(|error| {
+                if Self::is_cancelled(&error) {
+                    self.declined = true;
+                }
+                error.to_string()
+            })?;
             Ok(())
         })
     }
@@ -305,8 +330,18 @@ impl PortalOps for AshpdPortalOps {
             )
             .await
             .map_err(|_| "Start timed out".to_owned())?
-            .map_err(|error| error.to_string())?;
-            let response = request.response().map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                if Self::is_cancelled(&error) {
+                    self.declined = true;
+                }
+                error.to_string()
+            })?;
+            let response = request.response().map_err(|error| {
+                if Self::is_cancelled(&error) {
+                    self.declined = true;
+                }
+                error.to_string()
+            })?;
             Ok(PortalStartResult {
                 streams: response
                     .streams()
@@ -351,6 +386,10 @@ impl PortalOps for AshpdPortalOps {
                 .map_err(|error| error.to_string())
         })
     }
+
+    fn was_declined(&self) -> bool {
+        self.declined
+    }
 }
 
 struct PortalPipeline {
@@ -382,6 +421,7 @@ enum Command {
 pub struct PortalVideoCapture {
     commands: mpsc::Sender<Command>,
     healthy: Arc<AtomicBool>,
+    declined: Arc<AtomicBool>,
 }
 
 impl PortalVideoCapture {
@@ -434,7 +474,9 @@ impl PortalVideoCapture {
     {
         let (commands, receiver) = mpsc::channel();
         let healthy = Arc::new(AtomicBool::new(false));
+        let declined = Arc::new(AtomicBool::new(false));
         let worker_health = healthy.clone();
+        let worker_declined = declined.clone();
         let worker_cancellation = startup_cancellation.clone();
         thread::Builder::new().name("solstone-portal".into()).spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -455,6 +497,7 @@ impl PortalVideoCapture {
                 };
                 match command {
                     Command::Start { directory, draw_cursor, reply } => {
+                        worker_declined.store(false, Ordering::Release);
                         if !tracked.is_empty() {
                             let _ = reply.send(Err("portal capture is already active".into()));
                             continue;
@@ -501,9 +544,12 @@ impl PortalVideoCapture {
                             }
                         };
                         if result.is_err() {
+                            worker_declined.store(ops.was_declined(), Ordering::Release);
                             let _ = runtime.block_on(ops.close());
                             portal_session = None;
                             tracked.clear();
+                        } else {
+                            worker_declined.store(false, Ordering::Release);
                         }
                         worker_health.store(result.is_ok(), Ordering::Release);
                         let started = result.is_ok();
@@ -560,7 +606,11 @@ impl PortalVideoCapture {
             }
             worker_health.store(false, Ordering::Release);
         }).map_err(|error| error.to_string())?;
-        Ok(Self { commands, healthy })
+        Ok(Self {
+            commands,
+            healthy,
+            declined,
+        })
     }
 
     fn request<T>(
@@ -601,6 +651,11 @@ impl VideoCapture for PortalVideoCapture {
     }
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
+    }
+    fn last_start_failure_kind(&self) -> Option<ScreenStartFailureKind> {
+        self.declined
+            .load(Ordering::Acquire)
+            .then_some(ScreenStartFailureKind::PortalDeclined)
     }
 }
 
@@ -675,7 +730,7 @@ mod tests {
         fn start(&mut self) -> PortalFuture<'_, PortalStartResult> {
             Box::pin(async move {
                 self.calls.lock().unwrap().push("start");
-                if self.fail == Some("start") {
+                if self.fail == Some("start") || self.fail == Some("declined") {
                     Err("start failed".into())
                 } else {
                     self.started = true;
@@ -708,6 +763,9 @@ mod tests {
                     Ok(())
                 }
             })
+        }
+        fn was_declined(&self) -> bool {
+            self.fail == Some("declined")
         }
     }
 
@@ -1663,5 +1721,31 @@ mod tests {
         );
         assert_eq!(*opens.lock().unwrap(), 2);
         capture.stop().unwrap();
+    }
+
+    #[test]
+    fn declined_portal_reports_portal_declined_failure_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = FakeOps {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail: Some("declined"),
+            token: None,
+            streams: vec![],
+            opens: Arc::new(Mutex::new(0)),
+            open_outcomes: VecDeque::new(),
+            started: false,
+        };
+        let mut capture = PortalVideoCapture::spawn(
+            ops,
+            Store(Arc::new(Mutex::new(None))),
+            Geometry(vec![]),
+            FakeFactory::default(),
+        )
+        .unwrap();
+        assert!(capture.start(dir.path(), true).is_err());
+        assert_eq!(
+            capture.last_start_failure_kind(),
+            Some(ScreenStartFailureKind::PortalDeclined)
+        );
     }
 }

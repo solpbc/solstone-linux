@@ -3,15 +3,26 @@
 
 use crate::{
     desktop_session::SessionPresence,
-    observer::{Mode, StateSnapshot},
+    observer::{Mode, ScreenStartFailureKind, StateSnapshot},
     sync_health::SyncHealth,
 };
 use solstone_i18n::{message, text};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenStartFault {
+    MissingElements,
+    PortalDeclined,
+    StartFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayStatus {
     Recording,
     Idle,
+    /// Live session, screen intake failed to start once and will retry automatically.
+    ScreenRetrying,
+    /// Live session, screen intake cannot start and needs owner attention.
+    ScreenAttention(ScreenStartFault),
     Paused,
     /// Running, with no live desktop session of this owner to take in.
     Waiting(SessionPresence),
@@ -20,11 +31,12 @@ pub enum TrayStatus {
 }
 
 impl TrayStatus {
-    /// Waiting because something is wrong, not because the owner stepped away.
+    /// Something is wrong with desktop or screen intake, not because the owner stepped away.
     pub(crate) fn needs_attention(self) -> bool {
         matches!(
             self,
             Self::Waiting(SessionPresence::Unreachable | SessionPresence::LoginUnavailable)
+                | Self::ScreenAttention(_)
         )
     }
 }
@@ -58,6 +70,18 @@ pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
         TrayStatus::Waiting(snapshot.session)
     } else if snapshot.mode == Mode::Screencast {
         TrayStatus::Recording
+    } else if let Some(failure) = &snapshot.screen_start_failure {
+        if failure.needs_attention() {
+            TrayStatus::ScreenAttention(match &failure.kind {
+                ScreenStartFailureKind::MissingElements { .. } => ScreenStartFault::MissingElements,
+                ScreenStartFailureKind::PortalDeclined => ScreenStartFault::PortalDeclined,
+                ScreenStartFailureKind::StartFailed => ScreenStartFault::StartFailed,
+            })
+        } else if failure.retrying() {
+            TrayStatus::ScreenRetrying
+        } else {
+            TrayStatus::Idle
+        }
     } else {
         TrayStatus::Idle
     }
@@ -66,7 +90,7 @@ pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
 pub fn status_name(status: TrayStatus) -> &'static str {
     match status {
         TrayStatus::Recording => "recording",
-        TrayStatus::Idle => "idle",
+        TrayStatus::Idle | TrayStatus::ScreenRetrying | TrayStatus::ScreenAttention(_) => "idle",
         TrayStatus::Paused => "paused",
         TrayStatus::Waiting(_) => "waiting",
         TrayStatus::Stopped => "stopped",
@@ -108,6 +132,16 @@ pub fn header_label(status: TrayStatus, health: &SyncHealth, pause: i32) -> Stri
             text!("linux.tray.cantreachyourdesktop").into()
         }
         TrayStatus::Waiting(_) => text!("linux.tray.waitingforyourdesktop").into(),
+        TrayStatus::ScreenRetrying => text!("linux.tray.waitingforscreenintake").into(),
+        TrayStatus::ScreenAttention(ScreenStartFault::MissingElements) => {
+            text!("linux.tray.screenintakecantstart").into()
+        }
+        TrayStatus::ScreenAttention(ScreenStartFault::PortalDeclined) => {
+            text!("linux.tray.screensharingnotallowed").into()
+        }
+        TrayStatus::ScreenAttention(ScreenStartFault::StartFailed) => {
+            text!("linux.tray.screenintakecouldntstart").into()
+        }
         TrayStatus::Stopped => text!("linux.tray.notrunning").into(),
         TrayStatus::Recording => health.header_recording.clone(),
         TrayStatus::Idle => health.header_idle.clone(),
@@ -119,6 +153,16 @@ pub fn tooltip(status: TrayStatus, health: &SyncHealth) -> String {
         TrayStatus::Recording => text!("linux.copy.on"),
         TrayStatus::Paused => text!("linux.copy.paused"),
         TrayStatus::Idle => text!("linux.tray.idlescreeninactive"),
+        TrayStatus::ScreenRetrying => text!("linux.tray.waitingforscreenintake"),
+        TrayStatus::ScreenAttention(ScreenStartFault::MissingElements) => {
+            text!("linux.tray.screenintakecantstart")
+        }
+        TrayStatus::ScreenAttention(ScreenStartFault::PortalDeclined) => {
+            text!("linux.tray.screensharingnotallowed")
+        }
+        TrayStatus::ScreenAttention(ScreenStartFault::StartFailed) => {
+            text!("linux.tray.screenintakecouldntstart")
+        }
         TrayStatus::Waiting(SessionPresence::NotActive) => {
             text!("linux.tray.waitingyoursessionisntinfront")
         }
@@ -151,11 +195,17 @@ pub fn icon_name(status: TrayStatus, health: &SyncHealth) -> String {
     match health.icon.as_str() {
         "healthy" => match status {
             TrayStatus::Paused | TrayStatus::Stopped | TrayStatus::Waiting(_) => "paused",
-            TrayStatus::Recording | TrayStatus::Idle => "healthy",
+            TrayStatus::Recording
+            | TrayStatus::Idle
+            | TrayStatus::ScreenRetrying
+            | TrayStatus::ScreenAttention(_) => "healthy",
         },
         "connecting" => match status {
             TrayStatus::Paused | TrayStatus::Stopped | TrayStatus::Waiting(_) => "paused",
-            TrayStatus::Recording | TrayStatus::Idle => "connecting",
+            TrayStatus::Recording
+            | TrayStatus::Idle
+            | TrayStatus::ScreenRetrying
+            | TrayStatus::ScreenAttention(_) => "connecting",
         },
         "attention" => "attention",
         "paused" => "paused",
@@ -255,6 +305,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         }
     }
     fn connected_health() -> SyncHealth {
@@ -504,6 +556,73 @@ mod tests {
         for facts in facts {
             let health = derive_health(&facts, 100.0, 600.0);
             assert_eq!(build(&snapshot(), 100.0, &health).sync, health.sync_line);
+        }
+    }
+    #[test]
+    fn screen_start_failures_keep_idle_status_name_and_gate_attention() {
+        let health = connected_health();
+
+        // Ordinary idle (no start failure) stays calm Idle.
+        let mut idle = snapshot();
+        idle.mode = Mode::Idle;
+        assert_eq!(status(&idle), TrayStatus::Idle);
+        assert_eq!(status_name(status(&idle)), "idle");
+        let idle_model = build(&idle, 100.0, &health);
+        assert_eq!(idle_model.icon, "healthy");
+        assert_eq!(idle_model.sni_status, "Active");
+
+        // Attempt 1 (retrying) stays calm (no attention icon/SNI, status_name still "idle").
+        let mut retrying = idle.clone();
+        retrying.screen_start_failure = Some(crate::observer::ScreenStartFailure {
+            kind: ScreenStartFailureKind::StartFailed,
+            consecutive_failures: 1,
+        });
+        assert_eq!(status(&retrying), TrayStatus::ScreenRetrying);
+        assert!(!status(&retrying).needs_attention());
+        assert_eq!(status_name(status(&retrying)), "idle");
+        let retry_model = build(&retrying, 100.0, &health);
+        assert_eq!(retry_model.icon, "healthy");
+        assert_eq!(retry_model.sni_status, "Active");
+
+        // Missing GStreamer component at attempt 1, and portal/generic failure at attempt 2,
+        // each flip icon/SNI to attention while keeping status_name "idle".
+        for (failure, expected_fault) in [
+            (
+                crate::observer::ScreenStartFailure {
+                    kind: ScreenStartFailureKind::MissingElements {
+                        elements: vec!["pipewiresrc".into()],
+                        pipewire: true,
+                    },
+                    consecutive_failures: 1,
+                },
+                ScreenStartFault::MissingElements,
+            ),
+            (
+                crate::observer::ScreenStartFailure {
+                    kind: ScreenStartFailureKind::PortalDeclined,
+                    consecutive_failures: 2,
+                },
+                ScreenStartFault::PortalDeclined,
+            ),
+            (
+                crate::observer::ScreenStartFailure {
+                    kind: ScreenStartFailureKind::StartFailed,
+                    consecutive_failures: 2,
+                },
+                ScreenStartFault::StartFailed,
+            ),
+        ] {
+            let mut faulted = idle.clone();
+            faulted.screen_start_failure = Some(failure);
+            assert_eq!(
+                status(&faulted),
+                TrayStatus::ScreenAttention(expected_fault)
+            );
+            assert!(status(&faulted).needs_attention());
+            assert_eq!(status_name(status(&faulted)), "idle");
+            let model = build(&faulted, 100.0, &health);
+            assert_eq!(model.icon, "attention");
+            assert_eq!(model.sni_status, "NeedsAttention");
         }
     }
 }

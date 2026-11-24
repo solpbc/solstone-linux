@@ -137,17 +137,29 @@ pub fn ensure_initialized() -> Result<(), String> {
 
 /// The elements of `description` this computer's GStreamer can't load, each named once.
 /// Empty when GStreamer itself won't start: building the pipeline reports that.
+/// When an element is missing, refreshes GStreamer's plugin registry once so a plugin
+/// installed while the app is running is picked up without restarting the app.
 pub fn missing_elements(description: &PipelineDescription) -> Vec<String> {
     if ensure_initialized().is_err() {
         return Vec::new();
     }
-    let mut missing: Vec<String> = Vec::new();
-    for spec in &description.elements {
-        if gst::ElementFactory::find(&spec.factory).is_none() && !missing.contains(&spec.factory) {
-            missing.push(spec.factory.clone());
+    let collect = || {
+        let mut missing: Vec<String> = Vec::new();
+        for spec in &description.elements {
+            if gst::ElementFactory::find(&spec.factory).is_none()
+                && !missing.contains(&spec.factory)
+            {
+                missing.push(spec.factory.clone());
+            }
         }
+        missing
+    };
+    let missing = collect();
+    if missing.is_empty() {
+        return missing;
     }
-    missing
+    let _ = gst::Registry::update();
+    collect()
 }
 
 impl PipelineFactory for GstreamerPipelineFactory {

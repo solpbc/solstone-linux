@@ -189,6 +189,7 @@ impl DesktopComponent {
             crate::tray::TrayCommand::Pause(_)
             | crate::tray::TrayCommand::PauseIndefinite
             | crate::tray::TrayCommand::Resume
+            | crate::tray::TrayCommand::RetryScreen
             | crate::tray::TrayCommand::Quit => {
                 Err(text!("linux.desktop.observercommandmustberoutedbytherunloopowne").into())
             }
@@ -242,6 +243,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         }
     }
     #[test]

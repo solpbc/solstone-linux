@@ -1,0 +1,23 @@
+{
+  "description": "Short sub-line on the screen tile under needs attention when a required GStreamer plugin is missing.",
+  "context": "Shown beneath the needs attention state word on the home deck's screen tile.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "618163e4e1714b1e4b4d6258e140f5076f886d547ebeddb335a05fcf522f9e1a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "GStreamer"
+    }
+  ]
+}

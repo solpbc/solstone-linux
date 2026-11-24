@@ -1206,7 +1206,9 @@ m6c696e75782e6d657461646174612e73657276696365 = solstone app for linux
 
 m6c696e75782e6e6f74696669636174696f6e2e636f70696564 = copied
 
-m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67 = screen intake can't start: { "GStreamer" } is missing { $elements }. install the { "GStreamer" } { "PipeWire" }, good and base plugins with your package manager, then restart the solstone app.
+m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67 = screen intake can't start: { "GStreamer" } is missing { $elements }. install the { "GStreamer" } { "PipeWire" }, good and base plugins with your package manager, then choose try again on the screen page.
+
+m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67783131 = screen intake can't start: { "GStreamer" } is missing { $elements }. install the { "GStreamer" } good and base plugins with your package manager, then choose try again on the screen page.
 
 m6c696e75782e706169722e63616e63656c = cancel
 
@@ -1504,10 +1506,16 @@ m6c696e75782e7368656c6c2e70617573656c656674 = paused, { $minutes } min left
 
 m6c696e75782e7368656c6c2e7265616479746f7365747570 = ready to set up
 
+m6c696e75782e7368656c6c2e73637265656e6d697373696e67706c7567696e = missing a { "GStreamer" } plugin.
+
+m6c696e75782e7368656c6c2e73637265656e73686172696e676e6f74616c6c6f776564 = screen sharing wasn't allowed.
+
 m6c696e75782e7368656c6c2e73637265656e73686f74636f756e74 = { $i18nCategory ->
     [one] { $display } screenshot
    *[other] { $display } screenshots
 }
+
+m6c696e75782e7368656c6c2e73637265656e73746172746661696c6564 = screen intake couldn't start.
 
 m6c696e75782e7368656c6c2e73657474696e677570 = setting up
 
@@ -1703,11 +1711,19 @@ m6c696e75782e747261792e726573756d65786d72656d61696e696e67 = { $i18nCategory ->
    *[other] resume ({ NUMBER($count, useGrouping: 0) } minutes remaining)
 }
 
+m6c696e75782e747261792e73637265656e696e74616b6563616e747374617274 = screen intake can't start
+
+m6c696e75782e747261792e73637265656e696e74616b65636f756c646e747374617274 = screen intake couldn't start
+
 m6c696e75782e747261792e73637265656e6e65656473617474656e74696f6e = screen needs attention
+
+m6c696e75782e747261792e73637265656e73686172696e676e6f74616c6c6f776564 = screen sharing wasn't allowed
 
 m6c696e75782e747261792e746f6f6c746970 = { $status }{ "\u000a" }{ $health }
 
 m6c696e75782e747261792e756e74696c69726573756d65 = until I resume
+
+m6c696e75782e747261792e77616974696e67666f7273637265656e696e74616b65 = waiting for screen intake
 
 m6c696e75782e747261792e77616974696e67666f72796f75726465736b746f70 = waiting for your desktop
 
@@ -1797,9 +1813,27 @@ m6c696e75782e77696e646f772e726573756d65 = resume
 
 m6c696e75782e77696e646f772e73637265656e = screen
 
+m6c696e75782e77696e646f772e73637265656e617564696f616e6461637469766974797374696c6c6f6e = audio and activity are still on.
+
+m6c696e75782e77696e646f772e73637265656e617564696f7374696c6c6f6e = audio is still on.
+
 m6c696e75782e77696e646f772e73637265656e627265617468 = while this is on, the solstone app takes in what's on your screen, the sound, and which apps and windows you're using, and all of it goes into your journal.
 
+m6c696e75782e77696e646f772e73637265656e6c6f67696e756e617661696c61626c65 = can't check which session is in front.
+
+m6c696e75782e77696e646f772e73637265656e6d697373696e67656c656d656e7473 = screen intake can't start: { "GStreamer" } is missing { $elements }. install the { "GStreamer" } { "PipeWire" }, good and base plugins with your package manager, then choose try again.
+
+m6c696e75782e77696e646f772e73637265656e6d697373696e67656c656d656e7473783131 = screen intake can't start: { "GStreamer" } is missing { $elements }. install the { "GStreamer" } good and base plugins with your package manager, then choose try again.
+
+m6c696e75782e77696e646f772e73637265656e7265747279696e67 = screen intake didn't start on the first try. trying again in a moment.
+
+m6c696e75782e77696e646f772e73637265656e73686172696e676e6f74616c6c6f776564 = screen sharing wasn't allowed. choose try again to share your screen.
+
 m6c696e75782e77696e646f772e73637265656e736f756e64 = sound covers your microphone and what this computer plays. if there is no microphone, neither comes in.
+
+m6c696e75782e77696e646f772e73637265656e73746172746661696c6564 = screen intake couldn't start.
+
+m6c696e75782e77696e646f772e73637265656e756e726561636861626c65 = can't reach your desktop.
 
 m6c696e75782e77696e646f772e73637265656e77616974696e67 = waiting to take in the screen.
 
@@ -1828,6 +1862,8 @@ m6c696e75782e77696e646f772e74686973636f6d7075746572 = this computer
 m6c696e75782e77696e646f772e7468697372656d6f766573746865636f70796f6e74686973646576696365 = this removes the copy on this device. your journal may still bring in the copy it already has.
 
 m6c696e75782e77696e646f772e7468697372656d6f766573746865636f70796f6e746869736465766963652e763535386130633466 = this removes the copy on this device, so it won't reach your journal.
+
+m6c696e75782e77696e646f772e747279696e67 = trying…
 
 m6c696e75782e77696e646f772e7472796e6f77 = try now
 

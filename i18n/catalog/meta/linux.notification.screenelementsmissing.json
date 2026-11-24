@@ -1,5 +1,5 @@
 {
-  "description": "Notification shown once per run when screen intake can't start because a GStreamer element it needs is missing.",
+  "description": "Notification shown once per run on Wayland when screen intake can't start because a GStreamer element it needs is missing.",
   "context": "Desktop notification body; the summary line is the app's name. elements is a comma-separated list of GStreamer element names such as pipewiresrc.",
   "surfaces": [
     "linux"
@@ -14,8 +14,8 @@
     }
   ],
   "format_intent": "text",
-  "max_length": 200,
-  "source_revision": "4d3ceec839058b1bc39e9848493d61d2478a7330c4a41c77a1de1b957ebf7345",
+  "max_length": 220,
+  "source_revision": "5913ec24a4715ef1be386e7fe4d88ad638e45581d568001dbb8096692ee40585",
   "risk": "routine",
   "auto_merge": true,
   "protected_slots": [

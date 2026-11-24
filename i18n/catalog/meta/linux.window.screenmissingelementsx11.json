@@ -1,0 +1,28 @@
+{
+  "description": "Reason line on the screen page on X11 when a required GStreamer element is missing.",
+  "context": "Shown beneath needs attention on the screen detail page above the try again button. elements is a comma-separated list of GStreamer element names such as ximagesrc.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "elements",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 220,
+  "source_revision": "ec0e7865aada8662e0a94153ecd1bf9adeaa5cd05d69b45908bc2740304bb86d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "GStreamer"
+    }
+  ]
+}

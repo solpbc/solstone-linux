@@ -1,0 +1,17 @@
+{
+  "description": "Reason line on the screen page when screen intake could not start after retrying.",
+  "context": "Shown beneath needs attention on the screen detail page above the try again button.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 60,
+  "source_revision": "c73a09bc97d2f6a23c85f58f94989b95861741e7b5f095f4c5e78b3ba81263bd",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

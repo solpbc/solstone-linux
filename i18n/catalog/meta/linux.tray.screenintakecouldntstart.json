@@ -1,0 +1,17 @@
+{
+  "description": "Panel icon tooltip and header status when screen intake could not start after retrying.",
+  "context": "First line of the panel icon tooltip, above sync status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "f9a99ee9cfa9dd7cd63cd1eba89dd07fb293e8317f5bb0e9421b7fbc24ea1d4c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

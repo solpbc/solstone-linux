@@ -9351,6 +9351,32 @@
       "selector": null
     },
     {
+      "id": "linux.notification.screenelementsmissingx11",
+      "resource": "m6c696e75782e6e6f74696669636174696f6e2e73637265656e656c656d656e74736d697373696e67783131",
+      "namespace": "linux.notification",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "elements",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [
+        {
+          "name": "literal1",
+          "kind": "command",
+          "value": "GStreamer"
+        }
+      ],
+      "selector": null
+    },
+    {
       "id": "linux.pair.cancel",
       "resource": "m6c696e75782e706169722e63616e63656c",
       "namespace": "linux.pair",
@@ -11694,6 +11720,36 @@
       "selector": null
     },
     {
+      "id": "linux.shell.screenmissingplugin",
+      "resource": "m6c696e75782e7368656c6c2e73637265656e6d697373696e67706c7567696e",
+      "namespace": "linux.shell",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [
+        {
+          "name": "literal1",
+          "kind": "command",
+          "value": "GStreamer"
+        }
+      ],
+      "selector": null
+    },
+    {
+      "id": "linux.shell.screensharingnotallowed",
+      "resource": "m6c696e75782e7368656c6c2e73637265656e73686172696e676e6f74616c6c6f776564",
+      "namespace": "linux.shell",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.shell.screenshotcount",
       "resource": "m6c696e75782e7368656c6c2e73637265656e73686f74636f756e74",
       "namespace": "linux.shell",
@@ -11724,6 +11780,18 @@
         "enum_values": [],
         "enum_default": null
       }
+    },
+    {
+      "id": "linux.shell.screenstartfailed",
+      "resource": "m6c696e75782e7368656c6c2e73637265656e73746172746661696c6564",
+      "namespace": "linux.shell",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
     },
     {
       "id": "linux.shell.settingup",
@@ -13341,8 +13409,44 @@
       }
     },
     {
+      "id": "linux.tray.screenintakecantstart",
+      "resource": "m6c696e75782e747261792e73637265656e696e74616b6563616e747374617274",
+      "namespace": "linux.tray",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.tray.screenintakecouldntstart",
+      "resource": "m6c696e75782e747261792e73637265656e696e74616b65636f756c646e747374617274",
+      "namespace": "linux.tray",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.tray.screenneedsattention",
       "resource": "m6c696e75782e747261792e73637265656e6e65656473617474656e74696f6e",
+      "namespace": "linux.tray",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.tray.screensharingnotallowed",
+      "resource": "m6c696e75782e747261792e73637265656e73686172696e676e6f74616c6c6f776564",
       "namespace": "linux.tray",
       "owner": "linux",
       "tombstone": false,
@@ -13388,6 +13492,18 @@
     {
       "id": "linux.tray.untiliresume",
       "resource": "m6c696e75782e747261792e756e74696c69726573756d65",
+      "namespace": "linux.tray",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.tray.waitingforscreenintake",
+      "resource": "m6c696e75782e747261792e77616974696e67666f7273637265656e696e74616b65",
       "namespace": "linux.tray",
       "owner": "linux",
       "tombstone": false,
@@ -14000,6 +14116,30 @@
       "selector": null
     },
     {
+      "id": "linux.window.screenaudioandactivitystillon",
+      "resource": "m6c696e75782e77696e646f772e73637265656e617564696f616e6461637469766974797374696c6c6f6e",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.window.screenaudiostillon",
+      "resource": "m6c696e75782e77696e646f772e73637265656e617564696f7374696c6c6f6e",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.window.screenbreath",
       "resource": "m6c696e75782e77696e646f772e73637265656e627265617468",
       "namespace": "linux.window",
@@ -14012,8 +14152,125 @@
       "selector": null
     },
     {
+      "id": "linux.window.screenloginunavailable",
+      "resource": "m6c696e75782e77696e646f772e73637265656e6c6f67696e756e617661696c61626c65",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.window.screenmissingelements",
+      "resource": "m6c696e75782e77696e646f772e73637265656e6d697373696e67656c656d656e7473",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "elements",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [
+        {
+          "name": "literal1",
+          "kind": "command",
+          "value": "GStreamer"
+        },
+        {
+          "name": "literal2",
+          "kind": "command",
+          "value": "PipeWire"
+        }
+      ],
+      "selector": null
+    },
+    {
+      "id": "linux.window.screenmissingelementsx11",
+      "resource": "m6c696e75782e77696e646f772e73637265656e6d697373696e67656c656d656e7473783131",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "elements",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [
+        {
+          "name": "literal1",
+          "kind": "command",
+          "value": "GStreamer"
+        }
+      ],
+      "selector": null
+    },
+    {
+      "id": "linux.window.screenretrying",
+      "resource": "m6c696e75782e77696e646f772e73637265656e7265747279696e67",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.window.screensharingnotallowed",
+      "resource": "m6c696e75782e77696e646f772e73637265656e73686172696e676e6f74616c6c6f776564",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.window.screensound",
       "resource": "m6c696e75782e77696e646f772e73637265656e736f756e64",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.window.screenstartfailed",
+      "resource": "m6c696e75782e77696e646f772e73637265656e73746172746661696c6564",
+      "namespace": "linux.window",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.window.screenunreachable",
+      "resource": "m6c696e75782e77696e646f772e73637265656e756e726561636861626c65",
       "namespace": "linux.window",
       "owner": "linux",
       "tombstone": false,
@@ -14194,6 +14451,18 @@
       "id": "linux.window.thisremovesthecopyonthisdevice.v558a0c4f",
       "resource": "m6c696e75782e77696e646f772e7468697372656d6f766573746865636f70796f6e746869736465766963652e763535386130633466",
       "namespace": "linux.window.thisremovesthecopyonthisdevice",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.window.trying",
+      "resource": "m6c696e75782e77696e646f772e747279696e67",
+      "namespace": "linux.window",
       "owner": "linux",
       "tombstone": false,
       "replacement": null,

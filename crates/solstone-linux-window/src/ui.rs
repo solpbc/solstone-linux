@@ -43,6 +43,15 @@ pub fn show_settings(app: &gtk::Application) {
     crate::deck::show_home();
 }
 
+/// Opens the window directly on the screen page.
+pub fn show_screen(app: &gtk::Application) {
+    let Some(window) = app.windows().into_iter().next() else {
+        return;
+    };
+    window.present();
+    crate::deck::show_screen();
+}
+
 /// Puts a clicked pairing link on the journal tab. It never pairs: that waits for the press.
 type ShowClickedLink = Rc<dyn Fn(&str)>;
 

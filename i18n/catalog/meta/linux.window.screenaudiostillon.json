@@ -1,0 +1,17 @@
+{
+  "description": "Secondary note on the screen page when screen intake did not start while audio remains on and desktop activity is off.",
+  "context": "Shown below the screen start failure reason on the screen detail page.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 30,
+  "source_revision": "c58c7ab639738f6f6390fcb6270787550727d6bdd0d2950050fdc586839c0f51",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

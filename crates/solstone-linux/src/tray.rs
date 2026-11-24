@@ -26,6 +26,8 @@ pub enum TrayCommand {
     CopyInstructions,
     /// The owner's desktop-capture switch, already saved.
     SetDesktopCapture(bool),
+    /// Owner asked to retry starting screen intake right away.
+    RetryScreen,
     Quit,
 }
 
@@ -129,7 +131,7 @@ impl Tray for KsniTray {
                 StandardItem {
                     label: text!("linux.tray.screenneedsattention").into(),
                     activate: Box::new(|_: &mut KsniTray| {
-                        crate::cli::spawn_window_from_tray();
+                        crate::cli::spawn_screen_window_from_tray();
                     }),
                     ..Default::default()
                 }
@@ -248,6 +250,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         };
         let health = derive_health(
             &SyncFacts {
@@ -666,6 +670,31 @@ mod tests {
     fn watcher_offline_returns_true_for_service_survival() {
         let test_tray = tray();
         assert!(test_tray.watcher_offline(ksni::OfflineReason::No));
+    }
+
+    #[test]
+    fn tray_menu_shows_screen_attention_row_only_for_attention_states() {
+        let mut t = tray();
+        let first_label = |menu: &[MenuItem<KsniTray>]| match menu.first() {
+            Some(MenuItem::Standard(item)) => Some(item.label.clone()),
+            _ => None,
+        };
+        let attention_label = text!("linux.tray.screenneedsattention");
+
+        t.model.status = TrayStatus::Idle;
+        assert_ne!(first_label(&t.menu()).as_deref(), Some(attention_label));
+
+        t.model.status = TrayStatus::ScreenRetrying;
+        assert_ne!(first_label(&t.menu()).as_deref(), Some(attention_label));
+
+        t.model.status = TrayStatus::ScreenAttention(tray_model::ScreenStartFault::MissingElements);
+        assert_eq!(first_label(&t.menu()).as_deref(), Some(attention_label));
+
+        t.model.status = TrayStatus::ScreenAttention(tray_model::ScreenStartFault::PortalDeclined);
+        assert_eq!(first_label(&t.menu()).as_deref(), Some(attention_label));
+
+        t.model.status = TrayStatus::ScreenAttention(tray_model::ScreenStartFault::StartFailed);
+        assert_eq!(first_label(&t.menu()).as_deref(), Some(attention_label));
     }
 }
 

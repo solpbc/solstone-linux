@@ -58,6 +58,49 @@ pub struct StoppedStream {
     pub file_bytes: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScreenStartFailureKind {
+    /// One or more GStreamer elements needed for screen intake are absent on this
+    /// computer. Deterministic and owner-actionable on the first attempt.
+    MissingElements {
+        elements: Vec<String>,
+        pipewire: bool,
+    },
+    /// Desktop screen sharing was cancelled or declined.
+    PortalDeclined,
+    /// Screen intake failed to start for another reason (refused stream, portal
+    /// or compositor error, X11 display error, or pipeline start failure).
+    StartFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenStartFailure {
+    pub kind: ScreenStartFailureKind,
+    /// Consecutive start failures since the last successful start or reset.
+    pub consecutive_failures: u32,
+}
+
+impl ScreenStartFailure {
+    /// Missing GStreamer elements are deterministic and owner-actionable on attempt 1.
+    /// Declined or refused starts get one quiet automatic retry first and need
+    /// attention from the second consecutive failure.
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        match self.kind {
+            ScreenStartFailureKind::MissingElements { .. } => self.consecutive_failures >= 1,
+            ScreenStartFailureKind::PortalDeclined | ScreenStartFailureKind::StartFailed => {
+                self.consecutive_failures >= 2
+            }
+        }
+    }
+
+    /// First non-missing-component failure with an automatic retry pending.
+    #[must_use]
+    pub fn retrying(&self) -> bool {
+        self.consecutive_failures > 0 && !self.needs_attention()
+    }
+}
+
 pub trait VideoCapture {
     fn start(&mut self, directory: &Path, draw_cursor: bool) -> Result<Vec<VideoStream>, String>;
     fn stop(&mut self) -> Result<Vec<StoppedStream>, String>;
@@ -68,6 +111,10 @@ pub trait VideoCapture {
     /// Lets go of the backend while desktop capture is off; the next start opens
     /// it again.
     fn release(&mut self) {}
+    /// Structured reason for the latest `start` failure, when known.
+    fn last_start_failure_kind(&self) -> Option<ScreenStartFailureKind> {
+        None
+    }
 }
 pub trait AudioCapture {
     /// Must be a nonblocking drain; device probing belongs to the backend worker.
@@ -196,6 +243,10 @@ pub struct StateSnapshot {
     /// Nobody is at this desktop: its screen is locked, or this owner's session
     /// is not the live one in front of the seat. Browser reads hold here.
     pub away: bool,
+    /// Present while screen intake failed to start and has not succeeded since.
+    pub screen_start_failure: Option<ScreenStartFailure>,
+    /// Incremented after each explicit owner retry attempt completes.
+    pub screen_retry_seq: u64,
 }
 pub trait StateSink {
     fn publish(&mut self, snapshot: StateSnapshot);
@@ -276,6 +327,10 @@ pub struct ObserverState {
     pub video_retry_after: f64,
     /// Screen-share starts that have failed in a row; each waits longer.
     pub video_start_failures: u32,
+    /// Latest diagnosed screen-start failure, cleared on successful start or switch off.
+    pub screen_start_failure: Option<ScreenStartFailure>,
+    /// Sequence number bumped after each explicit owner retry completes.
+    pub screen_retry_seq: u64,
     /// The main pause is holding desktop activity, and the desktop readers know it.
     pub activity_held: bool,
     /// Screen and audio are paused while desktop activity keeps going on its own,
@@ -369,6 +424,8 @@ where
                 session_settle_until: f64::NEG_INFINITY,
                 video_retry_after: f64::NEG_INFINITY,
                 video_start_failures: 0,
+                screen_start_failure: None,
+                screen_retry_seq: 0,
                 activity_held: starting.paused,
                 activity_alone: false,
                 pending_audio_seconds: 0,
@@ -457,12 +514,31 @@ where
         self.state.paused = false;
         self.state.pause_until = None;
         self.state.pause_until_wall = None;
+        self.state.video_retry_after = f64::NEG_INFINITY;
         if let Err(error) = pause_hold::clear(&self.config.state_dir()) {
             tracing::warn!(%error, "Could not remove the recorded pause");
         }
         let now_ms = wall_millis(self.backends.clock.wall_seconds());
         self.sync_activity_hold(now_ms);
         self.publish();
+    }
+
+    /// Owner asked to try starting screen intake again right away instead of
+    /// waiting out exponential backoff.
+    pub fn retry_screen(&mut self) -> Result<(), ObserverError> {
+        self.state.video_retry_after = f64::NEG_INFINITY;
+        let result = if !self.config.activity_only
+            && !self.state.paused
+            && self.session_live()
+            && self.state.mode == Mode::Idle
+        {
+            self.tick()
+        } else {
+            Ok(())
+        };
+        self.state.screen_retry_seq = self.state.screen_retry_seq.wrapping_add(1);
+        self.publish();
+        result
     }
 
     /// The main pause holds desktop activity, unless the owner chose to keep
@@ -560,8 +636,9 @@ where
             self.state.mode = target;
             self.note_activity();
             match self.start_capture(target) {
-                Err(ObserverError::VideoStart(_)) => {
+                Err(ObserverError::VideoStart(error)) => {
                     // Deliberate reference parity: failed resume start leaves its first .incomplete potentially orphaned for recovery.
+                    self.note_video_start_failure(&error);
                     self.start_segment()?;
                 }
                 Err(error) => return Err(error),
@@ -715,10 +792,14 @@ where
         self.config.desktop_capture = enabled;
         if enabled {
             tracing::info!("desktop capture on");
+            self.state.video_retry_after = f64::NEG_INFINITY;
             self.publish();
             return Ok(());
         }
         tracing::info!("desktop capture off");
+        self.state.video_start_failures = 0;
+        self.state.screen_start_failure = None;
+        self.state.video_retry_after = f64::NEG_INFINITY;
         let result = self.wait_for_session();
         self.state.activity_alone = false;
         self.backends.video.release();
@@ -746,6 +827,7 @@ where
         self.state.mode = Mode::Idle;
         self.state.cached_is_active = false;
         self.state.waited_for_session = true;
+        self.state.video_retry_after = f64::NEG_INFINITY;
         self.publish();
         Ok(())
     }
@@ -805,6 +887,7 @@ where
             self.state.current_streams = streams;
             self.state.video_started = true;
             self.state.video_start_failures = 0;
+            self.state.screen_start_failure = None;
             self.state.screen_open_mono = Some(self.backends.clock.monotonic_seconds());
         }
         Ok(())
@@ -815,6 +898,15 @@ where
     /// regardless, so the app stays up and asks again later, less often each time.
     fn note_video_start_failure(&mut self, error: &str) {
         self.state.video_start_failures = self.state.video_start_failures.saturating_add(1);
+        let kind = self
+            .backends
+            .video
+            .last_start_failure_kind()
+            .unwrap_or(ScreenStartFailureKind::StartFailed);
+        self.state.screen_start_failure = Some(ScreenStartFailure {
+            kind,
+            consecutive_failures: self.state.video_start_failures,
+        });
         let doublings = self.state.video_start_failures.saturating_sub(1).min(16);
         let delay =
             (VIDEO_RETRY_SECONDS * f64::from(1u32 << doublings)).min(VIDEO_RETRY_MAX_SECONDS);
@@ -1340,6 +1432,8 @@ where
             activity_through_pause: self.state.paused && !self.state.activity_held,
             // The same test desktop activity uses for someone being here.
             away: self.state.cached_activity.screen_locked || !self.session_in_front(),
+            screen_start_failure: self.state.screen_start_failure.clone(),
+            screen_retry_seq: self.state.screen_retry_seq,
         })
     }
 }
@@ -1497,6 +1591,7 @@ pub(crate) mod tests {
         starts: Rc<Cell<usize>>,
         stops: Rc<Cell<usize>>,
         fail_start: bool,
+        fail_kind: Option<ScreenStartFailureKind>,
         empty_start: bool,
         fail_stop: bool,
         stopped: Vec<StoppedStream>,
@@ -1530,6 +1625,9 @@ pub(crate) mod tests {
         }
         fn is_healthy(&self) -> bool {
             self.healthy
+        }
+        fn last_start_failure_kind(&self) -> Option<ScreenStartFailureKind> {
+            self.fail_kind.clone()
         }
     }
     struct FakeAudio {
@@ -1756,6 +1854,7 @@ pub(crate) mod tests {
                 starts: starts.clone(),
                 stops: stops.clone(),
                 fail_start: false,
+                fail_kind: None,
                 empty_start: false,
                 fail_stop: false,
                 stopped: vec![],
@@ -4018,6 +4117,95 @@ pub(crate) mod tests {
         f.mono.set(f.mono.get() + 5.0);
         f.observer.tick().unwrap();
         assert_eq!(f.starts.get(), 2, "on takes in again");
+    }
+
+    #[test]
+    fn screen_start_failure_thresholds_retry_and_clear_follow_cause() {
+        // Missing GStreamer component needs attention on attempt 1.
+        let mut missing = fixture(false);
+        missing.observer.backends.video.fail_start = true;
+        missing.observer.backends.video.fail_kind = Some(ScreenStartFailureKind::MissingElements {
+            elements: vec!["pipewiresrc".into()],
+            pipewire: true,
+        });
+        missing.observer.initialize().unwrap();
+        let snap = missing.states.0.borrow().last().unwrap().clone();
+        assert_eq!(snap.mode, Mode::Idle);
+        let failure = snap.screen_start_failure.expect("failure recorded");
+        assert!(failure.needs_attention());
+        assert!(!failure.retrying());
+
+        // retry_screen clears backoff immediately, retries, and clears the fault on success.
+        missing.observer.backends.video.fail_start = false;
+        missing.observer.backends.video.fail_kind = None;
+        missing.observer.retry_screen().unwrap();
+        let recovered = missing.states.0.borrow().last().unwrap().clone();
+        assert_eq!(recovered.mode, Mode::Screencast);
+        assert_eq!(recovered.screen_start_failure, None);
+        assert_eq!(recovered.screen_retry_seq, 1);
+
+        // Declined portal or generic start failure retries quietly on attempt 1, needs attention on attempt 2.
+        let mut declined = fixture(false);
+        declined.observer.backends.video.fail_start = true;
+        declined.observer.backends.video.fail_kind = Some(ScreenStartFailureKind::PortalDeclined);
+        declined.observer.initialize().unwrap();
+        let first = declined
+            .states
+            .0
+            .borrow()
+            .last()
+            .unwrap()
+            .screen_start_failure
+            .clone()
+            .expect("first failure recorded");
+        assert!(first.retrying());
+        assert!(!first.needs_attention());
+
+        // Advance past the 10s first retry interval; attempt 2 flips to needs attention.
+        declined.mono.set(declined.mono.get() + 11.0);
+        declined.observer.tick().unwrap();
+        let second = declined
+            .states
+            .0
+            .borrow()
+            .last()
+            .unwrap()
+            .screen_start_failure
+            .clone()
+            .expect("second failure recorded");
+        assert!(!second.retrying());
+        assert!(second.needs_attention());
+        assert_eq!(second.consecutive_failures, 2);
+
+        // Turning desktop capture off clears the failure state.
+        declined.observer.set_desktop_capture(false).unwrap();
+        assert_eq!(
+            declined
+                .states
+                .0
+                .borrow()
+                .last()
+                .unwrap()
+                .screen_start_failure,
+            None
+        );
+        assert_eq!(declined.observer.state.video_start_failures, 0);
+
+        // Resume reopen start failure records failure and sets Mode::Idle instead of Mode::Screencast.
+        let mut resumed = fixture(true);
+        initialize(&mut resumed);
+        resumed.observer.resume();
+        resumed.observer.backends.video.fail_start = true;
+        resumed.observer.backends.video.fail_kind = Some(ScreenStartFailureKind::StartFailed);
+        resumed.observer.tick().unwrap();
+        let after_resume = resumed.states.0.borrow().last().unwrap().clone();
+        assert_eq!(after_resume.mode, Mode::Idle);
+        assert!(
+            after_resume
+                .screen_start_failure
+                .as_ref()
+                .is_some_and(ScreenStartFailure::retrying)
+        );
     }
 
     #[test]

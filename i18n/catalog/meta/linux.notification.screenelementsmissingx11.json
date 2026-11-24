@@ -1,0 +1,28 @@
+{
+  "description": "Notification shown once per run on X11 when screen intake can't start because a GStreamer element it needs is missing.",
+  "context": "Desktop notification body; the summary line is the app's name. elements is a comma-separated list of GStreamer element names such as ximagesrc.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "elements",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 220,
+  "source_revision": "4370052d99d94f878192e1f5d5a7c28d636bf7f445a3b2f6e3176ee475d3c2f0",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": [
+    {
+      "name": "literal1",
+      "kind": "command",
+      "value": "GStreamer"
+    }
+  ]
+}

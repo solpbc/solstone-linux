@@ -1,0 +1,17 @@
+{
+  "description": "Panel icon tooltip and header status when screen intake cannot start because a required GStreamer plugin is missing.",
+  "context": "First line of the panel icon tooltip, above sync status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "7616bed22ae7a46780c96167070ca8b201d29378315c1f58da57e622bb0ff608",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

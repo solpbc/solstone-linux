@@ -15,13 +15,14 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::activity_prefs::{ActivityPolicy, ActivityPrefs};
 use crate::config::{ConfigPaths, set_guided_field};
+use crate::desktop_session::SessionPresence;
 use crate::journal_mark::{
     JOURNAL_MARK_RECHECK_INTERVAL, PAIRING_ANSWER_FILENAME, begin_pairing_commit,
     finish_pairing_commit_with_fault, is_pairing_confirmed, pairing_commit_pending,
     read_pairing_answer, retire_client_registration, write_pairing_answer_with_fault,
 };
 use crate::local_journal::{LocalJournal, encode_offer, link_stays_on_this_computer};
-use crate::observer::{Mode, StateSnapshot};
+use crate::observer::{Mode, ScreenStartFailureKind, StateSnapshot};
 use crate::private_file::DurableWriteFault;
 use crate::private_link::{
     CREDENTIALS_FILENAME, LinkFact, LinkFacts, OpenJournalAccess, Pairer, PrivateLinkOwner,
@@ -133,6 +134,21 @@ pub struct SampledInstantDocument {
     pub at: Option<f64>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ScreenStartDocument {
+    /// `"retrying"` | `"missing_elements"` | `"portal_declined"` | `"start_failed"`
+    /// | `"desktop_unreachable"` | `"login_unavailable"`
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_elements: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pipewire: bool,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ControlDocument {
     pub v: u32,
@@ -164,6 +180,10 @@ pub struct ControlDocument {
     pub activity_through_pause: bool,
     #[serde(default)]
     pub capture_attention: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_start: Option<ScreenStartDocument>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub screen_retry_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_count: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,6 +321,8 @@ pub struct ControlModel {
     pub pause_bounded: Option<bool>,
     pub activity_through_pause: bool,
     pub capture_attention: bool,
+    pub screen_start: Option<ScreenStartDocument>,
+    pub screen_retry_seq: u64,
     pub queue_count: Option<i64>,
     pub quarantine_count: Option<u64>,
     pub last_delivery: Option<SampledInstantDocument>,
@@ -387,6 +409,8 @@ impl ControlModel {
             pause_bounded: None,
             activity_through_pause: false,
             capture_attention: false,
+            screen_start: None,
+            screen_retry_seq: 0,
             queue_count: None,
             quarantine_count: None,
             last_delivery: None,
@@ -475,6 +499,8 @@ pub fn decode_control<E: std::fmt::Display>(
         pause_bounded: doc.pause_bounded,
         activity_through_pause: doc.activity_through_pause,
         capture_attention: doc.capture_attention,
+        screen_start: doc.screen_start,
+        screen_retry_seq: doc.screen_retry_seq,
         queue_count: doc.queue_count,
         quarantine_count: doc.quarantine_count,
         last_delivery: doc.last_delivery,
@@ -931,7 +957,53 @@ pub(crate) fn assemble_document(
         None
     };
 
-    let capture_attention = tray_model::status(snapshot).needs_attention();
+    let tray_status = tray_model::status(snapshot);
+    let capture_attention = tray_status.needs_attention();
+    let screen_start =
+        match tray_status {
+            tray_model::TrayStatus::Waiting(SessionPresence::Unreachable) => {
+                Some(ScreenStartDocument {
+                    state: "desktop_unreachable".into(),
+                    missing_elements: Vec::new(),
+                    pipewire: false,
+                })
+            }
+            tray_model::TrayStatus::Waiting(SessionPresence::LoginUnavailable) => {
+                Some(ScreenStartDocument {
+                    state: "login_unavailable".into(),
+                    missing_elements: Vec::new(),
+                    pipewire: false,
+                })
+            }
+            tray_model::TrayStatus::ScreenRetrying => Some(ScreenStartDocument {
+                state: "retrying".into(),
+                missing_elements: Vec::new(),
+                pipewire: false,
+            }),
+            tray_model::TrayStatus::ScreenAttention(_) => snapshot
+                .screen_start_failure
+                .as_ref()
+                .map(|failure| match &failure.kind {
+                    ScreenStartFailureKind::MissingElements { elements, pipewire } => {
+                        ScreenStartDocument {
+                            state: "missing_elements".into(),
+                            missing_elements: elements.clone(),
+                            pipewire: *pipewire,
+                        }
+                    }
+                    ScreenStartFailureKind::PortalDeclined => ScreenStartDocument {
+                        state: "portal_declined".into(),
+                        missing_elements: Vec::new(),
+                        pipewire: false,
+                    },
+                    ScreenStartFailureKind::StartFailed => ScreenStartDocument {
+                        state: "start_failed".into(),
+                        missing_elements: Vec::new(),
+                        pipewire: false,
+                    },
+                }),
+            _ => None,
+        };
 
     let (queue_count, last_delivery, unknown_journals) = match sampler {
         Some(s) => {
@@ -977,6 +1049,8 @@ pub(crate) fn assemble_document(
         pause_bounded,
         activity_through_pause: snapshot.paused && snapshot.activity_through_pause,
         capture_attention,
+        screen_start,
+        screen_retry_seq: snapshot.screen_retry_seq,
         queue_count,
         quarantine_count,
         last_delivery,
@@ -2285,6 +2359,8 @@ impl Default for WindowControlHandler {
                     session: Default::default(),
                     activity_through_pause: false,
                     away: false,
+                    screen_start_failure: None,
+                    screen_retry_seq: 0,
                 })),
                 effective_settings: Arc::new(Mutex::new(None)),
                 route_status: Arc::new(Mutex::new(None)),
@@ -2898,6 +2974,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         }
     }
 
@@ -5477,5 +5555,79 @@ mod tests {
             assert_eq!(model.durable, "unpaired");
             assert_eq!(harness.starter.starts.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[test]
+    fn control_document_propagates_screen_start_retrying_and_attention() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            base_dir: Some(dir.path().to_path_buf()),
+            config_dir: Some(dir.path().to_path_buf()),
+        };
+        let phase = Phase {
+            durable: "unpaired".into(),
+            owner_status: "absent".into(),
+            attempt: None,
+            fault: None,
+            restart_required: None,
+            open_journal: None,
+            failed_owner_pairing_id: None,
+            current_owner_pairing_id: None,
+            pending_instance_id: None,
+        };
+        let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
+
+        let mut retrying_snap = test_snapshot(Mode::Idle, false);
+        retrying_snap.screen_start_failure = Some(crate::observer::ScreenStartFailure {
+            kind: ScreenStartFailureKind::StartFailed,
+            consecutive_failures: 1,
+        });
+        let raw_retry = assemble_document(
+            &phase,
+            &health,
+            &retrying_snap,
+            &paths,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let retry_model = decode_control_str(&raw_retry).unwrap();
+        assert_eq!(retry_model.capture, "idle");
+        assert!(!retry_model.capture_attention);
+        assert_eq!(
+            retry_model.screen_start.as_ref().map(|d| d.state.as_str()),
+            Some("retrying")
+        );
+
+        let mut missing_snap = test_snapshot(Mode::Idle, false);
+        missing_snap.screen_retry_seq = 3;
+        missing_snap.screen_start_failure = Some(crate::observer::ScreenStartFailure {
+            kind: ScreenStartFailureKind::MissingElements {
+                elements: vec!["pipewiresrc".into()],
+                pipewire: true,
+            },
+            consecutive_failures: 1,
+        });
+        let raw_missing = assemble_document(
+            &phase,
+            &health,
+            &missing_snap,
+            &paths,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let missing_model = decode_control_str(&raw_missing).unwrap();
+        assert_eq!(missing_model.capture, "idle");
+        assert!(missing_model.capture_attention);
+        assert_eq!(missing_model.screen_retry_seq, 3);
+        let start = missing_model.screen_start.expect("screen_start populated");
+        assert_eq!(start.state, "missing_elements");
+        assert_eq!(start.missing_elements, vec!["pipewiresrc".to_string()]);
+        assert!(start.pipewire);
     }
 }

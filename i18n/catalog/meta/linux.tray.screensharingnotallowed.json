@@ -1,0 +1,17 @@
+{
+  "description": "Panel icon tooltip and header status when screen sharing was not allowed after retrying.",
+  "context": "First line of the panel icon tooltip, above sync status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "0ca3e57b99dbbea30a60a455215f24501339e3e66173e29dc5e7d91d36335173",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

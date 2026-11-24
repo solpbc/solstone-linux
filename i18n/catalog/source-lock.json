@@ -4168,9 +4168,16 @@
     },
     {
       "id": "linux.notification.screenelementsmissing",
-      "source": "4d3ceec839058b1bc39e9848493d61d2478a7330c4a41c77a1de1b957ebf7345",
+      "source": "5913ec24a4715ef1be386e7fe4d88ad638e45581d568001dbb8096692ee40585",
       "contract": "ec92201ccad0ccab4b934abd28fb9574c6ea4ea92c124959c55847cbd6ba21ce",
       "protected": "261a091d8f13dbbfe383731174eba2ab9bfab7e81ae2750ca089f3cf010724d1",
+      "locales": []
+    },
+    {
+      "id": "linux.notification.screenelementsmissingx11",
+      "source": "4370052d99d94f878192e1f5d5a7c28d636bf7f445a3b2f6e3176ee475d3c2f0",
+      "contract": "ec92201ccad0ccab4b934abd28fb9574c6ea4ea92c124959c55847cbd6ba21ce",
+      "protected": "0d9884c1fa92d83e1a9c0cd8a799bb80aba3c04d43fb5d7c0e8f277b92d6a3c7",
       "locales": []
     },
     {
@@ -5105,9 +5112,30 @@
       "locales": []
     },
     {
+      "id": "linux.shell.screenmissingplugin",
+      "source": "618163e4e1714b1e4b4d6258e140f5076f886d547ebeddb335a05fcf522f9e1a",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "0d9884c1fa92d83e1a9c0cd8a799bb80aba3c04d43fb5d7c0e8f277b92d6a3c7",
+      "locales": []
+    },
+    {
+      "id": "linux.shell.screensharingnotallowed",
+      "source": "e5bbcc039bf1474a65358df28d50bd44107f5c613d535c937aeb6b61f3ba67d1",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.shell.screenshotcount",
       "source": "9b229901d05d8db2ac3d413a2677510ea98772359d790bc34d25b6183eef0c8f",
       "contract": "d47ec32665785fdbc476c9b03fc91c4ac16d1a4edfcc8730fd1fc407ad13c575",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.shell.screenstartfailed",
+      "source": "c73a09bc97d2f6a23c85f58f94989b95861741e7b5f095f4c5e78b3ba81263bd",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
       "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
       "locales": []
     },
@@ -5749,8 +5777,29 @@
       "locales": []
     },
     {
+      "id": "linux.tray.screenintakecantstart",
+      "source": "7616bed22ae7a46780c96167070ca8b201d29378315c1f58da57e622bb0ff608",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.tray.screenintakecouldntstart",
+      "source": "f9a99ee9cfa9dd7cd63cd1eba89dd07fb293e8317f5bb0e9421b7fbc24ea1d4c",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.tray.screenneedsattention",
       "source": "1d8dc58281805ccdc42ff4db57096440eeee7e6e7d21027e7f7722f7812ee471",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.tray.screensharingnotallowed",
+      "source": "0ca3e57b99dbbea30a60a455215f24501339e3e66173e29dc5e7d91d36335173",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
       "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
       "locales": []
@@ -5765,6 +5814,13 @@
     {
       "id": "linux.tray.untiliresume",
       "source": "08e0631e8bc379c38fac1ff44917c9b020996b6ae0b70841b27dc924fb1eb2a9",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.tray.waitingforscreenintake",
+      "source": "bbea3c30d46198f039e3c94ba6130f11532ce2174fcf39eec93236d43981ae59",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
       "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
       "locales": []
@@ -6078,6 +6134,20 @@
       "locales": []
     },
     {
+      "id": "linux.window.screenaudioandactivitystillon",
+      "source": "f3a88edda4749d5168366404277995a9af54aaebd841406dabdf06e7eca58ac1",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.window.screenaudiostillon",
+      "source": "c58c7ab639738f6f6390fcb6270787550727d6bdd0d2950050fdc586839c0f51",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.window.screenbreath",
       "source": "be9512df2aea562bae5d9ce20ad2d7fe4e8e31d2ca3923a7a045e72d9377d794",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
@@ -6085,8 +6155,57 @@
       "locales": []
     },
     {
+      "id": "linux.window.screenloginunavailable",
+      "source": "19f0aa17ff2a4a40a28a6afe98a1b501b5c0ca6a434593910b127d30ff0d458d",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.window.screenmissingelements",
+      "source": "257b1d92eb50d6d7be1cb222b4271d0cbae43f2374b70e636ccead655dae9e8e",
+      "contract": "ec92201ccad0ccab4b934abd28fb9574c6ea4ea92c124959c55847cbd6ba21ce",
+      "protected": "261a091d8f13dbbfe383731174eba2ab9bfab7e81ae2750ca089f3cf010724d1",
+      "locales": []
+    },
+    {
+      "id": "linux.window.screenmissingelementsx11",
+      "source": "ec0e7865aada8662e0a94153ecd1bf9adeaa5cd05d69b45908bc2740304bb86d",
+      "contract": "ec92201ccad0ccab4b934abd28fb9574c6ea4ea92c124959c55847cbd6ba21ce",
+      "protected": "0d9884c1fa92d83e1a9c0cd8a799bb80aba3c04d43fb5d7c0e8f277b92d6a3c7",
+      "locales": []
+    },
+    {
+      "id": "linux.window.screenretrying",
+      "source": "912e4f5b27cf04a8ad7860395ee78722cecc19ce3fed1c08d7ef662b2551512a",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.window.screensharingnotallowed",
+      "source": "1722089f6508dcbc5933cc9110d87aed3ec226de9cf15593b40c1e632a86a721",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.window.screensound",
       "source": "91abbcddebf35568ca960f86aa2e9777f8f6d8c103a97a13a79b8b74f688b82c",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.window.screenstartfailed",
+      "source": "c73a09bc97d2f6a23c85f58f94989b95861741e7b5f095f4c5e78b3ba81263bd",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.window.screenunreachable",
+      "source": "b338edb7e3c0383dc20783d3199d3f08b6a8757015617c82889f24ffa9b8610d",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
       "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
       "locales": []
@@ -6185,6 +6304,13 @@
     {
       "id": "linux.window.thisremovesthecopyonthisdevice.v558a0c4f",
       "source": "a0738d4b0613e43d450447fc30dad814e7ac92ae5fa53c7b3df2508a797efe1c",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
+      "id": "linux.window.trying",
+      "source": "f6ac2cc92794a5e0cf3dca9655f450b73f824a490e0207ad44ae1b21ae889fbe",
       "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
       "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
       "locales": []

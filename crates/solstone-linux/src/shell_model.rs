@@ -9,10 +9,11 @@ use jiff::civil::Date;
 use solstone_i18n::{message, text};
 
 use crate::browser::status::RUNNING_STALE_MS;
+use crate::desktop_session::SessionPresence;
 use crate::obsidian::State as VaultState;
 use crate::source_intake::{Counter, IntakeFile, IntakeRows};
 use crate::terminal::state::EngineState;
-use crate::tray_model::TrayStatus;
+use crate::tray_model::{ScreenStartFault, TrayStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TileId {
@@ -53,6 +54,11 @@ pub enum ScreenSub {
     WithAudioAndActivity,
     WithAudio,
     ActivityStillOn,
+    MissingPlugin,
+    SharingNotAllowed,
+    StartFailed,
+    DesktopUnreachable,
+    LoginUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +104,8 @@ pub fn screen_tile(
         StateWord::Off
     } else if status.needs_attention() {
         StateWord::NeedsAttention
+    } else if matches!(status, TrayStatus::ScreenRetrying) {
+        StateWord::Checking
     } else if matches!(status, TrayStatus::Paused) {
         StateWord::Paused
     } else if matches!(
@@ -108,8 +116,8 @@ pub fn screen_tile(
     } else {
         StateWord::Off
     };
-    // Needs attention, on, and checking say `with audio and activity` while activity
-    // is running, and `with audio` when it is not. Off or paused keeps
+    // Faults name their cause on the tile. On and checking say `with audio and activity`
+    // while activity is running, and `with audio` when it is not. Off or paused keeps
     // `activity is still on.` while that intake is running. `activity only` never
     // says `with audio and activity`.
     let sub = if activity_only {
@@ -118,9 +126,22 @@ pub fn screen_tile(
         } else {
             ScreenSub::WithAudio
         }
+    } else if word == StateWord::NeedsAttention {
+        match status {
+            TrayStatus::ScreenAttention(ScreenStartFault::MissingElements) => {
+                ScreenSub::MissingPlugin
+            }
+            TrayStatus::ScreenAttention(ScreenStartFault::PortalDeclined) => {
+                ScreenSub::SharingNotAllowed
+            }
+            TrayStatus::ScreenAttention(ScreenStartFault::StartFailed) => ScreenSub::StartFailed,
+            TrayStatus::Waiting(SessionPresence::Unreachable) => ScreenSub::DesktopUnreachable,
+            TrayStatus::Waiting(SessionPresence::LoginUnavailable) => ScreenSub::LoginUnavailable,
+            _ => ScreenSub::StartFailed,
+        }
     } else if activity_running && matches!(word, StateWord::Off | StateWord::Paused) {
         ScreenSub::ActivityStillOn
-    } else if word == StateWord::On && !activity_running {
+    } else if matches!(word, StateWord::On | StateWord::Checking) && !activity_running {
         ScreenSub::WithAudio
     } else {
         ScreenSub::WithAudioAndActivity
@@ -253,6 +274,11 @@ pub fn screen_sub_label(sub: ScreenSub) -> Option<&'static str> {
         ScreenSub::WithAudioAndActivity => Some(text!("linux.shell.withaudioactivity")),
         ScreenSub::WithAudio => Some(text!("linux.shell.withaudio")),
         ScreenSub::ActivityStillOn => Some(text!("linux.shell.activitystillon")),
+        ScreenSub::MissingPlugin => Some(text!("linux.shell.screenmissingplugin")),
+        ScreenSub::SharingNotAllowed => Some(text!("linux.shell.screensharingnotallowed")),
+        ScreenSub::StartFailed => Some(text!("linux.shell.screenstartfailed")),
+        ScreenSub::DesktopUnreachable => Some(text!("linux.window.screenunreachable")),
+        ScreenSub::LoginUnavailable => Some(text!("linux.window.screenloginunavailable")),
     }
 }
 
@@ -1575,7 +1601,7 @@ mod tests {
             TrayStatus::Waiting(SessionPresence::Unreachable),
         );
         assert_eq!(fault.word, StateWord::NeedsAttention);
-        assert_eq!(fault.sub, ScreenSub::WithAudioAndActivity);
+        assert_eq!(fault.sub, ScreenSub::DesktopUnreachable);
         let login = screen_tile(
             true,
             false,
@@ -1583,6 +1609,37 @@ mod tests {
             TrayStatus::Waiting(SessionPresence::LoginUnavailable),
         );
         assert_eq!(login.word, StateWord::NeedsAttention);
+        assert_eq!(login.sub, ScreenSub::LoginUnavailable);
+        let retrying = screen_tile(true, false, true, TrayStatus::ScreenRetrying);
+        assert_eq!(retrying.word, StateWord::Checking);
+        assert_eq!(retrying.sub, ScreenSub::WithAudioAndActivity);
+        let retrying_audio = screen_tile(true, false, false, TrayStatus::ScreenRetrying);
+        assert_eq!(retrying_audio.word, StateWord::Checking);
+        assert_eq!(retrying_audio.sub, ScreenSub::WithAudio);
+        let missing = screen_tile(
+            true,
+            false,
+            true,
+            TrayStatus::ScreenAttention(ScreenStartFault::MissingElements),
+        );
+        assert_eq!(missing.word, StateWord::NeedsAttention);
+        assert_eq!(missing.sub, ScreenSub::MissingPlugin);
+        let declined = screen_tile(
+            true,
+            false,
+            true,
+            TrayStatus::ScreenAttention(ScreenStartFault::PortalDeclined),
+        );
+        assert_eq!(declined.word, StateWord::NeedsAttention);
+        assert_eq!(declined.sub, ScreenSub::SharingNotAllowed);
+        let failed = screen_tile(
+            true,
+            false,
+            true,
+            TrayStatus::ScreenAttention(ScreenStartFault::StartFailed),
+        );
+        assert_eq!(failed.word, StateWord::NeedsAttention);
+        assert_eq!(failed.sub, ScreenSub::StartFailed);
         let held = screen_tile(
             false,
             false,

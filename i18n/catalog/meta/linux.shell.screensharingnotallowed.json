@@ -1,0 +1,17 @@
+{
+  "description": "Short sub-line on the screen tile under needs attention when desktop screen sharing was not allowed.",
+  "context": "Shown beneath the needs attention state word on the home deck's screen tile.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "e5bbcc039bf1474a65358df28d50bd44107f5c613d535c937aeb6b61f3ba67d1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

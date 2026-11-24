@@ -31,10 +31,15 @@ pub(crate) struct Entry {
     detail: Option<String>,
 }
 
+pub(crate) struct LocalDesktop {
+    pub session: crate::desktop_session::SessionPresence,
+    pub paused: bool,
+    pub screen_needs_attention: bool,
+}
+
 pub(crate) fn local(
     config: &Config,
-    session: crate::desktop_session::SessionPresence,
-    paused: bool,
+    desktop: LocalDesktop,
     vault: &crate::obsidian::ObsidianHandle,
     shots: &crate::screenshots::ScreenshotsHandle,
     terminal: bool,
@@ -76,7 +81,7 @@ pub(crate) fn local(
             None,
         );
     }
-    let active = if paused { "paused" } else { "on" };
+    let active = if desktop.paused { "paused" } else { "on" };
     if terminal {
         use crate::terminal::state::{EngineState, TerminalState};
         if let Some(t) = TerminalState::read(&config.state_dir()) {
@@ -93,9 +98,17 @@ pub(crate) fn local(
     }
     if config.desktop_capture
         && !config.activity_only
-        && session == crate::desktop_session::SessionPresence::Live
+        && desktop.session == crate::desktop_session::SessionPresence::Live
     {
-        add("screen", active, None);
+        add(
+            "screen",
+            if !desktop.paused && desktop.screen_needs_attention {
+                "needs_attention"
+            } else {
+                active
+            },
+            None,
+        );
         add("audio", active, None);
     }
     if browser {

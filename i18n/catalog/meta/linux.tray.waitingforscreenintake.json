@@ -1,0 +1,17 @@
+{
+  "description": "Panel icon tooltip and header status while waiting to retry starting screen intake after a first failure.",
+  "context": "First line of the panel icon tooltip, above sync status.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 40,
+  "source_revision": "bbea3c30d46198f039e3c94ba6130f11532ce2174fcf39eec93236d43981ae59",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

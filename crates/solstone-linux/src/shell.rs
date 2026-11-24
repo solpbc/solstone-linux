@@ -107,6 +107,10 @@ impl ObserverCommands for CommandSender {
     fn resume(&self) {
         let _ = self.sender.send(TrayCommand::Resume);
     }
+
+    fn retry_screen(&self) {
+        let _ = self.sender.send(TrayCommand::RetryScreen);
+    }
 }
 
 trait ComponentSignalSink: Send + Sync + 'static {
@@ -769,6 +773,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         }
     }
 

@@ -21,6 +21,7 @@ pub fn clamp_pause(duration_seconds: i32) -> Option<u64> {
 pub trait ObserverCommands: Send + Sync {
     fn pause(&self, duration: Option<u64>);
     fn resume(&self);
+    fn retry_screen(&self);
 }
 
 pub struct Observer1<C: Clock, O: ObserverCommands> {
@@ -101,6 +102,10 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     }
     fn resume(&self) -> String {
         self.commands.resume();
+        "ok".into()
+    }
+    fn retry_screen(&self) -> String {
+        self.commands.retry_screen();
         "ok".into()
     }
     fn get_stats(&self) -> std::collections::HashMap<String, zbus::zvariant::OwnedValue> {
@@ -541,6 +546,7 @@ mod tests {
     enum RecordedCommand {
         Pause(Option<u64>),
         Resume,
+        RetryScreen,
     }
     #[derive(Clone, Default)]
     struct Commands(Arc<Mutex<Vec<RecordedCommand>>>);
@@ -557,6 +563,12 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(RecordedCommand::Resume);
         }
+        fn retry_screen(&self) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(RecordedCommand::RetryScreen);
+        }
     }
     fn snapshot(mode: crate::observer::Mode, paused: bool) -> StateSnapshot {
         StateSnapshot {
@@ -571,6 +583,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         }
     }
     fn not_reported_health() -> SyncHealth {
@@ -680,6 +694,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         };
         let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
         let service = Observer1 {
@@ -718,6 +734,8 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_start_failure: None,
+            screen_retry_seq: 0,
         };
         let service = Observer1 {
             snapshot: Arc::new(Mutex::new(snapshot)),

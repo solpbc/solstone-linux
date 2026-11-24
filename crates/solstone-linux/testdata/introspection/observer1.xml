@@ -83,6 +83,9 @@
       <method name="Resume">
           <arg direction="out" type="s" />
         </method>
+      <method name="RetryScreen">
+          <arg direction="out" type="s" />
+        </method>
       <method name="ScreenshotsChooseFolder"><arg name="path" direction="in" type="s" /><arg direction="out" type="s" /></method>
       <method name="ScreenshotsConfirm"><arg name="span" direction="in" type="s" /><arg direction="out" type="s" /></method>
       <method name="ScreenshotsCount"><arg name="span" direction="in" type="s" /><arg direction="out" type="s" /></method>

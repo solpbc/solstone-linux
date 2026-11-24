@@ -1,0 +1,17 @@
+{
+  "description": "In-progress button label while a screen intake retry is running.",
+  "context": "Replaces the try again button label while the retry attempt is in flight.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 20,
+  "source_revision": "f6ac2cc92794a5e0cf3dca9655f450b73f824a490e0207ad44ae1b21ae889fbe",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

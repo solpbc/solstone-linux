@@ -22,8 +22,8 @@ use solstone_linux::shell_model::{
 };
 use solstone_linux::source_intake::{self, IntakeFile, IntakeRows};
 use solstone_linux::terminal::state::{EngineState, TerminalState};
-use solstone_linux::tray_model::TrayStatus;
-use solstone_linux::window_control::MarkRenderDocument;
+use solstone_linux::tray_model::{ScreenStartFault, TrayStatus};
+use solstone_linux::window_control::{MarkRenderDocument, ScreenStartDocument};
 
 use crate::sun_bg::{self, Chrome};
 
@@ -70,6 +70,9 @@ struct View {
     terminal_on: bool,
     screen: StateWord,
     screen_sub: ScreenSub,
+    screen_start: Option<ScreenStartDocument>,
+    screen_retry_seq: u64,
+    activity_running: bool,
     terminal: StateWord,
     terminal_reason: Option<&'static str>,
     browsers: StateWord,
@@ -143,6 +146,8 @@ struct ServiceSnap {
     reading: ServiceReading,
     capture: String,
     capture_attention: bool,
+    screen_start: Option<ScreenStartDocument>,
+    screen_retry_seq: u64,
     activity_source: bool,
     activity_through_pause: bool,
     durable: String,
@@ -166,6 +171,8 @@ impl ServiceSnap {
             reading: ServiceReading::Checking,
             capture: String::new(),
             capture_attention: false,
+            screen_start: None,
+            screen_retry_seq: 0,
             activity_source: true,
             activity_through_pause: false,
             durable: String::new(),
@@ -519,6 +526,34 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
     }
 
     {
+        let ui_screen = Rc::clone(&ui);
+        let selected_screen = Rc::clone(&selected);
+        let row_screen = Rc::clone(&row);
+        let page_open_screen = Rc::clone(&page_open);
+        let shelf_open_screen = Rc::clone(&shelf_open);
+        let view_screen = Rc::clone(&view);
+        SHOW_SCREEN.with(|slot| {
+            *slot.borrow_mut() = Some(Rc::new(move || {
+                row_screen.set(ShelfRow::Home);
+                selected_screen.set(Some(TileId::Screen));
+                page_open_screen.set(true);
+                ui_screen
+                    .page
+                    .show_tile(TileId::Screen, &view_screen.borrow());
+                apply_layout(
+                    &ui_screen,
+                    &selected_screen,
+                    &row_screen,
+                    &shelf_open_screen,
+                    &page_open_screen,
+                );
+            }));
+        });
+    }
+
+    wire_screen_retry(&ui, &view, &seen_report, &daemon_up, &selected);
+
+    {
         let ui_open = ui.clone();
         let selected = selected.clone();
         let row = row.clone();
@@ -695,6 +730,7 @@ thread_local! {
 
 thread_local! {
     static SHOW_HOME: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+    static SHOW_SCREEN: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
     static SHOW_JOURNAL: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
     static SLOTS: RefCell<Option<(gtk::Box, gtk::Box)>> = const { RefCell::new(None) };
     /// The Obsidian page's vault section, where the working flow lands.
@@ -783,6 +819,14 @@ pub fn show_home() {
     });
 }
 
+pub fn show_screen() {
+    SHOW_SCREEN.with(|slot| {
+        if let Some(show) = slot.borrow().as_ref() {
+            show();
+        }
+    });
+}
+
 struct Ui {
     window: gtk::ApplicationWindow,
     shelf: gtk::Box,
@@ -861,6 +905,8 @@ struct Page {
     switch: gtk::Switch,
     reason: gtk::Label,
     next: gtk::Label,
+    retry: gtk::Button,
+    retry_inflight: Rc<Cell<Option<u64>>>,
     breath: gtk::Label,
     sound: gtk::Label,
     so_far_row: gtk::Box,
@@ -1030,15 +1076,32 @@ impl Page {
                 Some(
                     view.service
                         .status_line()
-                        .unwrap_or(text!("linux.copy.statusunavailable")),
+                        .unwrap_or(text!("linux.copy.statusunavailable"))
+                        .to_owned(),
                 ),
                 None,
             )
         } else {
             page_reason(id, word, view)
         };
-        set_fact(&self.reason, reason);
-        set_fact(&self.next, next);
+        set_fact(&self.reason, reason.as_deref());
+        set_fact(&self.next, next.as_deref());
+        let show_retry = id == TileId::Screen && screen_retry_visible(word, view);
+        if !show_retry {
+            self.retry_inflight.set(None);
+        } else if let Some(before) = self.retry_inflight.get()
+            && view.screen_retry_seq != before
+        {
+            self.retry_inflight.set(None);
+        }
+        let trying = show_retry && self.retry_inflight.get().is_some();
+        self.retry.set_visible(show_retry);
+        self.retry.set_sensitive(!trying);
+        self.retry.set_label(if trying {
+            text!("linux.window.trying")
+        } else {
+            text!("linux.copy.tryagain")
+        });
         self.breath.set_text(page_breath(id));
         let screen = id == TileId::Screen;
         self.sound.set_visible(screen);
@@ -1626,12 +1689,17 @@ fn make_source_page(status: gtk::Box) -> Page {
 
     let reason = note_label(None);
     let next = note_label(None);
+    let retry = gtk::Button::with_label(text!("linux.copy.tryagain"));
+    retry.add_css_class("sol-action");
+    retry.set_halign(gtk::Align::Start);
+    retry.set_visible(false);
     let breath = note_label(None);
     breath.set_visible(true);
     let sound = note_label(Some(screen_sound()));
     sound.add_css_class("sol-quiet");
     page_box.append(&reason);
     page_box.append(&next);
+    page_box.append(&retry);
     page_box.append(&breath);
     page_box.append(&sound);
 
@@ -1689,6 +1757,8 @@ fn make_source_page(status: gtk::Box) -> Page {
         switch,
         reason,
         next,
+        retry,
+        retry_inflight: Rc::new(Cell::new(None)),
         breath,
         sound,
         so_far_row,
@@ -1817,19 +1887,106 @@ fn page_breath(id: TileId) -> &'static str {
     }
 }
 
-fn page_reason(
-    id: TileId,
-    word: StateWord,
-    view: &View,
-) -> (Option<&'static str>, Option<&'static str>) {
+fn screen_still_on_note(activity_running: bool) -> String {
+    if activity_running {
+        text!("linux.window.screenaudioandactivitystillon").to_owned()
+    } else {
+        text!("linux.window.screenaudiostillon").to_owned()
+    }
+}
+
+fn screen_retry_visible(word: StateWord, view: &View) -> bool {
+    if word != StateWord::NeedsAttention || view.service != ServiceReading::Answering {
+        return false;
+    }
+    matches!(
+        view.screen_start.as_ref().map(|doc| doc.state.as_str()),
+        Some("missing_elements" | "portal_declined" | "start_failed")
+    ) || matches!(
+        view.screen_sub,
+        ScreenSub::MissingPlugin | ScreenSub::SharingNotAllowed | ScreenSub::StartFailed
+    )
+}
+
+fn page_reason(id: TileId, word: StateWord, view: &View) -> (Option<String>, Option<String>) {
+    if id == TileId::Screen
+        && word == StateWord::Checking
+        && view.service == ServiceReading::Answering
+    {
+        if view
+            .screen_start
+            .as_ref()
+            .is_some_and(|doc| doc.state == "retrying")
+        {
+            return (
+                Some(text!("linux.window.screenretrying").to_owned()),
+                Some(screen_still_on_note(view.activity_running)),
+            );
+        }
+        return (None, None);
+    }
     if word != StateWord::NeedsAttention {
         return (None, None);
     }
     match id {
-        TileId::Screen => (Some(screen_waiting()), None),
-        TileId::Terminal => (view.terminal_reason, None),
-        TileId::Browsers => (view.browsers_reason, None),
-        TileId::Obsidian => (Some(solstone_linux::copy::obsidian_attention_vault()), None),
+        TileId::Screen => {
+            let Some(doc) = view.screen_start.as_ref() else {
+                let reason = match view.screen_sub {
+                    ScreenSub::DesktopUnreachable => text!("linux.window.screenunreachable"),
+                    ScreenSub::LoginUnavailable => text!("linux.window.screenloginunavailable"),
+                    ScreenSub::StartFailed => text!("linux.window.screenstartfailed"),
+                    _ => screen_waiting(),
+                };
+                let next = matches!(view.screen_sub, ScreenSub::StartFailed)
+                    .then(|| screen_still_on_note(view.activity_running));
+                return (Some(reason.to_owned()), next);
+            };
+            match doc.state.as_str() {
+                "missing_elements" => {
+                    let elements = doc.missing_elements.join(", ");
+                    let reason = if elements.is_empty() {
+                        text!("linux.window.screenstartfailed").to_owned()
+                    } else if doc.pipewire {
+                        message!(
+                            "linux.window.screenmissingelements",
+                            "elements" => elements.as_str()
+                        )
+                    } else {
+                        message!(
+                            "linux.window.screenmissingelementsx11",
+                            "elements" => elements.as_str()
+                        )
+                    };
+                    (
+                        Some(reason),
+                        Some(screen_still_on_note(view.activity_running)),
+                    )
+                }
+                "portal_declined" => (
+                    Some(text!("linux.window.screensharingnotallowed").to_owned()),
+                    Some(screen_still_on_note(view.activity_running)),
+                ),
+                "start_failed" => (
+                    Some(text!("linux.window.screenstartfailed").to_owned()),
+                    Some(screen_still_on_note(view.activity_running)),
+                ),
+                "desktop_unreachable" => (
+                    Some(text!("linux.window.screenunreachable").to_owned()),
+                    None,
+                ),
+                "login_unavailable" => (
+                    Some(text!("linux.window.screenloginunavailable").to_owned()),
+                    None,
+                ),
+                _ => (Some(screen_waiting().to_owned()), None),
+            }
+        }
+        TileId::Terminal => (view.terminal_reason.map(str::to_owned), None),
+        TileId::Browsers => (view.browsers_reason.map(str::to_owned), None),
+        TileId::Obsidian => (
+            Some(solstone_linux::copy::obsidian_attention_vault().to_owned()),
+            None,
+        ),
         TileId::Screenshots | TileId::Import => (None, None),
     }
 }
@@ -2471,6 +2628,54 @@ fn place_shelf_button(body: &gtk::Box, button: &gtk::Button) {
     overlay.add_overlay(button);
 }
 
+fn wire_screen_retry(
+    ui: &Rc<Ui>,
+    view: &Rc<RefCell<View>>,
+    seen: &Rc<Cell<bool>>,
+    daemon: &Rc<Cell<Option<bool>>>,
+    selected: &Rc<Cell<Option<TileId>>>,
+) {
+    let ui_click = Rc::clone(ui);
+    let view = Rc::clone(view);
+    let seen = Rc::clone(seen);
+    let daemon = Rc::clone(daemon);
+    let selected = Rc::clone(selected);
+    ui.page.retry.connect_clicked(move |_| {
+        if ui_click.page.retry_inflight.get().is_some() {
+            return;
+        }
+        let before = current_snap().screen_retry_seq;
+        ui_click.page.retry_inflight.set(Some(before));
+        ui_click.page.retry.set_sensitive(false);
+        ui_click.page.retry.set_label(text!("linux.window.trying"));
+        let ui = Rc::clone(&ui_click);
+        let view = Rc::clone(&view);
+        let seen = Rc::clone(&seen);
+        let daemon = Rc::clone(&daemon);
+        let selected = Rc::clone(&selected);
+        glib::MainContext::default().spawn_local(async move {
+            let sent = match solstone_linux::dbus_client::ControlClient::session().await {
+                Ok(client) => client.retry_screen().await.is_ok(),
+                Err(_) => false,
+            };
+            if !sent {
+                ui.page.retry_inflight.set(None);
+                refresh(&ui, &view, &seen, &daemon, &selected);
+                return;
+            }
+            if let Ok(mut next) = fetch_service().await {
+                next.kept = kept_label().await;
+                SERVICE.with(|slot| {
+                    if let Some(snap) = slot.borrow().as_ref() {
+                        *snap.borrow_mut() = next;
+                    }
+                });
+                refresh(&ui, &view, &seen, &daemon, &selected);
+            }
+        });
+    });
+}
+
 fn wire_switch(
     switch: Option<&gtk::Switch>,
     which: OwnerSwitch,
@@ -3083,7 +3288,8 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
     let loaded = config::load_config(config::ConfigPaths::default());
     let config = loaded.config;
     let intake = source_intake::read_rows(&config.state_dir().join(source_intake::FILENAME));
-    let snap = current_snap();
+    let mut snap = current_snap();
+    apply_screen_fixture(&mut snap);
     let paused = pause_left(&config, &snap);
     let app_paused = paused.is_some();
     let activity_running = if snap.reading == ServiceReading::Answering {
@@ -3139,6 +3345,9 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
         terminal_on: config.terminal,
         screen: hold_pause_word(screen.word, app_paused),
         screen_sub: screen.sub,
+        screen_start: snap.screen_start,
+        screen_retry_seq: snap.screen_retry_seq,
+        activity_running,
         terminal: hold_pause_word(terminal, app_paused),
         terminal_reason,
         browsers: hold_pause_word(browsers, app_paused),
@@ -3196,7 +3405,11 @@ fn screen_now(
     let status = if app_paused {
         Some(TrayStatus::Paused)
     } else if snap.reading == ServiceReading::Answering {
-        tray_from_capture(&snap.capture, snap.capture_attention)
+        tray_from_capture(
+            &snap.capture,
+            snap.capture_attention,
+            snap.screen_start.as_ref(),
+        )
     } else {
         None
     };
@@ -3219,16 +3432,115 @@ fn screen_now(
     )
 }
 
-fn tray_from_capture(capture: &str, attention: bool) -> Option<TrayStatus> {
+fn tray_from_capture(
+    capture: &str,
+    attention: bool,
+    screen_start: Option<&ScreenStartDocument>,
+) -> Option<TrayStatus> {
     match capture {
         "recording" => Some(TrayStatus::Recording),
-        "idle" => Some(TrayStatus::Idle),
+        "idle" => match screen_start.map(|doc| doc.state.as_str()) {
+            Some("retrying") => Some(TrayStatus::ScreenRetrying),
+            Some("missing_elements") => Some(TrayStatus::ScreenAttention(
+                ScreenStartFault::MissingElements,
+            )),
+            Some("portal_declined") => Some(TrayStatus::ScreenAttention(
+                ScreenStartFault::PortalDeclined,
+            )),
+            Some("start_failed") => {
+                Some(TrayStatus::ScreenAttention(ScreenStartFault::StartFailed))
+            }
+            _ if attention => Some(TrayStatus::ScreenAttention(ScreenStartFault::StartFailed)),
+            _ => Some(TrayStatus::Idle),
+        },
         "paused" => Some(TrayStatus::Paused),
         "stopped" => Some(TrayStatus::Stopped),
-        "waiting" if attention => Some(TrayStatus::Waiting(SessionPresence::Unreachable)),
+        "waiting" if attention => match screen_start.map(|doc| doc.state.as_str()) {
+            Some("login_unavailable") => {
+                Some(TrayStatus::Waiting(SessionPresence::LoginUnavailable))
+            }
+            _ => Some(TrayStatus::Waiting(SessionPresence::Unreachable)),
+        },
         "waiting" => Some(TrayStatus::Waiting(SessionPresence::NoDesktop)),
         _ => None,
     }
+}
+
+/// A frame capture can show a screen start-failure state without a failing live
+/// backend. A normal launch leaves the live reading alone.
+fn apply_screen_fixture(snap: &mut ServiceSnap) {
+    let framed = std::env::var("SOLSTONE_FRAME_PNG")
+        .ok()
+        .is_some_and(|value| !value.is_empty());
+    if !framed {
+        return;
+    }
+    let Ok(raw) = std::env::var("SOLSTONE_SCREEN_STATE") else {
+        return;
+    };
+    let (capture, attention, screen_start) = match raw.as_str() {
+        "on" => ("recording", false, None),
+        "retrying" => (
+            "idle",
+            false,
+            Some(ScreenStartDocument {
+                state: "retrying".into(),
+                missing_elements: Vec::new(),
+                pipewire: false,
+            }),
+        ),
+        "missing_wayland" => (
+            "idle",
+            true,
+            Some(ScreenStartDocument {
+                state: "missing_elements".into(),
+                missing_elements: vec!["pipewiresrc".into()],
+                pipewire: true,
+            }),
+        ),
+        "missing_x11" => (
+            "idle",
+            true,
+            Some(ScreenStartDocument {
+                state: "missing_elements".into(),
+                missing_elements: vec!["ximagesrc".into()],
+                pipewire: false,
+            }),
+        ),
+        "portal_declined" => (
+            "idle",
+            true,
+            Some(ScreenStartDocument {
+                state: "portal_declined".into(),
+                missing_elements: Vec::new(),
+                pipewire: false,
+            }),
+        ),
+        "start_failed" => (
+            "idle",
+            true,
+            Some(ScreenStartDocument {
+                state: "start_failed".into(),
+                missing_elements: Vec::new(),
+                pipewire: false,
+            }),
+        ),
+        "desktop_unreachable" => (
+            "waiting",
+            true,
+            Some(ScreenStartDocument {
+                state: "desktop_unreachable".into(),
+                missing_elements: Vec::new(),
+                pipewire: false,
+            }),
+        ),
+        _ => return,
+    };
+    snap.reading = ServiceReading::Answering;
+    snap.capture = capture.into();
+    snap.capture_attention = attention;
+    snap.screen_start = screen_start;
+    snap.obsidian = Some(solstone_linux::obsidian::State::Off);
 }
 
 fn obsidian_word(snap: &ServiceSnap) -> StateWord {
@@ -4544,6 +4856,8 @@ fn apply_document(
         reading: ServiceReading::Answering,
         capture: doc.capture,
         capture_attention: doc.capture_attention,
+        screen_start: doc.screen_start,
+        screen_retry_seq: doc.screen_retry_seq,
         activity_source: doc.settings.activity_source,
         activity_through_pause: doc.settings.activity_through_pause,
         durable: doc.durable,
@@ -4831,5 +5145,57 @@ mod tests {
         let (so_far, last) = page_facts(TileId::Import, &rows);
         assert!(so_far.as_deref().is_some_and(|s| s.starts_with("3 items")));
         assert!(last.is_some());
+    }
+
+    #[test]
+    fn screen_capture_decoding_maps_retrying_and_attention_states() {
+        assert_eq!(
+            tray_from_capture("idle", false, None),
+            Some(TrayStatus::Idle)
+        );
+        assert_eq!(
+            tray_from_capture("idle", true, None),
+            Some(TrayStatus::ScreenAttention(ScreenStartFault::StartFailed))
+        );
+        let retrying = ScreenStartDocument {
+            state: "retrying".into(),
+            missing_elements: Vec::new(),
+            pipewire: false,
+        };
+        assert_eq!(
+            tray_from_capture("idle", false, Some(&retrying)),
+            Some(TrayStatus::ScreenRetrying)
+        );
+        let missing = ScreenStartDocument {
+            state: "missing_elements".into(),
+            missing_elements: vec!["pipewiresrc".into()],
+            pipewire: true,
+        };
+        assert_eq!(
+            tray_from_capture("idle", true, Some(&missing)),
+            Some(TrayStatus::ScreenAttention(
+                ScreenStartFault::MissingElements
+            ))
+        );
+        let declined = ScreenStartDocument {
+            state: "portal_declined".into(),
+            missing_elements: Vec::new(),
+            pipewire: false,
+        };
+        assert_eq!(
+            tray_from_capture("idle", true, Some(&declined)),
+            Some(TrayStatus::ScreenAttention(
+                ScreenStartFault::PortalDeclined
+            ))
+        );
+        let login = ScreenStartDocument {
+            state: "login_unavailable".into(),
+            missing_elements: Vec::new(),
+            pipewire: false,
+        };
+        assert_eq!(
+            tray_from_capture("waiting", true, Some(&login)),
+            Some(TrayStatus::Waiting(SessionPresence::LoginUnavailable))
+        );
     }
 }

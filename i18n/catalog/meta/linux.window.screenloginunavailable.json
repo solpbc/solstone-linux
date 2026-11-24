@@ -1,0 +1,17 @@
+{
+  "description": "Reason line on the screen page when the app cannot check which desktop session is in front.",
+  "context": "Shown beneath needs attention on the screen detail page.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 60,
+  "source_revision": "19f0aa17ff2a4a40a28a6afe98a1b501b5c0ca6a434593910b127d30ff0d458d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

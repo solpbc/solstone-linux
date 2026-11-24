@@ -1,0 +1,17 @@
+{
+  "description": "Reason line on the screen page when screen sharing was not allowed after retrying.",
+  "context": "Shown beneath needs attention on the screen detail page above the try again button.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 100,
+  "source_revision": "1722089f6508dcbc5933cc9110d87aed3ec226de9cf15593b40c1e632a86a721",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

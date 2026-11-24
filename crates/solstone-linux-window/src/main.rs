@@ -75,8 +75,14 @@ fn main() {
     app.connect_activate(ui::build_ui);
     app.connect_command_line(|app, command_line| {
         app.activate();
-        if command_line
-            .arguments()
+        let args = command_line.arguments();
+        if args
+            .iter()
+            .skip(1)
+            .any(|arg| arg.to_str() == Some(solstone_linux::cli::WINDOW_SCREEN_ARG))
+        {
+            ui::show_screen(app);
+        } else if args
             .iter()
             .skip(1)
             .any(|arg| arg.to_str() == Some(solstone_linux::cli::WINDOW_SETTINGS_ARG))
