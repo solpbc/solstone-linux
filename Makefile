@@ -187,9 +187,12 @@ check-rust-release-manifest: rust-preflight
 shellcheck:
 	shellcheck $(SHELLCHECK_SCRIPTS)
 
-.PHONY: check-i18n
+.PHONY: check-i18n i18n-dev
 check-i18n:
 	python3 scripts/i18n.py --check
+
+i18n-dev:
+	python3 scripts/i18n.py --channel development
 
 ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-audit-signed-packet check-i18n
 	@echo "Evidence class: host evidence (format, lint, tests, and offline dependency policy)."

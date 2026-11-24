@@ -109,20 +109,23 @@ def metadata(ir):
     MANIFEST.write_text(manifest)
 
 
-def regenerate():
+def regenerate(channel="production"):
     compiler = str(Path(os.environ["I18N_COMPILER"]).resolve())
     pin = json.loads(PIN.read_text())
+    extra = ["--fallback-stale"] if channel == "development" else []
     with tempfile.TemporaryDirectory() as directory:
         ir = Path(directory) / "catalog.json"
         subprocess.run(
-            [compiler, "emit", str(CATALOG), "--channel", "production", "--out", str(ir)], check=True
+            [compiler, "emit", str(CATALOG), "--channel", channel, *extra, "--out", str(ir)], check=True
         )
         data = json.loads(ir.read_text())
-        if data["locales"] != pin["locales"]:
+        if channel == "production" and data["locales"] != pin["locales"]:
             raise SystemExit("Catalog locales differ from the compiler pin")
+        if channel == "development" and not set(pin["locales"]).issubset(set(data["locales"])):
+            raise SystemExit("Development catalog is missing required production locales")
         targets = Path(directory) / "targets"
         subprocess.run(
-            [compiler, "targets", str(CATALOG), "--channel", "production", "--target", "rust",
+            [compiler, "targets", str(CATALOG), "--channel", channel, *extra, "--target", "rust",
              "--out", str(targets)], check=True
         )
         # Keep generated Rust in the normal module tree scanned by the unsafe inventory.
@@ -137,13 +140,16 @@ def regenerate():
             ", ".join(json.dumps(tag) for tag in data["locales"]) + "];\n"
         )
         metadata(data)
-    SNAPSHOT.write_text(json.dumps(hashes(), indent=2, sort_keys=True) + "\n")
+    if channel == "production":
+        SNAPSHOT.write_text(json.dumps(hashes(), indent=2, sort_keys=True) + "\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
-    if parser.parse_args().check:
+    parser.add_argument("--channel", default="production", choices=["production", "development"])
+    args = parser.parse_args()
+    if args.check:
         expected = json.loads(SNAPSHOT.read_text())
         actual = hashes()
         changed = [key for key in sorted(expected.keys() | actual.keys())
@@ -153,7 +159,7 @@ def main():
     else:
         if not os.environ.get("I18N_COMPILER"):
             parser.error("Set I18N_COMPILER to the pinned compiler")
-        regenerate()
+        regenerate(args.channel)
 
 
 if __name__ == "__main__":
