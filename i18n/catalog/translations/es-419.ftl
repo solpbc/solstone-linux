@@ -260,9 +260,9 @@ linux.copy.audio = audio
 
 linux.copy.audiointakecancontinue = la recepción de audio puede continuar.
 
-linux.copy.availablelogsareshownbelowcheckthenotesforg = los registros disponibles se muestran abajo. revisa las notas por si hay huecos antes de guardar una copia.
+linux.copy.availablelogsareshownbelowcheckthenotesforg = los registros disponibles se muestran abajo. revisa las notas en busca de huecos antes de guardar una copia.
 
-linux.copy.cancelpairing = desvincular
+linux.copy.cancelpairing = cancelar la vinculación
 
 linux.copy.checkingstatus = revisando el estado…
 
@@ -308,9 +308,9 @@ linux.copy.couldntopenyourbrowsertryagainoropenyourjo = no se pudo abrir tu nave
 
 linux.copy.couldntpauseintaketryagain = no se pudo pausar la recepción. vuelve a intentarlo.
 
-linux.copy.couldntreadthelogfilestryagain = no se pudo leer los archivos de registro. vuelve a intentarlo.
+linux.copy.couldntreadthelogfilestryagain = no se pudieron leer los archivos de registro. vuelve a intentarlo.
 
-linux.copy.couldntreadthelogstryagain = no se pudo leer los registros. vuelve a intentarlo.
+linux.copy.couldntreadthelogstryagain = no se pudieron leer los registros. vuelve a intentarlo.
 
 linux.copy.couldntreadthesolstoneappsstatuscheckwhethe = no se pudo leer el estado de la app de solstone. revisa si se está ejecutando y luego vuelve a intentarlo.
 
@@ -352,7 +352,7 @@ linux.copy.d8 = no se pudo encontrar una carpeta Screenshots en esta computadora
 
 linux.copy.d8pickertitle = elegir la carpeta donde se guardan tus capturas de pantalla
 
-linux.copy.desktopactivity = actividad del escritorio
+linux.copy.desktopactivity = actividad de escritorio
 
 linux.copy.desktopactivityisonwheneverthesolstoneapptak = la actividad del escritorio está activada siempre que la app de solstone recibe tu pantalla, y al pausar se pausan ambas. la app de solstone recibe la aplicación, el título de la ventana, las direcciones web y el tiempo activo o inactivo que compartes con ella, y todo va a tu diario.
 
@@ -446,11 +446,11 @@ linux.copy.not = no
 
 linux.copy.nothingthiscomputerhaskept = nada de lo que esta computadora ha guardado llegó a ese diario por este enlace. puede que hayas pegado el enlace equivocado, o que algo no esté bien. obtén un nuevo enlace de vinculación de tu diario y vuelve a intentarlo, o escribe a { $literal1 } y te ayudamos.
 
-linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo = nada de lo que está en espera entra a tu diario hasta que lo hagas.
+linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo = nada en espera entra a tu diario hasta que lo hagas.
 
 linux.copy.notpaired = sin vincular
 
-linux.copy.notreachingyourjournalrightnow = no se conecta con tu diario en este momento
+linux.copy.notreachingyourjournalrightnow = ahora no se conecta con tu diario
 
 linux.copy.notthisdevice = no está en este dispositivo
 
@@ -524,7 +524,7 @@ linux.copy.readrecentlogs = leer registros recientes
 
 linux.copy.readsettingsagain = volver a leer la configuración
 
-linux.copy.readthelogsbelowthenchoosewhethertosaveaco = lee los registros de abajo y luego elige si guardas una copia.
+linux.copy.readthelogsbelowthenchoosewhethertosaveaco = lee los registros de abajo y luego elige si guardar una copia.
 
 linux.copy.readthesolstoneappsrecentlogsbeforesavinga = lee los registros recientes de la app de solstone antes de guardar una copia para un reporte de soporte. no se envía nada desde aquí.
 
@@ -546,17 +546,17 @@ linux.copy.s10counting = revisando…
 
 linux.copy.s10today = empezar desde hoy
 
-linux.copy.s11 = elige desde cuándo empezar y luego recíbelas.
+linux.copy.s11 = elige qué tan atrás empezar y luego tráelas.
 
-linux.copy.s12 = no se pudo contar tus capturas de pantalla.
+linux.copy.s12 = no se pudieron contar tus capturas de pantalla.
 
 linux.copy.s14 = una captura de pantalla que ya está en tu diario se queda ahí si la eliminas de la carpeta.
 
 linux.copy.s15 = lo que ya está en tu diario se queda cuando pausas o desactivas esto.
 
-linux.copy.s16computer = las capturas de pantalla que tomas mientras está en pausa no se reciben.
+linux.copy.s16computer = las capturas de pantalla que tomas mientras está en pausa no entran.
 
-linux.copy.s17 = las capturas de pantalla que ya están en tu diario no se vuelven a recibir.
+linux.copy.s17 = las capturas de pantalla que ya están en tu diario no se vuelven a traer.
 
 linux.copy.s19 = en espera de ir a tu diario
 
@@ -564,11 +564,11 @@ linux.copy.s21 = en espera de una actualización del diario. tus capturas de pan
 
 linux.copy.s22 = carpeta
 
-linux.copy.s23 = solo se recibe lo que la app de solstone puede distinguir como captura de pantalla.
+linux.copy.s23 = solo entra lo que la app de solstone puede reconocer como captura de pantalla.
 
 linux.copy.s7 = de antes de hoy
 
-linux.copy.s9 = verás cuántas capturas de pantalla hay antes de que se reciba alguna.
+linux.copy.s9 = verás cuántas capturas de pantalla hay antes de que entre alguna.
 
 linux.copy.saveacopy = guardar una copia…
 
@@ -612,15 +612,15 @@ linux.copy.settingsactivityonlyhelp = solo actividad del escritorio, con la pant
 
 linux.copy.settingssaved = configuración guardada.
 
-linux.copy.solstoneappcantread = la app de solstone no puede leer esta bóveda. revisa que su carpeta esté ahí y que la unidad en la que está esté conectada. no cambia nada en tu diario mientras esté fuera de alcance.
+linux.copy.solstoneappcantread = la app de solstone no puede leer esta bóveda. revisa que su carpeta esté ahí y que la unidad donde está esté conectada. nada cambia en tu diario mientras está fuera de alcance.
 
 linux.copy.solstoneappcouldntsave = no se pudo guardar la posición de la app de solstone para esta bóveda. revisa que esta computadora tenga espacio libre.
 
 linux.copy.solstoneappdidntfind = la app de solstone no encontró una bóveda en esta computadora. elige su carpeta en su lugar.
 
-linux.copy.solstoneapptakesnotesone = la app de solstone recibe las notas de una bóveda en esta computadora. todas van a tu diario, y luego cada una a medida que cambia. tu bóveda se queda como está.
+linux.copy.solstoneapptakesnotesone = la app de solstone recibe las notas de una bóveda en esta computadora. todas van a tu diario, y luego cada una cuando cambia. tu bóveda se queda como está.
 
-linux.copy.somenotescouldntgo = no se pudo llevar algunas notas a tu diario. la app de solstone vuelve a intentarlas la próxima vez que se inicia.
+linux.copy.somenotescouldntgo = algunas notas no pudieron ir a tu diario. la app de solstone las intenta de nuevo la próxima vez que se inicia.
 
 linux.copy.somethingansweredinsteadjournal = algo respondió en lugar de tu diario
 
@@ -698,7 +698,7 @@ linux.copy.vault = bóveda
 
 linux.copy.vaultsthiscomputer = bóvedas en esta computadora
 
-linux.copy.vaultwiththisnameis = una bóveda con este nombre ya está en tu diario
+linux.copy.vaultwiththisnameis = ya hay una bóveda con este nombre en tu diario
 
 linux.copy.versionvalue = versión de la app: { $value }
 
@@ -736,7 +736,7 @@ linux.copy.yourjournalsmarkisconfirmedbutthesolstoneap = la marca de tu diario e
 
 linux.copy.yourjournalsmarkisconfirmedbutthesolstoneap2 = la marca de tu diario está confirmada, pero la app de solstone necesita atención. revisa los detalles y luego vuelve a intentarlo.
 
-linux.copy.yourjournalsmarkunavailablerightnow = la marca de tu diario, no disponible en este momento
+linux.copy.yourjournalsmarkunavailablerightnow = la marca de tu diario, no disponible ahora
 
 linux.copy.yoursettingsaresavedbutthesolstoneappcouldn = tu configuración está guardada, pero no se pudo reiniciar la app de solstone. vuelve a intentarlo.
 
@@ -1056,7 +1056,7 @@ linux.import.delivered = en tu diario.
 
 linux.import.expired = venció
 
-linux.import.explanation = agrega cualquier archivo que elijas aquí o sueltes en esta ventana. tu diario determina qué es.
+linux.import.explanation = agrega cualquier archivo que elijas aquí o sueltes en esta ventana. tu diario averigua qué es.
 
 linux.import.explanationnodrop = agrega cualquier archivo que elijas aquí. tu diario determina qué es.
 
@@ -1066,7 +1066,7 @@ linux.import.filemissing = falta la copia en este dispositivo
 
 linux.import.filenotread = no se pudo leer esto. agrégalo de nuevo
 
-linux.import.filetoolarge = es más grande de lo que tu diario acepta
+linux.import.filetoolarge = es más grande de lo que tu diario recibe
 
 linux.import.held = por ahora no van a tu diario. cada uno dice por qué.
 
@@ -1076,7 +1076,7 @@ linux.import.journalrefusal = tu diario no pudo aceptar esto.
 
 linux.import.moreimports = más importaciones
 
-linux.import.moreimportssub = guías, opciones e historial de importación en tu diario
+linux.import.moreimportssub = guías, opciones y el historial de importación en tu diario
 
 linux.import.namedrefusal = { $name }: { $reason }
 
@@ -1108,7 +1108,7 @@ linux.import.removereadytoreview = esto quita la copia de este dispositivo. la c
 
 linux.import.reviewdetail = se guardó en tu diario. previsualiza y confirma para empezar.
 
-linux.import.reviewdetailhour = se guardó en tu diario. revisa dentro de una hora, antes de que tu diario quite la copia en espera.
+linux.import.reviewdetailhour = se guardó en tu diario. revisa en menos de una hora, antes de que tu diario quite la copia en espera.
 
 linux.import.reviewexpireddetail = la copia en espera en tu diario venció. este dispositivo todavía guarda el archivo.
 
@@ -1176,7 +1176,7 @@ linux.journalmark.journaljournal = diario: tu diario
 
 linux.journalmark.journalnotpaired = diario: sin vincular
 
-linux.journalmark.journalsmarkunavailableright = la marca de tu diario: no disponible en este momento
+linux.journalmark.journalsmarkunavailableright = la marca de tu diario: no disponible ahora
 
 linux.journalmark.markwordsyougavedon = las palabras de la marca que diste no coinciden con la marca del diario, así que esta computadora no está vinculada. revisa las palabras, obtén un nuevo enlace de vinculación de tu diario y vincula de nuevo.
 
@@ -1300,7 +1300,7 @@ linux.panel.pausedforxminutesrunsolstonelinuxresumetoe = en pausa por { $minutes
 
 linux.panel.pausedrunsolstonelinuxresumewhenyouwantitba = en pausa. ejecuta { $literal1 } resume cuando quieras que vuelva.
 
-linux.panel.setitup = configurar
+linux.panel.setitup = configurarlo
 
 linux.panel.solstoneapp = app de solstone
 
@@ -1426,11 +1426,11 @@ linux.shared.pair.yourjournalsmarkisalreadyconfirmednothingto = la marca de tu d
 
 linux.shared.tray.offline = sin conexión
 
-linux.sharedsources.also = también activado
+linux.sharedsources.also = también en
 
 linux.sharedsources.cli = Obsidian: { $state }
 
-linux.sharedsources.many = desde { $count } dispositivos más
+linux.sharedsources.many = de otros { $count } dispositivos
 
 linux.sharedsources.one = desde otro dispositivo
 
@@ -1508,7 +1508,7 @@ linux.shell.month.september = septiembre
 
 linux.shell.monthday = { $month } { $day }
 
-linux.shell.monthdayyear = { $month } { $day }, { $year }
+linux.shell.monthdayyear = { $day } { $month } { $year }
 
 linux.shell.morning = buenos días
 
@@ -1768,7 +1768,7 @@ linux.window.brightharbor = bright · harbor
 
 linux.window.browsers = navegadores
 
-linux.window.browsersbreath = en los sitios que permites, la extensión de solstone recibe el texto de la página y su disposición aproximada, y todo pasa a tu diario.
+linux.window.browsersbreath = en los sitios que permites, la extensión de solstone recibe el texto y la disposición aproximada de la página, y todo va a tu diario.
 
 linux.window.browsersgap = las páginas llegan desde la extensión de solstone. aquí no hay un interruptor para eso.
 
@@ -1794,7 +1794,7 @@ linux.window.files = archivos
 
 linux.window.foregroundtitleurlidle = { $route }; primer plano { $foreground }; título { $title }; url { $url }; en reposo { $idle }
 
-linux.window.goesalongwithit = va junto con eso
+linux.window.goesalongwithit = va junto con esto
 
 linux.window.help = ayuda
 
