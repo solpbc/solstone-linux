@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- the solstone app now asks linux not to put your computer to sleep while an import is sending to your journal. if your computer goes to sleep anyway, the app pauses sending and starts again once your computer wakes.
+
 ## [2.0.52] - 2026-11-24
 
 ### Fixed

@@ -60,6 +60,7 @@ pub mod session_env;
 pub mod shared_sources;
 mod shell;
 pub mod shell_model;
+mod sleep_inhibit;
 pub mod source_intake;
 pub mod sources;
 pub mod streams;

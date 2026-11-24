@@ -384,10 +384,12 @@ fn import_custody(
     client: &Arc<UploadClient>,
     trigger: SyncTrigger,
     facts: Arc<Mutex<SyncFacts>>,
+    sleep_inhibit: crate::sleep_inhibit::SleepInhibit,
 ) -> crate::import::ImportHandle {
     let state_dir = config.state_dir();
     let imports = crate::import::ImportHandle::new(config.base_dir.join("import"), client, trigger)
         .with_state_dir(state_dir.clone())
+        .with_sleep_inhibit(sleep_inhibit)
         .with_status_sink(Arc::new(move |summary| {
             let mut facts = facts.lock().unwrap_or_else(|p| p.into_inner());
             if facts.imports.as_ref() == Some(&summary) {
@@ -439,6 +441,7 @@ impl SyncService {
             process_epoch,
             browser_custody,
             crate::terminal::TerminalSync::default(),
+            crate::sleep_inhibit::SleepInhibit::disabled(),
         )
     }
 
@@ -450,6 +453,7 @@ impl SyncService {
         process_epoch: Option<ProcessEpoch>,
         browser_custody: Option<Arc<Mutex<crate::browser::custody::Custody>>>,
         terminal: crate::terminal::TerminalSync,
+        sleep_inhibit: crate::sleep_inhibit::SleepInhibit,
     ) -> Self {
         let notify = Arc::new(Notify::new());
         let pending_trigger = Arc::new(AtomicBool::new(false));
@@ -519,6 +523,7 @@ impl SyncService {
                 pending_trigger: pending_trigger.clone(),
             },
             facts.clone(),
+            sleep_inhibit,
         );
         worker.imports = imports.clone();
         let task = tokio::spawn(async move { worker.run().await });
@@ -892,7 +897,17 @@ impl SyncWorker {
                 || self.clock.monotonic_seconds() - self.last_pass >= PASS_INTERVAL;
             if !pass_due {
                 if fresh_check || self.check_due() {
-                    self.check_journal().await;
+                    let err = self.check_journal().await;
+                    if fresh_check
+                        && err.is_none()
+                        && self.is_running()
+                        && self.imports.has_deliverable_items()
+                    {
+                        self.imports.deliver(&self.client, &self.running).await;
+                        if let Some(status) = self.imports.take_auth_status() {
+                            self.record_failure(Some(ErrorType::Auth), Some(i64::from(status)));
+                        }
+                    }
                 }
                 if self.imports.has_review_items()
                     && self.clock.monotonic_seconds() - self.last_review_reconcile
@@ -3216,6 +3231,7 @@ mod tests {
             &worker.client,
             SyncTrigger::default(),
             worker.facts.clone(),
+            crate::sleep_inhibit::SleepInhibit::disabled(),
         );
         let source = temp.path().join("note.txt");
         fs::write(&source, b"only an import, no capture segments").unwrap();
@@ -3299,6 +3315,130 @@ mod tests {
         assert!(worker.imports.document().rows.is_empty());
         assert!(!worker.imports.document().held);
         assert_eq!(sampler.facts().pending_confirmed, Some(0));
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn prepare_for_sleep_pauses_sync_service_import_and_wake_resumes_immediately() {
+        use crate::{
+            private_link::start_private_link_session,
+            private_link_test_peer::PrivateLinkPeer,
+            sleep_inhibit::{
+                LockKind, SleepInhibit,
+                tests::{FakeBackend, FakeOutcome},
+            },
+            test_support::MutableClock,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let peer = PrivateLinkPeer::start().await;
+        peer.set_route(
+            "/api/system/status",
+            200,
+            json!({"version":{"current":"2.0.52"}})
+                .to_string()
+                .into_bytes(),
+        );
+        let save_gate = Arc::new(AtomicBool::new(false));
+        peer.set_pending_route(
+            "/app/import/api/save",
+            200,
+            br#"{"status":"staged","path":"/imports/woke/note.txt","timestamp":"20261124_120000"}"#
+                .to_vec(),
+            save_gate.clone(),
+            false,
+        );
+        peer.set_route(
+            "/app/import/api/start",
+            200,
+            br#"{"status":"ok","task_id":"task","import_id":"20261124_120000"}"#.to_vec(),
+        );
+        let session =
+            start_private_link_session(&temp.path().join("link"), peer.credential(), "desktop")
+                .await
+                .unwrap();
+        let config = Config {
+            stream: "desktop".to_owned(),
+            base_dir: temp.path().join("data"),
+            config_dir: temp.path().join("config"),
+            ..Config::default()
+        };
+        let clock = Arc::new(MutableClock::new(1_800_000_000.0, 100.0));
+        let client = Arc::new(UploadClient::new(
+            &config,
+            session.capability(),
+            clock.clone(),
+        ));
+        let backend = FakeBackend::new(|_| FakeOutcome::Allow);
+        let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
+        let service = SyncService::start_with_sources(
+            config,
+            client,
+            clock,
+            ProcessEpoch::generate().ok(),
+            None,
+            crate::terminal::TerminalSync::default(),
+            sleep.clone(),
+        );
+        let episode = service.new_episode_handle();
+        let imports = service.import_handle();
+
+        let source = temp.path().join("wake-resume.txt");
+        fs::write(&source, b"resumes right after wake").unwrap();
+        assert!(imports.add_files(vec![source.display().to_string()]).await);
+
+        // Wait for SyncWorker to start sending /app/import/api/save with locks held.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !peer
+                .requests()
+                .iter()
+                .any(|r| r.path == "/app/import/api/save")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            backend.active_kinds(),
+            vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+        );
+
+        // Sleep arrives: delivery pauses cleanly and drops all locks before sleep proceeds.
+        sleep.on_prepare_for_sleep(true, || {}).await;
+        assert_eq!(backend.active_count(), 0);
+        assert_eq!(imports.document().rows.len(), 1);
+        assert_eq!(imports.document().rows[0].state, "waiting");
+
+        // Unblock /save and deliver PrepareForSleep(false) with the monotonic clock unchanged
+        // (matching Linux CLOCK_MONOTONIC pausing across suspend). SyncWorker must resume
+        // immediately via NewEpisode::begin() without waiting 60s for PASS_INTERVAL.
+        save_gate.store(true, Ordering::Release);
+        peer.set_route(
+            "/app/import/api/save",
+            200,
+            br#"{"status":"staged","path":"/imports/woke/note.txt","timestamp":"20261124_120000"}"#
+                .to_vec(),
+        );
+        sleep.on_prepare_for_sleep(false, || episode.begin()).await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !imports.document().rows.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(backend.active_count(), 0);
+        assert!(
+            peer.requests()
+                .iter()
+                .any(|r| r.path == "/app/import/api/start")
+        );
+
+        service.shutdown(Duration::from_secs(2)).await.unwrap();
+        let _ = session.shutdown().await;
+        peer.shutdown().await;
     }
 
     trait RequestLog {

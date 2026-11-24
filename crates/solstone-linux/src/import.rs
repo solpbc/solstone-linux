@@ -349,6 +349,7 @@ pub struct ImportHandle {
     adding: Arc<AtomicBool>,
     client: Weak<UploadClient>,
     trigger: Option<crate::sync::SyncTrigger>,
+    sleep: crate::sleep_inhibit::SleepInhibit,
     status_sink: Option<Arc<dyn Fn(ImportSummary) + Send + Sync>>,
     status_lock: Arc<Mutex<()>>,
     recent_lock: Arc<Mutex<()>>,
@@ -449,6 +450,22 @@ impl ImportHandle {
     pub(crate) fn with_state_dir(mut self, state_dir: PathBuf) -> Self {
         self.state_dir = Some(state_dir);
         self
+    }
+
+    pub(crate) fn with_sleep_inhibit(mut self, sleep: crate::sleep_inhibit::SleepInhibit) -> Self {
+        self.sleep = sleep;
+        self
+    }
+
+    pub(crate) fn has_deliverable_items(&self) -> bool {
+        if self.root.is_none() || self.sleep.is_sleeping() {
+            return false;
+        }
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        !state.failed
+            && state.items.values().any(|item| {
+                item.phase == Phase::Pending && !state.confirmations.contains_key(&item.id)
+            })
     }
 
     #[cfg(all(test, feature = "full-tests"))]
@@ -1469,7 +1486,11 @@ impl ImportHandle {
     }
 
     pub(crate) async fn reconcile_reviews(&self, client: &Arc<UploadClient>, running: &AtomicBool) {
-        if self.root.is_none() || !running.load(Ordering::Acquire) || client.is_revoked() {
+        if self.root.is_none()
+            || !running.load(Ordering::Acquire)
+            || self.sleep.is_sleeping()
+            || client.is_revoked()
+        {
             return;
         }
         let association = client.capture_association();
@@ -1521,6 +1542,7 @@ impl ImportHandle {
         };
         for (item_id, saved_import_id, saved_instance_id) in candidates {
             if !running.load(Ordering::Acquire)
+                || self.sleep.is_sleeping()
                 || client.is_revoked()
                 || !client.association_is_current(&association)
                 || self
@@ -1536,6 +1558,7 @@ impl ImportHandle {
                 client,
                 &association,
                 running,
+                &self.sleep,
                 capability.import_status(&saved_import_id),
             )
             .await
@@ -1637,7 +1660,11 @@ impl ImportHandle {
     }
 
     pub(crate) async fn deliver(&self, client: &Arc<UploadClient>, running: &AtomicBool) {
-        if self.root.is_none() || !running.load(Ordering::Acquire) || client.is_revoked() {
+        if self.root.is_none()
+            || !running.load(Ordering::Acquire)
+            || self.sleep.is_sleeping()
+            || client.is_revoked()
+        {
             return;
         }
         let association = client.capture_association();
@@ -1661,6 +1688,7 @@ impl ImportHandle {
         }
         self.reconcile_reviews(client, running).await;
         if !running.load(Ordering::Acquire)
+            || self.sleep.is_sleeping()
             || client.is_revoked()
             || !client.association_is_current(&association)
             || self
@@ -1705,8 +1733,14 @@ impl ImportHandle {
                 state.version = None;
             }
         }
-        let Some(version_result) =
-            guarded(client, &association, running, capability.system_status()).await
+        let Some(version_result) = guarded(
+            client,
+            &association,
+            running,
+            &self.sleep,
+            capability.system_status(),
+        )
+        .await
         else {
             return;
         };
@@ -1734,10 +1768,12 @@ impl ImportHandle {
             ids.rotate_left(split);
             ids
         };
+        let mut sleep_hold = None;
         let mut attempted = 0;
         for id in ids {
             if attempted >= BATCH
                 || !running.load(Ordering::Acquire)
+                || self.sleep.is_sleeping()
                 || client.is_revoked()
                 || !client.association_is_current(&association)
                 || self
@@ -1748,6 +1784,29 @@ impl ImportHandle {
                     .is_some()
             {
                 break;
+            }
+            let deliverable = {
+                let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                state.items.get(&id).is_some_and(|item| {
+                    !matches!(
+                        item.phase,
+                        Phase::Copying | Phase::Delivered | Phase::ReadyToReview
+                    ) && !state.busy.contains(&id)
+                        && !state.confirmations.contains_key(&id)
+                        && !item
+                            .refusal
+                            .as_ref()
+                            .is_some_and(|r| r.applies_to(Some(&binding), version.as_deref()))
+                })
+            };
+            if !deliverable {
+                continue;
+            }
+            if sleep_hold.is_none() {
+                match self.sleep.acquire().await {
+                    crate::sleep_inhibit::AcquireOutcome::Held(hold) => sleep_hold = Some(hold),
+                    crate::sleep_inhibit::AcquireOutcome::Sleeping => break,
+                }
             }
             let item = {
                 let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1792,6 +1851,7 @@ impl ImportHandle {
                 tracing::warn!(%error, "import retained after local storage failure");
             }
         }
+        drop(sleep_hold);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1867,8 +1927,14 @@ impl ImportHandle {
                     serde_json::to_string(&handoff.context).map_err(ioe)?,
                 );
             }
-            let Some(outcome) =
-                guarded(client, association, running, capability.import_save(form)).await
+            let Some(outcome) = guarded(
+                client,
+                association,
+                running,
+                &self.sleep,
+                capability.import_save(form),
+            )
+            .await
             else {
                 return Ok(());
             };
@@ -1894,7 +1960,10 @@ impl ImportHandle {
                 other => return self.retain_answer(item, other, binding, version, &instance_id),
             }
         }
-        if !client.association_is_current(association) || !running.load(Ordering::Acquire) {
+        if !client.association_is_current(association)
+            || !running.load(Ordering::Acquire)
+            || self.sleep.is_sleeping()
+        {
             return Ok(());
         }
         let saved = item
@@ -1906,6 +1975,7 @@ impl ImportHandle {
             client,
             association,
             running,
+            &self.sleep,
             capability.import_start(&saved.path, &saved.timestamp),
         )
         .await
@@ -2106,16 +2176,40 @@ async fn guarded<T>(
     client: &UploadClient,
     association: &CapturedAssociation,
     running: &AtomicBool,
+    sleep: &crate::sleep_inhibit::SleepInhibit,
     future: impl std::future::Future<Output = T>,
 ) -> Option<T> {
+    if !running.load(Ordering::Acquire)
+        || !client.association_is_current(association)
+        || sleep.is_sleeping()
+    {
+        return None;
+    }
+    let mut sleep_rx = sleep.subscribe();
+    if *sleep_rx.borrow_and_update() {
+        return None;
+    }
+    let mut watch_open = true;
     tokio::pin!(future);
     loop {
         tokio::select! {
             // A completed delivery answer may end custody even after the association retired.
             biased;
             answer = &mut future => return Some(answer),
+            changed = sleep_rx.changed(), if watch_open => {
+                match changed {
+                    Ok(()) if *sleep_rx.borrow_and_update() => return None,
+                    Ok(()) => {}
+                    Err(_) => watch_open = false,
+                }
+            }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if !running.load(Ordering::Acquire) || !client.association_is_current(association) { return None }
+                if !running.load(Ordering::Acquire)
+                    || !client.association_is_current(association)
+                    || sleep.is_sleeping()
+                {
+                    return None;
+                }
             }
         }
     }
@@ -3691,6 +3785,283 @@ mod tests {
             for id in &ids {
                 assert_eq!(h.handle.handoff_status(id)["state"], "delivered");
             }
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn active_delivery_holds_sleep_inhibitor_and_releases_on_every_exit() {
+            use crate::sleep_inhibit::{
+                LockKind, SleepInhibit,
+                tests::{FakeBackend, FakeOutcome},
+            };
+
+            let mut h = Harness::new().await;
+            let backend = FakeBackend::new(|_| FakeOutcome::Allow);
+            let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
+            h.handle = h.handle.with_sleep_inhibit(sleep);
+
+            // Idle pass with no items takes no inhibitor locks.
+            h.pass().await;
+            assert!(backend.called_kinds().is_empty());
+            assert_eq!(backend.active_count(), 0);
+
+            // Active delivery holds both delay and sleep:idle block while /save is in flight.
+            let _id = h.add(b"sleep hold bytes").await;
+            let gate = Arc::new(AtomicBool::new(false));
+            h.peer.set_pending_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/saved/note.txt","timestamp":"saved"}"#
+                    .to_vec(),
+                gate.clone(),
+                false,
+            );
+            let handle = h.handle.clone();
+            let client = h.client.clone();
+            let running = h.running.clone();
+            let task = tokio::spawn(async move {
+                handle.deliver(&client, &running).await;
+            });
+            h.wait_save().await;
+            assert_eq!(
+                backend.active_kinds(),
+                vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+            );
+            gate.store(true, Ordering::Release);
+            h.peer.notify_response_gates();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(backend.active_count(), 0);
+
+            // Transient failure and client refusal both release their locks on exit.
+            let _id2 = h.add(b"fail exit bytes").await;
+            h.peer
+                .set_route("/app/import/api/save", 500, br#"{"error":"busy"}"#.to_vec());
+            h.pass().await;
+            assert_eq!(backend.active_count(), 0);
+
+            h.peer.set_route(
+                "/app/import/api/save",
+                400,
+                br#"{"reason_code":"unsupported_type","error":"no"}"#.to_vec(),
+            );
+            h.pass().await;
+            assert_eq!(backend.active_count(), 0);
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn prepare_for_sleep_pauses_in_flight_delivery_releases_holds_and_resumes_on_wake() {
+            use crate::sleep_inhibit::{
+                LockKind, SleepInhibit,
+                tests::{FakeBackend, FakeOutcome},
+            };
+
+            let mut h = Harness::new().await;
+            let backend = FakeBackend::new(|_| FakeOutcome::Allow);
+            let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
+            h.handle = h.handle.with_sleep_inhibit(sleep.clone());
+
+            let id = h.add(b"pause across sleep").await;
+            let gate = Arc::new(AtomicBool::new(false));
+            h.peer.set_pending_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/saved/note.txt","timestamp":"saved"}"#
+                    .to_vec(),
+                gate.clone(),
+                false,
+            );
+            let handle = h.handle.clone();
+            let client = h.client.clone();
+            let running = h.running.clone();
+            let task = tokio::spawn(async move {
+                handle.deliver(&client, &running).await;
+            });
+            h.wait_save().await;
+            assert!(h.handle.document().sending);
+            assert_eq!(
+                backend.active_kinds(),
+                vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+            );
+
+            // Owner initiates sleep: delivery pauses, drops its locks, keeps item waiting.
+            sleep.on_prepare_for_sleep(true, || {}).await;
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(backend.active_count(), 0);
+            assert_eq!(h.starts(), 0);
+            let paused_doc = h.handle.document();
+            assert!(!paused_doc.sending);
+            assert_eq!(paused_doc.needs_attention, 0);
+            assert_eq!(paused_doc.rows.len(), 1);
+            assert_eq!(paused_doc.rows[0].state, "waiting");
+            assert!(
+                h.handle
+                    .root
+                    .as_ref()
+                    .unwrap()
+                    .join(&id)
+                    .join("payload")
+                    .exists()
+            );
+
+            // While sleeping, another pass neither sends nor acquires locks.
+            let saves_while_paused = h.saves();
+            let calls_while_paused = backend.called_kinds().len();
+            h.pass().await;
+            assert_eq!(h.saves(), saves_while_paused);
+            assert_eq!(backend.called_kinds().len(), calls_while_paused);
+
+            // Release the paused route and wake: delivery resumes cleanly and finishes.
+            gate.store(true, Ordering::Release);
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/saved/note.txt","timestamp":"saved"}"#
+                    .to_vec(),
+            );
+            let woke = Arc::new(AtomicBool::new(false));
+            let woke_flag = woke.clone();
+            sleep
+                .on_prepare_for_sleep(false, move || woke_flag.store(true, Ordering::Release))
+                .await;
+            assert!(woke.load(Ordering::Acquire));
+
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(h.starts(), 1);
+            assert_eq!(backend.active_count(), 0);
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn polkit_refusal_degrades_cleanly_during_real_import_delivery() {
+            use crate::sleep_inhibit::{
+                LockKind, SleepInhibit,
+                tests::{FakeBackend, FakeOutcome},
+            };
+
+            let mut h = Harness::new().await;
+            let fallback_backend = FakeBackend::new(|kind| match kind {
+                LockKind::SleepIdleBlock => FakeOutcome::Refuse("AccessDenied"),
+                _ => FakeOutcome::Allow,
+            });
+            h.handle = h.handle.with_sleep_inhibit(SleepInhibit::with_backend(
+                fallback_backend.clone(),
+                Duration::from_secs(1),
+            ));
+            let _ = h.add(b"fallback idle lock").await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(
+                fallback_backend.called_kinds(),
+                vec![
+                    LockKind::SleepDelay,
+                    LockKind::SleepIdleBlock,
+                    LockKind::IdleBlock,
+                ]
+            );
+            assert_eq!(fallback_backend.active_count(), 0);
+
+            let denied_backend = FakeBackend::new(|_| FakeOutcome::Refuse("AccessDenied"));
+            h.handle = h.handle.with_sleep_inhibit(SleepInhibit::with_backend(
+                denied_backend.clone(),
+                Duration::from_secs(1),
+            ));
+            let _ = h.add(b"all locks denied").await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(denied_backend.active_count(), 0);
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn live_logind_holds_during_import_delivery_and_releases_on_prepare_for_sleep() {
+            use crate::sleep_inhibit::{
+                SleepInhibit,
+                tests::{
+                    list_logind_inhibitors_for_pid, lock_real_logind_test,
+                    wait_logind_inhibitors_cleared,
+                },
+            };
+
+            let _guard = lock_real_logind_test().await;
+            let pid = std::process::id();
+            wait_logind_inhibitors_cleared(pid).await;
+
+            let mut h = Harness::new().await;
+            let sleep = SleepInhibit::logind();
+            h.handle = h.handle.with_sleep_inhibit(sleep.clone());
+
+            let _id = h.add(b"live logind delivery bytes").await;
+            let gate = Arc::new(AtomicBool::new(false));
+            h.peer.set_pending_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/saved/note.txt","timestamp":"saved"}"#
+                    .to_vec(),
+                gate.clone(),
+                false,
+            );
+            let handle = h.handle.clone();
+            let client = h.client.clone();
+            let running = h.running.clone();
+            let task = tokio::spawn(async move {
+                handle.deliver(&client, &running).await;
+            });
+            h.wait_save().await;
+
+            let during = list_logind_inhibitors_for_pid(pid).await;
+            println!("live import delivery logind inhibitors (pid {pid}): {during:?}");
+            assert!(
+                during
+                    .iter()
+                    .any(|(what, who, _, mode, _, _)| what == "sleep"
+                        && who == text!("linux.metadata.name")
+                        && mode == "delay"),
+                "expected sleep delay lock during live import delivery, got {during:?}"
+            );
+            assert!(
+                during.iter().any(|(what, who, _, mode, _, _)| {
+                    (what == "sleep:idle" || what == "idle")
+                        && who == text!("linux.metadata.name")
+                        && mode == "block"
+                }),
+                "expected sleep:idle or idle block lock during live import delivery, got {during:?}"
+            );
+
+            // Simulate PrepareForSleep(true) while /save is still gated: delivery pauses
+            // and logind clears every held lock immediately.
+            sleep.on_prepare_for_sleep(true, || {}).await;
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            wait_logind_inhibitors_cleared(pid).await;
+            let paused = h.handle.document();
+            assert_eq!(paused.rows.len(), 1);
+            assert_eq!(paused.rows[0].state, "waiting");
+
+            // Simulate PrepareForSleep(false) and let delivery complete cleanly.
+            gate.store(true, Ordering::Release);
+            h.peer.notify_response_gates();
+            h.peer.set_route(
+                "/app/import/api/save",
+                200,
+                br#"{"status":"staged","path":"/imports/saved/note.txt","timestamp":"saved"}"#
+                    .to_vec(),
+            );
+            sleep.on_prepare_for_sleep(false, || {}).await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(h.starts(), 1);
+            wait_logind_inhibitors_cleared(pid).await;
             h.close().await;
         }
     }

@@ -338,6 +338,7 @@ fn run_capture(
         .try_clone()
         .map_err(|error| ObserverError::Io(format!("linked state lock clone failed: {error}")))?;
     let (terminal_sync, terminal_activity) = crate::terminal::TerminalSync::new(config.terminal);
+    let sleep_inhibit = crate::sleep_inhibit::SleepInhibit::logind();
     let sync = SyncService::start_with_sources(
         config.clone(),
         Arc::clone(&upload),
@@ -345,12 +346,30 @@ fn run_capture(
         process_epoch.clone(),
         browser_custody.clone(),
         terminal_sync.clone(),
+        sleep_inhibit.clone(),
     );
     let sync_trigger = sync.trigger_handle();
     let sync_sampler = sync.sampler_handle();
     sync.trigger();
 
     runtime.spawn(crate::network_watch::watch(sync.new_episode_handle()));
+    struct SleepWatchGuard {
+        sleep: crate::sleep_inhibit::SleepInhibit,
+        task: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for SleepWatchGuard {
+        fn drop(&mut self) {
+            self.task.abort();
+            self.sleep.release_all();
+        }
+    }
+    let _sleep_watch_guard = SleepWatchGuard {
+        sleep: sleep_inhibit.clone(),
+        task: runtime.spawn(crate::sleep_inhibit::watch(
+            sleep_inhibit,
+            sync.new_episode_handle(),
+        )),
+    };
     // Read before anything subscribes to state: the browser host and the panel
     // must see a held pause from the first snapshot, not after initialization.
     let starting_pause = crate::pause_hold::StartingPause::read(
