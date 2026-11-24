@@ -621,7 +621,7 @@ linux.copy.somethingansweredinsteadjournal = etwas hat statt deines Journals gea
 
 linux.copy.somethingansweredthiscomputerat = unter { $address } hat etwas diesem Computer geantwortet, und es ist nicht das Journal, mit dem dieser Computer gekoppelt ist. das kann ein anderes Gerät sein, das diese Adresse jetzt nutzt, oder dein Journal, wenn seine Identität zurückgesetzt wurde. wenn die mark unter "was geantwortet hat" zu der passt, die dein Journal jetzt zeigt, kopple diesen Computer erneut.
 
-linux.copy.somethingansweredthiscomputerthrough = etwas hat diesem Computer über das Relay geantwortet, und es ist nicht das Journal, mit dem dieser Computer gekoppelt ist. das ist weniger sicher als eine direkte Verbindung.
+linux.copy.somethingansweredthiscomputerthrough = etwas hat diesem Computer über das Relay geantwortet, und es ist nicht das Journal, mit dem dieser Computer gekoppelt ist. das ist weniger gewiss als eine direkte Verbindung.
 
 linux.copy.starting = startet…
 
