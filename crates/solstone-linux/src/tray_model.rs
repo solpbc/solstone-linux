@@ -19,6 +19,8 @@ pub enum ScreenStartFault {
 pub enum TrayStatus {
     Recording,
     Idle,
+    /// Live session, initial screen intake is starting (for example, waiting on portal consent).
+    ScreenStarting,
     /// Live session, screen intake failed to start once and will retry automatically.
     ScreenRetrying,
     /// Live session, screen intake cannot start and needs owner attention.
@@ -70,6 +72,8 @@ pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
         TrayStatus::Waiting(snapshot.session)
     } else if snapshot.mode == Mode::Screencast {
         TrayStatus::Recording
+    } else if snapshot.screen_starting {
+        TrayStatus::ScreenStarting
     } else if let Some(failure) = &snapshot.screen_start_failure {
         if failure.needs_attention() {
             TrayStatus::ScreenAttention(match &failure.kind {
@@ -90,7 +94,10 @@ pub fn status(snapshot: &StateSnapshot) -> TrayStatus {
 pub fn status_name(status: TrayStatus) -> &'static str {
     match status {
         TrayStatus::Recording => "recording",
-        TrayStatus::Idle | TrayStatus::ScreenRetrying | TrayStatus::ScreenAttention(_) => "idle",
+        TrayStatus::Idle
+        | TrayStatus::ScreenStarting
+        | TrayStatus::ScreenRetrying
+        | TrayStatus::ScreenAttention(_) => "idle",
         TrayStatus::Paused => "paused",
         TrayStatus::Waiting(_) => "waiting",
         TrayStatus::Stopped => "stopped",
@@ -132,7 +139,9 @@ pub fn header_label(status: TrayStatus, health: &SyncHealth, pause: i32) -> Stri
             text!("linux.tray.cantreachyourdesktop").into()
         }
         TrayStatus::Waiting(_) => text!("linux.tray.waitingforyourdesktop").into(),
-        TrayStatus::ScreenRetrying => text!("linux.tray.waitingforscreenintake").into(),
+        TrayStatus::ScreenStarting | TrayStatus::ScreenRetrying => {
+            text!("linux.tray.waitingforscreenintake").into()
+        }
         TrayStatus::ScreenAttention(ScreenStartFault::MissingElements) => {
             text!("linux.tray.screenintakecantstart").into()
         }
@@ -153,7 +162,9 @@ pub fn tooltip(status: TrayStatus, health: &SyncHealth) -> String {
         TrayStatus::Recording => text!("linux.copy.on"),
         TrayStatus::Paused => text!("linux.copy.paused"),
         TrayStatus::Idle => text!("linux.tray.idlescreeninactive"),
-        TrayStatus::ScreenRetrying => text!("linux.tray.waitingforscreenintake"),
+        TrayStatus::ScreenStarting | TrayStatus::ScreenRetrying => {
+            text!("linux.tray.waitingforscreenintake")
+        }
         TrayStatus::ScreenAttention(ScreenStartFault::MissingElements) => {
             text!("linux.tray.screenintakecantstart")
         }
@@ -197,6 +208,7 @@ pub fn icon_name(status: TrayStatus, health: &SyncHealth) -> String {
             TrayStatus::Paused | TrayStatus::Stopped | TrayStatus::Waiting(_) => "paused",
             TrayStatus::Recording
             | TrayStatus::Idle
+            | TrayStatus::ScreenStarting
             | TrayStatus::ScreenRetrying
             | TrayStatus::ScreenAttention(_) => "healthy",
         },
@@ -204,6 +216,7 @@ pub fn icon_name(status: TrayStatus, health: &SyncHealth) -> String {
             TrayStatus::Paused | TrayStatus::Stopped | TrayStatus::Waiting(_) => "paused",
             TrayStatus::Recording
             | TrayStatus::Idle
+            | TrayStatus::ScreenStarting
             | TrayStatus::ScreenRetrying
             | TrayStatus::ScreenAttention(_) => "connecting",
         },
@@ -305,6 +318,7 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_starting: false,
             screen_start_failure: None,
             screen_retry_seq: 0,
         }
@@ -570,6 +584,28 @@ mod tests {
         let idle_model = build(&idle, 100.0, &health);
         assert_eq!(idle_model.icon, "healthy");
         assert_eq!(idle_model.sni_status, "Active");
+
+        // Initial startup (while screen intake is starting) stays calm and keeps status_name "idle".
+        let mut starting = idle.clone();
+        starting.screen_starting = true;
+        assert_eq!(status(&starting), TrayStatus::ScreenStarting);
+        assert!(!status(&starting).needs_attention());
+        assert_eq!(status_name(status(&starting)), "idle");
+        let start_model = build(&starting, 100.0, &health);
+        assert_eq!(start_model.icon, "healthy");
+        assert_eq!(start_model.sni_status, "Active");
+        let mut starting_recording = starting.clone();
+        starting_recording.mode = Mode::Screencast;
+        assert_eq!(status(&starting_recording), TrayStatus::Recording);
+        let mut starting_paused = starting.clone();
+        starting_paused.paused = true;
+        assert_eq!(status(&starting_paused), TrayStatus::Paused);
+        let mut starting_away = starting.clone();
+        starting_away.session = SessionPresence::NotActive;
+        assert_eq!(
+            status(&starting_away),
+            TrayStatus::Waiting(SessionPresence::NotActive)
+        );
 
         // Attempt 1 (retrying) stays calm (no attention icon/SNI, status_name still "idle").
         let mut retrying = idle.clone();

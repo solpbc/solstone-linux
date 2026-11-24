@@ -3440,6 +3440,7 @@ fn tray_from_capture(
     match capture {
         "recording" => Some(TrayStatus::Recording),
         "idle" => match screen_start.map(|doc| doc.state.as_str()) {
+            Some("starting") => Some(TrayStatus::ScreenStarting),
             Some("retrying") => Some(TrayStatus::ScreenRetrying),
             Some("missing_elements") => Some(TrayStatus::ScreenAttention(
                 ScreenStartFault::MissingElements,
@@ -5156,6 +5157,15 @@ mod tests {
         assert_eq!(
             tray_from_capture("idle", true, None),
             Some(TrayStatus::ScreenAttention(ScreenStartFault::StartFailed))
+        );
+        let starting = ScreenStartDocument {
+            state: "starting".into(),
+            missing_elements: Vec::new(),
+            pipewire: false,
+        };
+        assert_eq!(
+            tray_from_capture("idle", false, Some(&starting)),
+            Some(TrayStatus::ScreenStarting)
         );
         let retrying = ScreenStartDocument {
             state: "retrying".into(),

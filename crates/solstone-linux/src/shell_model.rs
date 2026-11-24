@@ -104,7 +104,10 @@ pub fn screen_tile(
         StateWord::Off
     } else if status.needs_attention() {
         StateWord::NeedsAttention
-    } else if matches!(status, TrayStatus::ScreenRetrying) {
+    } else if matches!(
+        status,
+        TrayStatus::ScreenStarting | TrayStatus::ScreenRetrying
+    ) {
         StateWord::Checking
     } else if matches!(status, TrayStatus::Paused) {
         StateWord::Paused
@@ -1610,6 +1613,12 @@ mod tests {
         );
         assert_eq!(login.word, StateWord::NeedsAttention);
         assert_eq!(login.sub, ScreenSub::LoginUnavailable);
+        let starting = screen_tile(true, false, true, TrayStatus::ScreenStarting);
+        assert_eq!(starting.word, StateWord::Checking);
+        assert_eq!(starting.sub, ScreenSub::WithAudioAndActivity);
+        let starting_audio = screen_tile(true, false, false, TrayStatus::ScreenStarting);
+        assert_eq!(starting_audio.word, StateWord::Checking);
+        assert_eq!(starting_audio.sub, ScreenSub::WithAudio);
         let retrying = screen_tile(true, false, true, TrayStatus::ScreenRetrying);
         assert_eq!(retrying.word, StateWord::Checking);
         assert_eq!(retrying.sub, ScreenSub::WithAudioAndActivity);

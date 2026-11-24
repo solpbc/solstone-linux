@@ -191,8 +191,9 @@ where
 // 2. lifecycle setup acquires the singleton bus name and performs no capture work.
 // 3. recovery finalizes old incomplete segments while singleton ownership is held.
 // 4. the run closure constructs capture backends, sync, and the observer.
-// 5. initialize publishes the first snapshot, then desktop surfaces start and commands wake the
-//    absolute-deadline tick loop.
+// 5. desktop surfaces start with the initial snapshot (so the panel icon and Observer1 are live
+//    even while initial portal consent waits), then initialize publishes the first observed
+//    snapshot and commands wake the absolute-deadline tick loop.
 // 6. desktop surfaces stop first, then observer capture/audio cleanup and sync.
 // 7. the linked owner closes streams and joins bridge/carrier tasks last, then releases its lock.
 pub(crate) fn run_observer(
@@ -369,6 +370,11 @@ fn run_capture(
         session: first_target.presence,
         activity_through_pause: false,
         away: false,
+        screen_starting: initial_screen_starting(
+            &config,
+            starting_pause.paused,
+            first_target.presence,
+        ),
         screen_start_failure: None,
         screen_retry_seq: 0,
     };
@@ -389,8 +395,9 @@ fn run_capture(
         tray_receiver.clone(),
         config.state_dir(),
     );
-    let (command_sender, command_receiver) = std::sync::mpsc::channel();
-    let commands = CommandSender::new(command_sender.clone());
+    let (incoming_commands, router_receiver) = std::sync::mpsc::channel();
+    let (observer_commands, command_receiver) = std::sync::mpsc::channel();
+    let commands = CommandSender::new(incoming_commands.clone());
     let legacy_probe = crate::terminal::control::production_legacy_probe(config.state_dir());
     let terminal = {
         let wake = sync_trigger.clone();
@@ -546,7 +553,7 @@ fn run_capture(
         None
     };
     let signal_receiver = tray_receiver.clone();
-    let _command_lifetime_sender = command_sender;
+    let _command_lifetime_sender = incoming_commands;
     let backends = Backends {
         video,
         audio,
@@ -581,16 +588,23 @@ fn run_capture(
         activity_capability,
         Box::new(foreground),
     );
-    let initialized = !stopped.load(Ordering::Acquire);
-    let mut run_result = if initialized {
-        observer.initialize()
-    } else {
-        Ok(())
-    };
     // The supervisor closes the link when the last handler drops or on the notify below.
     // The desktop shell drops its handler as it stops, so hold one until sync has drained
     // the final segment over that link (runtime order step 7).
     let window_control_until_linked_stage = window_control.clone();
+    let quit_pending = Arc::new(AtomicBool::new(false));
+    let router_open_journal = open_journal.clone();
+    let command_router = thread::Builder::new()
+        .name("tray-commands".into())
+        .spawn(move || {
+            route_incoming_commands(
+                router_receiver,
+                observer_commands,
+                move || trigger_open_journal(&router_open_journal),
+                move || trigger_quit_in_background(Arc::clone(&quit_pending)),
+            );
+        })
+        .map_err(|error| ObserverError::Io(format!("tray command router: {error}")))?;
     let shared =
         crate::shared_sources::Worker::start(runtime, observer.config.clone(), Arc::clone(&upload));
     let desktop_shell = crate::shell::start(
@@ -614,10 +628,15 @@ fn run_capture(
             imports: sync.import_handle(),
         },
     );
+    let initialized = !stopped.load(Ordering::Acquire);
+    let mut run_result = if initialized {
+        observer.initialize()
+    } else {
+        Ok(())
+    };
     if initialized && run_result.is_ok() {
-        // systemd readiness precedes portal and observer initialization so its watchdog can
-        // cover that work. This log marks the later point after observer initialization and
-        // desktop-surface startup have both been attempted.
+        // systemd readiness precedes desktop-surface startup and observer initialization so its
+        // watchdog can cover that work. This log marks the later point after both have completed.
         tracing::info!("observer initialization complete");
     }
     let mut next_tick = Instant::now() + TICK_INTERVAL;
@@ -725,10 +744,77 @@ fn run_capture(
         }),
         &mut |stage| tracing::info!(stage, "shutdown progress"),
     ));
+    drop(live_settings);
+    drop(_command_lifetime_sender);
+    // Detach rather than join: in normal shutdown all senders are already dropped so the
+    // router exits immediately, while if a hung bus timed out DesktopShell::shutdown and
+    // left a sender alive, shutdown must stay bounded.
+    drop(command_router);
     stop_during_startup_is_clean(run_result, stopped.load(Ordering::Acquire))
         .and(shutdown)
         .and(sync_shutdown)
         .and(linked_shutdown)
+}
+
+/// Whether `Observer::initialize` will attempt to start screen intake on this launch.
+fn initial_screen_starting(
+    config: &Config,
+    starting_paused: bool,
+    session: crate::desktop_session::SessionPresence,
+) -> bool {
+    !starting_paused && config.desktop_capture && !config.activity_only && session.is_live()
+}
+
+/// Handles observer-independent tray actions off the observer thread so Quit and Open Journal
+/// still respond while `Observer::initialize` or a later retry waits on a portal prompt.
+fn route_incoming_commands(
+    incoming: std::sync::mpsc::Receiver<TrayCommand>,
+    observer_commands: std::sync::mpsc::Sender<TrayCommand>,
+    mut on_open_journal: impl FnMut(),
+    mut on_quit: impl FnMut(),
+) {
+    while let Ok(command) = incoming.recv() {
+        match command {
+            TrayCommand::Quit => on_quit(),
+            TrayCommand::OpenJournal => on_open_journal(),
+            other => {
+                if observer_commands.send(other).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn trigger_quit_in_background(pending: Arc<AtomicBool>) {
+    if pending.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let worker = Arc::clone(&pending);
+    if let Err(error) = thread::Builder::new()
+        .name("tray-quit".into())
+        .spawn(move || {
+            if let Err(error) = crate::service::stop_for_window(&crate::cli::SystemRunner) {
+                tracing::warn!(%error, "quit could not stop the user service");
+            }
+            worker.store(false, Ordering::Release);
+        })
+    {
+        pending.store(false, Ordering::Release);
+        tracing::warn!(%error, "failed to start background quit worker");
+    }
+}
+
+fn trigger_open_journal(open_journal: &crate::private_link::OpenJournalAccess) {
+    let notify = || {
+        let _ = notify_rust::Notification::new()
+            .summary(text!("linux.panel.solstoneapp"))
+            .body(crate::desktop_component::open_journal_remediation())
+            .show();
+    };
+    if open_journal.open_from_tray(notify).is_err() {
+        notify();
+    }
 }
 
 /// A stop that lands while screen sharing is still starting is an ordinary stop.
@@ -955,15 +1041,7 @@ fn apply_command<V, A, P, M, W, E, C, Q, N>(
             }
         }
         ObserverAction::Desktop(TrayCommand::OpenJournal) => {
-            let notify = || {
-                let _ = notify_rust::Notification::new()
-                    .summary(text!("linux.panel.solstoneapp"))
-                    .body(crate::desktop_component::open_journal_remediation())
-                    .show();
-            };
-            if open_journal.open_from_tray(notify).is_err() {
-                notify();
-            }
+            trigger_open_journal(open_journal);
         }
         ObserverAction::Desktop(command) => {
             if let Err(error) = crate::desktop_component::DesktopComponent::with_open_journal(
@@ -1734,6 +1812,7 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_starting: false,
             screen_start_failure: None,
             screen_retry_seq: 0,
         };
@@ -1961,6 +2040,7 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_starting: false,
             screen_start_failure: None,
             screen_retry_seq: 0,
         };
@@ -3650,5 +3730,89 @@ mod tests {
         sync.shutdown(Duration::from_secs(1)).await.unwrap();
         peer_x.shutdown().await;
         peer_y.shutdown().await;
+    }
+
+    #[test]
+    fn initial_screen_starting_matches_conditions_that_start_screen_intake() {
+        let mut config = Config {
+            desktop_capture: true,
+            activity_only: false,
+            ..Default::default()
+        };
+        assert!(initial_screen_starting(
+            &config,
+            false,
+            crate::desktop_session::SessionPresence::Live
+        ));
+        assert!(!initial_screen_starting(
+            &config,
+            true,
+            crate::desktop_session::SessionPresence::Live
+        ));
+        assert!(!initial_screen_starting(
+            &config,
+            false,
+            crate::desktop_session::SessionPresence::NoDesktop
+        ));
+        config.desktop_capture = false;
+        assert!(!initial_screen_starting(
+            &config,
+            false,
+            crate::desktop_session::SessionPresence::Live
+        ));
+        config.desktop_capture = true;
+        config.activity_only = true;
+        assert!(!initial_screen_starting(
+            &config,
+            false,
+            crate::desktop_session::SessionPresence::Live
+        ));
+    }
+
+    #[test]
+    fn command_router_handles_quit_and_open_journal_without_draining_observer_queue() {
+        let (incoming_tx, incoming_rx) = std::sync::mpsc::channel();
+        let (observer_tx, observer_rx) = std::sync::mpsc::channel();
+        let (immediate_tx, immediate_rx) = std::sync::mpsc::channel();
+        let quit_tx = immediate_tx.clone();
+        let router = thread::spawn(move || {
+            route_incoming_commands(
+                incoming_rx,
+                observer_tx,
+                move || {
+                    let _ = immediate_tx.send("open_journal");
+                },
+                move || {
+                    let _ = quit_tx.send("quit");
+                },
+            );
+        });
+
+        incoming_tx.send(TrayCommand::Pause(900)).unwrap();
+        incoming_tx.send(TrayCommand::OpenJournal).unwrap();
+        incoming_tx.send(TrayCommand::Quit).unwrap();
+        incoming_tx.send(TrayCommand::Resume).unwrap();
+
+        // Quit and OpenJournal complete before anyone drains the observer queue.
+        assert_eq!(
+            immediate_rx.recv_timeout(Duration::from_secs(1)),
+            Ok("open_journal")
+        );
+        assert_eq!(
+            immediate_rx.recv_timeout(Duration::from_secs(1)),
+            Ok("quit")
+        );
+        assert_eq!(
+            observer_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(TrayCommand::Pause(900))
+        );
+        assert_eq!(
+            observer_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(TrayCommand::Resume)
+        );
+        assert!(observer_rx.try_recv().is_err());
+
+        drop(incoming_tx);
+        router.join().unwrap();
     }
 }

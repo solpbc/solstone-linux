@@ -975,6 +975,11 @@ pub(crate) fn assemble_document(
                     pipewire: false,
                 })
             }
+            tray_model::TrayStatus::ScreenStarting => Some(ScreenStartDocument {
+                state: "starting".into(),
+                missing_elements: Vec::new(),
+                pipewire: false,
+            }),
             tray_model::TrayStatus::ScreenRetrying => Some(ScreenStartDocument {
                 state: "retrying".into(),
                 missing_elements: Vec::new(),
@@ -2359,6 +2364,7 @@ impl Default for WindowControlHandler {
                     session: Default::default(),
                     activity_through_pause: false,
                     away: false,
+                    screen_starting: false,
                     screen_start_failure: None,
                     screen_retry_seq: 0,
                 })),
@@ -2974,6 +2980,7 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_starting: false,
             screen_start_failure: None,
             screen_retry_seq: 0,
         }
@@ -5576,6 +5583,30 @@ mod tests {
             pending_instance_id: None,
         };
         let health = crate::sync_health::derive_health(&Default::default(), 0.0, 600.0);
+
+        let mut starting_snap = test_snapshot(Mode::Idle, false);
+        starting_snap.screen_starting = true;
+        let raw_starting = assemble_document(
+            &phase,
+            &health,
+            &starting_snap,
+            &paths,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let starting_model = decode_control_str(&raw_starting).unwrap();
+        assert_eq!(starting_model.capture, "idle");
+        assert!(!starting_model.capture_attention);
+        assert_eq!(
+            starting_model
+                .screen_start
+                .as_ref()
+                .map(|d| d.state.as_str()),
+            Some("starting")
+        );
 
         let mut retrying_snap = test_snapshot(Mode::Idle, false);
         retrying_snap.screen_start_failure = Some(crate::observer::ScreenStartFailure {

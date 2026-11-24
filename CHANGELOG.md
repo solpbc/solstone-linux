@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- on Wayland, the panel icon now appears as soon as the app starts instead of waiting until you answer your desktop's screen-sharing prompt, and opening the app's window while that prompt is open shows your sources instead of saying status unavailable. while the prompt is open, the screen tile reads as checking, and opening settings, opening your journal, or quitting from the panel icon works right away.
 - opening the app's window or its settings from the panel icon now works after your computer restarts. before, it said "the window couldn't start" until you restarted the app.
 - the deb and rpm now recommend GStreamer's PipeWire plugin, which screen intake needs on Wayland, so installing the deb with apt, or the rpm with dnf, brings it along. if a plugin screen intake needs is still missing, the app now tells you once per run, before your desktop asks you to share the screen, instead of failing quietly.
 - when screen intake can't start, the screen tile no longer reads as on. if a GStreamer plugin is missing, the screen tile and panel icon show needs attention right away, and the screen page names what's missing. after installing the plugin, choose "try again" on the screen page without restarting the app. if screen sharing isn't allowed or screen intake can't start for another reason, the screen tile waits as checking while the app tries again. if screen intake still can't start, the screen tile and panel icon show needs attention with "try again" on the screen page.

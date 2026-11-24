@@ -736,6 +736,7 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_starting: false,
             screen_start_failure: None,
             screen_retry_seq: 0,
         }

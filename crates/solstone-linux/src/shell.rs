@@ -249,10 +249,9 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         inputs.imports,
     );
     let signal_sink = with_connection(inputs.connection.as_ref(), |connection| {
-        // Setup owns the name before recovery. Observer1 can only be served after recovery and
-        // video construction (including a portal consent wait that can block on a human), so
-        // `busctl` may hang transiently in that startup window. That is expected and is distinct
-        // from the previous permanent hang where no interface was ever served.
+        // Setup owns the bus name before recovery. Observer1 is mounted before observer
+        // initialization, so the panel icon and control state answer immediately even while
+        // initial Wayland portal consent waits on the owner.
         match runtime.block_on(connection.object_server().at(OBSERVER_PATH, interface)) {
             Ok(_) => {
                 interface_served = true;
@@ -773,6 +772,7 @@ mod tests {
             session: Default::default(),
             activity_through_pause: false,
             away: false,
+            screen_starting: false,
             screen_start_failure: None,
             screen_retry_seq: 0,
         }

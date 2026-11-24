@@ -331,7 +331,7 @@ impl Refresh {
 }
 
 pub(crate) struct Worker {
-    local: watch::Sender<Vec<Entry>>,
+    local: watch::Sender<Option<Vec<Entry>>>,
     pub refresh: Refresh,
     task: tokio::task::JoinHandle<()>,
 }
@@ -341,7 +341,7 @@ impl Worker {
         config: Config,
         client: Arc<UploadClient>,
     ) -> Self {
-        let (local, rx) = watch::channel(Vec::new());
+        let (local, rx) = watch::channel(None);
         let refresh = Refresh::default();
         let task = runtime.spawn(run(config, client, rx, refresh.clone()));
         Self {
@@ -353,7 +353,7 @@ impl Worker {
     // Wake on the daemon's existing observer pass. The worker compares the
     // status advertisement and local configuration before making any request.
     pub(crate) fn update(&self, entries: Vec<Entry>) {
-        self.local.send_replace(entries);
+        self.local.send_replace(Some(entries));
     }
     pub(crate) async fn stop(self) {
         self.task.abort();
@@ -375,10 +375,21 @@ struct Progress {
     fetched_at: i64,
 }
 
+fn pending_declaration<'a>(
+    local: &'a Option<Vec<Entry>>,
+    progress: &Progress,
+) -> Option<&'a [Entry]> {
+    let entries = local.as_deref()?;
+    if progress.sent.as_deref() == Some(entries) || progress.rejected.as_deref() == Some(entries) {
+        return None;
+    }
+    Some(entries)
+}
+
 async fn run(
     config: Config,
     client: Arc<UploadClient>,
-    mut input: watch::Receiver<Vec<Entry>>,
+    mut input: watch::Receiver<Option<Vec<Entry>>>,
     refresh: Refresh,
 ) {
     let mut progress = Progress::default();
@@ -450,21 +461,21 @@ async fn run(
             progress.loaded = true;
         }
         let local = input.borrow_and_update().clone();
-        if progress.sent.as_ref() != Some(&local) && progress.rejected.as_ref() != Some(&local) {
-            let answer = cap.shared_source_request(Some(&local)).await;
+        if let Some(entries) = pending_declaration(&local, &progress) {
+            let answer = cap.shared_source_request(Some(entries)).await;
             if !client.association_is_current(&assoc) {
                 continue;
             }
             match answer.status_code() {
                 Some(204) => {
-                    progress.sent = Some(local);
+                    progress.sent = Some(entries.to_vec());
                     progress.rejected = None;
                 }
                 Some(400) => {
                     tracing::warn!(
                         "journal rejected source declaration; waiting for a configuration change"
                     );
-                    progress.rejected = Some(local);
+                    progress.rejected = Some(entries.to_vec());
                 }
                 _ => {
                     failure(&client, &assoc, &answer, &config, &mut progress, serial);
@@ -572,5 +583,29 @@ mod tests {
         );
         assert_eq!(rows[0].at.as_deref(), Some("2026-11-20T09:00:00Z"));
         assert_eq!(rows[2].at.as_deref(), Some("2026-11-19T03:00:00Z"));
+    }
+
+    #[test]
+    fn skips_declaration_until_first_local_update_arrives() {
+        let mut progress = Progress::default();
+        assert!(pending_declaration(&None, &progress).is_none());
+
+        let empty = Some(Vec::new());
+        assert_eq!(pending_declaration(&empty, &progress), Some(&[][..]));
+
+        progress.sent = Some(Vec::new());
+        assert!(pending_declaration(&empty, &progress).is_none());
+
+        let populated = Some(vec![Entry {
+            source: "screen",
+            detail: None,
+            state: "on",
+        }]);
+        assert_eq!(
+            pending_declaration(&populated, &progress),
+            populated.as_deref()
+        );
+        progress.rejected = populated.clone();
+        assert!(pending_declaration(&populated, &progress).is_none());
     }
 }

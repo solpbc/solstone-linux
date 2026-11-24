@@ -243,6 +243,9 @@ pub struct StateSnapshot {
     /// Nobody is at this desktop: its screen is locked, or this owner's session
     /// is not the live one in front of the seat. Browser reads hold here.
     pub away: bool,
+    /// True on the initial startup snapshot while `Observer::initialize` is still
+    /// running its first screen-start attempt.
+    pub screen_starting: bool,
     /// Present while screen intake failed to start and has not succeeded since.
     pub screen_start_failure: Option<ScreenStartFailure>,
     /// Incremented after each explicit owner retry attempt completes.
@@ -1432,6 +1435,7 @@ where
             activity_through_pause: self.state.paused && !self.state.activity_held,
             // The same test desktop activity uses for someone being here.
             away: self.state.cached_activity.screen_locked || !self.session_in_front(),
+            screen_starting: false,
             screen_start_failure: self.state.screen_start_failure.clone(),
             screen_retry_seq: self.state.screen_retry_seq,
         })
