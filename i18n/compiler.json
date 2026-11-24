@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/solpbc/solstone-journal.git",
-  "revision": "c3781ff99bf7bef72f3227c6826104c16fe47b16",
-  "registry_sha256": "d3086c4c89a94607a75ba2abf0a9a881da4b4c09792af2afb94bcd363c9a56b8",
+  "revision": "1e4c16bf15e00112ddce282da8d871786d0efc39",
+  "registry_sha256": "802cf9998855efad01e990e7c63ee3ebd01a0c4a0609c7033398392351d5c815",
   "targets": [
     "rust"
   ],
