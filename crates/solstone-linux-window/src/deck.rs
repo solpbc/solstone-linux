@@ -1611,6 +1611,10 @@ fn named_icon_button(name: &str) -> gtk::Button {
 
 /// A button whose visible caption and explicit accessible name differ (e.g. per-file
 /// `review in your journal` -> `review export.zip in your journal`).
+///
+/// Sets the caption via an explicit child `GtkLabel` rather than `Button::set_label`,
+/// because GTK4's `gtk_button_set_label` attaches a `labelled-by` relation to the
+/// internal label that overrides the explicit accessible `label` property in AT-SPI.
 pub(crate) fn labeled_button(visible_label: &str, accessible_label: &str) -> gtk::Button {
     let a11y = gtk::glib::markup_escape_text(accessible_label);
     let interface = format!(
@@ -1622,9 +1626,16 @@ pub(crate) fn labeled_button(visible_label: &str, accessible_label: &str) -> gtk
         .object("button")
         .expect("the labeled button interface names its only object");
     if !visible_label.is_empty() {
-        button.set_label(visible_label);
+        set_button_caption(&button, visible_label);
     }
     button
+}
+
+/// Display a text caption inside a button without overwriting its accessible name.
+fn set_button_caption(button: &gtk::Button, caption: &str) {
+    let label = gtk::Label::new(Some(caption));
+    button.set_child(Some(&label));
+    button.add_css_class("text-button");
 }
 
 fn make_source_page(status: gtk::Box) -> Page {
@@ -1658,7 +1669,7 @@ fn make_source_page(status: gtk::Box) -> Page {
     title.set_hexpand(true);
     title.set_xalign(0.0);
     let close = named_icon_button(text!("linux.window.close"));
-    close.set_label("×");
+    set_button_caption(&close, "×");
     close.add_css_class("sol-glyph");
     close.set_has_frame(false);
     close.set_visible(false);

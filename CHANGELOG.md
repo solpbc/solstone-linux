@@ -13,6 +13,7 @@ and this project adheres to Semantic Versioning.
 - the deb and rpm now recommend GStreamer's PipeWire plugin, which screen intake needs on Wayland, so installing the deb with apt, or the rpm with dnf, brings it along. if a plugin screen intake needs is still missing, the app now tells you once per run, before your desktop asks you to share the screen, instead of failing quietly.
 - when screen intake can't start, the screen tile no longer reads as on. if a GStreamer plugin is missing, the screen tile and panel icon show needs attention right away, and the screen page names what's missing. after installing the plugin, choose "try again" on the screen page without restarting the app. if screen sharing isn't allowed or screen intake can't start for another reason, the screen tile waits as checking while the app tries again. if screen intake still can't start, the screen tile and panel icon show needs attention with "try again" on the screen page.
 - empty audio and screen recordings left behind when intake stops early or the solstone app recovers after an interruption are now removed so they don't go into your journal.
+- screen readers on the import page now name the file on each row's review, send again, try now, and remove buttons.
 
 ## [2.0.51] - 2026-11-23
 
