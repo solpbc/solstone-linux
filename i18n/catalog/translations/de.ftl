@@ -266,9 +266,9 @@ linux.copy.checkstatus = Status prüfen
 
 linux.copy.choose = wählen
 
-linux.copy.choosefolder = einen Ordner wählen
+linux.copy.choosefolder = Ordner wählen
 
-linux.copy.choosefolder.v4cba918b = einen Ordner wählen…
+linux.copy.choosefolder.v4cba918b = Ordner wählen…
 
 linux.copy.chooseobsidianvault = wähle deinen { $literal1 }-Tresor
 
@@ -276,11 +276,11 @@ linux.copy.configfile = Konfigurationsdatei
 
 linux.copy.confirming = wird bestätigt…
 
-linux.copy.confirmyourjournalsmark = bestätige die mark deines Journals
+linux.copy.confirmyourjournalsmark = die mark deines Journals bestätigen
 
 linux.copy.connected = verbunden mit
 
-linux.copy.connecting = verbindet…
+linux.copy.connecting = wird verbunden…
 
 linux.copy.connectjournal = mit deinem Journal verbinden
 
@@ -362,7 +362,7 @@ linux.copy.foundjournalthiscomputer = dein Journal auf diesem Computer gefunden
 
 linux.copy.from = aus { $folder }
 
-linux.copy.getafreshlink = einen neuen Link holen
+linux.copy.getafreshlink = frischen Link holen
 
 linux.copy.gethelp = Hilfe holen
 
@@ -370,7 +370,7 @@ linux.copy.healthdetails = Details zum Zustand
 
 linux.copy.help = Hilfe
 
-linux.copy.helpreport = ein Problem melden
+linux.copy.helpreport = Problem melden
 
 linux.copy.intake = Annahme
 
@@ -424,7 +424,7 @@ linux.copy.moveit = es verschieben
 
 linux.copy.movesolstonetmux = solstone für { $literal1 } hereinverschieben?
 
-linux.copy.needahandreachahumanwerehappytohelp = brauchst du Hilfe? meld dich bei uns. wir helfen gern.
+linux.copy.needahandreachahumanwerehappytohelp = Hilfe nötig? meld dich. wir helfen gern.
 
 linux.copy.needattention = brauchen Aufmerksamkeit
 
@@ -442,7 +442,7 @@ linux.copy.not = nicht
 
 linux.copy.nothingthiscomputerhaskept = nichts, was dieser Computer behalten hat, ist über diesen Link in dieses Journal gegangen. du hast vielleicht den falschen Link eingefügt, oder etwas stimmt nicht. hol einen neuen Kopplungslink aus deinem Journal und versuch es noch einmal, oder schreib an { $literal1 }, und wir helfen.
 
-linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo = nichts, was wartet, geht in dein Journal, bevor du es tust.
+linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo = nichts, was wartet, geht in dein Journal, bis du es tust.
 
 linux.copy.notpaired = nicht gekoppelt
 
@@ -483,7 +483,7 @@ linux.copy.openyourjournal = dein Journal öffnen
 
 linux.copy.otherfilesinstaywheretheyare = andere Dateien in { $folder } bleiben, wo sie sind.
 
-linux.copy.pairadevice = ein Gerät koppeln
+linux.copy.pairadevice = Gerät koppeln
 
 linux.copy.pairagain = erneut koppeln
 
@@ -523,7 +523,7 @@ linux.copy.readthelogsbelowthenchoosewhethertosaveaco = lies die Protokolle unte
 
 linux.copy.readthesolstoneappsrecentlogsbeforesavinga = lies die neueren Protokolle der solstone-App, bevor du eine Kopie für einen Support-Bericht speicherst. von hier wird nichts gesendet.
 
-linux.copy.recentlogs = neuere Protokolle
+linux.copy.recentlogs = letzte Protokolle
 
 linux.copy.restarting = startet neu…
 
@@ -547,9 +547,9 @@ linux.copy.s12 = deine Bildschirmfotos konnten nicht gezählt werden.
 
 linux.copy.s14 = ein Bildschirmfoto, das schon in deinem Journal ist, bleibt dort, wenn du es aus dem Ordner löschst.
 
-linux.copy.s15 = was schon in deinem Journal ist, bleibt, wenn du das pausierst oder ausschaltest.
+linux.copy.s15 = was schon in deinem Journal ist, bleibt, wenn du pausierst oder das ausschaltest.
 
-linux.copy.s16computer = Bildschirmfotos, die du machst, solange es pausiert ist, kommen nicht herein.
+linux.copy.s16computer = Bildschirmfotos, die du machst, während es pausiert ist, kommen nicht herein.
 
 linux.copy.s17 = Bildschirmfotos, die schon in deinem Journal sind, werden nicht erneut hereingeholt.
 
@@ -565,7 +565,7 @@ linux.copy.s7 = von vor heute
 
 linux.copy.s9 = du siehst, wie viele Bildschirmfotos es gibt, bevor welche hereinkommen.
 
-linux.copy.saveacopy = eine Kopie speichern…
+linux.copy.saveacopy = Kopie speichern…
 
 linux.copy.savesettings = Einstellungen speichern
 
@@ -623,7 +623,7 @@ linux.copy.somethingansweredthiscomputerat = unter { $address } hat etwas diesem
 
 linux.copy.somethingansweredthiscomputerthrough = etwas hat diesem Computer über das Relay geantwortet, und es ist nicht das Journal, mit dem dieser Computer gekoppelt ist. das ist weniger gewiss als eine direkte Verbindung.
 
-linux.copy.starting = startet…
+linux.copy.starting = wird gestartet…
 
 linux.copy.startpaused = pausiert starten
 
@@ -631,7 +631,7 @@ linux.copy.startthesolstoneapp = die solstone-App starten
 
 linux.copy.statusunavailable = Status nicht verfügbar
 
-linux.copy.syncingjournal = Abgleich mit deinem Journal…
+linux.copy.syncingjournal = wird mit deinem Journal abgeglichen…
 
 linux.copy.takestmuxsessionsallit = nimmt deine { $literal1 }-Sitzungen entgegen, und alles davon geht in dein Journal. braucht { $literal1 } auf diesem Computer und funktioniert über { $literal2 } und ohne Desktop.
 
@@ -685,7 +685,7 @@ linux.copy.unavailable = nicht verfügbar
 
 linux.copy.updateshow = mit automatischen Aktualisierungen an aktualisiert sich die App zusammen mit deinem Journal, wenn das solstone-Installationsprogramm beide auf diesem Computer eingerichtet hat. sonst führe das solstone-Installationsprogramm erneut mit --upgrade aus.
 
-linux.copy.updatesjournalversion = journal-Version
+linux.copy.updatesjournalversion = Journalversion
 
 linux.copy.usethisvault = diesen Tresor nutzen
 
@@ -1041,7 +1041,7 @@ linux.health.uptodateat = Abgleich-Zustand: auf dem neuesten Stand um { $timesta
 
 linux.health.waitingforyoutoconfirmyourjournalsmarknothi = warte auf deine Bestätigung der mark deines Journals. nichts, was wartet, geht in dein Journal, bevor du es tust.{ $ws1 }wenn du soweit bist, führe aus: { $literal2 }
 
-linux.import.allhistory = der ganze Importverlauf in deinem Journal
+linux.import.allhistory = der gesamte Importverlauf in deinem Journal
 
 linux.import.attention = braucht Aufmerksamkeit
 
@@ -1051,7 +1051,7 @@ linux.import.delivered = in deinem Journal.
 
 linux.import.expired = abgelaufen
 
-linux.import.explanation = fügt jede Datei hinzu, die du hier wählst oder auf diesem Fenster ablegst. dein Journal erkennt, was es ist.
+linux.import.explanation = fügt jede Datei hinzu, die du hier wählst oder auf dieses Fenster ablegst. dein Journal findet heraus, was es ist.
 
 linux.import.explanationnodrop = fügt jede Datei hinzu, die du hier wählst. dein Journal erkennt, was es ist.
 
@@ -1059,7 +1059,7 @@ linux.import.filekind = dein Journal kann diese Art von Datei nicht entgegennehm
 
 linux.import.filemissing = die Kopie auf diesem Gerät fehlt
 
-linux.import.filenotread = das konnte nicht gelesen werden. füge es noch einmal hinzu.
+linux.import.filenotread = das konnte nicht gelesen werden. füge es erneut hinzu
 
 linux.import.filetoolarge = es ist größer, als dein Journal entgegennimmt
 
@@ -1079,7 +1079,7 @@ linux.import.nfiles = Dateien: { $count }
 
 linux.import.noroom = auf diesem Gerät ist nicht genug Platz
 
-linux.import.nothingwassaved = auf diesem Gerät wurde nichts gespeichert.
+linux.import.nothingwassaved = nichts wurde auf diesem Gerät gespeichert.
 
 linux.import.nothingyet = noch nichts.
 
@@ -1097,15 +1097,15 @@ linux.import.recentrow.a11y = { $name }, in deinem Journal, { $when }. in deinem
 
 linux.import.remove.a11y = { $name } entfernen
 
-linux.import.removeerror = das konnte nicht entfernt werden. versuch es noch einmal.
+linux.import.removeerror = dies konnte nicht entfernt werden. versuch es noch einmal.
 
 linux.import.removereadytoreview = das entfernt die Kopie auf diesem Gerät. die wartende Kopie in deinem Journal bleibt dort, bis du sie verwirfst oder sie abläuft.
 
-linux.import.reviewdetail = in deinem Journal gespeichert. sieh die Vorschau an und bestätige, um zu starten.
+linux.import.reviewdetail = in deinem Journal gespeichert. Vorschau anzeigen und bestätigen, um zu starten.
 
-linux.import.reviewdetailhour = in deinem Journal gespeichert. prüfe es innerhalb einer Stunde, bevor dein Journal die wartende Kopie entfernt.
+linux.import.reviewdetailhour = in deinem Journal gespeichert. prüfe innerhalb einer Stunde, bevor dein Journal die wartende Kopie entfernt.
 
-linux.import.reviewexpireddetail = die wartende Kopie in deinem Journal ist abgelaufen. dieses Gerät hat die Datei noch.
+linux.import.reviewexpireddetail = die wartende Kopie in deinem Journal ist abgelaufen. dieses Gerät hält die Datei noch.
 
 linux.import.reviewinjournal = in deinem Journal prüfen
 
@@ -1121,7 +1121,7 @@ linux.import.sendagain.a11y = { $name } erneut zum Prüfen senden
 
 linux.import.sending = sendet
 
-linux.import.sendingellipsis = sendet an dein Journal…
+linux.import.sendingellipsis = wird an dein Journal gesendet…
 
 linux.import.sendingtojournal = sendet an dein Journal.
 
@@ -1140,7 +1140,7 @@ linux.import.statusrow.a11y = Import, { $detail }.
 
 linux.import.steperror = dieser Schritt konnte nicht fertig werden. versuch es noch einmal.
 
-linux.import.storeerror = Importe auf diesem Gerät konnten nicht gelesen werden. es wurde nichts entfernt. starte die solstone-App neu, um es noch einmal zu versuchen.
+linux.import.storeerror = die Importe auf diesem Gerät konnten nicht gelesen werden. nichts wurde entfernt. starte die solstone-App neu, um es noch einmal zu versuchen.
 
 linux.import.tile.a11y = Import, { $state }. { $detail }.
 
@@ -1162,7 +1162,7 @@ linux.import.waitingforjournalshort = wartet auf dein Journal
 
 linux.import.waitingforyourreview = wartet auf deine Prüfung
 
-linux.import.waitingreconnect = wartet darauf, dass dein Journal sich wieder verbindet.
+linux.import.waitingreconnect = wartet, bis dein Journal wieder verbunden ist.
 
 linux.journalmark.journal = journal: { $value1 }·{ $value2 }
 
@@ -1436,7 +1436,7 @@ linux.shell.attention = braucht Aufmerksamkeit
 
 linux.shell.browserunavailable = Browserseiten können gerade nicht starten.
 
-linux.shell.checking = prüft…
+linux.shell.checking = wird geprüft…
 
 linux.shell.evening = guten Abend
 
@@ -1741,13 +1741,13 @@ linux.ui.terminalterminalstatus = Terminal: { $terminal-status }
 
 linux.window.addmore = mehr hinzufügen
 
-linux.window.allcaughtup = alles aufgeholt
+linux.window.allcaughtup = alles auf dem neuesten Stand
 
 linux.window.brightharbor = bright · harbor
 
 linux.window.browsers = Browser
 
-linux.window.browsersbreath = auf den Seiten, die du erlaubst, nimmt die solstone-Erweiterung den Text und die grobe Anordnung der Seite entgegen, und alles davon geht in dein Journal.
+linux.window.browsersbreath = auf den Websites, die du erlaubst, nimmt die solstone-Erweiterung den Text und das grobe Layout der Seite entgegen, und alles davon geht in dein Journal.
 
 linux.window.browsersgap = Seiten kommen von der solstone-Erweiterung. hier gibt es keinen Schalter dafür.
 
@@ -1761,7 +1761,7 @@ linux.window.choosenewdownloadname = wähle einen neuen Namen, um die vorhandene
 
 linux.window.close = schließen
 
-linux.window.connectajournal = ein Journal verbinden
+linux.window.connectajournal = Journal verbinden
 
 linux.window.connected = verbunden
 
@@ -1773,7 +1773,7 @@ linux.window.files = Dateien
 
 linux.window.foregroundtitleurlidle = { $route }; Vordergrund { $foreground }; Titel { $title }; Adresse { $url }; Leerlauf { $idle }
 
-linux.window.goesalongwithit = gehört dazu
+linux.window.goesalongwithit = geht damit einher
 
 linux.window.help = Hilfe
 
@@ -1861,15 +1861,15 @@ linux.window.terminal = Terminal
 
 linux.window.terminalbreath = die solstone-App nimmt deine { $literal1 }-Sitzungen entgegen, und alles davon geht in dein Journal. braucht { $literal1 } auf diesem Computer und funktioniert in jeder Terminal-Sitzung, auch wenn du per { $literal2 } auf diesen Computer kommst.
 
-linux.window.thecopyisalreadygonesothis = die Kopie ist schon weg, deshalb entfernt das sie nur noch von hier.
+linux.window.thecopyisalreadygonesothis = die Kopie ist schon weg, also wird sie nur von hier entfernt.
 
 linux.window.thiscomputer = dieser Computer
 
 linux.window.thisremovesthecopyonthisdevice = das entfernt die Kopie auf diesem Gerät. dein Journal kann die Kopie, die es schon hat, weiterhin hereinholen.
 
-linux.window.thisremovesthecopyonthisdevice.v558a0c4f = das entfernt die Kopie auf diesem Gerät, deshalb erreicht sie dein Journal nicht.
+linux.window.thisremovesthecopyonthisdevice.v558a0c4f = das entfernt die Kopie auf diesem Gerät, also erreicht sie dein Journal nicht.
 
-linux.window.trying = versucht…
+linux.window.trying = wird versucht…
 
 linux.window.trynow = jetzt versuchen
 
