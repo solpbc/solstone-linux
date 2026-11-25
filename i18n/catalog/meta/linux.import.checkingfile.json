@@ -1,0 +1,17 @@
+{
+  "description": "Short status word on the import tile and import row while the journal verifies a completed large file.",
+  "context": "Short status word on the import tile and import row while the journal verifies a completed large file.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 24,
+  "source_revision": "1c85e9355218d43ec2eae188f7da35d97fbf1493a49f328496be835a7cd3d564",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

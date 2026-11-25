@@ -1,0 +1,22 @@
+{
+  "description": "Formatted file or transfer size in gigabytes.",
+  "context": "Formatted file or transfer size in gigabytes.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "size",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 16,
+  "source_revision": "f360e9be34e2ce080c561204f170790abcaaf7a669077eeded985c1002615d5b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

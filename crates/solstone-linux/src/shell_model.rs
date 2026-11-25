@@ -836,6 +836,7 @@ pub fn relative_unix_now(at: f64) -> Option<String> {
 pub enum ImportTileState {
     Idle,
     Waiting,
+    Paused,
     Sending,
     ReadyToReview,
     NeedsAttention,
@@ -849,8 +850,25 @@ pub struct ImportTileModel {
     pub accessible_label: String,
 }
 
+/// Format transfer byte counts consistently with the journal transfer strip.
+#[must_use]
+pub fn format_transfer_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    if bytes < 1024 {
+        message!("linux.import.sizebytes", "size" => bytes.to_string())
+    } else if bytes < 1024 * 1024 {
+        message!("linux.import.sizekb", "size" => format!("{:.0}", bytes as f64 / KIB))
+    } else if bytes < 1024 * 1024 * 1024 {
+        message!("linux.import.sizemb", "size" => format!("{:.1}", bytes as f64 / MIB))
+    } else {
+        message!("linux.import.sizegb", "size" => format!("{:.1}", bytes as f64 / GIB))
+    }
+}
+
 /// Worst-signal-wins status for the home `import` tile:
-/// `needs attention` > `ready to review` > `sending` > `waiting` > idle (quiet).
+/// `needs attention` > `ready to review` > `sending` > `paused` > `waiting` > idle (quiet).
 /// When `doc` is `None` (daemon not running / unavailable), stays quiet without a live state word.
 #[must_use]
 pub fn import_tile_model(
@@ -934,6 +952,59 @@ pub fn import_tile_model(
             .filter(|r| r.state == "sending")
             .collect();
         let total = active_rows.len() as u64;
+        if let Some(resumable_row) = sending_rows
+            .iter()
+            .copied()
+            .find(|r| r.resumable && r.bytes_total > 0)
+        {
+            if resumable_row.transfer_phase.as_deref() == Some("checking") {
+                let state_label = text!("linux.import.checkingfile");
+                let sub_line = if total <= 1 {
+                    resumable_row.name.clone()
+                } else {
+                    message!("linux.import.nfiles", "count" => total.max(1))
+                };
+                return ImportTileModel {
+                    state: ImportTileState::Sending,
+                    state_label: Some(state_label),
+                    accessible_label: message!(
+                        "linux.import.tile.a11y",
+                        "state" => state_label,
+                        "detail" => sub_line
+                    ),
+                    sub_line,
+                };
+            }
+            let sent =
+                format_transfer_bytes(resumable_row.bytes_sent.min(resumable_row.bytes_total));
+            let total_size = format_transfer_bytes(resumable_row.bytes_total);
+            let queued = total.saturating_sub(1);
+            let sub_line = if queued > 0 {
+                message!(
+                    "linux.import.progressofmore",
+                    "sent" => sent,
+                    "total" => total_size,
+                    "queued" => queued
+                )
+            } else {
+                message!(
+                    "linux.import.progressof",
+                    "sent" => sent,
+                    "total" => total_size
+                )
+            };
+            let state_label = text!("linux.import.sending");
+            return ImportTileModel {
+                state: ImportTileState::Sending,
+                state_label: Some(state_label),
+                accessible_label: message!(
+                    "linux.import.tile.a11y",
+                    "state" => state_label,
+                    "detail" => sub_line
+                ),
+                sub_line,
+            };
+        }
         let sub_line = if total <= 1
             && let Some(first) = sending_rows.first().or_else(|| active_rows.first())
         {
@@ -944,6 +1015,41 @@ pub fn import_tile_model(
         let state_label = text!("linux.import.sending");
         return ImportTileModel {
             state: ImportTileState::Sending,
+            state_label: Some(state_label),
+            accessible_label: message!(
+                "linux.import.tile.a11y",
+                "state" => state_label,
+                "detail" => sub_line
+            ),
+            sub_line,
+        };
+    }
+
+    if let Some(paused_row) = active_rows
+        .iter()
+        .copied()
+        .find(|r| r.resumable && r.bytes_total > 0 && r.transfer_phase.as_deref() == Some("paused"))
+    {
+        let sent = format_transfer_bytes(paused_row.bytes_sent.min(paused_row.bytes_total));
+        let total_size = format_transfer_bytes(paused_row.bytes_total);
+        let queued = (active_rows.len() as u64).saturating_sub(1);
+        let sub_line = if queued > 0 {
+            message!(
+                "linux.import.progressofmore",
+                "sent" => sent,
+                "total" => total_size,
+                "queued" => queued
+            )
+        } else {
+            message!(
+                "linux.import.progressof",
+                "sent" => sent,
+                "total" => total_size
+            )
+        };
+        let state_label = text!("linux.import.paused");
+        return ImportTileModel {
+            state: ImportTileState::Paused,
             state_label: Some(state_label),
             accessible_label: message!(
                 "linux.import.tile.a11y",
@@ -1111,6 +1217,11 @@ pub fn import_remove_a11y(name: &str) -> String {
 #[must_use]
 pub fn import_try_now_a11y(name: &str) -> String {
     message!("linux.import.trynow.a11y", "name" => name)
+}
+
+#[must_use]
+pub fn import_cancel_a11y(name: &str) -> String {
+    message!("linux.import.cancel.a11y", "name" => name)
 }
 
 #[must_use]
@@ -1474,9 +1585,114 @@ mod tests {
         );
         assert_eq!(import_remove_a11y("holiday.mov"), "remove holiday.mov");
         assert_eq!(import_try_now_a11y("holiday.mov"), "try holiday.mov now");
+        assert_eq!(import_cancel_a11y("archive.zip"), "cancel archive.zip");
         assert_eq!(
             import_recent_row_a11y("notes.pdf", "4 min ago"),
             "notes.pdf, in your journal, 4 min ago. open in your journal."
+        );
+    }
+
+    #[test]
+    fn resumable_import_tile_and_size_formatter_track_confirmed_progress() {
+        use crate::import::{ImportDocument, ImportRow};
+
+        assert_eq!(format_transfer_bytes(0), "0 B");
+        assert_eq!(format_transfer_bytes(512), "512 B");
+        assert_eq!(format_transfer_bytes(16 * 1024), "16 KB");
+        assert_eq!(format_transfer_bytes(16 * 1024 * 1024), "16.0 MB");
+        assert_eq!(format_transfer_bytes(4 * 1024 * 1024 * 1024), "4.0 GB");
+
+        let one_gib = 1024 * 1024 * 1024u64;
+        let sending_single = ImportDocument {
+            v: 1,
+            paired_confirmed: true,
+            sending: true,
+            waiting: 1,
+            held: true,
+            rows: vec![ImportRow {
+                id: "a".into(),
+                name: "archive.zip".into(),
+                state: "sending".into(),
+                size_bytes: 4 * one_gib,
+                resumable: true,
+                bytes_sent: one_gib,
+                bytes_total: 4 * one_gib,
+                transfer_phase: Some("sending".into()),
+                can_cancel: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let tile = import_tile_model(Some(&sending_single), false);
+        assert_eq!(tile.state, ImportTileState::Sending);
+        assert_eq!(tile.state_label, Some(text!("linux.import.sending")));
+        assert!(tile.sub_line.contains("1.0 GB") && tile.sub_line.contains("4.0 GB"));
+
+        let mut sending_with_queue = sending_single.clone();
+        sending_with_queue.waiting = 3;
+        sending_with_queue.rows.push(ImportRow {
+            id: "b".into(),
+            name: "more1.zip".into(),
+            state: "waiting".into(),
+            ..Default::default()
+        });
+        sending_with_queue.rows.push(ImportRow {
+            id: "c".into(),
+            name: "more2.zip".into(),
+            state: "waiting".into(),
+            ..Default::default()
+        });
+        let queued_tile = import_tile_model(Some(&sending_with_queue), false);
+        assert_eq!(queued_tile.state, ImportTileState::Sending);
+        assert!(queued_tile.sub_line.contains('2'));
+
+        let mut checking_doc = sending_single.clone();
+        checking_doc.rows[0].transfer_phase = Some("checking".into());
+        checking_doc.rows[0].bytes_sent = 4 * one_gib;
+        let checking_tile = import_tile_model(Some(&checking_doc), false);
+        assert_eq!(checking_tile.state, ImportTileState::Sending);
+        assert_eq!(
+            checking_tile.state_label,
+            Some(text!("linux.import.checkingfile"))
+        );
+
+        let paused_doc = ImportDocument {
+            v: 1,
+            paired_confirmed: true,
+            sending: false,
+            waiting: 1,
+            held: true,
+            rows: vec![ImportRow {
+                id: "a".into(),
+                name: "archive.zip".into(),
+                state: "waiting".into(),
+                size_bytes: 4 * one_gib,
+                resumable: true,
+                bytes_sent: one_gib,
+                bytes_total: 4 * one_gib,
+                transfer_phase: Some("paused".into()),
+                can_cancel: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paused_tile = import_tile_model(Some(&paused_doc), true);
+        assert_eq!(paused_tile.state, ImportTileState::Paused);
+        assert_eq!(paused_tile.state_label, Some(text!("linux.import.paused")));
+        assert!(paused_tile.sub_line.contains("1.0 GB") && paused_tile.sub_line.contains("4.0 GB"));
+
+        // Worst-signal-wins: ready to review still outranks paused/sending.
+        let mut mixed = paused_doc.clone();
+        mixed.ready_to_review = 1;
+        mixed.rows.push(ImportRow {
+            id: "r".into(),
+            name: "health.zip".into(),
+            state: "ready to review".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            import_tile_model(Some(&mixed), false).state,
+            ImportTileState::ReadyToReview
         );
     }
 

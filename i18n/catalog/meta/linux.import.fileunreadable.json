@@ -1,0 +1,17 @@
+{
+  "description": "Actionable failure line when the staged local copy on this device can no longer be read.",
+  "context": "Actionable failure line when the staged local copy on this device can no longer be read.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 110,
+  "source_revision": "bdfacf25ff1f8d2bbc510680bb015a0529ebcc54ffefb85943612f6e1845cd6b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

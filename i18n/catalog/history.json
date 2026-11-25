@@ -8129,8 +8129,52 @@
       "selector": null
     },
     {
+      "id": "linux.import.cancel.a11y",
+      "resource": "m6c696e75782e696d706f72742e63616e63656c2e61313179",
+      "namespace": "linux.import.cancel",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.import.cannotconvert",
       "resource": "m6c696e75782e696d706f72742e63616e6e6f74636f6e76657274",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.checkingdetail",
+      "resource": "m6c696e75782e696d706f72742e636865636b696e6764657461696c",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.checkingfile",
+      "resource": "m6c696e75782e696d706f72742e636865636b696e6766696c65",
       "namespace": "linux.import",
       "owner": "linux",
       "tombstone": false,
@@ -8237,8 +8281,32 @@
       "selector": null
     },
     {
+      "id": "linux.import.fileunreadable",
+      "resource": "m6c696e75782e696d706f72742e66696c65756e7265616461626c65",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.import.held",
       "resource": "m6c696e75782e696d706f72742e68656c64",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.integritymismatch",
+      "resource": "m6c696e75782e696d706f72742e696e746567726974796d69736d61746368",
       "namespace": "linux.import",
       "owner": "linux",
       "tombstone": false,
@@ -8364,6 +8432,26 @@
       "selector": null
     },
     {
+      "id": "linux.import.nospacejournal",
+      "resource": "m6c696e75782e696d706f72742e6e6f73706163656a6f75726e616c",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.import.nothingwassaved",
       "resource": "m6c696e75782e696d706f72742e6e6f7468696e677761737361766564",
       "namespace": "linux.import",
@@ -8436,6 +8524,140 @@
       "replacement": null,
       "format_intent": "text",
       "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.paused",
+      "resource": "m6c696e75782e696d706f72742e706175736564",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.pauseddetail",
+      "resource": "m6c696e75782e696d706f72742e70617573656464657461696c",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "sent",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.progressof",
+      "resource": "m6c696e75782e696d706f72742e70726f67726573736f66",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "sent",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.progressofmore",
+      "resource": "m6c696e75782e696d706f72742e70726f67726573736f666d6f7265",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "sent",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "queued",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.progresspercent",
+      "resource": "m6c696e75782e696d706f72742e70726f677265737370657263656e74",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "sent",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "percent",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
       "protected_slots": [],
       "selector": null
     },
@@ -8539,6 +8761,33 @@
       "replacement": null,
       "format_intent": "text",
       "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.resumingfrom",
+      "resource": "m6c696e75782e696d706f72742e726573756d696e6766726f6d",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "sent",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
       "protected_slots": [],
       "selector": null
     },
@@ -8726,6 +8975,86 @@
       "selector": null
     },
     {
+      "id": "linux.import.sizebytes",
+      "resource": "m6c696e75782e696d706f72742e73697a656279746573",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "size",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.sizegb",
+      "resource": "m6c696e75782e696d706f72742e73697a656762",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "size",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.sizekb",
+      "resource": "m6c696e75782e696d706f72742e73697a656b62",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "size",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.sizemb",
+      "resource": "m6c696e75782e696d706f72742e73697a656d62",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "size",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.import.statusneedsyou",
       "resource": "m6c696e75782e696d706f72742e7374617475736e65656473796f75",
       "namespace": "linux.import",
@@ -8881,6 +9210,18 @@
           "max": null
         }
       ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.import.uploadexpired",
+      "resource": "m6c696e75782e696d706f72742e75706c6f616465787069726564",
+      "namespace": "linux.import",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
       "protected_slots": [],
       "selector": null
     },

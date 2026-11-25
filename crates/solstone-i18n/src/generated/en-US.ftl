@@ -1039,7 +1039,13 @@ m6c696e75782e696d706f72742e616c6c686973746f7279 = all import history in your jou
 
 m6c696e75782e696d706f72742e617474656e74696f6e = needs attention
 
+m6c696e75782e696d706f72742e63616e63656c2e61313179 = cancel { $name }
+
 m6c696e75782e696d706f72742e63616e6e6f74636f6e76657274 = this device can't convert this photo
+
+m6c696e75782e696d706f72742e636865636b696e6764657461696c = checking the complete file
+
+m6c696e75782e696d706f72742e636865636b696e6766696c65 = checking file
 
 m6c696e75782e696d706f72742e64656c697665726564 = in your journal.
 
@@ -1057,7 +1063,11 @@ m6c696e75782e696d706f72742e66696c656e6f7472656164 = this couldn't be read. add i
 
 m6c696e75782e696d706f72742e66696c65746f6f6c61726765 = it's larger than your journal takes
 
+m6c696e75782e696d706f72742e66696c65756e7265616461626c65 = the copy on this device could no longer be read. remove it and choose the file again.
+
 m6c696e75782e696d706f72742e68656c64 = not going to your journal right now. each one says why.
+
+m6c696e75782e696d706f72742e696e746567726974796d69736d61746368 = the file didn't arrive intact. try sending it again.
 
 m6c696e75782e696d706f72742e696e796f75726a6f75726e616c72656c = in your journal · { $when }
 
@@ -1073,6 +1083,8 @@ m6c696e75782e696d706f72742e6e66696c6573 = { $count } files
 
 m6c696e75782e696d706f72742e6e6f726f6f6d = there isn't enough room on this device
 
+m6c696e75782e696d706f72742e6e6f73706163656a6f75726e616c = not enough space for this { $total } file right now. free up space where your journal lives or cancel unfinished imports, and try again.
+
 m6c696e75782e696d706f72742e6e6f7468696e677761737361766564 = nothing was saved on this device.
 
 m6c696e75782e696d706f72742e6e6f7468696e67796574 = nothing yet.
@@ -1082,6 +1094,16 @@ m6c696e75782e696d706f72742e6e7265616479696e6a6f75726e616c = { $count } ready in 
 m6c696e75782e696d706f72742e6e77616974696e67 = { $count } waiting
 
 m6c696e75782e696d706f72742e70616972616761696e = your journal stopped accepting this device. imports wait here until you pair again.
+
+m6c696e75782e696d706f72742e706175736564 = paused
+
+m6c696e75782e696d706f72742e70617573656464657461696c = paused at { $sent } of { $total }. picks up from here when your journal is ready.
+
+m6c696e75782e696d706f72742e70726f67726573736f66 = { $sent } of { $total }
+
+m6c696e75782e696d706f72742e70726f67726573736f666d6f7265 = { $sent } of { $total } · { $queued } more waiting
+
+m6c696e75782e696d706f72742e70726f677265737370657263656e74 = { $sent } of { $total } ({ $percent }%)
 
 m6c696e75782e696d706f72742e7265616479746f726576696577 = ready to review
 
@@ -1094,6 +1116,8 @@ m6c696e75782e696d706f72742e72656d6f76652e61313179 = remove { $name }
 m6c696e75782e696d706f72742e72656d6f76656572726f72 = couldn't remove this. try again.
 
 m6c696e75782e696d706f72742e72656d6f76657265616479746f726576696577 = this removes the copy on this device. the waiting copy in your journal stays there until you discard it or it expires.
+
+m6c696e75782e696d706f72742e726573756d696e6766726f6d = resuming from { $sent } of { $total }
 
 m6c696e75782e696d706f72742e72657669657764657461696c = saved in your journal. preview and confirm to start.
 
@@ -1119,6 +1143,14 @@ m6c696e75782e696d706f72742e73656e64696e67656c6c6970736973 = sending to your jour
 
 m6c696e75782e696d706f72742e73656e64696e67746f6a6f75726e616c = sending to your journal.
 
+m6c696e75782e696d706f72742e73697a656279746573 = { $size } B
+
+m6c696e75782e696d706f72742e73697a656762 = { $size } GB
+
+m6c696e75782e696d706f72742e73697a656b62 = { $size } KB
+
+m6c696e75782e696d706f72742e73697a656d62 = { $size } MB
+
 m6c696e75782e696d706f72742e7374617475736e65656473796f75 = imports need you
 
 m6c696e75782e696d706f72742e7374617475736e65656473796f75737562 = open import to see why.
@@ -1139,6 +1171,8 @@ m6c696e75782e696d706f72742e73746f72656572726f72 = couldn't read imports on this 
 m6c696e75782e696d706f72742e74696c652e61313179 = import, { $state }. { $detail }.
 
 m6c696e75782e696d706f72742e7472796e6f772e61313179 = try { $name } now
+
+m6c696e75782e696d706f72742e75706c6f616465787069726564 = your journal no longer has this unfinished import. try again to start over.
 
 m6c696e75782e696d706f72742e77616974666f726a6f75726e616c = imports wait on this device until you connect a journal.
 

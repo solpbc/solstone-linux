@@ -1,0 +1,17 @@
+{
+  "description": "Actionable failure line when whole-file integrity verification fails after sending a large file.",
+  "context": "Actionable failure line when whole-file integrity verification fails after sending a large file.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 80,
+  "source_revision": "90d7865d6707f67e9009e71d0e5249f7aa9ed0affdaf82b95a062153d19ed921",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

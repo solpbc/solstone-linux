@@ -144,7 +144,8 @@ fn device_row_priority(row: &ImportRow) -> u8 {
     match row.state.as_str() {
         "needs attention" => 0,
         "sending" => 1,
-        _ => 2,
+        _ if row.resumable && row.transfer_phase.as_deref() == Some("paused") => 2,
+        _ => 3,
     }
 }
 
@@ -164,14 +165,82 @@ fn queue_hold_line(document: &ImportDocument, offline: bool) -> Option<&str> {
     }
 }
 
+fn transfer_progress_fraction(row: &ImportRow) -> Option<f64> {
+    if !row.resumable || row.bytes_total == 0 || row.state == "needs attention" {
+        return None;
+    }
+    if !matches!(
+        row.transfer_phase.as_deref(),
+        Some("sending" | "paused" | "checking" | "resuming")
+    ) {
+        return None;
+    }
+    let clamped = row.bytes_sent.min(row.bytes_total) as f64;
+    Some((clamped / row.bytes_total as f64).clamp(0.0, 1.0))
+}
+
+fn transfer_progress_percent(bytes_sent: u64, bytes_total: u64) -> u64 {
+    if bytes_total == 0 {
+        return 0;
+    }
+    let clamped = bytes_sent.min(bytes_total) as u128;
+    ((clamped * 100) / bytes_total as u128).min(100) as u64
+}
+
 fn device_row_detail(row: &ImportRow) -> Option<String> {
+    if row.state == "needs attention" {
+        if row.missing {
+            return Some(text!("linux.import.fileunreadable").to_owned());
+        }
+        return match row.reason_code.as_deref() {
+            Some("insufficient_journal_space") => {
+                let total = shell_model::format_transfer_bytes(row.size_bytes.max(row.bytes_total));
+                Some(message!("linux.import.nospacejournal", "total" => total))
+            }
+            Some("whole_file_checksum_mismatch" | "chunk_checksum_mismatch") => {
+                Some(text!("linux.import.integritymismatch").to_owned())
+            }
+            Some("upload_not_found") => Some(text!("linux.import.uploadexpired").to_owned()),
+            _ => row
+                .reason
+                .as_deref()
+                .map(|r| solstone_linux::import::display_import_status(r).to_owned()),
+        };
+    }
+    if row.resumable && row.bytes_total > 0 {
+        let sent = shell_model::format_transfer_bytes(row.bytes_sent.min(row.bytes_total));
+        let total = shell_model::format_transfer_bytes(row.bytes_total);
+        match row.transfer_phase.as_deref() {
+            Some("checking") => return Some(text!("linux.import.checkingdetail").to_owned()),
+            Some("resuming") => {
+                return Some(message!(
+                    "linux.import.resumingfrom",
+                    "sent" => sent,
+                    "total" => total
+                ));
+            }
+            Some("paused") => {
+                return Some(message!(
+                    "linux.import.pauseddetail",
+                    "sent" => sent,
+                    "total" => total
+                ));
+            }
+            Some("sending") => {
+                let percent = transfer_progress_percent(row.bytes_sent, row.bytes_total);
+                return Some(message!(
+                    "linux.import.progresspercent",
+                    "sent" => sent,
+                    "total" => total,
+                    "percent" => percent.to_string()
+                ));
+            }
+            _ => {}
+        }
+    }
     match row.state.as_str() {
         "sending" => Some(text!("linux.import.sendingellipsis").to_owned()),
         "waiting" => Some(text!("linux.import.waitingdetail").to_owned()),
-        "needs attention" => row
-            .reason
-            .as_deref()
-            .map(|r| solstone_linux::import::display_import_status(r).to_owned()),
         _ => row
             .reason
             .as_deref()
@@ -703,7 +772,13 @@ impl ImportPage {
                 text!("linux.import.attention"),
                 "sol-attn",
             ),
+            "sending" if row.transfer_phase.as_deref() == Some("checking") => {
+                (MarkKind::Dot, text!("linux.import.checkingfile"), "sol-ink")
+            }
             "sending" => (MarkKind::Dot, text!("linux.import.sending"), "sol-ink"),
+            _ if row.resumable && row.transfer_phase.as_deref() == Some("paused") => {
+                (MarkKind::Ring, text!("linux.import.paused"), "sol-faint")
+            }
             _ => (MarkKind::Ring, text!("linux.import.waiting"), "sol-faint"),
         };
         apply_mark_kind(&mark, mark_kind);
@@ -714,13 +789,34 @@ impl ImportPage {
         status.append(&state_label);
         box_.append(&status);
 
+        if let Some(fraction) = transfer_progress_fraction(row) {
+            let progress = gtk::ProgressBar::new();
+            progress.set_fraction(fraction);
+            progress.add_css_class("sol-import-progress");
+            if row.transfer_phase.as_deref() == Some("paused") {
+                progress.add_css_class("sol-import-progress-paused");
+            }
+            box_.append(&progress);
+        }
+
         if let Some(detail_text) = device_row_detail(row) {
             let detail = label(&detail_text);
             detail.add_css_class("sol-faint");
             box_.append(&detail);
         }
 
-        if row.state != "sending" && (row.can_remove || row.can_retry) {
+        if row.can_cancel {
+            let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            actions.set_margin_top(2);
+            let cancel = labeled_button(
+                text!("linux.window.cancel"),
+                &shell_model::import_cancel_a11y(&row.name),
+            );
+            cancel.add_css_class("sol-action");
+            self.wire_cancel(&cancel, row.id.clone());
+            actions.append(&cancel);
+            box_.append(&actions);
+        } else if row.state != "sending" && (row.can_remove || row.can_retry) {
             let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             actions.set_margin_top(2);
             if row.can_retry {
@@ -793,6 +889,33 @@ impl ImportPage {
             content.add_css_class("sol-recent-row-static");
             content.upcast()
         }
+    }
+
+    fn wire_cancel(&self, button: &gtk::Button, id: String) {
+        let page = self.clone();
+        button.connect_clicked(move |button| {
+            page.clear_step();
+            button.set_sensitive(false);
+            let page = page.clone();
+            let id = id.clone();
+            let button = button.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let success = match ControlClient::session().await {
+                    Ok(client) => {
+                        let success = ok(client.import_cancel(&id).await);
+                        page.reload(&client).await;
+                        success
+                    }
+                    Err(_) => false,
+                };
+                if !success {
+                    page.fail(solstone_linux::import::step_error());
+                    button.set_sensitive(true);
+                } else {
+                    page.clear_step();
+                }
+            });
+        });
     }
 
     fn wire_retry(&self, button: &gtk::Button, id: String) {
@@ -1085,6 +1208,92 @@ mod tests {
         assert_eq!(
             queue_hold_line(&held_doc, true),
             Some("imports wait until you confirm your journal's mark.")
+        );
+    }
+
+    #[test]
+    fn resumable_row_progress_sorting_and_fault_mapping() {
+        let one_gib = 1024 * 1024 * 1024u64;
+        let paused = ImportRow {
+            resumable: true,
+            bytes_sent: one_gib,
+            bytes_total: 4 * one_gib,
+            size_bytes: 4 * one_gib,
+            transfer_phase: Some("paused".into()),
+            can_cancel: true,
+            ..sample_row("p", "archive.zip", "waiting")
+        };
+        let sending = ImportRow {
+            resumable: true,
+            bytes_sent: 2 * one_gib,
+            bytes_total: 4 * one_gib,
+            size_bytes: 4 * one_gib,
+            transfer_phase: Some("sending".into()),
+            can_cancel: true,
+            ..sample_row("s", "movie.mp4", "sending")
+        };
+        let checking = ImportRow {
+            resumable: true,
+            bytes_sent: 4 * one_gib,
+            bytes_total: 4 * one_gib,
+            size_bytes: 4 * one_gib,
+            transfer_phase: Some("checking".into()),
+            can_cancel: true,
+            ..sample_row("c", "done.zip", "sending")
+        };
+        let queued = sample_row("q", "small.txt", "waiting");
+        let rows = [queued.clone(), paused.clone(), sending.clone()];
+        let sorted = sort_device_rows(&rows);
+        let ids: Vec<&str> = sorted.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["s", "p", "q"]);
+
+        assert_eq!(transfer_progress_fraction(&sending), Some(0.5));
+        assert_eq!(transfer_progress_fraction(&paused), Some(0.25));
+        assert_eq!(transfer_progress_fraction(&checking), Some(1.0));
+        assert_eq!(transfer_progress_fraction(&queued), None);
+
+        let sending_detail = device_row_detail(&sending).unwrap();
+        assert!(sending_detail.contains("2.0 GB") && sending_detail.contains("50%"));
+        let paused_detail = device_row_detail(&paused).unwrap();
+        assert!(paused_detail.contains("1.0 GB") && paused_detail.contains("4.0 GB"));
+        assert_eq!(
+            device_row_detail(&checking).as_deref(),
+            Some(text!("linux.import.checkingdetail"))
+        );
+
+        let no_space = ImportRow {
+            size_bytes: 4 * one_gib,
+            reason_code: Some("insufficient_journal_space".into()),
+            ..sample_row("ns", "big.zip", "needs attention")
+        };
+        assert!(device_row_detail(&no_space).unwrap().contains("4.0 GB"));
+        assert_eq!(transfer_progress_fraction(&no_space), None);
+
+        let integrity = ImportRow {
+            reason_code: Some("whole_file_checksum_mismatch".into()),
+            ..sample_row("int", "big.zip", "needs attention")
+        };
+        assert_eq!(
+            device_row_detail(&integrity).as_deref(),
+            Some(text!("linux.import.integritymismatch"))
+        );
+
+        let expired = ImportRow {
+            reason_code: Some("upload_not_found".into()),
+            ..sample_row("exp", "big.zip", "needs attention")
+        };
+        assert_eq!(
+            device_row_detail(&expired).as_deref(),
+            Some(text!("linux.import.uploadexpired"))
+        );
+
+        let missing = ImportRow {
+            missing: true,
+            ..sample_row("miss", "big.zip", "needs attention")
+        };
+        assert_eq!(
+            device_row_detail(&missing).as_deref(),
+            Some(text!("linux.import.fileunreadable"))
         );
     }
 }

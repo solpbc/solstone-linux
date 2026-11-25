@@ -1,0 +1,17 @@
+{
+  "description": "Detail line on a large file row while the journal verifies the complete file before staging.",
+  "context": "Detail line on a large file row while the journal verifies the complete file before staging.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 48,
+  "source_revision": "9a9c57cffa4ed1eb8c63b6b14996cc8ca3d3147057f1e671c6ee27ca64cbdad5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,26 @@
+{
+  "description": "Detail line on a paused large file row explaining where it will resume once the journal is ready.",
+  "context": "Detail line on a paused large file row explaining where it will resume once the journal is ready.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "sent",
+      "type": "string"
+    },
+    {
+      "name": "total",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 120,
+  "source_revision": "22e67a0f4467eff2df0774de9ed21bbb3d832359e0295a3926af8a794580aa2e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

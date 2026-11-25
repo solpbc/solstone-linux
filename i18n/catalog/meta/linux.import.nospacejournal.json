@@ -1,0 +1,22 @@
+{
+  "description": "Actionable failure line when the journal reports insufficient storage or staging space for a large import.",
+  "context": "Actionable failure line when the journal reports insufficient storage or staging space for a large import.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "total",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 180,
+  "source_revision": "f520e0c42d56e5f137930fe1af9cbf1d5452fe4607146a5e6413aa7e809d4bb8",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

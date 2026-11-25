@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- with your journal up to date, large files you choose or drop on the app's import page now send in pieces so a transfer picks up where it left off after a network switch, restart, or sleep instead of starting over. the import tile and the app's import page show how much your journal has received and when a transfer is paused, and the import page lets you cancel an unfinished transfer.
+
 ## [2.0.53] - 2026-11-25
 
 ### Fixed

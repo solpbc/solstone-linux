@@ -1,0 +1,30 @@
+{
+  "description": "Confirmed byte progress and percentage on a large file row in the import page.",
+  "context": "Confirmed byte progress and percentage on a large file row in the import page.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "sent",
+      "type": "string"
+    },
+    {
+      "name": "total",
+      "type": "string"
+    },
+    {
+      "name": "percent",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 44,
+  "source_revision": "bb6612bb5d4c4ce2a62cc11bc274472124d229aeb3d4e14b936e678e4931e310",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

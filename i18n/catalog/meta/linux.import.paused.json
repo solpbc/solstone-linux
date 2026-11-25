@@ -1,0 +1,17 @@
+{
+  "description": "Short status word on the import tile and import row when a large transfer is paused waiting to reconnect.",
+  "context": "Short status word on the import tile and import row when a large transfer is paused waiting to reconnect.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 20,
+  "source_revision": "bd7388c578d50e4a0746e9b352b91bca48827551ef442e581a74a8feea5bf9a4",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

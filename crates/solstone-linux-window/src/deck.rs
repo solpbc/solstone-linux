@@ -2974,7 +2974,9 @@ fn import_mark_kind(state: ImportTileState) -> MarkKind {
         ImportTileState::NeedsAttention => MarkKind::Diamond,
         ImportTileState::ReadyToReview => MarkKind::Review,
         ImportTileState::Sending => MarkKind::Dot,
-        ImportTileState::Waiting | ImportTileState::Idle => MarkKind::Ring,
+        ImportTileState::Paused | ImportTileState::Waiting | ImportTileState::Idle => {
+            MarkKind::Ring
+        }
     }
 }
 
@@ -3020,7 +3022,10 @@ fn paint_import_tile(tile: &TileWidgets, model: &ImportTileModel) {
             match model.state {
                 ImportTileState::NeedsAttention => tile.word.add_css_class("sol-attn"),
                 ImportTileState::ReadyToReview => tile.word.add_css_class("sol-review-word"),
-                ImportTileState::Sending | ImportTileState::Waiting | ImportTileState::Idle => {
+                ImportTileState::Sending
+                | ImportTileState::Paused
+                | ImportTileState::Waiting
+                | ImportTileState::Idle => {
                     tile.word.add_css_class("sol-faint");
                 }
             }
@@ -4119,6 +4124,26 @@ window.sol-dark button.sol-action.sol-primary:hover {\
 }\
 window.sol-dark .sol-import-row {\
   border-bottom-color: rgba(255, 244, 230, 0.12);\
+}\
+progressbar.sol-import-progress {\
+  margin: 2px 0;\
+}\
+progressbar.sol-import-progress trough {\
+  min-height: 6px;\
+  border-radius: 3px;\
+  background-color: rgba(58, 46, 36, 0.12);\
+}\
+window.sol-dark progressbar.sol-import-progress trough {\
+  background-color: rgba(255, 244, 230, 0.14);\
+}\
+progressbar.sol-import-progress progress {\
+  min-height: 6px;\
+  border-radius: 3px;\
+  background-color: #E8913A;\
+  background-image: none;\
+}\
+progressbar.sol-import-progress.sol-import-progress-paused progress {\
+  background-color: rgba(232, 145, 58, 0.45);\
 }\
 button.sol-recent-row {\
   background: none;\

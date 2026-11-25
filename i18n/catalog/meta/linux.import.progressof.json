@@ -1,0 +1,26 @@
+{
+  "description": "Confirmed bytes received by the journal out of the total file size on the import tile.",
+  "context": "Confirmed bytes received by the journal out of the total file size on the import tile.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "sent",
+      "type": "string"
+    },
+    {
+      "name": "total",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 32,
+  "source_revision": "4109c26cdeaa8541837e789ee748c920de77c1a6e75a8f58989d843f459b88ef",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

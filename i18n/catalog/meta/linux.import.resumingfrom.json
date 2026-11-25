@@ -1,0 +1,26 @@
+{
+  "description": "Detail line on a large file row while resyncing and resuming from a journal-confirmed byte offset.",
+  "context": "Detail line on a large file row while resyncing and resuming from a journal-confirmed byte offset.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "sent",
+      "type": "string"
+    },
+    {
+      "name": "total",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 48,
+  "source_revision": "610c9d51dc5d4efeab193e49d80741bcef20363b250ec63b1aa2fdf79c7009a2",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

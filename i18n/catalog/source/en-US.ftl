@@ -969,6 +969,23 @@ linux.import.nfiles = { $count } files
 linux.import.nreadyinjournal = { $count } ready in your journal
 linux.import.tile.a11y = import, { $state }. { $detail }.
 linux.import.statusrow.a11y = import, { $detail }.
+linux.import.sizebytes = { $size } B
+linux.import.sizekb = { $size } KB
+linux.import.sizemb = { $size } MB
+linux.import.sizegb = { $size } GB
+linux.import.paused = paused
+linux.import.checkingfile = checking file
+linux.import.progressof = { $sent } of { $total }
+linux.import.progressofmore = { $sent } of { $total } · { $queued } more waiting
+linux.import.progresspercent = { $sent } of { $total } ({ $percent }%)
+linux.import.checkingdetail = checking the complete file
+linux.import.pauseddetail = paused at { $sent } of { $total }. picks up from here when your journal is ready.
+linux.import.resumingfrom = resuming from { $sent } of { $total }
+linux.import.nospacejournal = not enough space for this { $total } file right now. free up space where your journal lives or cancel unfinished imports, and try again.
+linux.import.integritymismatch = the file didn't arrive intact. try sending it again.
+linux.import.uploadexpired = your journal no longer has this unfinished import. try again to start over.
+linux.import.fileunreadable = the copy on this device could no longer be read. remove it and choose the file again.
+linux.import.cancel.a11y = cancel { $name }
 linux.shell.itemcount = { $count ->
     [one] { $display } item
    *[other] { $display } items

@@ -1,0 +1,30 @@
+{
+  "description": "Confirmed bytes received by the journal out of total size plus count of additional waiting items on the import tile.",
+  "context": "Confirmed bytes received by the journal out of total size plus count of additional waiting items on the import tile.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "sent",
+      "type": "string"
+    },
+    {
+      "name": "total",
+      "type": "string"
+    },
+    {
+      "name": "queued",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 60,
+  "source_revision": "90e219094cc7cbefdd14d6a23e8941f8e41db4ec7e249c74fd37809e6e23ed99",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

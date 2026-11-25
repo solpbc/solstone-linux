@@ -1,0 +1,22 @@
+{
+  "description": "Formatted file or transfer byte size in bytes.",
+  "context": "Formatted file or transfer byte size in bytes.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "size",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 16,
+  "source_revision": "b7516e89bda4469983f1dbc214f24b5c96b5c2fd0e1448d86cbd13d34cc04182",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

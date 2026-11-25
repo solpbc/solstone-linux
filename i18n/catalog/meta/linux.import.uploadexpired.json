@@ -1,0 +1,17 @@
+{
+  "description": "Actionable failure line when an unfinished resumable upload is no longer held by the journal.",
+  "context": "Actionable failure line when an unfinished resumable upload is no longer held by the journal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 100,
+  "source_revision": "c53a2526eb58edd2e0357987281a710432ff9c2ed711c3851e47eb86a89b3a4d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}
