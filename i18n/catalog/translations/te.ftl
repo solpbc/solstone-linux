@@ -23,7 +23,7 @@ linux.about.lastseen = { $journal } · చివరిసారి కనిప�
 
 linux.about.now = ఇప్పుడే
 
-linux.about.unknown = journal తెలియదు
+linux.about.unknown = జర్నల్ తెలియదు
 
 linux.about.version = { $name } { $version }
 
@@ -256,7 +256,7 @@ linux.copy.audio = ఆడియో
 
 linux.copy.audiointakecancontinue = ఆడియో తీసుకోలు కొనసాగవచ్చు.
 
-linux.copy.availablelogsareshownbelowcheckthenotesforg = అందుబాటులో ఉన్న లాగ్‌లు కింద ఉన్నాయి. కాపీ సేవ్ చేయడానికి ముందు నోట్‌లలో లోటు ఉందో సరిచూడండి.
+linux.copy.availablelogsareshownbelowcheckthenotesforg = అందుబాటులో ఉన్న లాగ్‌లు కింద చూపబడ్డాయి. కాపీ సేవ్ చేయడానికి ముందు, ఖాళీల కోసం నోట్‌లు సరిచూడండి.
 
 linux.copy.cancelpairing = పెయిరింగ్ రద్దు చేయండి
 
@@ -268,7 +268,7 @@ linux.copy.choose = ఎంచుకోండి
 
 linux.copy.choosefolder = ఒక ఫోల్డర్‌ను ఎంచుకోండి
 
-linux.copy.choosefolder.v4cba918b = ఒక ఫోల్డర్‌ను ఎంచుకోండి…
+linux.copy.choosefolder.v4cba918b = ఫోల్డర్‌ను ఎంచుకోండి…
 
 linux.copy.chooseobsidianvault = మీ { $literal1 } వాల్ట్‌ను ఎంచుకోండి
 
@@ -282,7 +282,7 @@ linux.copy.connected = కనెక్ట్ అయి ఉంది
 
 linux.copy.connecting = కనెక్ట్ అవుతోంది…
 
-linux.copy.connectjournal = మీ జర్నల్‌కు కనెక్ట్ చేయండి
+linux.copy.connectjournal = మీ జర్నల్‌తో కనెక్ట్ అవ్వండి
 
 linux.copy.copysaved = కాపీ సేవ్ అయింది.
 
@@ -304,9 +304,9 @@ linux.copy.couldntopenyourbrowsertryagainoropenyourjo = మీ బ్రౌజ�
 
 linux.copy.couldntpauseintaketryagain = తీసుకోలు పాజ్ చేయలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
 
-linux.copy.couldntreadthelogfilestryagain = లాగ్ ఫైల్‌లను చదవలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
+linux.copy.couldntreadthelogfilestryagain = లాగ్ ఫైల్‌లు చదవలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
 
-linux.copy.couldntreadthelogstryagain = లాగ్‌లను చదవలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
+linux.copy.couldntreadthelogstryagain = లాగ్‌లు చదవలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
 
 linux.copy.couldntreadthesolstoneappsstatuscheckwhethe = solstone యాప్ స్థితిని చదవలేకపోయింది. అది నడుస్తోందో సరిచూసి, మళ్ళీ ప్రయత్నించండి.
 
@@ -320,7 +320,7 @@ linux.copy.couldntsaveactivityintaketryagain = కార్యకలాపం �
 
 linux.copy.couldntsaveallyoursettingsyoureditsarestill = మీ సెట్టింగ్‌లన్నీ సేవ్ చేయలేకపోయింది. మీ మార్పులు ఇక్కడే ఉన్నాయి. మళ్ళీ ప్రయత్నించండి.
 
-linux.copy.couldntsavethecopytrysavingtoanotherfolder = కాపీని సేవ్ చేయలేకపోయింది. మరో ఫోల్డర్‌లో సేవ్ చేయడం ప్రయత్నించండి.
+linux.copy.couldntsavethecopytrysavingtoanotherfolder = కాపీ సేవ్ చేయలేకపోయింది. ఇంకో ఫోల్డర్‌కు సేవ్ చేయండి.
 
 linux.copy.couldntsaveyouranswertryagain = మీ సమాధానాన్ని సేవ్ చేయలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
 
@@ -346,7 +346,7 @@ linux.copy.d15 = దీని గురించి మరింత
 
 linux.copy.d8 = ఈ కంప్యూటర్‌లో Screenshots ఫోల్డర్ కనబడలేదు. మీ స్క్రీన్‌షాట్‌లు సేవ్ అయ్యే ఫోల్డర్‌ను ఎంచుకోండి.
 
-linux.copy.d8pickertitle = మీ స్క్రీన్‌షాట్‌లు సేవ్ అయ్యే ఫోల్డర్‌ను ఎంచుకోండి
+linux.copy.d8pickertitle = మీ స్క్రీన్‌షాట్‌లు సేవ్ అయ్యే ఫోల్డర్ ఎంచుకోండి
 
 linux.copy.desktopactivity = డెస్క్‌టాప్ కార్యకలాపం
 
@@ -362,9 +362,9 @@ linux.copy.foundjournalthiscomputer = ఈ కంప్యూటర్‌లో �
 
 linux.copy.from = { $folder } నుండి
 
-linux.copy.getafreshlink = కొత్త లింక్ తీసుకోండి
+linux.copy.getafreshlink = తాజా లింక్ తీసుకోండి
 
-linux.copy.gethelp = సహాయం తీసుకోండి
+linux.copy.gethelp = సహాయం పొందండి
 
 linux.copy.healthdetails = స్థితి వివరాలు
 
@@ -384,13 +384,13 @@ linux.copy.journal = journal
 
 linux.copy.journal3 = మీ జర్నల్
 
-linux.copy.journaldetails = journal వివరాలు
+linux.copy.journaldetails = జర్నల్ వివరాలు
 
-linux.copy.journallinkinvalidbody = మీ చాట్ నుండి పూర్తి లింక్‌ను కాపీ చేసి మళ్ళీ తెరవండి.
+linux.copy.journallinkinvalidbody = మీ చాట్ నుండి పూర్తి లింక్ కాపీ చేసి మళ్ళీ తెరవండి.
 
-linux.copy.journallinkinvalidtitle = ఈ journal లింక్ సరైనది కాదు.
+linux.copy.journallinkinvalidtitle = ఈ జర్నల్ లింక్ చెల్లదు.
 
-linux.copy.journalneedsupdatebeforeit = ఈ నోట్‌లను తీసుకోవడానికి ముందు మీ జర్నల్‌కు అప్‌డేట్ కావాలి. అవి ఈ కంప్యూటర్‌లో వేచి ఉన్నాయి.
+linux.copy.journalneedsupdatebeforeit = ఈ నోట్‌లు స్వీకరించడానికి ముందు మీ జర్నల్‌కు అప్‌డేట్ కావాలి. అవి ఈ కంప్యూటర్‌లో వేచి ఉన్నాయి.
 
 linux.copy.journalsetupaction = ఈ కంప్యూటర్‌లో ఒక journal సెటప్ చేయండి
 
@@ -420,11 +420,11 @@ linux.copy.mark = మార్క్
 
 linux.copy.markunavailable = మార్క్ అందుబాటులో లేదు
 
-linux.copy.moveit = తరలించండి
+linux.copy.moveit = దీన్ని తరలించండి
 
 linux.copy.movesolstonetmux = solstone for { $literal1 } లోపలికి తరలించాలా?
 
-linux.copy.needahandreachahumanwerehappytohelp = సహాయం కావాలా? మమ్మల్ని సంప్రదించండి. మేము సంతోషంగా సహాయం చేస్తాము.
+linux.copy.needahandreachahumanwerehappytohelp = సహాయం కావాలా? మమ్మల్ని సంప్రదించండి. సహాయం చేయడానికి సంతోషంగా ఉన్నాం.
 
 linux.copy.needattention = శ్రద్ధ కావాలి
 
@@ -434,7 +434,7 @@ linux.copy.newpairingcancelled = కొత్త పెయిరింగ్ ర
 
 linux.copy.newpairingcancelledyourcurrentpairingstaysin = కొత్త పెయిరింగ్ రద్దు అయింది. మీ ప్రస్తుత పెయిరింగ్ వాడుకలోనే ఉంటుంది.
 
-linux.copy.nologfilesareavailableyettryagainafterusing = లాగ్ ఫైల్‌లు ఇంకా అందుబాటులో లేవు. యాప్ వాడిన తర్వాత మళ్ళీ ప్రయత్నించండి.
+linux.copy.nologfilesareavailableyettryagainafterusing = ఇంకా లాగ్ ఫైల్‌లు అందుబాటులో లేవు. యాప్ వాడిన తర్వాత మళ్ళీ ప్రయత్నించండి.
 
 linux.copy.norecentlogsareavailableyettryagainafterusi = ఇటీవలి లాగ్‌లు ఇంకా అందుబాటులో లేవు. యాప్ వాడిన తర్వాత మళ్ళీ ప్రయత్నించండి.
 
@@ -442,33 +442,33 @@ linux.copy.not = కాదు
 
 linux.copy.nothingthiscomputerhaskept = ఈ లింక్ ద్వారా, ఈ కంప్యూటర్ ఉంచినది ఏదీ ఆ జర్నల్‌కు వెళ్ళలేదు. మీరు తప్పు లింక్ పేస్ట్ చేసి ఉండవచ్చు, లేదా ఏదో సరిగా లేదు. మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తీసుకుని మళ్ళీ ప్రయత్నించండి, లేదా ఇమెయిల్ పంపండి: { $literal1 }. మేము సహాయం చేస్తాము.
 
-linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo = వేచి ఉన్నది ఏదీ, మీరు చేసే వరకు, మీ జర్నల్‌లోకి వెళ్ళదు.
+linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo = మీరు చేసే వరకు వేచి ఉన్నది ఏదీ మీ జర్నల్‌లోకి వెళ్లదు.
 
 linux.copy.notpaired = పెయిర్ కాలేదు
 
-linux.copy.notreachingyourjournalrightnow = ఇప్పుడు మీ జర్నల్‌ను చేరడం లేదు
+linux.copy.notreachingyourjournalrightnow = ఇప్పుడు మీ జర్నల్‌కు చేరడం లేదు
 
-linux.copy.notthisdevice = ఈ పరికరం‌లో లేదు
+linux.copy.notthisdevice = ఈ పరికరంలో లేదు
 
 linux.copy.notyet = ఇంకా కాదు
 
 linux.copy.obsidian = { $literal1 }
 
-linux.copy.obsidianwarning = మీ జర్నల్‌లో { $vault } అనే వాల్ట్ మరో పరికరం నుండి ఇప్పటికే ఉంది. మీరు కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
+linux.copy.obsidianwarning = మీ జర్నల్‌లో ఇంకో పరికరం నుండి { $vault } పేరుతో వాల్ట్ ఇప్పటికే ఉంది. కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
 
-linux.copy.obsidianwarningdate = మీ జర్నల్‌లో { $vault } అనే వాల్ట్ మరో పరికరం నుండి ఇప్పటికే ఉంది, చివరిసారి అప్‌డేట్ అయింది { $date }. మీరు కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
+linux.copy.obsidianwarningdate = మీ జర్నల్‌లో ఇంకో పరికరం నుండి { $vault } పేరుతో వాల్ట్ ఇప్పటికే ఉంది, చివరిగా { $date } న అప్‌డేట్ అయింది. కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
 
-linux.copy.obsidianwarningdevice = మీ జర్నల్‌లో { $vault } అనే వాల్ట్ { $device } నుండి ఇప్పటికే ఉంది. మీరు కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
+linux.copy.obsidianwarningdevice = మీ జర్నల్‌లో { $device } నుండి { $vault } పేరుతో వాల్ట్ ఇప్పటికే ఉంది. కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
 
-linux.copy.obsidianwarningdevicedate = మీ జర్నల్‌లో { $vault } అనే వాల్ట్ { $device } నుండి ఇప్పటికే ఉంది, చివరిసారి అప్‌డేట్ అయింది { $date }. మీరు కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
+linux.copy.obsidianwarningdevicedate = మీ జర్నల్‌లో { $device } నుండి { $vault } పేరుతో వాల్ట్ ఇప్పటికే ఉంది, చివరిగా { $date } న అప్‌డేట్ అయింది. కొనసాగిస్తే, రెండు పరికరాల మార్పులు మీ జర్నల్‌లోకి వెళ్తాయి.
 
 linux.copy.off = ఆఫ్
 
 linux.copy.offmeansnonethreegoes = ఆఫ్ అంటే మూడూ మీ జర్నల్‌లోకి వెళ్ళవు, మీ డెస్క్‌టాప్ ఏమి చేస్తున్నా.
 
-linux.copy.ofinyourjournal = మీ జర్నల్‌లో { $total }లో { $done }
+linux.copy.ofinyourjournal = మీ జర్నల్‌లో { $done } / { $total }
 
-linux.copy.ofscreenshotsinyourjournal = మీ జర్నల్‌లో { $total } స్క్రీన్‌షాట్‌లలో { $done }
+linux.copy.ofscreenshotsinyourjournal = మీ జర్నల్‌లో { $done } / { $total } స్క్రీన్‌షాట్‌లు
 
 linux.copy.omittedbytes = { $count ->
     [one] { $break }[మినహాయించిన { $formatted } బైట్]{ $break }
@@ -479,27 +479,27 @@ linux.copy.on = ఆన్
 
 linux.copy.openthenetworkappinyourjournalandgetapairi = మీ జర్నల్‌లో నెట్‌వర్క్ యాప్ తెరిచి, పెయిరింగ్ లింక్ తీసుకోండి.
 
-linux.copy.openyourjournal = మీ జర్నల్ తెరవండి
+linux.copy.openyourjournal = మీ జర్నల్‌ను తెరవండి
 
 linux.copy.otherfilesinstaywheretheyare = { $folder } లోని ఇతర ఫైల్‌లు అక్కడే ఉంటాయి.
 
-linux.copy.pairadevice = ఒక పరికరాన్ని పెయిర్ చేయండి
+linux.copy.pairadevice = ఒక పరికరాన్ని పెయిరింగ్ చేయండి
 
-linux.copy.pairagain = మళ్ళీ పెయిర్ చేయండి
+linux.copy.pairagain = మళ్ళీ పెయిరింగ్ చేయండి
 
 linux.copy.pairing = పెయిర్ అవుతోంది…
 
 linux.copy.pairingcancelledgetafreshpairinglinkfromyour = పెయిరింగ్ రద్దు అయింది. మీరు సిద్ధంగా ఉన్నప్పుడు మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తీసుకోండి.
 
-linux.copy.pairingdidntgothroughgetanewpairinglinkfro = పెయిరింగ్ జరగలేదు. మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తీసుకుని మళ్ళీ ప్రయత్నించండి.
+linux.copy.pairingdidntgothroughgetanewpairinglinkfro = పెయిరింగ్ కాలేదు. మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తెచ్చుకుని మళ్ళీ ప్రయత్నించండి.
 
 linux.copy.pairinglink = పెయిరింగ్ లింక్
 
-linux.copy.partthisvaultcant = ఈ వాల్ట్‌లో కొంత చదవలేం. లోపలి ఫోల్డర్‌ల అనుమతులు సరిచూడండి. మిగతా వాల్ట్ మీ జర్నల్‌లోకి వెళ్తూనే ఉంటుంది.
+linux.copy.partthisvaultcant = ఈ వాల్ట్‌లో కొంత భాగం చదవలేకపోయింది. దాని లోపలి ఫోల్డర్‌ల అనుమతులు సరిచూడండి. వాల్ట్ మిగతా భాగం మీ జర్నల్‌లోకి వెళ్తూనే ఉంటుంది.
 
 linux.copy.pasteapairinglinkfromyourjournal = మీ జర్నల్ నుండి పెయిరింగ్ లింక్‌ను పేస్ట్ చేయండి.
 
-linux.copy.pastepairinglink = పెయిరింగ్ లింక్ పేస్ట్ చేయండి
+linux.copy.pastepairinglink = పెయిరింగ్ లింక్‌ను పేస్ట్ చేయండి
 
 linux.copy.pause = పాజ్ చేయండి
 
@@ -519,9 +519,9 @@ linux.copy.readrecentlogs = ఇటీవలి లాగ్‌లు చదవ�
 
 linux.copy.readsettingsagain = సెట్టింగ్‌లు మళ్ళీ చదవండి
 
-linux.copy.readthelogsbelowthenchoosewhethertosaveaco = కింద లాగ్‌లు చదివి, కాపీ సేవ్ చేయాలో ఎంచుకోండి.
+linux.copy.readthelogsbelowthenchoosewhethertosaveaco = కింద లాగ్‌లు చదవండి, తర్వాత కాపీ సేవ్ చేయాలా అని ఎంచుకోండి.
 
-linux.copy.readthesolstoneappsrecentlogsbeforesavinga = సపోర్ట్ నివేదిక కోసం కాపీ సేవ్ చేయడానికి ముందు solstone యాప్ ఇటీవలి లాగ్‌లు చదవండి. ఇక్కడి నుండి ఏమీ పంపబడదు.
+linux.copy.readthesolstoneappsrecentlogsbeforesavinga = సపోర్ట్ నివేదిక కోసం కాపీ సేవ్ చేయడానికి ముందు, solstone యాప్ ఇటీవలి లాగ్‌లు చదవండి. ఇక్కడి నుండి ఏమీ పంపబడదు.
 
 linux.copy.recentlogs = ఇటీవలి లాగ్‌లు
 
@@ -541,31 +541,31 @@ linux.copy.s10counting = సరిచూస్తోంది…
 
 linux.copy.s10today = ఈ రోజు నుండి ప్రారంభించండి
 
-linux.copy.s11 = ఎంత వెనక్కి నుండి మొదలుపెట్టాలో ఎంచుకుని, వాటిని తీసుకురండి.
+linux.copy.s11 = ఎంత వెనక్కి మొదలు పెట్టాలో ఎంచుకుని, వాటిని తీసుకురండి.
 
-linux.copy.s12 = మీ స్క్రీన్‌షాట్‌లు లెక్కించలేకపోయింది.
+linux.copy.s12 = మీ స్క్రీన్‌షాట్‌లను లెక్కించలేకపోయింది.
 
-linux.copy.s14 = మీ జర్నల్‌లో ఇప్పటికే ఉన్న స్క్రీన్‌షాట్, ఫోల్డర్ నుండి తొలగించినా, అక్కడే ఉంటుంది.
+linux.copy.s14 = మీరు ఫోల్డర్ నుండి తొలగించినా, మీ జర్నల్‌లో ఇప్పటికే ఉన్న స్క్రీన్‌షాట్ అక్కడే ఉంటుంది.
 
-linux.copy.s15 = మీరు దీన్ని పాజ్ చేసినా లేదా ఆఫ్ చేసినా, మీ జర్నల్‌లో ఇప్పటికే ఉన్నది ఉండిపోతుంది.
+linux.copy.s15 = మీరు పాజ్ చేసినా, లేదా దీన్ని ఆఫ్ చేసినా, మీ జర్నల్‌లో ఇప్పటికే ఉన్నది అలాగే ఉంటుంది.
 
-linux.copy.s16computer = పాజ్ అయి ఉన్నప్పుడు మీరు తీసే స్క్రీన్‌షాట్‌లు లోపలికి రావు.
+linux.copy.s16computer = ఇది పాజ్ అయి ఉన్నప్పుడు మీరు తీసే స్క్రీన్‌షాట్‌లు లోపలికి రావు.
 
 linux.copy.s17 = మీ జర్నల్‌లో ఇప్పటికే ఉన్న స్క్రీన్‌షాట్‌లు మళ్ళీ తీసుకురాబడవు.
 
-linux.copy.s19 = మీ జర్నల్‌కు వెళ్ళడానికి వేచి ఉంది
+linux.copy.s19 = మీ జర్నల్‌కు వెళ్లేందుకు వేచి ఉంది
 
 linux.copy.s21 = journal అప్‌డేట్ కోసం వేచి ఉంది. మీ స్క్రీన్‌షాట్‌లు ఈ కంప్యూటర్‌లో వేచి ఉన్నాయి.
 
 linux.copy.s22 = ఫోల్డర్
 
-linux.copy.s23 = solstone యాప్ స్క్రీన్‌షాట్ అని గుర్తించినదే లోపలికి వస్తుంది.
+linux.copy.s23 = solstone యాప్ స్క్రీన్‌షాట్ అని గుర్తించగలిగింది మాత్రమే లోపలికి వస్తుంది.
 
 linux.copy.s7 = ఈ రోజుకు ముందు నుండి
 
-linux.copy.s9 = ఏవీ లోపలికి రాకముందే ఎన్ని స్క్రీన్‌షాట్‌లు ఉన్నాయో మీరు చూస్తారు.
+linux.copy.s9 = ఏవీ లోపలికి రాకముందే, స్క్రీన్‌షాట్‌లు ఎన్ని ఉన్నాయో మీరు చూస్తారు.
 
-linux.copy.saveacopy = కాపీ సేవ్ చేయండి…
+linux.copy.saveacopy = కాపీని సేవ్ చేయండి…
 
 linux.copy.savesettings = సెట్టింగ్‌లు సేవ్ చేయండి
 
@@ -599,7 +599,7 @@ linux.copy.seconds = సెకన్లు
 
 linux.copy.segmentinterval = సెగ్మెంట్ విరామం
 
-linux.copy.sentfoundnotesjournal = మీ జర్నల్‌లో { $found } నోట్‌లలో { $sent }
+linux.copy.sentfoundnotesjournal = { $sent } / { $found } నోట్‌లు మీ జర్నల్‌లో
 
 linux.copy.settings = సెట్టింగ్‌లు
 
@@ -607,15 +607,15 @@ linux.copy.settingsactivityonlyhelp = డెస్క్‌టాప్ కా�
 
 linux.copy.settingssaved = సెట్టింగ్‌లు సేవ్ అయ్యాయి.
 
-linux.copy.solstoneappcantread = solstone యాప్ ఈ వాల్ట్‌ను చదవలేదు. దాని ఫోల్డర్ ఉందో, అది ఉన్న డ్రైవ్ కనెక్ట్ అయి ఉందో సరిచూడండి. అది అందనింతవరకు మీ జర్నల్‌లో ఏమీ మారదు.
+linux.copy.solstoneappcantread = solstone యాప్ ఈ వాల్ట్ చదవలేకపోయింది. దాని ఫోల్డర్ ఉందో, అది ఉన్న డ్రైవ్ కనెక్ట్ అయి ఉందో సరిచూడండి. అది కనెక్ట్ కానంతవరకు మీ జర్నల్‌లో ఏమీ మారదు.
 
-linux.copy.solstoneappcouldntsave = ఈ వాల్ట్ కోసం తన స్థానాన్ని solstone యాప్ సేవ్ చేయలేకపోయింది. ఈ కంప్యూటర్‌లో ఖాళీ చోటు ఉందో సరిచూడండి.
+linux.copy.solstoneappcouldntsave = solstone యాప్ ఈ వాల్ట్ స్థానం సేవ్ చేయలేకపోయింది. ఈ కంప్యూటర్‌లో ఖాళీ చోటు ఉందో సరిచూడండి.
 
-linux.copy.solstoneappdidntfind = ఈ కంప్యూటర్‌లో solstone యాప్ వాల్ట్ కనబడలేదు. బదులుగా దాని ఫోల్డర్‌ను ఎంచుకోండి.
+linux.copy.solstoneappdidntfind = solstone యాప్ ఈ కంప్యూటర్‌లో వాల్ట్ దొరకలేదు. బదులుగా దాని ఫోల్డర్ ఎంచుకోండి.
 
-linux.copy.solstoneapptakesnotesone = ఈ కంప్యూటర్‌లోని ఒక వాల్ట్ నోట్‌లను solstone యాప్ స్వీకరిస్తుంది. అన్నీ మీ జర్నల్‌లోకి వెళ్తాయి, తర్వాత మారిన ప్రతిదీ. మీ వాల్ట్ ఉన్నది ఉన్నట్లే ఉంటుంది.
+linux.copy.solstoneapptakesnotesone = solstone యాప్ ఈ కంప్యూటర్‌లోని ఒక వాల్ట్ నోట్‌లను స్వీకరిస్తుంది. అన్నీ మీ జర్నల్‌లోకి వెళ్తాయి, తర్వాత ఒక్కోటి మారినప్పుడు. మీ వాల్ట్ ఉన్నట్టే ఉంటుంది.
 
-linux.copy.somenotescouldntgo = కొన్ని నోట్‌లు మీ జర్నల్‌లోకి వెళ్ళలేకపోయాయి. solstone యాప్ తర్వాతి సారి స్టార్ట్ అయినప్పుడు వాటిని మళ్ళీ ప్రయత్నిస్తుంది.
+linux.copy.somenotescouldntgo = కొన్ని నోట్‌లు మీ జర్నల్‌లోకి వెళ్ళలేకపోయాయి. solstone యాప్ తర్వాత స్టార్ట్ అయినప్పుడు వాటిని మళ్ళీ ప్రయత్నిస్తుంది.
 
 linux.copy.somethingansweredinsteadjournal = మీ జర్నల్ బదులు ఏదో సమాధానం ఇచ్చింది
 
@@ -637,13 +637,13 @@ linux.copy.takestmuxsessionsallit = మీ { $literal1 } సెషన్‌ల�
 
 linux.copy.terminal = టర్మినల్
 
-linux.copy.thatdoesntmatch = ఇది సరిపోలేదు
+linux.copy.thatdoesntmatch = అది సరిపోదు
 
 linux.copy.thatfolderisntobsidian = ఆ ఫోల్డర్ { $literal1 } వాల్ట్ కాదు, కాబట్టి solstone యాప్ దాన్ని చేర్చలేదు. వాల్ట్ సొంత ఫోల్డర్‌ను ఎంచుకోండి.
 
-linux.copy.thatfoldersnamecan = ఆ ఫోల్డర్ పేరు మీ జర్నల్‌లో వాల్ట్ పేరు కాలేదు. ఫోల్డర్ పేరు మార్చి మళ్ళీ ప్రయత్నించండి.
+linux.copy.thatfoldersnamecan = ఆ ఫోల్డర్ పేరు మీ జర్నల్‌లో వాల్ట్ పేరు కాదు. ఫోల్డర్ పేరు మార్చి మళ్ళీ ప్రయత్నించండి.
 
-linux.copy.thatpairinglinkisntonethesolstoneappcanrea = ఆ పెయిరింగ్ లింక్‌ను solstone యాప్ చదవలేదు. మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తీసుకుని మళ్ళీ ప్రయత్నించండి.
+linux.copy.thatpairinglinkisntonethesolstoneappcanrea = ఆ పెయిరింగ్ లింక్ solstone యాప్ చదవగలిగేది కాదు. మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తెచ్చుకుని మళ్ళీ ప్రయత్నించండి.
 
 linux.copy.thefolderisntonthiscomputer = { $folder } ఫోల్డర్ ఈ కంప్యూటర్‌లో ఇక లేదు.
 
@@ -651,7 +651,7 @@ linux.copy.thelogpreviewwaslimitedmorelogtextmaybeava = { $ws1 }[లాగ్ �
 
 linux.copy.thepairingchangedwhileyouwerecheckingitsmark = మీరు దాని మార్క్‌ను సరిచూస్తుండగా పెయిరింగ్ మారింది. నిర్ధారించే ముందు ప్రస్తుత మార్క్‌ను సరిచూడండి.
 
-linux.copy.thepairingwindowclosedgetanewpairinglinkfro = పెయిరింగ్ విండో మూసుకుంది. మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తీసుకుని, మళ్ళీ ప్రయత్నించండి.
+linux.copy.thepairingwindowclosedgetanewpairinglinkfro = పెయిరింగ్ విండో మూసుకుంది. మీ జర్నల్ నుండి కొత్త పెయిరింగ్ లింక్ తెచ్చుకుని, మళ్ళీ ప్రయత్నించండి.
 
 linux.copy.thesetakeeffectthenexttimethesolstoneappsta = ఇవి solstone యాప్ తర్వాతి సారి స్టార్ట్ అయినప్పుడు అమలు అవుతాయి.
 
@@ -677,7 +677,7 @@ linux.copy.toolargebring = తీసుకురావడానికి చా�
 
 linux.copy.tryagain = మళ్ళీ ప్రయత్నించండి
 
-linux.copy.turningthisoffstopsbringing = దీన్ని ఆఫ్ చేస్తే మార్పులు లోపలికి రావడం ఆగుతుంది. మీ జర్నల్‌లో ఇప్పటికే ఉన్నది అక్కడే ఉంటుంది, వేచి ఉన్నది మీరు మళ్ళీ ఆన్ చేసే వరకు ఈ కంప్యూటర్‌లోనే ఉంటుంది.
+linux.copy.turningthisoffstopsbringing = దీన్ని ఆఫ్ చేయడం మార్పులు తీసుకురావడం ఆపుతుంది. మీ జర్నల్‌లో ఇప్పటికే ఉన్నది అక్కడే ఉంటుంది, వేచి ఉన్నది మీరు మళ్ళీ ఆన్ చేసే వరకు ఈ కంప్యూటర్‌లో ఉంటుంది.
 
 linux.copy.turnoff = ఆఫ్ చేయండి
 
@@ -685,7 +685,7 @@ linux.copy.unavailable = అందుబాటులో లేదు
 
 linux.copy.updateshow = ఆటోమేటిక్ అప్‌డేట్‌లు ఆన్‌లో ఉంటే, solstone ఇన్‌స్టాలర్ ఈ కంప్యూటర్‌లో రెండింటినీ సెటప్ చేసి ఉంటే, యాప్ మీ జర్నల్‌తో పాటు అప్‌డేట్ అవుతుంది. లేకపోతే, --upgrade తో solstone ఇన్‌స్టాలర్‌ను మళ్ళీ రన్ చేయండి.
 
-linux.copy.updatesjournalversion = journal వెర్షన్
+linux.copy.updatesjournalversion = జర్నల్ వెర్షన్
 
 linux.copy.usethisvault = ఈ వాల్ట్‌ను వాడండి
 
@@ -693,7 +693,7 @@ linux.copy.vault = వాల్ట్
 
 linux.copy.vaultsthiscomputer = ఈ కంప్యూటర్‌లోని వాల్ట్‌లు
 
-linux.copy.vaultwiththisnameis = ఈ పేరుతో ఒక వాల్ట్ మీ జర్నల్‌లో ఇప్పటికే ఉంది
+linux.copy.vaultwiththisnameis = ఈ పేరుతో వాల్ట్ మీ జర్నల్‌లో ఇప్పటికే ఉంది
 
 linux.copy.versionvalue = యాప్ వెర్షన్: { $value }
 
@@ -703,9 +703,9 @@ linux.copy.waitingforthesolstoneapptoanswerifyourdeskt = solstone యాప్ �
 
 linux.copy.waitingforyoutoconfirmyourjournalsmark = మీ జర్నల్ మార్క్‌ను మీరు నిర్ధారించేందుకు వేచి ఉంది
 
-linux.copy.waitingjournalupdate = journal అప్‌డేట్ కోసం వేచి ఉంది
+linux.copy.waitingjournalupdate = జర్నల్ అప్‌డేట్ కోసం వేచి ఉంది
 
-linux.copy.waitingreachjournal = మీ జర్నల్‌ను చేరడానికి వేచి ఉంది
+linux.copy.waitingreachjournal = మీ జర్నల్‌కు చేరడానికి వేచి ఉంది
 
 linux.copy.waitingtosync = సింక్ కోసం వేచి ఉంది
 
@@ -713,7 +713,7 @@ linux.copy.waitingvalue = సింక్ కోసం వేచి ఉంది
 
 linux.copy.webaddressesturnsondesktopaccessibility = వెబ్ చిరునామాలు (డెస్క్‌టాప్ యాక్సెసిబిలిటీ ఆన్ అవుతుంది)
 
-linux.copy.whatanswered = ఏమి సమాధానం ఇచ్చింది
+linux.copy.whatanswered = ఏది సమాధానం ఇచ్చింది
 
 linux.copy.windowtitles = విండో శీర్షికలు
 
@@ -775,7 +775,7 @@ linux.doctor.gstreamerinitializationfailedxinstallgstreamer = { $literal1 } ప�
 
 linux.doctor.label.desktopsession = డెస్క్‌టాప్ సెషన్
 
-linux.doctor.label.fail = విఫలమైంది
+linux.doctor.label.fail =fail
 
 linux.doctor.label.gstreamer = gstreamer
 
@@ -915,7 +915,7 @@ linux.health.markclaimed = క్లెయిమ్ చేయబడింది,
 
 linux.health.n0pending = 0 వేచి ఉంది
 
-linux.health.noidentitypresented = గుర్తింపు చూపించబడలేదు
+linux.health.noidentitypresented = గుర్తింపు చూపించలేదు
 
 linux.health.onconfirmingwithyourjournal = ఆన్, మీ జర్నల్‌తో నిర్ధారిస్తోంది
 
@@ -1033,15 +1033,15 @@ linux.health.syncwaitwhilethisdeviceconnectstoyourjournal = సింక్: ఈ
 
 linux.health.thesolstoneappisnotrunningorhasnostatusyet = solstone యాప్ నడవడం లేదు, లేదా ఇంకా స్థితి లేదు
 
-linux.health.unknownjournalseenatx = { $address } వద్ద తెలియని journal కనిపించింది
+linux.health.unknownjournalseenatx = { $address } వద్ద తెలియని జర్నల్ కనబడింది
 
-linux.health.unknownjournalseenthroughtherelay = రిలే ద్వారా తెలియని journal కనిపించింది
+linux.health.unknownjournalseenthroughtherelay = రిలే ద్వారా తెలియని జర్నల్ కనిపించింది
 
 linux.health.uptodateat = సింక్ స్థితి: { $timestamp } వద్ద తాజాగా ఉంది
 
 linux.health.waitingforyoutoconfirmyourjournalsmarknothi = మీ జర్నల్ మార్క్‌ను మీరు నిర్ధారించేందుకు వేచి ఉంది. వేచి ఉన్నది ఏదీ, మీరు నిర్ధారించే వరకు, మీ జర్నల్‌లోకి వెళ్ళదు.{ $ws1 }మీరు సిద్ధంగా ఉన్నప్పుడు ఇది రన్ చేయండి: { $literal2 }
 
-linux.import.allhistory = మీ జర్నల్‌లోని ఇంపోర్ట్ చరిత్ర అంతా
+linux.import.allhistory = మీ జర్నల్‌లో ఇంపోర్ట్ చరిత్ర అంతా
 
 linux.import.attention = శ్రద్ధ కావాలి
 
@@ -1051,35 +1051,35 @@ linux.import.delivered = మీ జర్నల్‌లో.
 
 linux.import.expired = గడువు అయింది
 
-linux.import.explanation = ఇక్కడ మీరు ఎంచుకునే, లేదా ఈ విండోపై డ్రాప్ చేసే, ఏ ఫైల్‌నైనా చేరుస్తుంది. అది ఏమిటో మీ జర్నల్ తేల్చుకుంటుంది.
+linux.import.explanation = మీరు ఇక్కడ ఎంచుకునే లేదా ఈ విండోపై డ్రాప్ చేసే ఏ ఫైల్‌నైనా చేరుస్తుంది. అది ఏమిటో మీ జర్నల్ తేల్చుతుంది.
 
 linux.import.explanationnodrop = ఇక్కడ మీరు ఎంచుకునే ఏ ఫైల్‌నైనా చేరుస్తుంది. అది ఏమిటో మీ జర్నల్ తేల్చుకుంటుంది.
 
-linux.import.filekind = మీ జర్నల్ ఈ రకం ఫైల్‌ను స్వీకరించలేదు
+linux.import.filekind = మీ జర్నల్ ఈ రకం ఫైల్‌ను స్వీకరించలేకపోతోంది
 
-linux.import.filemissing = ఈ పరికరం‌లోని కాపీ లేదు
+linux.import.filemissing = ఈ పరికరంలోని కాపీ లేదు
 
 linux.import.filenotread = దీన్ని చదవలేకపోయింది. మళ్ళీ చేర్చండి
 
-linux.import.filetoolarge = ఇది మీ జర్నల్ స్వీకరించే దాని కంటే పెద్దది
+linux.import.filetoolarge = ఇది మీ జర్నల్ స్వీకరించే దానికంటే పెద్దది
 
-linux.import.held = ఇప్పుడు మీ జర్నల్‌లోకి వెళ్ళడం లేదు. ఒక్కోదానిపై ఎందుకో ఉంటుంది.
+linux.import.held = ఇప్పుడు మీ జర్నల్‌కు వెళ్లడం లేదు. ప్రతి ఒక్కటీ ఎందుకో చెబుతుంది.
 
 linux.import.inyourjournalrel = మీ జర్నల్‌లో · { $when }
 
-linux.import.journalrefusal = మీ జర్నల్ దీన్ని స్వీకరించలేకపోయింది.
+linux.import.journalrefusal = మీ జర్నల్ దీన్ని అంగీకరించలేకపోయింది.
 
 linux.import.moreimports = మరిన్ని ఇంపోర్ట్‌లు
 
-linux.import.moreimportssub = గైడ్‌లు, ఎంపికలు, మరియు మీ జర్నల్‌లోని ఇంపోర్ట్ చరిత్ర
+linux.import.moreimportssub = మీ జర్నల్‌లో గైడ్‌లు, ఆప్షన్‌లు, ఇంపోర్ట్ చరిత్ర
 
 linux.import.namedrefusal = { $name }: { $reason }
 
 linux.import.nfiles = { $count } ఫైల్‌లు
 
-linux.import.noroom = ఈ పరికరం‌లో చోటు సరిపోదు
+linux.import.noroom = ఈ పరికరంలో చోటు సరిపోదు
 
-linux.import.nothingwassaved = ఈ పరికరం‌లో ఏమీ సేవ్ కాలేదు.
+linux.import.nothingwassaved = ఈ పరికరంలో ఏమీ సేవ్ కాలేదు.
 
 linux.import.nothingyet = ఇంకా ఏమీ లేదు.
 
@@ -1087,7 +1087,7 @@ linux.import.nreadyinjournal = మీ జర్నల్‌లో { $count } స
 
 linux.import.nwaiting = { $count } వేచి ఉన్నాయి
 
-linux.import.pairagain = మీ జర్నల్ ఈ పరికరాన్ని స్వీకరించడం ఆపింది. మీరు మళ్ళీ పెయిర్ చేసే వరకు ఇంపోర్ట్‌లు ఇక్కడ వేచి ఉంటాయి.
+linux.import.pairagain = మీ జర్నల్ ఈ పరికరాన్ని అంగీకరించడం ఆపింది. మీరు మళ్ళీ పెయిరింగ్ చేసే వరకు ఇంపోర్ట్‌లు ఇక్కడ వేచి ఉంటాయి.
 
 linux.import.readytoreview = సమీక్షించడానికి సిద్ధంగా ఉంది
 
@@ -1099,13 +1099,13 @@ linux.import.remove.a11y = { $name } తీసివేయండి
 
 linux.import.removeerror = దీన్ని తీసివేయలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
 
-linux.import.removereadytoreview = ఇది ఈ పరికరం‌లోని కాపీని తీసివేస్తుంది. మీ జర్నల్‌లో వేచి ఉన్న కాపీ, మీరు దాన్ని వదిలే వరకు లేదా అది గడువు అయే వరకు, అక్కడే ఉంటుంది.
+linux.import.removereadytoreview = ఇది ఈ పరికరంలోని కాపీని తీసివేస్తుంది. మీ జర్నల్‌లో వేచి ఉన్న కాపీ, మీరు దాన్ని వదిలే వరకు లేదా అది గడువు అయే వరకు, అక్కడే ఉంటుంది.
 
 linux.import.reviewdetail = మీ జర్నల్‌లో సేవ్ అయింది. ప్రారంభించడానికి ప్రివ్యూ చూసి నిర్ధారించండి.
 
-linux.import.reviewdetailhour = మీ జర్నల్‌లో సేవ్ అయింది. మీ జర్నల్ వేచి ఉన్న కాపీని తీసివేసే లోపు ఒక గంటలో సమీక్షించండి.
+linux.import.reviewdetailhour = మీ జర్నల్‌లో సేవ్ అయింది. వేచి ఉన్న కాపీని మీ జర్నల్ తీసివేసే ముందు ఒక గంటలోపు సమీక్షించండి.
 
-linux.import.reviewexpireddetail = మీ జర్నల్‌లో వేచి ఉన్న కాపీ గడువు అయింది. ఈ పరికరం ఫైల్‌ను ఇంకా ఉంచుతోంది.
+linux.import.reviewexpireddetail = మీ జర్నల్‌లో వేచి ఉన్న కాపీ గడువు అయింది. ఈ పరికరం ఫైల్‌ను ఇంకా ఉంచుకుంటోంది.
 
 linux.import.reviewinjournal = మీ జర్నల్‌లో సమీక్షించండి
 
@@ -1115,13 +1115,13 @@ linux.import.saved = ఈ పరికరం‌లో సేవ్ అయిం�
 
 linux.import.saving = ఈ పరికరం‌లో సేవ్ అవుతోంది: { $total }లో { $saved }
 
-linux.import.sendagain = సమీక్ష కోసం మళ్ళీ పంపండి
+linux.import.sendagain = సమీక్షకు మళ్ళీ పంపండి
 
-linux.import.sendagain.a11y = సమీక్ష కోసం { $name } మళ్ళీ పంపండి
+linux.import.sendagain.a11y = సమీక్షకు { $name } మళ్ళీ పంపండి
 
-linux.import.sending = పంపుతోంది
+linux.import.sending = పంపిస్తోంది
 
-linux.import.sendingellipsis = మీ జర్నల్‌కు పంపుతోంది…
+linux.import.sendingellipsis = మీ జర్నల్‌కు పంపిస్తోంది…
 
 linux.import.sendingtojournal = మీ జర్నల్‌కు పంపుతోంది.
 
@@ -1140,13 +1140,13 @@ linux.import.statusrow.a11y = ఇంపోర్ట్, { $detail }.
 
 linux.import.steperror = ఈ అడుగు పూర్తి కాలేకపోయింది. మళ్ళీ ప్రయత్నించండి.
 
-linux.import.storeerror = ఈ పరికరం‌లో ఇంపోర్ట్‌లు చదవలేకపోయింది. ఏదీ తీసివేయబడలేదు. మళ్ళీ ప్రయత్నించడానికి solstone యాప్‌ను రీస్టార్ట్ చేయండి.
+linux.import.storeerror = ఈ పరికరంలోని ఇంపోర్ట్‌లను చదవలేకపోయింది. ఏమీ తీసివేయబడలేదు. మళ్ళీ ప్రయత్నించడానికి solstone యాప్‌ను రీస్టార్ట్ చేయండి.
 
 linux.import.tile.a11y = ఇంపోర్ట్, { $state }. { $detail }.
 
 linux.import.trynow.a11y = { $name } ఇప్పుడు ప్రయత్నించండి
 
-linux.import.waitforjournal = మీరు ఒక journal కనెక్ట్ చేసే వరకు ఇంపోర్ట్‌లు ఈ పరికరం‌లో వేచి ఉంటాయి.
+linux.import.waitforjournal = మీరు ఒక జర్నల్‌ను కనెక్ట్ చేసే వరకు ఇంపోర్ట్‌లు ఈ పరికరంలో వేచి ఉంటాయి.
 
 linux.import.waitformark = మీరు మీ జర్నల్ మార్క్‌ను నిర్ధారించే వరకు ఇంపోర్ట్‌లు వేచి ఉంటాయి.
 
@@ -1154,15 +1154,15 @@ linux.import.waitforupdate = మీ జర్నల్ అప్‌డేట్ 
 
 linux.import.waiting = వేచి ఉంది
 
-linux.import.waitingdetail = మీ జర్నల్‌కు వెళ్ళడానికి వేచి ఉంది
+linux.import.waitingdetail = మీ జర్నల్‌కు వెళ్లేందుకు వేచి ఉంది
 
-linux.import.waitingforjournal = మీ జర్నల్‌కు వెళ్ళడానికి వేచి ఉంది.
+linux.import.waitingforjournal = మీ జర్నల్‌లోకి వెళ్ళడానికి వేచి ఉంది.
 
 linux.import.waitingforjournalshort = మీ జర్నల్ కోసం వేచి ఉంది
 
 linux.import.waitingforyourreview = మీ సమీక్ష కోసం వేచి ఉంది
 
-linux.import.waitingreconnect = మీ జర్నల్ మళ్ళీ కనెక్ట్ అయే వరకు వేచి ఉంది.
+linux.import.waitingreconnect = మీ జర్నల్ మళ్ళీ కనెక్ట్ అవ్వడానికి వేచి ఉంది.
 
 linux.journalmark.journal = journal: { $value1 }·{ $value2 }
 
@@ -1294,7 +1294,7 @@ linux.panel.pausedforxminutesrunsolstonelinuxresumetoe = { $minutes } నిమ�
 
 linux.panel.pausedrunsolstonelinuxresumewhenyouwantitba = పాజ్ అయి ఉంది. తిరిగి కావాలంటే { $literal1 } resume రన్ చేయండి.
 
-linux.panel.setitup = సెటప్ చేయండి
+linux.panel.setitup = దీన్ని సెటప్ చేయండి
 
 linux.panel.solstoneapp = solstone యాప్
 
@@ -1390,7 +1390,7 @@ linux.shared.copy.connected = కనెక్ట్ అయి ఉంది
 
 linux.shared.copy.status = స్థితి
 
-linux.shared.copy.yourjournalshowsthissamemarkinitsnetworkapp = మీ జర్నల్ తన నెట్‌వర్క్ యాప్‌లో ఇదే మార్క్‌ను చూపిస్తుంది. అది సరిగ్గా సరిపోవాలి.
+linux.shared.copy.yourjournalshowsthissamemarkinitsnetworkapp = మీ జర్నల్ తన నెట్‌వర్క్ యాప్‌లో ఇదే మార్క్ చూపిస్తుంది. అది కచ్చితంగా సరిపోవాలి.
 
 linux.shared.health.unknown = తెలియదు
 
@@ -1416,11 +1416,11 @@ linux.shared.pair.yourjournalsmarkisalreadyconfirmednothingto = మీ జర్
 
 linux.shared.tray.offline = ఆఫ్‌లైన్
 
-linux.sharedsources.also = కూడా ఆన్
+linux.sharedsources.also = వీటిలో కూడా
 
 linux.sharedsources.cli = Obsidian: { $state }
 
-linux.sharedsources.many = మరో { $count } పరికరాల నుండి
+linux.sharedsources.many = ఇతర { $count } పరికరాల నుండి
 
 linux.sharedsources.one = మరో పరికరం నుండి
 
@@ -1428,17 +1428,17 @@ linux.sharedsources.pair = { $first } · { $second }
 
 linux.shell.activitystillon = కార్యకలాపం ఇంకా ఆన్‌లో ఉంది.
 
-linux.shell.afternoon = మీకు శుభ మధ్యాహ్నం
+linux.shell.afternoon = శుభ మధ్యాహ్నం
 
 linux.shell.amountsince = { $date } నుండి { $total }
 
 linux.shell.attention = శ్రద్ధ కావాలి
 
-linux.shell.browserunavailable = బ్రౌజర్ పేజీలు ఇప్పుడు స్టార్ట్ కాలేదు.
+linux.shell.browserunavailable = బ్రౌజర్ పేజీలు ఇప్పుడు స్టార్ట్ అవ్వలేవు.
 
 linux.shell.checking = సరిచూస్తోంది…
 
-linux.shell.evening = మీకు శుభ సాయంత్రం
+linux.shell.evening = శుభ సాయంత్రం
 
 linux.shell.hourcount = { $count ->
     [one] { $display } గంట
@@ -1478,7 +1478,7 @@ linux.shell.month.february = ఫిబ్రవరి
 
 linux.shell.month.january = జనవరి
 
-linux.shell.month.july = జులై
+linux.shell.month.july = జూలై
 
 linux.shell.month.june = జూన్
 
@@ -1494,9 +1494,9 @@ linux.shell.month.september = సెప్టెంబర్
 
 linux.shell.monthday = { $day } { $month }
 
-linux.shell.monthdayyear = { $day } { $month } { $year }
+linux.shell.monthdayyear = { $day } { $month }, { $year }
 
-linux.shell.morning = మీకు శుభోదయం
+linux.shell.morning = శుభోదయం
 
 linux.shell.notecount = { $count ->
     [one] { $display } నోట్
@@ -1683,7 +1683,7 @@ linux.tray.cantcheckwhichsessionisinfront = ఏ సెషన్ ముందు 
 
 linux.tray.cantreachyourdesktop = మీ డెస్క్‌టాప్‌ను చేరలేకపోయింది
 
-linux.tray.connectedallcaughtup = కనెక్ట్ అయి ఉంది · అన్నీ తాజాగా ఉన్నాయి
+linux.tray.connectedallcaughtup = కనెక్ట్ అయి ఉంది · తాజాగా ఉంది
 
 linux.tray.idlescreeninactive = పని లేకుండా (స్క్రీన్ యాక్టివ్ కాదు)
 
@@ -1699,7 +1699,7 @@ linux.tray.notrunning = నడవడం లేదు
 
 linux.tray.offlinewaiting = ఆఫ్‌లైన్ · { $count } వేచి ఉంది
 
-linux.tray.openjournal = journal తెరవండి
+linux.tray.openjournal = జర్నల్ తెరవండి
 
 linux.tray.opensettings = సెట్టింగ్‌లు తెరవండి
 
@@ -1741,19 +1741,19 @@ linux.ui.terminalterminalstatus = టర్మినల్: { $terminal-status }
 
 linux.window.addmore = మరిన్ని చేర్చండి
 
-linux.window.allcaughtup = అన్నీ తాజాగా ఉన్నాయి
+linux.window.allcaughtup = తాజాగా ఉంది
 
 linux.window.brightharbor = bright · harbor
 
 linux.window.browsers = బ్రౌజర్‌లు
 
-linux.window.browsersbreath = మీరు అనుమతించిన సైట్‌లలో solstone ఎక్స్‌టెన్షన్ పేజీ పాఠాన్ని మరియు సుమారు లేఅవుట్‌ను స్వీకరిస్తుంది, అదంతా మీ జర్నల్‌లోకి వెళ్తుంది.
+linux.window.browsersbreath = మీరు అనుమతించిన సైట్‌లలో, solstone ఎక్స్‌టెన్షన్ పేజీ వచనాన్ని మరియు సుమారు లేఅవుట్‌ను స్వీకరిస్తుంది, మరియు అంతా మీ జర్నల్‌లోకి వెళుతుంది.
 
 linux.window.browsersgap = పేజీలు solstone ఎక్స్‌టెన్షన్ నుండి వస్తాయి. దానికి ఇక్కడ స్విచ్ లేదు.
 
 linux.window.cancel = రద్దు చేయండి
 
-linux.window.checkingyourjournal = మీ జర్నల్ సరిచూస్తోంది.
+linux.window.checkingyourjournal = మీ జర్నల్‌ను సరిచూస్తోంది.
 
 linux.window.choosefiles = ఫైల్‌లు ఎంచుకోండి…
 
@@ -1761,7 +1761,7 @@ linux.window.choosenewdownloadname = ఉన్న ఫైల్‌ను ఉం�
 
 linux.window.close = మూసివేయండి
 
-linux.window.connectajournal = ఒక journal కనెక్ట్ చేయండి
+linux.window.connectajournal = ఒక జర్నల్‌ను కనెక్ట్ చేయండి
 
 linux.window.connected = కనెక్ట్ అయి ఉంది
 
@@ -1789,7 +1789,7 @@ linux.window.kilobytes = { $size } KB
 
 linux.window.lastreached = చివరిసారి చేరింది
 
-linux.window.lasttakenin = చివరిసారి తీసుకున్నది
+linux.window.lasttakenin = చివరి స్వీకరణ
 
 linux.window.leftout = మినహాయించబడింది
 
@@ -1805,7 +1805,7 @@ linux.window.offsub = ఎప్పుడైనా ఆన్ చేయండి.
 
 linux.window.ok = ok
 
-linux.window.onthisdevice = ఈ పరికరం‌లో
+linux.window.onthisdevice = ఈ పరికరంలో
 
 linux.window.pause = పాజ్ చేయండి ▾
 
@@ -1847,7 +1847,7 @@ linux.window.sidebar = సైడ్‌బార్
 
 linux.window.sofar = ఇప్పటి వరకు
 
-linux.window.somethingyouwereaddingdidntfinish = మీరు చేరుస్తున్నది సేవ్ అవడం పూర్తి కాలేదు. మళ్ళీ చేర్చండి.
+linux.window.somethingyouwereaddingdidntfinish = మీరు చేర్చేది సేవ్ అయిపోలేదు. మళ్ళీ చేర్చండి.
 
 linux.window.sources = మూలాలు
 
@@ -1865,9 +1865,9 @@ linux.window.thecopyisalreadygonesothis = కాపీ ఇప్పటికే 
 
 linux.window.thiscomputer = ఈ కంప్యూటర్
 
-linux.window.thisremovesthecopyonthisdevice = ఇది ఈ పరికరం‌లోని కాపీని తీసివేస్తుంది. మీ జర్నల్ ఇప్పటికే ఉన్న కాపీని ఇంకా తీసుకురావచ్చు.
+linux.window.thisremovesthecopyonthisdevice = ఇది ఈ పరికరంలోని కాపీని తీసివేస్తుంది. మీ జర్నల్‌లో ఇప్పటికే ఉన్న కాపీని అది ఇంకా తీసుకురావచ్చు.
 
-linux.window.thisremovesthecopyonthisdevice.v558a0c4f = ఇది ఈ పరికరం‌లోని కాపీని తీసివేస్తుంది, కాబట్టి అది మీ జర్నల్‌ను చేరదు.
+linux.window.thisremovesthecopyonthisdevice.v558a0c4f = ఇది ఈ పరికరంలోని కాపీని తీసివేస్తుంది, కాబట్టి అది మీ జర్నల్‌కు చేరదు.
 
 linux.window.trying = ప్రయత్నిస్తోంది…
 
