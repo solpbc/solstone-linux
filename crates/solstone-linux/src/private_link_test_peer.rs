@@ -49,7 +49,7 @@ pub(crate) struct PeerRequest {
 }
 
 #[derive(Clone)]
-struct PeerResponse {
+pub(crate) struct PeerResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
@@ -57,6 +57,23 @@ struct PeerResponse {
     nonblocking_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
     body_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
+
+#[cfg(feature = "full-tests")]
+impl PeerResponse {
+    pub(crate) fn plain(status: u16, body: Vec<u8>) -> Self {
+        plain_response(status, body)
+    }
+
+    pub(crate) fn with_nonblocking_gate(
+        mut self,
+        gate: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.nonblocking_gate = Some(gate);
+        self
+    }
+}
+
+type PeerHandler = Arc<dyn Fn(&PeerRequest) -> Option<PeerResponse> + Send + Sync>;
 
 enum QueuedResponse {
     Static(PeerResponse),
@@ -74,6 +91,7 @@ struct OutboundResponse {
 #[derive(Clone)]
 struct PeerState {
     routes: Arc<Mutex<std::collections::HashMap<String, PeerResponse>>>,
+    handler: Arc<Mutex<Option<PeerHandler>>>,
     responses: Arc<Mutex<VecDeque<QueuedResponse>>>,
     requests: Arc<Mutex<Vec<PeerRequest>>>,
     request_arrived: Arc<Notify>,
@@ -118,6 +136,7 @@ impl PrivateLinkPeer {
             credential_and_acceptor(listener.local_addr().unwrap().port(), refusal_alert.clone());
         let state = PeerState {
             routes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            handler: Arc::new(Mutex::new(None)),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             request_arrived: Arc::new(Notify::new()),
@@ -163,6 +182,13 @@ impl PrivateLinkPeer {
     }
     pub(crate) fn client_der(&self) -> &[u8] {
         &self.client_der
+    }
+    #[cfg(feature = "full-tests")]
+    pub(crate) fn set_handler(
+        &self,
+        handler: impl Fn(&PeerRequest) -> Option<PeerResponse> + Send + Sync + 'static,
+    ) {
+        *self.state.handler.lock().unwrap() = Some(Arc::new(handler));
     }
     pub(crate) fn set_route(&self, path: &str, status: u16, body: Vec<u8>) {
         self.state
@@ -703,6 +729,12 @@ fn next_response(state: &PeerState, request: Option<&PeerRequest>) -> PeerRespon
     let Some(request) = request else {
         return pop_static_response(state);
     };
+    let handler = state.handler.lock().unwrap().clone();
+    if let Some(handler) = handler
+        && let Some(response) = handler(request)
+    {
+        return response;
+    }
     if let Some(response) = state.routes.lock().unwrap().get(&request.path).cloned() {
         return response;
     }

@@ -58,7 +58,14 @@ const LAN_CARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const INGEST_TIMEOUT: Duration = Duration::from_secs(300);
 // A 4 GiB save at 50 KiB/s can take almost a day over a slow relay.
 const IMPORT_SAVE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+// A single resumable chunk (up to 4 MiB) covers slow links while bounding hung puts.
+const IMPORT_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+// Finalizing a 4 GiB upload checks the journal's saved hash and moves it into place.
+const IMPORT_COMMIT_TIMEOUT: Duration = Duration::from_secs(600);
+// Best-effort abort on owner cancel must return quickly even if the journal is unreachable.
+const IMPORT_ABORT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_IMPORT_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_IMPORT_SOURCES_RESPONSE_BYTES: usize = 256 * 1024;
 const LISTING_TIMEOUT: Duration = Duration::from_secs(60);
 // A journal probe is often the request that dials a fresh carrier, and the
 // request timeout covers that dial. When a LAN endpoint does not answer, the
@@ -2036,6 +2043,12 @@ impl OpenJournalAccess {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SystemStatusInfo {
+    pub(crate) version: Option<String>,
+    pub(crate) capabilities: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LinkOutcome {
     Success { status: StatusCode, body: Vec<u8> },
@@ -2424,6 +2437,16 @@ impl PrivateLinkCapability {
     // Import refusals carry an owner-readable reason. Bound the response while
     // reading it, including when it arrives without a length.
     async fn send_import(&self, builder: RequestBuilder, timeout: Duration) -> LinkOutcome {
+        self.send_import_bounded(builder, timeout, MAX_IMPORT_RESPONSE_BYTES)
+            .await
+    }
+
+    async fn send_import_bounded(
+        &self,
+        builder: RequestBuilder,
+        timeout: Duration,
+        max_bytes: usize,
+    ) -> LinkOutcome {
         let Ok(mut response) = builder.timeout(timeout).send().await else {
             return LinkOutcome::TransportUnavailable;
         };
@@ -2434,13 +2457,136 @@ impl PrivateLinkCapability {
         let mut body = Vec::new();
         loop {
             match response.chunk().await {
-                Ok(Some(chunk)) if chunk.len() <= MAX_IMPORT_RESPONSE_BYTES - body.len() => {
+                Ok(Some(chunk)) if chunk.len() <= max_bytes - body.len() => {
                     body.extend_from_slice(&chunk);
                 }
                 Ok(None) => return LinkOutcome::Success { status, body },
                 _ => return LinkOutcome::TransportUnavailable,
             }
         }
+    }
+
+    pub(crate) async fn import_sources(&self) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.inner.origin, "/app/import/api/sources") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import_bounded(
+            self.inner
+                .client
+                .get(url)
+                .header(reqwest::header::CACHE_CONTROL, "no-cache"),
+            LISTING_TIMEOUT,
+            MAX_IMPORT_SOURCES_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    pub(crate) async fn import_upload_create(&self, payload: &serde_json::Value) -> LinkOutcome {
+        let Ok(url) = confine_path(&self.inner.origin, "/app/import/api/uploads") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import(self.inner.client.post(url).json(payload), INGEST_TIMEOUT)
+            .await
+    }
+
+    pub(crate) async fn import_upload_chunk(
+        &self,
+        upload_id: &str,
+        offset: u64,
+        bytes: Vec<u8>,
+        chunk_sha256: &str,
+    ) -> LinkOutcome {
+        if !crate::import::valid_upload_id(upload_id)
+            || !crate::import::valid_sha256_hex(chunk_sha256)
+        {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        }
+        let path = format!("/app/import/api/uploads/{upload_id}");
+        let Ok(mut url) = confine_path(&self.inner.origin, &path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        url.query_pairs_mut()
+            .append_pair("offset", &offset.to_string());
+        let len = bytes.len();
+        self.send_import(
+            self.inner
+                .client
+                .put(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CONTENT_LENGTH, len.to_string())
+                .header("X-Chunk-Sha256", chunk_sha256)
+                .body(bytes),
+            IMPORT_CHUNK_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn import_upload_status(&self, upload_id: &str) -> LinkOutcome {
+        if !crate::import::valid_upload_id(upload_id) {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        }
+        let path = format!("/app/import/api/uploads/{upload_id}");
+        let Ok(url) = confine_path(&self.inner.origin, &path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import(
+            self.inner
+                .client
+                .get(url)
+                .header(reqwest::header::CACHE_CONTROL, "no-cache"),
+            LISTING_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn import_upload_commit(&self, upload_id: &str, sha256: &str) -> LinkOutcome {
+        if !crate::import::valid_upload_id(upload_id) || !crate::import::valid_sha256_hex(sha256) {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        }
+        let path = format!("/app/import/api/uploads/{upload_id}/commit");
+        let Ok(url) = confine_path(&self.inner.origin, &path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import(
+            self.inner
+                .client
+                .post(url)
+                .json(&serde_json::json!({"sha256": sha256})),
+            IMPORT_COMMIT_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn import_upload_abort(&self, upload_id: &str) -> LinkOutcome {
+        if !crate::import::valid_upload_id(upload_id) {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        }
+        let path = format!("/app/import/api/uploads/{upload_id}");
+        let Ok(url) = confine_path(&self.inner.origin, &path) else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send_import(self.inner.client.delete(url), IMPORT_ABORT_TIMEOUT)
+            .await
     }
 
     pub(crate) async fn import_save(&self, form: multipart::Form) -> LinkOutcome {
@@ -2588,7 +2734,7 @@ impl PrivateLinkCapability {
         .await
     }
 
-    pub(crate) async fn system_status(&self) -> Result<Option<String>, LinkOutcome> {
+    pub(crate) async fn system_status_info(&self) -> Result<SystemStatusInfo, LinkOutcome> {
         let Ok(url) = confine_path(&self.inner.origin, SYSTEM_STATUS_PATH) else {
             return Err(LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
@@ -2606,25 +2752,27 @@ impl PrivateLinkCapability {
         match outcome {
             LinkOutcome::Success { status, body } if status == StatusCode::OK => {
                 let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) else {
-                    return Ok(None);
+                    return Ok(SystemStatusInfo::default());
                 };
                 self.observe_source_status(&json);
-                let Some(raw_version) = json
+                let capabilities = capabilities_from_status(&json);
+                let version = json
                     .get("version")
                     .and_then(|v| v.get("current"))
                     .and_then(serde_json::Value::as_str)
-                else {
-                    return Ok(None);
-                };
-                if let Some(sanitized) = sanitize_journal_version(raw_version) {
-                    Ok(Some(sanitized))
-                } else {
-                    Ok(None)
-                }
+                    .and_then(sanitize_journal_version);
+                Ok(SystemStatusInfo {
+                    version,
+                    capabilities,
+                })
             }
             LinkOutcome::Success { status, body } => Err(LinkOutcome::Success { status, body }),
             other => Err(other),
         }
+    }
+
+    pub(crate) async fn system_status(&self) -> Result<Option<String>, LinkOutcome> {
+        self.system_status_info().await.map(|info| info.version)
     }
 
     pub(crate) async fn system_status_optional(

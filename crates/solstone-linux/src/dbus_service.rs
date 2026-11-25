@@ -186,6 +186,9 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     async fn import_retry(&self, id: String) -> String {
         serde_json::json!({"ok":self.imports.retry(id).await}).to_string()
     }
+    async fn import_cancel(&self, id: String) -> String {
+        serde_json::json!({"ok":self.imports.cancel(id).await}).to_string()
+    }
     async fn import_begin_remove(
         &self,
         id: String,

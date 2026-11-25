@@ -8,25 +8,38 @@ use crate::private_link::{LinkOutcome, PrivateLinkCapability};
 use crate::upload::{CapturedAssociation, UploadClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use solstone_i18n::{message, text};
 use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio_util::io::ReaderStream;
+use tokio::sync::Notify;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
 const FILE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const BATCH: usize = 16;
 const RECENT_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 const RECENT_MAX_ITEMS: usize = 5;
+const RESUMABLE_CAPABILITY: &str = "resumable_import_uploads";
+const DEFAULT_RESUMABLE_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_RESUMABLE_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_RESUMABLE_MAX_FILE_BYTES: u64 = FILE_LIMIT;
+const MIN_RESUMABLE_CHUNK_BYTES: u64 = 1024;
+const MAX_RESUMABLE_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_UPLOAD_FILENAME_BYTES: usize = 128;
+const RESUMABLE_BACKOFF_SECS: [u64; 6] = [1, 2, 5, 10, 30, 60];
+const MAX_CHUNK_CHECKSUM_RETRIES: u32 = 3;
+const MAX_OFFSET_RESYNC_STEPS: u32 = 8;
+static MONO_ORIGIN: OnceLock<Instant> = OnceLock::new();
 /// The window binary converts a HEIC/HEIF photo into a JPEG with the desktop's
 /// own gdk-pixbuf loaders, preserving EXIF metadata.
 pub const CONVERT_PHOTO_ARG: &str = "--convert-photo";
@@ -54,6 +67,63 @@ pub fn valid_import_id(id: &str) -> bool {
         && bytes[..8].iter().all(u8::is_ascii_digit)
         && bytes[8] == b'_'
         && bytes[9..].iter().all(u8::is_ascii_digit)
+}
+
+/// Strict ASCII RFC-4122 UUID validation for journal upload identifiers.
+pub(crate) fn valid_upload_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (index, &byte) in bytes.iter().enumerate() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            if byte != b'-' {
+                return false;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Strict 64-character ASCII hex SHA-256 validation.
+pub(crate) fn valid_sha256_hex(hex: &str) -> bool {
+    hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn bounded_upload_filename(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "file".to_owned();
+    }
+    if trimmed.len() <= MAX_UPLOAD_FILENAME_BYTES {
+        return trimmed.to_owned();
+    }
+    let (stem, ext) = match trimmed.rfind('.') {
+        Some(dot) if dot > 0 && trimmed.len() - dot <= 24 => (&trimmed[..dot], &trimmed[dot..]),
+        _ => (trimmed, ""),
+    };
+    let stem_budget = MAX_UPLOAD_FILENAME_BYTES.saturating_sub(ext.len());
+    let mut end = stem.len().min(stem_budget);
+    while end > 0 && !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let kept_stem = &stem[..end];
+    if kept_stem.is_empty() {
+        let mut fallback_end = trimmed.len().min(MAX_UPLOAD_FILENAME_BYTES);
+        while fallback_end > 0 && !trimmed.is_char_boundary(fallback_end) {
+            fallback_end -= 1;
+        }
+        let fallback = &trimmed[..fallback_end];
+        if fallback.is_empty() {
+            "file".to_owned()
+        } else {
+            fallback.to_owned()
+        }
+    } else {
+        format!("{kept_stem}{ext}")
+    }
 }
 
 fn is_confirmation_required_kind(kind: Option<&str>) -> bool {
@@ -92,6 +162,70 @@ struct Review {
     expired: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct ResumableUpload {
+    upload_id: String,
+    instance_id: String,
+    binding: String,
+    remote_offset: u64,
+    chunk_bytes: u64,
+    total_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResumableConfig {
+    threshold_bytes: u64,
+    chunk_bytes: u64,
+    max_file_bytes: u64,
+}
+
+impl ResumableConfig {
+    fn default_limits() -> Self {
+        Self {
+            threshold_bytes: DEFAULT_RESUMABLE_THRESHOLD_BYTES,
+            chunk_bytes: DEFAULT_RESUMABLE_CHUNK_BYTES,
+            max_file_bytes: DEFAULT_RESUMABLE_MAX_FILE_BYTES,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransferPhase {
+    Sending,
+    Paused,
+    Checking,
+    Resuming,
+}
+
+impl TransferPhase {
+    fn wire_phase(self) -> &'static str {
+        match self {
+            Self::Sending | Self::Resuming => "sending",
+            Self::Paused => "paused",
+            Self::Checking => "checking",
+        }
+    }
+
+    fn ui_phase(self) -> &'static str {
+        match self {
+            Self::Sending => "sending",
+            Self::Paused => "paused",
+            Self::Checking => "checking",
+            Self::Resuming => "resuming",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TransferRuntime {
+    resumable: bool,
+    phase: Option<TransferPhase>,
+    retry_step: usize,
+    next_retry_at_ms: Option<i64>,
+    needs_resync: bool,
+    cancel_requested: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Refusal {
     reason: String,
@@ -110,7 +244,16 @@ impl Refusal {
         if self.binding.as_deref() != current_binding {
             return false;
         }
-        if self.reason_code.as_deref() == Some("import_preview_required") {
+        if matches!(
+            self.reason_code.as_deref(),
+            Some(
+                "import_preview_required"
+                    | "upload_not_found"
+                    | "whole_file_checksum_mismatch"
+                    | "chunk_checksum_mismatch"
+                    | "insufficient_journal_space"
+            )
+        ) {
             return true;
         }
         self.version.as_deref() == current_version
@@ -131,6 +274,10 @@ struct Item {
     review: Option<Review>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handoff: Option<Handoff>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upload: Option<ResumableUpload>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -197,6 +344,16 @@ pub struct ImportRow {
     pub review_expired: bool,
     #[serde(default)]
     pub size_bytes: u64,
+    #[serde(default)]
+    pub resumable: bool,
+    #[serde(default)]
+    pub bytes_sent: u64,
+    #[serde(default)]
+    pub bytes_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_phase: Option<String>,
+    #[serde(default)]
+    pub can_cancel: bool,
 }
 
 /// A file the app didn't take at intake. Nothing of it is kept on this device, so it is
@@ -288,10 +445,14 @@ struct Store {
     saved_current: BTreeMap<String, CapturedAssociation>,
     observed: Option<CapturedAssociation>,
     version: Option<String>,
+    capabilities: Vec<String>,
+    resumable_config: Option<ResumableConfig>,
     delivered_journal: Option<String>,
     recent_receipts: Vec<RecentReceipt>,
     receipts: std::collections::VecDeque<(String, Option<String>)>,
     sent_bytes: BTreeMap<String, u64>,
+    transfers: BTreeMap<String, TransferRuntime>,
+    cancel_tokens: BTreeMap<String, CancellationToken>,
     addition: Option<String>,
     intake_refused: Vec<IntakeRefusal>,
     interrupted: bool,
@@ -353,6 +514,7 @@ pub struct ImportHandle {
     status_sink: Option<Arc<dyn Fn(ImportSummary) + Send + Sync>>,
     status_lock: Arc<Mutex<()>>,
     recent_lock: Arc<Mutex<()>>,
+    cancel_done: Arc<Notify>,
     photo_converter: PhotoConverter,
     #[cfg(all(test, feature = "full-tests"))]
     clock_ms: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
@@ -461,11 +623,121 @@ impl ImportHandle {
         if self.root.is_none() || self.sleep.is_sleeping() {
             return false;
         }
+        let now = self.now_mono_ms();
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         !state.failed
             && state.items.values().any(|item| {
-                item.phase == Phase::Pending && !state.confirmations.contains_key(&item.id)
+                item.phase == Phase::Pending
+                    && !state.confirmations.contains_key(&item.id)
+                    && !state.busy.contains(&item.id)
+                    && state
+                        .transfers
+                        .get(&item.id)
+                        .and_then(|t| t.next_retry_at_ms)
+                        .is_none_or(|due| due <= now)
             })
+    }
+
+    pub(crate) fn next_retry_delay(&self) -> Option<Duration> {
+        if self.root.is_none() || self.sleep.is_sleeping() {
+            return None;
+        }
+        let now = self.now_mono_ms();
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.failed {
+            return None;
+        }
+        let earliest = state
+            .items
+            .values()
+            .filter(|item| {
+                item.phase == Phase::Pending
+                    && !state.confirmations.contains_key(&item.id)
+                    && !state.busy.contains(&item.id)
+            })
+            .filter_map(|item| state.transfers.get(&item.id)?.next_retry_at_ms)
+            .min()?;
+        let wait_ms = earliest.saturating_sub(now).max(0) as u64;
+        Some(Duration::from_millis(wait_ms))
+    }
+
+    pub(crate) fn has_resumable_retry_due(&self) -> bool {
+        if self.root.is_none() || self.sleep.is_sleeping() {
+            return false;
+        }
+        let now = self.now_mono_ms();
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        !state.failed
+            && state.items.values().any(|item| {
+                item.phase == Phase::Pending
+                    && !state.confirmations.contains_key(&item.id)
+                    && !state.busy.contains(&item.id)
+                    && state
+                        .transfers
+                        .get(&item.id)
+                        .and_then(|t| t.next_retry_at_ms)
+                        .is_some_and(|due| due <= now)
+            })
+    }
+
+    pub(crate) fn on_network_or_wake(&self) {
+        let changed = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let mut any = false;
+            for transfer in state.transfers.values_mut() {
+                if transfer.resumable {
+                    if transfer.retry_step != 0 || transfer.next_retry_at_ms.is_some() {
+                        any = true;
+                    }
+                    transfer.retry_step = 0;
+                    transfer.next_retry_at_ms = None;
+                    transfer.needs_resync = true;
+                }
+            }
+            any
+        };
+        if changed {
+            self.publish_status();
+        }
+    }
+
+    pub(crate) fn note_transient_offline(&self) {
+        let now = self.now_mono_ms();
+        let changed = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let due_ids: Vec<String> = state
+                .items
+                .values()
+                .filter(|item| {
+                    item.phase == Phase::Pending
+                        && !state.busy.contains(&item.id)
+                        && !state.confirmations.contains_key(&item.id)
+                        && (item.upload.is_some()
+                            || state.transfers.get(&item.id).is_some_and(|t| t.resumable))
+                        && state
+                            .transfers
+                            .get(&item.id)
+                            .and_then(|t| t.next_retry_at_ms)
+                            .is_none_or(|due| due <= now)
+                })
+                .map(|item| item.id.clone())
+                .collect();
+            let mut any = false;
+            for id in due_ids {
+                let entry = state.transfers.entry(id).or_default();
+                let delay_ms = resumable_backoff_ms(entry.retry_step);
+                entry.resumable = true;
+                entry.phase = Some(TransferPhase::Paused);
+                entry.needs_resync = true;
+                entry.retry_step = (entry.retry_step + 1).min(RESUMABLE_BACKOFF_SECS.len() - 1);
+                entry.next_retry_at_ms = Some(now.saturating_add(delay_ms));
+                any = true;
+            }
+            any
+        };
+        if changed {
+            self.publish_status();
+        }
     }
 
     #[cfg(all(test, feature = "full-tests"))]
@@ -484,6 +756,15 @@ impl ImportHandle {
             .ok()
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .unwrap_or(0)
+    }
+
+    fn now_mono_ms(&self) -> i64 {
+        #[cfg(all(test, feature = "full-tests"))]
+        if let Some(clock) = &self.clock_ms {
+            return clock();
+        }
+        let origin = MONO_ORIGIN.get_or_init(Instant::now);
+        i64::try_from(origin.elapsed().as_millis()).unwrap_or(i64::MAX)
     }
 
     pub(crate) fn has_review_items(&self) -> bool {
@@ -594,6 +875,8 @@ impl ImportHandle {
                         saved: None,
                         handoff: None,
                         review: None,
+                        sha256: None,
+                        upload: None,
                         refusal: Some(local_refusal("this couldn't be read. add it again")),
                     },
                 };
@@ -609,6 +892,7 @@ impl ImportHandle {
                     state.interrupted = true;
                     item.phase = Phase::Refused;
                     item.review = None;
+                    item.upload = None;
                     item.refusal = Some(local_refusal("this couldn't be read. add it again"));
                     self.persist(&item)?;
                 } else if item.phase == Phase::ReadyToReview
@@ -619,6 +903,7 @@ impl ImportHandle {
                 {
                     item.phase = Phase::Refused;
                     item.review = None;
+                    item.upload = None;
                     item.refusal = Some(local_refusal("this couldn't be read. add it again"));
                     self.persist(&item)?;
                 } else if (item.phase == Phase::Pending
@@ -628,7 +913,31 @@ impl ImportHandle {
                 {
                     item.phase = Phase::Refused;
                     item.review = None;
+                    item.upload = None;
                     item.refusal = Some(local_refusal("the copy on this device is missing"));
+                    self.persist(&item)?;
+                } else if item.phase == Phase::Pending
+                    && item.upload.as_ref().is_some_and(|u| {
+                        valid_upload_id(&u.upload_id) && u.total_bytes == item.size
+                    })
+                {
+                    state.transfers.insert(
+                        id.clone(),
+                        TransferRuntime {
+                            resumable: true,
+                            phase: Some(TransferPhase::Paused),
+                            retry_step: 0,
+                            next_retry_at_ms: None,
+                            needs_resync: true,
+                            cancel_requested: false,
+                        },
+                    );
+                } else if item.upload.is_some()
+                    && item.upload.as_ref().is_some_and(|u| {
+                        !valid_upload_id(&u.upload_id) || u.total_bytes != item.size
+                    })
+                {
+                    item.upload = None;
                     self.persist(&item)?;
                 }
                 state.items.insert(id, item);
@@ -848,11 +1157,74 @@ impl ImportHandle {
                 "size_bytes": item.size,
             });
         }
+        let client = self.client.upgrade();
+        let current_instance_id = client
+            .as_ref()
+            .and_then(|c| c.capability())
+            .map(|c| c.writer().identity_key().to_owned());
+        let matching_upload = item.upload.as_ref().filter(|u| {
+            current_instance_id
+                .as_deref()
+                .is_none_or(|inst| u.instance_id == inst)
+        });
+        let transfer = state.transfers.get(id);
+        let is_resumable = matching_upload.is_some() || transfer.is_some_and(|t| t.resumable);
         if state.busy.contains(id) {
+            if is_resumable {
+                let phase = transfer
+                    .and_then(|t| t.phase)
+                    .unwrap_or(TransferPhase::Sending);
+                let confirmed = matching_upload
+                    .map_or(0, |u| u.remote_offset)
+                    .min(item.size);
+                let bytes_sent = if phase == TransferPhase::Checking {
+                    item.size
+                } else {
+                    confirmed
+                };
+                return json!({
+                    "state": "uploading",
+                    "bytes": bytes_sent,
+                    "size": item.size,
+                    "bytes_sent": bytes_sent,
+                    "bytes_total": item.size,
+                    "resumable": true,
+                    "phase": phase.wire_phase(),
+                    "size_bytes": item.size,
+                    "device_noun": "computer",
+                });
+            }
+            let bytes_sent = state
+                .sent_bytes
+                .get(id)
+                .copied()
+                .unwrap_or(0)
+                .min(item.size);
             return json!({
                 "state": "uploading",
-                "bytes": state.sent_bytes.get(id).copied().unwrap_or(0),
+                "bytes": bytes_sent,
                 "size": item.size,
+                "bytes_sent": bytes_sent,
+                "bytes_total": item.size,
+                "resumable": false,
+                "phase": "sending",
+                "size_bytes": item.size,
+                "device_noun": "computer",
+            });
+        }
+        if is_resumable
+            && (matching_upload.is_some()
+                || transfer.and_then(|t| t.phase) == Some(TransferPhase::Paused))
+        {
+            let confirmed = matching_upload
+                .map_or(0, |u| u.remote_offset)
+                .min(item.size);
+            return json!({
+                "state": "waiting",
+                "bytes_sent": confirmed,
+                "bytes_total": item.size,
+                "resumable": true,
+                "phase": "paused",
                 "size_bytes": item.size,
                 "device_noun": "computer",
             });
@@ -899,6 +1271,8 @@ impl ImportHandle {
             refusal: None,
             review: None,
             handoff,
+            sha256: None,
+            upload: None,
         };
         self.publish(item.clone())?;
         let copied = (|| {
@@ -1092,6 +1466,11 @@ impl ImportHandle {
                     review_kind: Some(review.kind.clone()),
                     review_expired: review.expired,
                     size_bytes: item.size,
+                    resumable: false,
+                    bytes_sent: 0,
+                    bytes_total: item.size,
+                    transfer_phase: None,
+                    can_cancel: false,
                 });
                 continue;
             }
@@ -1106,6 +1485,46 @@ impl ImportHandle {
                 document.waiting += 1;
             }
             document.sending |= sending;
+            let matching_upload = item.upload.as_ref().filter(|u| {
+                current_instance_id
+                    .as_deref()
+                    .is_none_or(|inst| u.instance_id == inst)
+            });
+            let transfer = state.transfers.get(&item.id);
+            let resumable = !attention
+                && (matching_upload.is_some() || transfer.is_some_and(|t| t.resumable))
+                || (attention && matching_upload.is_some());
+            let confirmed_bytes = matching_upload
+                .map_or(0, |u| u.remote_offset)
+                .min(item.size);
+            let transfer_phase = if attention {
+                None
+            } else if sending && resumable {
+                Some(
+                    transfer
+                        .and_then(|t| t.phase)
+                        .unwrap_or(TransferPhase::Sending),
+                )
+            } else if !sending
+                && resumable
+                && (matching_upload.is_some()
+                    || transfer.and_then(|t| t.phase) == Some(TransferPhase::Paused))
+            {
+                Some(TransferPhase::Paused)
+            } else {
+                None
+            };
+            let bytes_sent = if transfer_phase == Some(TransferPhase::Checking) {
+                item.size
+            } else if resumable {
+                confirmed_bytes
+            } else {
+                0
+            };
+            let can_cancel = !attention
+                && resumable
+                && (sending || transfer_phase == Some(TransferPhase::Paused))
+                && !state.confirmations.contains_key(&item.id);
             document.rows.push(ImportRow {
                 id: item.id.clone(),
                 name: item.name.clone(),
@@ -1135,6 +1554,11 @@ impl ImportHandle {
                 review_kind: refusal.and_then(|r| r.kind.clone()),
                 review_expired: false,
                 size_bytes: item.size,
+                resumable,
+                bytes_sent,
+                bytes_total: item.size,
+                transfer_phase: transfer_phase.map(|p| p.ui_phase().to_owned()),
+                can_cancel,
             });
         }
         if ready && let Some(inst) = current_instance_id.as_deref() {
@@ -1219,10 +1643,12 @@ impl ImportHandle {
             next.saved = None;
             next.review = None;
             next.refusal = None;
+            next.upload = None;
             next.phase = Phase::Pending;
             handle.persist(&next)?;
             state.items.insert(id.clone(), next);
             state.saved_current.remove(&id);
+            state.transfers.remove(&id);
             Ok(true)
         })
         .await;
@@ -1248,22 +1674,56 @@ impl ImportHandle {
                 return Ok(false);
             }
             let mut next = item.clone();
+            let reason_code = next
+                .refusal
+                .as_ref()
+                .and_then(|r| r.reason_code.as_deref())
+                .map(str::to_owned);
             if is_expired_review
-                || next.refusal.as_ref().is_some_and(|refusal| {
-                    matches!(
-                        refusal.reason_code.as_deref(),
-                        Some("import_preview_required" | "import_not_found")
-                    )
-                })
+                || matches!(
+                    reason_code.as_deref(),
+                    Some("import_preview_required" | "import_not_found")
+                )
             {
                 next.saved = None;
+            }
+            if is_expired_review
+                || matches!(
+                    reason_code.as_deref(),
+                    Some(
+                        "upload_not_found"
+                            | "whole_file_checksum_mismatch"
+                            | "chunk_checksum_mismatch"
+                    )
+                )
+            {
+                next.upload = None;
+            }
+            if reason_code.as_deref() == Some("whole_file_checksum_mismatch") {
+                next.sha256 = None;
             }
             next.review = None;
             next.refusal = None;
             next.phase = Phase::Pending;
             handle.persist(&next)?;
+            let keep_upload = next.upload.is_some();
             state.items.insert(id.clone(), next);
             state.saved_current.remove(&id);
+            if keep_upload {
+                state.transfers.insert(
+                    id.clone(),
+                    TransferRuntime {
+                        resumable: true,
+                        phase: Some(TransferPhase::Paused),
+                        retry_step: 0,
+                        next_retry_at_ms: None,
+                        needs_resync: true,
+                        cancel_requested: false,
+                    },
+                );
+            } else {
+                state.transfers.remove(&id);
+            }
             Ok(true)
         })
         .await;
@@ -1359,6 +1819,127 @@ impl ImportHandle {
         self.remove_inner(id, may_have_saved, None).await
     }
 
+    pub async fn cancel(&self, id: String) -> bool {
+        if !valid_id(&id) || self.root.is_none() {
+            return false;
+        }
+        let token_to_cancel = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.failed || state.confirmations.contains_key(&id) {
+                return false;
+            }
+            let Some(item) = state.items.get(&id) else {
+                return false;
+            };
+            if matches!(item.phase, Phase::Copying | Phase::Delivered) {
+                return false;
+            }
+            state
+                .transfers
+                .entry(id.clone())
+                .or_default()
+                .cancel_requested = true;
+            state.cancel_tokens.get(&id).cloned()
+        };
+        if let Some(token) = token_to_cancel {
+            token.cancel();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = self.cancel_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let is_busy = self
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .busy
+                .contains(&id);
+            if !is_busy {
+                break;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return false;
+            }
+        }
+        let remote_upload = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.failed || state.busy.contains(&id) || state.confirmations.contains_key(&id) {
+                return false;
+            }
+            let Some(item) = state.items.get(&id) else {
+                return false;
+            };
+            if matches!(item.phase, Phase::Copying | Phase::Delivered) {
+                return false;
+            }
+            let remote = item
+                .upload
+                .as_ref()
+                .map(|u| (u.upload_id.clone(), u.instance_id.clone()));
+            state.busy.insert(id.clone());
+            remote
+        };
+        let _reservation = Sending {
+            handle: self.clone(),
+            id: id.clone(),
+        };
+        self.best_effort_abort_remote(remote_upload).await;
+        let handle = self.clone();
+        let cancel_id = id.clone();
+        let cleaned = tokio::task::spawn_blocking(move || {
+            let item = {
+                let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
+                let Some(item) = state.items.get(&cancel_id) else {
+                    return Ok::<_, io::Error>(false);
+                };
+                let mut tombstone = item.clone();
+                tombstone.phase = Phase::Delivered;
+                tombstone.upload = None;
+                handle.persist(&tombstone)?;
+                state.items.insert(cancel_id.clone(), tombstone);
+                true
+            };
+            if !item {
+                return Ok(false);
+            }
+            handle.cleanup(&cancel_id)?;
+            let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.items.remove(&cancel_id);
+            state.transfers.remove(&cancel_id);
+            state.saved_current.remove(&cancel_id);
+            state.confirmations.remove(&cancel_id);
+            state.sent_bytes.remove(&cancel_id);
+            Ok(true)
+        })
+        .await;
+        drop(_reservation);
+        self.wake();
+        matches!(cleaned, Ok(Ok(true)))
+    }
+
+    async fn best_effort_abort_remote(&self, remote_upload: Option<(String, String)>) {
+        let Some((upload_id, instance_id)) = remote_upload else {
+            return;
+        };
+        if !valid_upload_id(&upload_id) {
+            return;
+        }
+        let Some(client) = self.client.upgrade() else {
+            return;
+        };
+        if client.is_revoked() {
+            return;
+        }
+        let Some(capability) = client.capability() else {
+            return;
+        };
+        if capability.writer().identity_key() != instance_id {
+            return;
+        }
+        let _ = capability.import_upload_abort(&upload_id).await;
+    }
+
     /// A confirmation owns the item until it closes or its D-Bus connection disappears.
     async fn remove_inner(
         &self,
@@ -1366,6 +1947,30 @@ impl ImportHandle {
         may_have_saved: bool,
         confirmation: Option<(String, String)>,
     ) -> &'static str {
+        let remote_upload = {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let owns_confirmation = match confirmation {
+                Some((ref token, ref owner)) => state
+                    .confirmations
+                    .get(&id)
+                    .is_some_and(|c| c.token == *token && c.owner == *owner),
+                None => !state.confirmations.contains_key(&id),
+            };
+            if owns_confirmation && !state.failed && !state.busy.contains(&id) {
+                state.items.get(&id).and_then(|item| {
+                    (item.may_have_saved == may_have_saved && item.phase != Phase::Copying)
+                        .then(|| {
+                            item.upload
+                                .as_ref()
+                                .map(|u| (u.upload_id.clone(), u.instance_id.clone()))
+                        })
+                        .flatten()
+                })
+            } else {
+                None
+            }
+        };
+        self.best_effort_abort_remote(remote_upload).await;
         let handle = self.clone();
         let result = match tokio::task::spawn_blocking(move || {
             let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1396,6 +2001,7 @@ impl ImportHandle {
             }
             let mut tombstone = item.clone();
             tombstone.phase = Phase::Delivered;
+            tombstone.upload = None;
             if item.phase != Phase::Delivered {
                 handle.persist(&tombstone)?;
             }
@@ -1404,6 +2010,7 @@ impl ImportHandle {
             handle.cleanup(&id)?;
             let mut state = handle.state.lock().unwrap_or_else(|p| p.into_inner());
             state.items.remove(&id);
+            state.transfers.remove(&id);
             state.saved_current.remove(&id);
             state.confirmations.remove(&id);
             Ok("removed")
@@ -1454,27 +2061,50 @@ impl ImportHandle {
                 .items
                 .iter()
                 .filter(|(id, item)| {
-                    item.phase == Phase::ReadyToReview
-                        && !state.busy.contains(*id)
+                    !state.busy.contains(*id)
                         && !state.confirmations.contains_key(*id)
-                        && item
-                            .review
-                            .as_ref()
-                            .is_none_or(|r| r.instance_id != current_instance_id)
+                        && ((item.phase == Phase::ReadyToReview
+                            && item
+                                .review
+                                .as_ref()
+                                .is_none_or(|r| r.instance_id != current_instance_id))
+                            || item
+                                .upload
+                                .as_ref()
+                                .is_some_and(|u| u.instance_id != current_instance_id))
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in foreign_ids {
                 if let Some(item) = state.items.get(&id) {
                     let mut next = item.clone();
-                    next.phase = Phase::Pending;
-                    next.saved = None;
-                    next.review = None;
-                    next.refusal = None;
-                    next.may_have_saved = false;
+                    if next.phase == Phase::ReadyToReview
+                        && next
+                            .review
+                            .as_ref()
+                            .is_none_or(|r| r.instance_id != current_instance_id)
+                    {
+                        next.phase = Phase::Pending;
+                        next.saved = None;
+                        next.review = None;
+                        next.refusal = None;
+                        next.may_have_saved = false;
+                    }
+                    if next
+                        .upload
+                        .as_ref()
+                        .is_some_and(|u| u.instance_id != current_instance_id)
+                    {
+                        next.upload = None;
+                        if next.refusal.as_ref().is_some_and(|r| r.binding.is_some()) {
+                            next.refusal = None;
+                            next.phase = Phase::Pending;
+                        }
+                    }
                     self.persist(&next)?;
                     state.items.insert(id.clone(), next);
                     state.saved_current.remove(&id);
+                    state.transfers.remove(&id);
                     changed = true;
                 }
             }
@@ -1731,36 +2361,126 @@ impl ImportHandle {
                 }
                 state.saved_current.clear();
                 state.version = None;
+                state.capabilities.clear();
+                state.resumable_config = None;
+                state.transfers.clear();
             }
         }
-        let Some(version_result) = guarded(
+        let Some(status_result) = guarded(
             client,
             &association,
             running,
             &self.sleep,
-            capability.system_status(),
+            capability.system_status_info(),
         )
         .await
         else {
             return;
         };
-        let version = match version_result {
-            Ok(version) => version,
+        let status_info = match status_result {
+            Ok(info) => info,
             Err(outcome) => {
                 self.auth_answer(client, &association, &outcome);
+                if outcome.is_transport_unavailable()
+                    || outcome.status_code().is_some_and(|code| code >= 500)
+                {
+                    self.note_transient_offline();
+                }
                 return;
             }
         };
+        let version = status_info.version;
+        let advertises_resumable = status_info
+            .capabilities
+            .iter()
+            .any(|cap| cap == RESUMABLE_CAPABILITY);
         {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             state.observed = Some(association.clone());
             state.version = version.clone();
+            state.capabilities = status_info.capabilities;
+            if !advertises_resumable {
+                state.resumable_config = None;
+            }
         }
         self.publish_status();
         if !supports_import(version.as_deref()) {
             return;
         }
         let binding = binding(&capability);
+        let now_mono = self.now_mono_ms();
+        let has_due_deliverable = {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.items.iter().any(|(id, item)| {
+                !matches!(
+                    item.phase,
+                    Phase::Copying | Phase::Delivered | Phase::ReadyToReview
+                ) && !state.busy.contains(id)
+                    && !state.confirmations.contains_key(id)
+                    && !item
+                        .refusal
+                        .as_ref()
+                        .is_some_and(|r| r.applies_to(Some(&binding), version.as_deref()))
+                    && !state.transfers.get(id).is_some_and(|t| t.cancel_requested)
+                    && state
+                        .transfers
+                        .get(id)
+                        .and_then(|t| t.next_retry_at_ms)
+                        .is_none_or(|due| due <= now_mono)
+            })
+        };
+        if !has_due_deliverable {
+            return;
+        }
+        let mut resumable_config = if advertises_resumable {
+            self.state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .resumable_config
+        } else {
+            None
+        };
+        if advertises_resumable && resumable_config.is_none() {
+            let Some(sources_outcome) = guarded(
+                client,
+                &association,
+                running,
+                &self.sleep,
+                capability.import_sources(),
+            )
+            .await
+            else {
+                return;
+            };
+            self.auth_answer(client, &association, &sources_outcome);
+            if sources_outcome
+                .status_code()
+                .is_some_and(|code| matches!(code, 401 | 403))
+                || matches!(sources_outcome, LinkOutcome::Forbidden)
+            {
+                return;
+            }
+            match sources_outcome {
+                LinkOutcome::Success { status, body } if status.as_u16() == 200 => {
+                    let config = parse_resumable_config(&body)
+                        .unwrap_or_else(ResumableConfig::default_limits);
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .resumable_config = Some(config);
+                    resumable_config = Some(config);
+                }
+                LinkOutcome::TransportUnavailable => {
+                    self.note_transient_offline();
+                    return;
+                }
+                LinkOutcome::Success { status, .. } if status.as_u16() >= 500 => {
+                    self.note_transient_offline();
+                    return;
+                }
+                _ => {}
+            }
+        }
         let ids = {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let mut ids: Vec<_> = state.items.keys().cloned().collect();
@@ -1785,6 +2505,7 @@ impl ImportHandle {
             {
                 break;
             }
+            let now_mono = self.now_mono_ms();
             let deliverable = {
                 let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
                 state.items.get(&id).is_some_and(|item| {
@@ -1797,6 +2518,12 @@ impl ImportHandle {
                             .refusal
                             .as_ref()
                             .is_some_and(|r| r.applies_to(Some(&binding), version.as_deref()))
+                        && !state.transfers.get(&id).is_some_and(|t| t.cancel_requested)
+                        && state
+                            .transfers
+                            .get(&id)
+                            .and_then(|t| t.next_retry_at_ms)
+                            .is_none_or(|due| due <= now_mono)
                 })
             };
             if !deliverable {
@@ -1808,6 +2535,7 @@ impl ImportHandle {
                     crate::sleep_inhibit::AcquireOutcome::Sleeping => break,
                 }
             }
+            let cancel_token = CancellationToken::new();
             let item = {
                 let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
                 let Some(item) = state.items.get(&id) else {
@@ -1822,11 +2550,18 @@ impl ImportHandle {
                         .refusal
                         .as_ref()
                         .is_some_and(|r| r.applies_to(Some(&binding), version.as_deref()))
+                    || state.transfers.get(&id).is_some_and(|t| t.cancel_requested)
+                    || state
+                        .transfers
+                        .get(&id)
+                        .and_then(|t| t.next_retry_at_ms)
+                        .is_some_and(|due| due > now_mono)
                 {
                     continue;
                 }
                 let item = item.clone();
                 state.busy.insert(id.clone());
+                state.cancel_tokens.insert(id.clone(), cancel_token.clone());
                 state.cursor = id.clone();
                 item
             };
@@ -1836,8 +2571,43 @@ impl ImportHandle {
                 id: id.clone(),
             };
             self.publish_status();
-            if let Err(error) = self
-                .send_item(
+            let send_result = if let Some(config) = resumable_config
+                && advertises_resumable
+                && item.size >= config.threshold_bytes
+            {
+                match self
+                    .send_item_resumable(
+                        item.clone(),
+                        client,
+                        &association,
+                        &capability,
+                        &binding,
+                        version.as_deref(),
+                        running,
+                        config,
+                        true,
+                        &cancel_token,
+                    )
+                    .await
+                {
+                    Ok(ResumableStep::Done) => Ok(()),
+                    Ok(ResumableStep::FallbackToSave(item)) => {
+                        self.send_item_single_post(
+                            *item,
+                            client,
+                            &association,
+                            &capability,
+                            &binding,
+                            version.as_deref(),
+                            running,
+                            &cancel_token,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.send_item_single_post(
                     item,
                     client,
                     &association,
@@ -1845,9 +2615,11 @@ impl ImportHandle {
                     &binding,
                     version.as_deref(),
                     running,
+                    &cancel_token,
                 )
                 .await
-            {
+            };
+            if let Err(error) = send_result {
                 tracing::warn!(%error, "import retained after local storage failure");
             }
         }
@@ -1856,8 +2628,59 @@ impl ImportHandle {
         }
     }
 
+    fn set_transfer_phase(&self, id: &str, phase: TransferPhase, resumable: bool) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = state.transfers.entry(id.to_owned()).or_default();
+            entry.resumable = resumable;
+            entry.phase = Some(phase);
+        }
+        self.publish_status();
+    }
+
+    fn schedule_resumable_backoff(&self, id: &str, needs_resync: bool) {
+        let now = self.now_mono_ms();
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = state.transfers.entry(id.to_owned()).or_default();
+            let delay_ms = resumable_backoff_ms(entry.retry_step);
+            entry.resumable = true;
+            entry.phase = Some(TransferPhase::Paused);
+            entry.needs_resync = needs_resync;
+            entry.retry_step = (entry.retry_step + 1).min(RESUMABLE_BACKOFF_SECS.len() - 1);
+            entry.next_retry_at_ms = Some(now.saturating_add(delay_ms));
+        }
+        self.publish_status();
+    }
+
+    fn pause_resumable_for_sleep(&self, id: &str) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = state.transfers.entry(id.to_owned()).or_default();
+            entry.resumable = true;
+            entry.phase = Some(TransferPhase::Paused);
+            entry.needs_resync = true;
+            entry.retry_step = 0;
+            entry.next_retry_at_ms = None;
+        }
+        self.publish_status();
+    }
+
+    fn reset_resumable_backoff(&self, id: &str, phase: TransferPhase) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = state.transfers.entry(id.to_owned()).or_default();
+            entry.resumable = true;
+            entry.phase = Some(phase);
+            entry.retry_step = 0;
+            entry.next_retry_at_ms = None;
+            entry.needs_resync = false;
+        }
+        self.publish_status();
+    }
+
     #[allow(clippy::too_many_arguments)]
-    async fn send_item(
+    async fn send_item_resumable(
         &self,
         mut item: Item,
         client: &Arc<UploadClient>,
@@ -1866,6 +2689,874 @@ impl ImportHandle {
         binding: &str,
         version: Option<&str>,
         running: &AtomicBool,
+        config: ResumableConfig,
+        advertises_resumable: bool,
+        cancel_token: &CancellationToken,
+    ) -> io::Result<ResumableStep> {
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| ioe("import store unavailable"))?
+            .clone();
+        let payload_path = root.join(&item.id).join("payload");
+        let payload_ok = regular_file(&payload_path)
+            .and_then(|file| Ok(file.metadata()?.len() == item.size))
+            .unwrap_or(false);
+        if !payload_ok {
+            item.phase = Phase::Refused;
+            item.review = None;
+            item.upload = None;
+            item.refusal = Some(local_refusal("the copy on this device is missing"));
+            self.state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .transfers
+                .remove(&item.id);
+            self.publish(item)?;
+            return Ok(ResumableStep::Done);
+        }
+        let instance_id = capability.writer().identity_key().to_owned();
+        let reuse = self
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .saved_current
+            .get(&item.id)
+            .is_some_and(|a| client.association_is_current(a));
+        if reuse && item.saved.as_ref().is_some_and(|s| s.binding == binding) {
+            self.finish_start(
+                item,
+                client,
+                association,
+                capability,
+                binding,
+                version,
+                &instance_id,
+                running,
+                cancel_token,
+            )
+            .await?;
+            return Ok(ResumableStep::Done);
+        }
+
+        if item.size > config.max_file_bytes {
+            let refusal = Refusal {
+                reason: text!("linux.import.filetoolarge").to_owned(),
+                reason_code: Some("file_too_large".to_owned()),
+                kind: None,
+                binding: Some(binding.to_owned()),
+                version: version.map(str::to_owned),
+                retryable: false,
+            };
+            item.phase = Phase::Refused;
+            item.review = None;
+            item.upload = None;
+            item.refusal = Some(refusal);
+            self.state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .transfers
+                .remove(&item.id);
+            self.publish(item)?;
+            return Ok(ResumableStep::Done);
+        }
+
+        // Pairing-switch rule: discard any remote session bound to a different journal
+        // while keeping the staged local file and cached whole-file hash intact.
+        if item.upload.as_ref().is_some_and(|u| {
+            u.instance_id != instance_id
+                || u.binding != binding
+                || u.total_bytes != item.size
+                || !valid_upload_id(&u.upload_id)
+        }) {
+            item.upload = None;
+            self.publish(item.clone())?;
+        }
+
+        let initial_phase = if item.upload.is_some() {
+            TransferPhase::Resuming
+        } else {
+            TransferPhase::Sending
+        };
+        self.set_transfer_phase(&item.id, initial_phase, true);
+
+        // Compute whole-file SHA-256 once from custody payload so pre-upload dedup works.
+        let sha256 = match item.sha256.clone().filter(|h| valid_sha256_hex(h)) {
+            Some(existing) => existing,
+            None => {
+                let hash_abort = Arc::new(AtomicBool::new(false));
+                let _abort_guard = AbortOnDrop(Arc::clone(&hash_abort));
+                let hash_path = payload_path.clone();
+                let expected_size = item.size;
+                let hash_fut = async move {
+                    let abort = Arc::clone(&hash_abort);
+                    tokio::task::spawn_blocking(move || {
+                        hash_payload_file(&hash_path, expected_size, &abort)
+                    })
+                    .await
+                    .map_err(ioe)?
+                };
+                let Some(hash_result) = guarded_with_cancel(
+                    client,
+                    association,
+                    running,
+                    &self.sleep,
+                    cancel_token,
+                    hash_fut,
+                )
+                .await
+                else {
+                    if self.sleep.is_sleeping() {
+                        self.pause_resumable_for_sleep(&item.id);
+                    }
+                    return Ok(ResumableStep::Done);
+                };
+                match hash_result? {
+                    PayloadHash::Digest(hex) => {
+                        item.sha256 = Some(hex.clone());
+                        self.publish(item.clone())?;
+                        hex
+                    }
+                    PayloadHash::Aborted => {
+                        if self.sleep.is_sleeping() {
+                            self.pause_resumable_for_sleep(&item.id);
+                        }
+                        return Ok(ResumableStep::Done);
+                    }
+                    PayloadHash::Missing => {
+                        item.phase = Phase::Refused;
+                        item.review = None;
+                        item.upload = None;
+                        item.refusal = Some(local_refusal("the copy on this device is missing"));
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        self.publish(item)?;
+                        return Ok(ResumableStep::Done);
+                    }
+                }
+            }
+        };
+
+        // Ensure we have an open upload session or resync an existing one after interruption.
+        let needs_resync = self
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .transfers
+            .get(&item.id)
+            .is_some_and(|t| t.needs_resync);
+
+        if let Some(existing_upload) = item.upload.clone() {
+            if needs_resync {
+                self.set_transfer_phase(&item.id, TransferPhase::Resuming, true);
+                let Some(outcome) = guarded_with_cancel(
+                    client,
+                    association,
+                    running,
+                    &self.sleep,
+                    cancel_token,
+                    capability.import_upload_status(&existing_upload.upload_id),
+                )
+                .await
+                else {
+                    if self.sleep.is_sleeping() {
+                        self.pause_resumable_for_sleep(&item.id);
+                    }
+                    return Ok(ResumableStep::Done);
+                };
+                self.auth_answer(client, association, &outcome);
+                if outcome
+                    .status_code()
+                    .is_some_and(|code| matches!(code, 401 | 403))
+                    || matches!(outcome, LinkOutcome::Forbidden)
+                {
+                    return Ok(ResumableStep::Done);
+                }
+                match classify_upload_status_reply(outcome, item.size) {
+                    UploadStatusReply::Open {
+                        next_offset,
+                        chunk_bytes,
+                    } => {
+                        let advanced = next_offset > existing_upload.remote_offset;
+                        if let Some(upload) = &mut item.upload {
+                            upload.remote_offset = next_offset;
+                            if let Some(cb) = chunk_bytes {
+                                upload.chunk_bytes = cb;
+                            }
+                        }
+                        if advanced {
+                            self.reset_resumable_backoff(&item.id, TransferPhase::Sending);
+                        } else {
+                            {
+                                let mut state =
+                                    self.state.lock().unwrap_or_else(|p| p.into_inner());
+                                let entry = state.transfers.entry(item.id.clone()).or_default();
+                                entry.resumable = true;
+                                entry.phase = Some(TransferPhase::Sending);
+                                entry.needs_resync = false;
+                                entry.next_retry_at_ms = None;
+                            }
+                            self.publish_status();
+                        }
+                        self.publish(item.clone())?;
+                    }
+                    UploadStatusReply::NotFound(reason) => {
+                        item.upload = None;
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        let refusal = Refusal {
+                            reason,
+                            reason_code: Some("upload_not_found".to_owned()),
+                            kind: None,
+                            binding: None,
+                            version: None,
+                            retryable: true,
+                        };
+                        self.retain_answer(
+                            item,
+                            Answer::Refused(refusal),
+                            binding,
+                            version,
+                            &instance_id,
+                        )?;
+                        return Ok(ResumableStep::Done);
+                    }
+                    UploadStatusReply::Transient => {
+                        self.schedule_resumable_backoff(&item.id, true);
+                        return Ok(ResumableStep::Done);
+                    }
+                    UploadStatusReply::Refused(refusal) => {
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        self.retain_answer(
+                            item,
+                            Answer::Refused(refusal),
+                            binding,
+                            version,
+                            &instance_id,
+                        )?;
+                        return Ok(ResumableStep::Done);
+                    }
+                }
+            }
+        } else {
+            let mut create_body = json!({
+                "client_item_id": item.id,
+                "filename": bounded_upload_filename(&item.name),
+                "mime_type": item.mime,
+                "total_bytes": item.size,
+                "sha256": sha256,
+                "imported_via": "linux",
+                "device_noun": "computer",
+            });
+            if let Some(handoff) = &item.handoff
+                && let Some(obj) = create_body.as_object_mut()
+            {
+                obj.insert("area".to_owned(), json!(handoff.area));
+                if !matches!(handoff.area.as_str(), "quick" | "recording") {
+                    obj.insert("source_hint".to_owned(), json!(handoff.area));
+                }
+                obj.insert("context".to_owned(), Value::Object(handoff.context.clone()));
+            }
+            let Some(outcome) = guarded_with_cancel(
+                client,
+                association,
+                running,
+                &self.sleep,
+                cancel_token,
+                capability.import_upload_create(&create_body),
+            )
+            .await
+            else {
+                if self.sleep.is_sleeping() {
+                    self.pause_resumable_for_sleep(&item.id);
+                }
+                return Ok(ResumableStep::Done);
+            };
+            self.auth_answer(client, association, &outcome);
+            if outcome
+                .status_code()
+                .is_some_and(|code| matches!(code, 401 | 403))
+                || matches!(outcome, LinkOutcome::Forbidden)
+            {
+                return Ok(ResumableStep::Done);
+            }
+            match classify_upload_create_reply(outcome, advertises_resumable, item.size, config) {
+                UploadCreateReply::FallbackToSave => {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    return Ok(ResumableStep::FallbackToSave(Box::new(item)));
+                }
+                UploadCreateReply::Open {
+                    upload_id,
+                    next_offset,
+                    chunk_bytes,
+                } => {
+                    item.phase = Phase::Pending;
+                    item.refusal = None;
+                    item.review = None;
+                    item.saved = None;
+                    item.upload = Some(ResumableUpload {
+                        upload_id,
+                        instance_id: instance_id.clone(),
+                        binding: binding.to_owned(),
+                        remote_offset: next_offset,
+                        chunk_bytes,
+                        total_bytes: item.size,
+                    });
+                    self.reset_resumable_backoff(&item.id, TransferPhase::Sending);
+                    self.publish(item.clone())?;
+                }
+                UploadCreateReply::AlreadyStaged { path, timestamp } => {
+                    item.may_have_saved = true;
+                    item.upload = None;
+                    item.saved = Some(Saved {
+                        binding: binding.to_owned(),
+                        path,
+                        timestamp,
+                        instance_id: Some(instance_id.clone()),
+                    });
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    self.publish(item.clone())?;
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .saved_current
+                        .insert(item.id.clone(), association.clone());
+                    self.finish_start(
+                        item,
+                        client,
+                        association,
+                        capability,
+                        binding,
+                        version,
+                        &instance_id,
+                        running,
+                        cancel_token,
+                    )
+                    .await?;
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCreateReply::AlreadyImported(import_id) => {
+                    item.upload = None;
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    self.delivered(item, &instance_id, import_id)?;
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCreateReply::Transient => {
+                    self.schedule_resumable_backoff(&item.id, false);
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCreateReply::Refused(refusal) => {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    self.retain_answer(
+                        item,
+                        Answer::Refused(refusal),
+                        binding,
+                        version,
+                        &instance_id,
+                    )?;
+                    return Ok(ResumableStep::Done);
+                }
+            }
+        }
+
+        // Send chunks strictly in order until the journal confirms all bytes, then commit.
+        let mut checksum_retries = 0u32;
+        let mut offset_resyncs = 0u32;
+        loop {
+            let Some(upload) = item.upload.clone() else {
+                return Ok(ResumableStep::Done);
+            };
+            if upload.remote_offset < item.size {
+                if !running.load(Ordering::Acquire)
+                    || cancel_token.is_cancelled()
+                    || client.is_revoked()
+                    || !client.association_is_current(association)
+                {
+                    if self.sleep.is_sleeping() {
+                        self.pause_resumable_for_sleep(&item.id);
+                    }
+                    return Ok(ResumableStep::Done);
+                }
+                if self.sleep.is_sleeping() {
+                    self.pause_resumable_for_sleep(&item.id);
+                    return Ok(ResumableStep::Done);
+                }
+                let offset = upload.remote_offset;
+                let chunk_len = (item.size - offset).min(upload.chunk_bytes) as usize;
+                let read_path = payload_path.clone();
+                let expected_size = item.size;
+                let chunk_read = tokio::task::spawn_blocking(move || {
+                    read_payload_chunk(&read_path, expected_size, offset, chunk_len)
+                })
+                .await
+                .map_err(ioe)?;
+                let chunk_bytes = match chunk_read? {
+                    Some(bytes) => bytes,
+                    None => {
+                        item.phase = Phase::Refused;
+                        item.review = None;
+                        item.upload = None;
+                        item.refusal = Some(local_refusal("the copy on this device is missing"));
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        self.publish(item)?;
+                        return Ok(ResumableStep::Done);
+                    }
+                };
+                let chunk_sha256 = format!("{:x}", Sha256::digest(&chunk_bytes));
+                self.set_transfer_phase(&item.id, TransferPhase::Sending, true);
+                let Some(outcome) = guarded_with_cancel(
+                    client,
+                    association,
+                    running,
+                    &self.sleep,
+                    cancel_token,
+                    capability.import_upload_chunk(
+                        &upload.upload_id,
+                        offset,
+                        chunk_bytes,
+                        &chunk_sha256,
+                    ),
+                )
+                .await
+                else {
+                    if self.sleep.is_sleeping() {
+                        self.pause_resumable_for_sleep(&item.id);
+                    } else if !cancel_token.is_cancelled() {
+                        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                        let entry = state.transfers.entry(item.id.clone()).or_default();
+                        entry.resumable = true;
+                        entry.needs_resync = true;
+                    }
+                    return Ok(ResumableStep::Done);
+                };
+                self.auth_answer(client, association, &outcome);
+                if outcome
+                    .status_code()
+                    .is_some_and(|code| matches!(code, 401 | 403))
+                    || matches!(outcome, LinkOutcome::Forbidden)
+                {
+                    return Ok(ResumableStep::Done);
+                }
+                match classify_upload_chunk_reply(outcome, offset, item.size) {
+                    UploadChunkReply::Accepted { next_offset } => {
+                        checksum_retries = 0;
+                        offset_resyncs = 0;
+                        if let Some(active) = &mut item.upload {
+                            active.remote_offset = next_offset;
+                        }
+                        self.reset_resumable_backoff(&item.id, TransferPhase::Sending);
+                        self.publish(item.clone())?;
+                        continue;
+                    }
+                    UploadChunkReply::OffsetMismatch { next_offset } => {
+                        offset_resyncs += 1;
+                        if offset_resyncs > MAX_OFFSET_RESYNC_STEPS {
+                            self.schedule_resumable_backoff(&item.id, true);
+                            return Ok(ResumableStep::Done);
+                        }
+                        let synced = if let Some(next_offset) = next_offset {
+                            Some(next_offset)
+                        } else {
+                            let Some(status_outcome) = guarded_with_cancel(
+                                client,
+                                association,
+                                running,
+                                &self.sleep,
+                                cancel_token,
+                                capability.import_upload_status(&upload.upload_id),
+                            )
+                            .await
+                            else {
+                                if self.sleep.is_sleeping() {
+                                    self.pause_resumable_for_sleep(&item.id);
+                                }
+                                return Ok(ResumableStep::Done);
+                            };
+                            self.auth_answer(client, association, &status_outcome);
+                            if status_outcome
+                                .status_code()
+                                .is_some_and(|code| matches!(code, 401 | 403))
+                                || matches!(status_outcome, LinkOutcome::Forbidden)
+                            {
+                                return Ok(ResumableStep::Done);
+                            }
+                            match classify_upload_status_reply(status_outcome, item.size) {
+                                UploadStatusReply::Open { next_offset, .. } => Some(next_offset),
+                                UploadStatusReply::NotFound(reason) => {
+                                    item.upload = None;
+                                    self.state
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .transfers
+                                        .remove(&item.id);
+                                    let refusal = Refusal {
+                                        reason,
+                                        reason_code: Some("upload_not_found".to_owned()),
+                                        kind: None,
+                                        binding: None,
+                                        version: None,
+                                        retryable: true,
+                                    };
+                                    self.retain_answer(
+                                        item,
+                                        Answer::Refused(refusal),
+                                        binding,
+                                        version,
+                                        &instance_id,
+                                    )?;
+                                    return Ok(ResumableStep::Done);
+                                }
+                                UploadStatusReply::Transient => {
+                                    self.schedule_resumable_backoff(&item.id, true);
+                                    return Ok(ResumableStep::Done);
+                                }
+                                UploadStatusReply::Refused(refusal) => {
+                                    self.state
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .transfers
+                                        .remove(&item.id);
+                                    self.retain_answer(
+                                        item,
+                                        Answer::Refused(refusal),
+                                        binding,
+                                        version,
+                                        &instance_id,
+                                    )?;
+                                    return Ok(ResumableStep::Done);
+                                }
+                            }
+                        };
+                        if let (Some(synced), Some(active)) = (synced, &mut item.upload) {
+                            active.remote_offset = synced;
+                            self.publish(item.clone())?;
+                            continue;
+                        }
+                    }
+                    UploadChunkReply::ChunkChecksumMismatch(reason) => {
+                        checksum_retries += 1;
+                        if checksum_retries <= MAX_CHUNK_CHECKSUM_RETRIES {
+                            continue;
+                        }
+                        item.upload = None;
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        let refusal = Refusal {
+                            reason,
+                            reason_code: Some("chunk_checksum_mismatch".to_owned()),
+                            kind: None,
+                            binding: None,
+                            version: None,
+                            retryable: true,
+                        };
+                        self.retain_answer(
+                            item,
+                            Answer::Refused(refusal),
+                            binding,
+                            version,
+                            &instance_id,
+                        )?;
+                        return Ok(ResumableStep::Done);
+                    }
+                    UploadChunkReply::NotFound(reason) => {
+                        item.upload = None;
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        let refusal = Refusal {
+                            reason,
+                            reason_code: Some("upload_not_found".to_owned()),
+                            kind: None,
+                            binding: None,
+                            version: None,
+                            retryable: true,
+                        };
+                        self.retain_answer(
+                            item,
+                            Answer::Refused(refusal),
+                            binding,
+                            version,
+                            &instance_id,
+                        )?;
+                        return Ok(ResumableStep::Done);
+                    }
+                    UploadChunkReply::InsufficientSpace(reason) => {
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        let refusal = Refusal {
+                            reason,
+                            reason_code: Some("insufficient_journal_space".to_owned()),
+                            kind: None,
+                            binding: None,
+                            version: None,
+                            retryable: true,
+                        };
+                        self.retain_answer(
+                            item,
+                            Answer::Refused(refusal),
+                            binding,
+                            version,
+                            &instance_id,
+                        )?;
+                        return Ok(ResumableStep::Done);
+                    }
+                    UploadChunkReply::Transient => {
+                        self.schedule_resumable_backoff(&item.id, true);
+                        return Ok(ResumableStep::Done);
+                    }
+                    UploadChunkReply::Refused(refusal) => {
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .transfers
+                            .remove(&item.id);
+                        self.retain_answer(
+                            item,
+                            Answer::Refused(refusal),
+                            binding,
+                            version,
+                            &instance_id,
+                        )?;
+                        return Ok(ResumableStep::Done);
+                    }
+                }
+            }
+
+            // All chunks are confirmed on the journal: verify whole-file hash and commit.
+            if self.sleep.is_sleeping() {
+                self.pause_resumable_for_sleep(&item.id);
+                return Ok(ResumableStep::Done);
+            }
+            if !running.load(Ordering::Acquire)
+                || cancel_token.is_cancelled()
+                || client.is_revoked()
+                || !client.association_is_current(association)
+            {
+                return Ok(ResumableStep::Done);
+            }
+            item.may_have_saved = true;
+            self.set_transfer_phase(&item.id, TransferPhase::Checking, true);
+            self.publish(item.clone())?;
+            let Some(outcome) = guarded_with_cancel(
+                client,
+                association,
+                running,
+                &self.sleep,
+                cancel_token,
+                capability.import_upload_commit(&upload.upload_id, &sha256),
+            )
+            .await
+            else {
+                if self.sleep.is_sleeping() {
+                    self.pause_resumable_for_sleep(&item.id);
+                } else if !cancel_token.is_cancelled() {
+                    let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    let entry = state.transfers.entry(item.id.clone()).or_default();
+                    entry.resumable = true;
+                    entry.needs_resync = true;
+                }
+                return Ok(ResumableStep::Done);
+            };
+            self.auth_answer(client, association, &outcome);
+            if outcome
+                .status_code()
+                .is_some_and(|code| matches!(code, 401 | 403))
+                || matches!(outcome, LinkOutcome::Forbidden)
+            {
+                return Ok(ResumableStep::Done);
+            }
+            match classify_upload_commit_reply(outcome, item.size) {
+                UploadCommitReply::Staged { path, timestamp } => {
+                    item.upload = None;
+                    item.saved = Some(Saved {
+                        binding: binding.to_owned(),
+                        path,
+                        timestamp,
+                        instance_id: Some(instance_id.clone()),
+                    });
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    self.publish(item.clone())?;
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .saved_current
+                        .insert(item.id.clone(), association.clone());
+                    self.finish_start(
+                        item,
+                        client,
+                        association,
+                        capability,
+                        binding,
+                        version,
+                        &instance_id,
+                        running,
+                        cancel_token,
+                    )
+                    .await?;
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCommitReply::Incomplete { next_offset } => {
+                    offset_resyncs += 1;
+                    if offset_resyncs > MAX_OFFSET_RESYNC_STEPS {
+                        self.schedule_resumable_backoff(&item.id, true);
+                        return Ok(ResumableStep::Done);
+                    }
+                    if let (Some(next_offset), Some(active)) = (next_offset, &mut item.upload) {
+                        active.remote_offset = next_offset;
+                        self.publish(item.clone())?;
+                        continue;
+                    }
+                    self.schedule_resumable_backoff(&item.id, true);
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCommitReply::WholeFileMismatch(reason) => {
+                    item.upload = None;
+                    item.sha256 = None;
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    let refusal = Refusal {
+                        reason,
+                        reason_code: Some("whole_file_checksum_mismatch".to_owned()),
+                        kind: None,
+                        binding: None,
+                        version: None,
+                        retryable: true,
+                    };
+                    self.retain_answer(
+                        item,
+                        Answer::Refused(refusal),
+                        binding,
+                        version,
+                        &instance_id,
+                    )?;
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCommitReply::NotFound(reason) => {
+                    item.upload = None;
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    let refusal = Refusal {
+                        reason,
+                        reason_code: Some("upload_not_found".to_owned()),
+                        kind: None,
+                        binding: None,
+                        version: None,
+                        retryable: true,
+                    };
+                    self.retain_answer(
+                        item,
+                        Answer::Refused(refusal),
+                        binding,
+                        version,
+                        &instance_id,
+                    )?;
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCommitReply::InsufficientSpace(reason) => {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    let refusal = Refusal {
+                        reason,
+                        reason_code: Some("insufficient_journal_space".to_owned()),
+                        kind: None,
+                        binding: None,
+                        version: None,
+                        retryable: true,
+                    };
+                    self.retain_answer(
+                        item,
+                        Answer::Refused(refusal),
+                        binding,
+                        version,
+                        &instance_id,
+                    )?;
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCommitReply::Transient => {
+                    self.schedule_resumable_backoff(&item.id, true);
+                    return Ok(ResumableStep::Done);
+                }
+                UploadCommitReply::Refused(refusal) => {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .transfers
+                        .remove(&item.id);
+                    self.retain_answer(
+                        item,
+                        Answer::Refused(refusal),
+                        binding,
+                        version,
+                        &instance_id,
+                    )?;
+                    return Ok(ResumableStep::Done);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_item_single_post(
+        &self,
+        mut item: Item,
+        client: &Arc<UploadClient>,
+        association: &CapturedAssociation,
+        capability: &PrivateLinkCapability,
+        binding: &str,
+        version: Option<&str>,
+        running: &AtomicBool,
+        cancel_token: &CancellationToken,
     ) -> io::Result<()> {
         let root = self
             .root
@@ -1876,6 +3567,7 @@ impl ImportHandle {
             _ => {
                 item.phase = Phase::Refused;
                 item.review = None;
+                item.upload = None;
                 item.refusal = Some(local_refusal("the copy on this device is missing"));
                 return self.publish(item);
             }
@@ -1894,6 +3586,7 @@ impl ImportHandle {
             item.refusal = None;
             item.review = None;
             item.saved = None;
+            item.upload = None;
             self.publish(item.clone())?;
             let file = tokio::fs::File::from_std(payload);
             let state = self.state.clone();
@@ -1929,11 +3622,12 @@ impl ImportHandle {
                     serde_json::to_string(&handoff.context).map_err(ioe)?,
                 );
             }
-            let Some(outcome) = guarded(
+            let Some(outcome) = guarded_with_cancel(
                 client,
                 association,
                 running,
                 &self.sleep,
+                cancel_token,
                 capability.import_save(form),
             )
             .await
@@ -1962,9 +3656,37 @@ impl ImportHandle {
                 other => return self.retain_answer(item, other, binding, version, &instance_id),
             }
         }
+        self.finish_start(
+            item,
+            client,
+            association,
+            capability,
+            binding,
+            version,
+            &instance_id,
+            running,
+            cancel_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_start(
+        &self,
+        item: Item,
+        client: &Arc<UploadClient>,
+        association: &CapturedAssociation,
+        capability: &PrivateLinkCapability,
+        binding: &str,
+        version: Option<&str>,
+        instance_id: &str,
+        running: &AtomicBool,
+        cancel_token: &CancellationToken,
+    ) -> io::Result<()> {
         if !client.association_is_current(association)
             || !running.load(Ordering::Acquire)
             || self.sleep.is_sleeping()
+            || cancel_token.is_cancelled()
         {
             return Ok(());
         }
@@ -1973,11 +3695,12 @@ impl ImportHandle {
             .as_ref()
             .ok_or_else(|| ioe("missing import save progress"))?
             .clone();
-        let Some(outcome) = guarded(
+        let Some(outcome) = guarded_with_cancel(
             client,
             association,
             running,
             &self.sleep,
+            cancel_token,
             capability.import_start(&saved.path, &saved.timestamp),
         )
         .await
@@ -1986,8 +3709,8 @@ impl ImportHandle {
         };
         self.auth_answer(client, association, &outcome);
         match parse_reply(outcome, true, Some(&saved.timestamp)) {
-            Answer::Delivered(row) => self.delivered(item, &instance_id, row),
-            other => self.retain_answer(item, other, binding, version, &instance_id),
+            Answer::Delivered(row) => self.delivered(item, instance_id, row),
+            other => self.retain_answer(item, other, binding, version, instance_id),
         }
     }
 
@@ -2072,6 +3795,7 @@ impl ImportHandle {
         // Tombstone item.json so a crash before cleanup never resurrects it.
         item.phase = Phase::Delivered;
         item.review = None;
+        item.upload = None;
         self.persist(&item)?;
         {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -2084,6 +3808,7 @@ impl ImportHandle {
                 state.receipts.push_back((item.id.clone(), resolved_row));
             }
             state.sent_bytes.remove(&item.id);
+            state.transfers.remove(&item.id);
             state.items.remove(&item.id);
             state.saved_current.remove(&item.id);
         }
@@ -2153,9 +3878,467 @@ impl Drop for Sending {
             let mut state = self.handle.state.lock().unwrap_or_else(|p| p.into_inner());
             state.busy.remove(&self.id);
             state.sent_bytes.remove(&self.id);
+            state.cancel_tokens.remove(&self.id);
         }
+        self.handle.cancel_done.notify_waiters();
         self.handle.publish_status();
     }
+}
+
+struct AbortOnDrop(Arc<AtomicBool>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+enum ResumableStep {
+    Done,
+    FallbackToSave(Box<Item>),
+}
+
+enum PayloadHash {
+    Digest(String),
+    Aborted,
+    Missing,
+}
+
+fn hash_payload_file(
+    path: &Path,
+    expected_size: u64,
+    abort: &AtomicBool,
+) -> io::Result<PayloadHash> {
+    let Ok(mut file) = regular_file(path) else {
+        return Ok(PayloadHash::Missing);
+    };
+    if file.metadata()?.len() != expected_size {
+        return Ok(PayloadHash::Missing);
+    }
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    let mut iterations = 0u32;
+    loop {
+        if iterations.is_multiple_of(16) && abort.load(Ordering::Acquire) {
+            return Ok(PayloadHash::Aborted);
+        }
+        iterations = iterations.wrapping_add(1);
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => return Ok(PayloadHash::Missing),
+        };
+        total += n as u64;
+        if total > expected_size {
+            return Ok(PayloadHash::Missing);
+        }
+        hasher.update(&buf[..n]);
+    }
+    if total != expected_size {
+        return Ok(PayloadHash::Missing);
+    }
+    Ok(PayloadHash::Digest(format!("{:x}", hasher.finalize())))
+}
+
+fn read_payload_chunk(
+    path: &Path,
+    expected_size: u64,
+    offset: u64,
+    chunk_len: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    let Ok(mut file) = regular_file(path) else {
+        return Ok(None);
+    };
+    if file.metadata()?.len() != expected_size {
+        return Ok(None);
+    }
+    if offset.saturating_add(chunk_len as u64) > expected_size {
+        return Ok(None);
+    }
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; chunk_len];
+    if file.read_exact(&mut buf).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
+fn resumable_backoff_ms(step: usize) -> i64 {
+    let base_secs = RESUMABLE_BACKOFF_SECS[step.min(RESUMABLE_BACKOFF_SECS.len() - 1)];
+    let base_ms = base_secs * 1000;
+    let mut random_bytes = [0u8; 2];
+    let rand_u16 =
+        match File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut random_bytes)) {
+            Ok(()) => u16::from_le_bytes(random_bytes),
+            Err(_) => {
+                let origin = MONO_ORIGIN.get_or_init(Instant::now);
+                (origin.elapsed().subsec_nanos() & 0xffff) as u16
+            }
+        };
+    let factor_permille = 800 + u64::from(rand_u16) % 401;
+    ((base_ms * factor_permille) / 1000) as i64
+}
+
+fn parse_resumable_config(body: &[u8]) -> Option<ResumableConfig> {
+    let root: Value = serde_json::from_slice(body).ok()?;
+    let obj = root.get("resumable")?.as_object()?;
+    let threshold_bytes = obj.get("threshold_bytes")?.as_u64()?;
+    let chunk_bytes = obj.get("chunk_bytes")?.as_u64()?;
+    let max_file_bytes = obj.get("max_file_bytes")?.as_u64()?;
+    if threshold_bytes == 0 || max_file_bytes == 0 {
+        return None;
+    }
+    Some(ResumableConfig {
+        threshold_bytes,
+        chunk_bytes: chunk_bytes.clamp(MIN_RESUMABLE_CHUNK_BYTES, MAX_RESUMABLE_CHUNK_BYTES),
+        max_file_bytes,
+    })
+}
+
+fn json_string(root: &Value, key: &str) -> Option<String> {
+    root.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn upload_refusal_from_json(root: &Value, default_retryable: bool) -> Refusal {
+    let reason_code = json_string(root, "reason_code");
+    let kind = json_string(root, "kind");
+    let retryable = match reason_code.as_deref() {
+        Some(
+            "insufficient_journal_space"
+            | "upload_not_found"
+            | "whole_file_checksum_mismatch"
+            | "chunk_checksum_mismatch",
+        ) => true,
+        Some(
+            "multipart_part_too_large"
+            | "unsupported_type"
+            | "unsupported_file_type"
+            | "unsupported_image_format"
+            | "unsupported_media_type"
+            | "file_too_large"
+            | "invalid_file"
+            | "chunk_too_large"
+            | "evernote_export_too_big",
+        ) => false,
+        _ => {
+            default_retryable
+                && !matches!(
+                    kind.as_deref(),
+                    Some(
+                        "client_item_conflict"
+                            | "nothing_to_import"
+                            | "plan_failed"
+                            | "invalid_request"
+                            | "not_found"
+                    )
+                )
+        }
+    };
+    Refusal {
+        reason: json_string(root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned()),
+        reason_code,
+        kind,
+        binding: None,
+        version: None,
+        retryable,
+    }
+}
+
+#[derive(Debug)]
+enum UploadCreateReply {
+    FallbackToSave,
+    Open {
+        upload_id: String,
+        next_offset: u64,
+        chunk_bytes: u64,
+    },
+    AlreadyStaged {
+        path: String,
+        timestamp: String,
+    },
+    AlreadyImported(Option<String>),
+    Transient,
+    Refused(Refusal),
+}
+
+fn classify_upload_create_reply(
+    outcome: LinkOutcome,
+    advertises_resumable: bool,
+    expected_total: u64,
+    config: ResumableConfig,
+) -> UploadCreateReply {
+    let LinkOutcome::Success { status, body } = outcome else {
+        return UploadCreateReply::Transient;
+    };
+    let code = status.as_u16();
+    if matches!(code, 401 | 403) {
+        return UploadCreateReply::Transient;
+    }
+    let root: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if code == 507 {
+        let mut refusal = upload_refusal_from_json(&root, true);
+        refusal.reason_code = Some("insufficient_journal_space".to_owned());
+        refusal.retryable = true;
+        return UploadCreateReply::Refused(refusal);
+    }
+    if code >= 500 {
+        return UploadCreateReply::Transient;
+    }
+    if matches!(code, 404 | 405) && !advertises_resumable {
+        return UploadCreateReply::FallbackToSave;
+    }
+    if code == 409 && json_string(&root, "reason_code").as_deref() == Some("journal_busy") {
+        return UploadCreateReply::Transient;
+    }
+    if matches!(code, 200 | 201) {
+        match json_string(&root, "status").as_deref() {
+            Some("open") => {
+                if let (Some(upload_id), Some(next_offset)) = (
+                    json_string(&root, "upload_id").filter(|id| valid_upload_id(id)),
+                    root.get("next_offset").and_then(Value::as_u64),
+                ) && next_offset <= expected_total
+                {
+                    let chunk_bytes = root
+                        .get("chunk_bytes")
+                        .and_then(Value::as_u64)
+                        .map_or(config.chunk_bytes, |v| {
+                            v.clamp(MIN_RESUMABLE_CHUNK_BYTES, MAX_RESUMABLE_CHUNK_BYTES)
+                        });
+                    return UploadCreateReply::Open {
+                        upload_id,
+                        next_offset,
+                        chunk_bytes,
+                    };
+                }
+                return UploadCreateReply::Transient;
+            }
+            Some("already_staged") => {
+                if let Some(save) = root.get("save_response")
+                    && let (Some(path), Some(timestamp)) =
+                        (json_string(save, "path"), json_string(save, "timestamp"))
+                {
+                    return UploadCreateReply::AlreadyStaged { path, timestamp };
+                }
+                return UploadCreateReply::Transient;
+            }
+            Some("already_imported") => {
+                return UploadCreateReply::AlreadyImported(json_string(&root, "import_id"));
+            }
+            _ => return UploadCreateReply::Transient,
+        }
+    }
+    if status.is_success() {
+        return UploadCreateReply::Transient;
+    }
+    UploadCreateReply::Refused(upload_refusal_from_json(&root, false))
+}
+
+#[derive(Debug)]
+enum UploadStatusReply {
+    Open {
+        next_offset: u64,
+        chunk_bytes: Option<u64>,
+    },
+    NotFound(String),
+    Transient,
+    Refused(Refusal),
+}
+
+fn classify_upload_status_reply(outcome: LinkOutcome, expected_total: u64) -> UploadStatusReply {
+    let LinkOutcome::Success { status, body } = outcome else {
+        return UploadStatusReply::Transient;
+    };
+    let code = status.as_u16();
+    if matches!(code, 401 | 403) {
+        return UploadStatusReply::Transient;
+    }
+    let root: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if code == 507 {
+        let mut refusal = upload_refusal_from_json(&root, true);
+        refusal.reason_code = Some("insufficient_journal_space".to_owned());
+        refusal.retryable = true;
+        return UploadStatusReply::Refused(refusal);
+    }
+    if code >= 500 {
+        return UploadStatusReply::Transient;
+    }
+    if code == 409 && json_string(&root, "reason_code").as_deref() == Some("journal_busy") {
+        return UploadStatusReply::Transient;
+    }
+    if code == 404 {
+        let reason = json_string(&root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
+        return UploadStatusReply::NotFound(reason);
+    }
+    if code == 200
+        && json_string(&root, "status").as_deref() == Some("open")
+        && let Some(next_offset) = root.get("next_offset").and_then(Value::as_u64)
+        && next_offset <= expected_total
+    {
+        let chunk_bytes = root
+            .get("chunk_bytes")
+            .and_then(Value::as_u64)
+            .map(|v| v.clamp(MIN_RESUMABLE_CHUNK_BYTES, MAX_RESUMABLE_CHUNK_BYTES));
+        return UploadStatusReply::Open {
+            next_offset,
+            chunk_bytes,
+        };
+    }
+    if status.is_success() {
+        return UploadStatusReply::Transient;
+    }
+    UploadStatusReply::Refused(upload_refusal_from_json(&root, false))
+}
+
+#[derive(Debug)]
+enum UploadChunkReply {
+    Accepted { next_offset: u64 },
+    OffsetMismatch { next_offset: Option<u64> },
+    ChunkChecksumMismatch(String),
+    NotFound(String),
+    InsufficientSpace(String),
+    Transient,
+    Refused(Refusal),
+}
+
+fn classify_upload_chunk_reply(
+    outcome: LinkOutcome,
+    sent_offset: u64,
+    expected_total: u64,
+) -> UploadChunkReply {
+    let LinkOutcome::Success { status, body } = outcome else {
+        return UploadChunkReply::Transient;
+    };
+    let code = status.as_u16();
+    if matches!(code, 401 | 403) {
+        return UploadChunkReply::Transient;
+    }
+    let root: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if code == 507 {
+        let reason = json_string(&root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
+        return UploadChunkReply::InsufficientSpace(reason);
+    }
+    if code >= 500 {
+        return UploadChunkReply::Transient;
+    }
+    if code == 200 {
+        if let Some(next_offset) = root.get("next_offset").and_then(Value::as_u64)
+            && next_offset >= sent_offset
+            && next_offset <= expected_total
+        {
+            return UploadChunkReply::Accepted { next_offset };
+        }
+        return UploadChunkReply::Transient;
+    }
+    if code == 409 {
+        let reason_code = json_string(&root, "reason_code");
+        if reason_code.as_deref() == Some("journal_busy") {
+            return UploadChunkReply::Transient;
+        }
+        let next_offset = root
+            .get("next_offset")
+            .and_then(Value::as_u64)
+            .filter(|&n| n <= expected_total);
+        if reason_code.as_deref() == Some("offset_mismatch")
+            || next_offset.is_some()
+            || root.is_null()
+        {
+            return UploadChunkReply::OffsetMismatch { next_offset };
+        }
+        return UploadChunkReply::Refused(upload_refusal_from_json(&root, false));
+    }
+    if code == 422
+        && json_string(&root, "reason_code").as_deref() == Some("chunk_checksum_mismatch")
+    {
+        let reason = json_string(&root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
+        return UploadChunkReply::ChunkChecksumMismatch(reason);
+    }
+    if code == 404 {
+        let reason = json_string(&root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
+        return UploadChunkReply::NotFound(reason);
+    }
+    if status.is_success() {
+        return UploadChunkReply::Transient;
+    }
+    UploadChunkReply::Refused(upload_refusal_from_json(&root, false))
+}
+
+#[derive(Debug)]
+enum UploadCommitReply {
+    Staged { path: String, timestamp: String },
+    Incomplete { next_offset: Option<u64> },
+    WholeFileMismatch(String),
+    NotFound(String),
+    InsufficientSpace(String),
+    Transient,
+    Refused(Refusal),
+}
+
+fn classify_upload_commit_reply(outcome: LinkOutcome, expected_total: u64) -> UploadCommitReply {
+    let LinkOutcome::Success { status, body } = outcome else {
+        return UploadCommitReply::Transient;
+    };
+    let code = status.as_u16();
+    if matches!(code, 401 | 403) {
+        return UploadCommitReply::Transient;
+    }
+    let root: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if code == 507 {
+        let reason = json_string(&root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
+        return UploadCommitReply::InsufficientSpace(reason);
+    }
+    if code >= 500 {
+        return UploadCommitReply::Transient;
+    }
+    if code == 200 {
+        if json_string(&root, "status").as_deref() == Some("staged")
+            && let (Some(path), Some(timestamp)) =
+                (json_string(&root, "path"), json_string(&root, "timestamp"))
+        {
+            return UploadCommitReply::Staged { path, timestamp };
+        }
+        return UploadCommitReply::Transient;
+    }
+    if code == 409 {
+        let reason_code = json_string(&root, "reason_code");
+        if reason_code.as_deref() == Some("journal_busy") {
+            return UploadCommitReply::Transient;
+        }
+        if reason_code.as_deref() == Some("incomplete_upload") {
+            let next_offset = root
+                .get("next_offset")
+                .and_then(Value::as_u64)
+                .filter(|&n| n <= expected_total);
+            return UploadCommitReply::Incomplete { next_offset };
+        }
+        return UploadCommitReply::Refused(upload_refusal_from_json(&root, false));
+    }
+    if code == 422
+        && json_string(&root, "reason_code").as_deref() == Some("whole_file_checksum_mismatch")
+    {
+        let reason = json_string(&root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
+        return UploadCommitReply::WholeFileMismatch(reason);
+    }
+    if code == 404 {
+        let reason = json_string(&root, "error")
+            .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
+        return UploadCommitReply::NotFound(reason);
+    }
+    if status.is_success() {
+        return UploadCommitReply::Transient;
+    }
+    UploadCommitReply::Refused(upload_refusal_from_json(&root, false))
 }
 
 fn local_refusal(reason: &str) -> Refusal {
@@ -2181,9 +4364,22 @@ async fn guarded<T>(
     sleep: &crate::sleep_inhibit::SleepInhibit,
     future: impl std::future::Future<Output = T>,
 ) -> Option<T> {
+    let cancel = CancellationToken::new();
+    guarded_with_cancel(client, association, running, sleep, &cancel, future).await
+}
+
+async fn guarded_with_cancel<T>(
+    client: &UploadClient,
+    association: &CapturedAssociation,
+    running: &AtomicBool,
+    sleep: &crate::sleep_inhibit::SleepInhibit,
+    cancel: &CancellationToken,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
     if !running.load(Ordering::Acquire)
         || !client.association_is_current(association)
         || sleep.is_sleeping()
+        || cancel.is_cancelled()
     {
         return None;
     }
@@ -2198,6 +4394,7 @@ async fn guarded<T>(
             // A completed delivery answer may end custody even after the association retired.
             biased;
             answer = &mut future => return Some(answer),
+            () = cancel.cancelled() => return None,
             changed = sleep_rx.changed(), if watch_open => {
                 match changed {
                     Ok(()) if *sleep_rx.borrow_and_update() => return None,
@@ -2209,6 +4406,7 @@ async fn guarded<T>(
                 if !running.load(Ordering::Acquire)
                     || !client.association_is_current(association)
                     || sleep.is_sleeping()
+                    || cancel.is_cancelled()
                 {
                     return None;
                 }
@@ -2852,6 +5050,260 @@ mod tests {
         assert_eq!(doc.intake_refused.len(), 1);
         assert_eq!(doc.intake_refused[0].name, "IMG_0413.heif");
         assert!(!doc.intake_refused[0].reason.is_empty());
+    }
+
+    #[test]
+    fn resumable_validators_config_parser_and_backoff_bounds() {
+        assert!(valid_upload_id("550e8400-e29b-41d4-a716-446655440000"));
+        for bad in [
+            "",
+            "550e8400-e29b-41d4-a716-44665544000",
+            "550e8400-e29b-41d4-a716-4466554400000",
+            "550e8400e29b41d4a716446655440000----",
+            "../550e8400-e29b-41d4-a716-44665544",
+            "550e8400-e29b-41d4-a716-44665544000g",
+            "550e8400-e29b-41d4-a716-44665544?x=1",
+        ] {
+            assert!(!valid_upload_id(bad), "should reject upload_id {bad:?}");
+        }
+
+        assert!(valid_sha256_hex(&"a".repeat(64)));
+        assert!(!valid_sha256_hex(&"a".repeat(63)));
+        assert!(!valid_sha256_hex(&format!("{}z", "a".repeat(63))));
+
+        assert_eq!(bounded_upload_filename("  "), "file");
+        assert_eq!(bounded_upload_filename("archive.zip"), "archive.zip");
+        let long_name = format!("{}.zip", "x".repeat(200));
+        let bounded = bounded_upload_filename(&long_name);
+        assert!(bounded.len() <= MAX_UPLOAD_FILENAME_BYTES);
+        assert!(bounded.ends_with(".zip"));
+        let unicode_long = format!("{}.pdf", "é".repeat(90));
+        let unicode_bounded = bounded_upload_filename(&unicode_long);
+        assert!(unicode_bounded.len() <= MAX_UPLOAD_FILENAME_BYTES);
+        assert!(unicode_bounded.ends_with(".pdf"));
+
+        let parsed = parse_resumable_config(
+            br#"{"items":[],"resumable":{"threshold_bytes":16777216,"chunk_bytes":4194304,"max_file_bytes":4294967296}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.threshold_bytes, 16 * 1024 * 1024);
+        assert_eq!(parsed.chunk_bytes, 4 * 1024 * 1024);
+        assert_eq!(parsed.max_file_bytes, 4 * 1024 * 1024 * 1024);
+        assert!(parse_resumable_config(br#"{"items":[]}"#).is_none());
+        assert!(
+            parse_resumable_config(
+                br#"{"resumable":{"threshold_bytes":0,"chunk_bytes":4096,"max_file_bytes":8192}}"#
+            )
+            .is_none()
+        );
+
+        let expected_secs = [1u64, 2, 5, 10, 30, 60, 60, 60];
+        for (step, secs) in expected_secs.iter().enumerate() {
+            let ms = resumable_backoff_ms(step);
+            let min_ms = (secs * 800) as i64;
+            let max_ms = (secs * 1200) as i64;
+            assert!(
+                (min_ms..=max_ms).contains(&ms),
+                "step {step} backoff {ms}ms outside [{min_ms}, {max_ms}]"
+            );
+        }
+
+        // Legacy item.json without sha256 or upload deserializes cleanly.
+        let legacy_item: Item = serde_json::from_value(json!({
+            "id": "a".repeat(32),
+            "name": "legacy.zip",
+            "mime": "application/zip",
+            "size": 1024,
+            "phase": "pending",
+            "may_have_saved": false,
+            "saved": null,
+            "refusal": null
+        }))
+        .unwrap();
+        assert!(legacy_item.sha256.is_none());
+        assert!(legacy_item.upload.is_none());
+    }
+
+    #[test]
+    fn resumable_classifiers_cover_fallback_507_404_409_422_and_dedup() {
+        let cfg = ResumableConfig::default_limits();
+
+        // Unprobed older journal: 404 and 405 both fall back identically to /save.
+        for status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
+            assert!(matches!(
+                classify_upload_create_reply(
+                    LinkOutcome::Success {
+                        status,
+                        body: Vec::new(),
+                    },
+                    false,
+                    32 * 1024 * 1024,
+                    cfg,
+                ),
+                UploadCreateReply::FallbackToSave
+            ));
+        }
+
+        // Once resumable_import_uploads is advertised, 404 never falls back to /save.
+        assert!(matches!(
+            classify_upload_create_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::NOT_FOUND,
+                    body: br#"{"reason_code":"upload_not_found","error":"expired"}"#.to_vec(),
+                },
+                true,
+                32 * 1024 * 1024,
+                cfg,
+            ),
+            UploadCreateReply::Refused(Refusal {
+                retryable: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_upload_chunk_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::NOT_FOUND,
+                    body: br#"{"reason_code":"upload_not_found","error":"expired"}"#.to_vec(),
+                },
+                0,
+                32 * 1024 * 1024,
+            ),
+            UploadChunkReply::NotFound(_)
+        ));
+
+        // 507 is NOT treated as transient 5xx: it enters retryable refusal / InsufficientSpace.
+        assert!(matches!(
+            classify_upload_create_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::INSUFFICIENT_STORAGE,
+                    body: br#"{"reason_code":"insufficient_journal_space","error":"no room"}"#
+                        .to_vec(),
+                },
+                true,
+                32 * 1024 * 1024,
+                cfg,
+            ),
+            UploadCreateReply::Refused(Refusal {
+                retryable: true,
+                reason_code: Some(code),
+                ..
+            }) if code == "insufficient_journal_space"
+        ));
+        assert!(matches!(
+            classify_upload_chunk_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::INSUFFICIENT_STORAGE,
+                    body: br#"{"reason_code":"insufficient_journal_space","error":"no room"}"#
+                        .to_vec(),
+                },
+                0,
+                32 * 1024 * 1024,
+            ),
+            UploadChunkReply::InsufficientSpace(_)
+        ));
+        assert!(matches!(
+            classify_upload_commit_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::INSUFFICIENT_STORAGE,
+                    body: br#"{"reason_code":"insufficient_journal_space","error":"no room"}"#
+                        .to_vec(),
+                },
+                32 * 1024 * 1024,
+            ),
+            UploadCommitReply::InsufficientSpace(_)
+        ));
+
+        // 409 journal_busy is transient, while 409 offset_mismatch (with or without body) seeks.
+        assert!(matches!(
+            classify_upload_chunk_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::CONFLICT,
+                    body: br#"{"reason_code":"journal_busy","error":"busy"}"#.to_vec(),
+                },
+                0,
+                32 * 1024 * 1024,
+            ),
+            UploadChunkReply::Transient
+        ));
+        assert!(matches!(
+            classify_upload_chunk_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::CONFLICT,
+                    body: br#"{"reason_code":"offset_mismatch","next_offset":8388608}"#.to_vec(),
+                },
+                4194304,
+                32 * 1024 * 1024,
+            ),
+            UploadChunkReply::OffsetMismatch {
+                next_offset: Some(8388608)
+            }
+        ));
+        assert!(matches!(
+            classify_upload_chunk_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::CONFLICT,
+                    body: Vec::new(),
+                },
+                4194304,
+                32 * 1024 * 1024,
+            ),
+            UploadChunkReply::OffsetMismatch { next_offset: None }
+        ));
+
+        // 422 checksum mismatches on chunk vs commit.
+        assert!(matches!(
+            classify_upload_chunk_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    body: br#"{"reason_code":"chunk_checksum_mismatch","error":"bad chunk"}"#
+                        .to_vec(),
+                },
+                0,
+                32 * 1024 * 1024,
+            ),
+            UploadChunkReply::ChunkChecksumMismatch(_)
+        ));
+        assert!(matches!(
+            classify_upload_commit_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    body: br#"{"reason_code":"whole_file_checksum_mismatch","error":"mismatch"}"#
+                        .to_vec(),
+                },
+                32 * 1024 * 1024,
+            ),
+            UploadCommitReply::WholeFileMismatch(_)
+        ));
+
+        // Pre-upload deduplication responses.
+        assert!(matches!(
+            classify_upload_create_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::OK,
+                    body: br#"{"status":"already_staged","replay":true,"save_response":{"status":"staged","path":"/imports/20261125_120000/a.zip","timestamp":"20261125_120000"}}"#
+                        .to_vec(),
+                },
+                true,
+                32 * 1024 * 1024,
+                cfg,
+            ),
+            UploadCreateReply::AlreadyStaged { path, timestamp }
+                if path == "/imports/20261125_120000/a.zip" && timestamp == "20261125_120000"
+        ));
+        assert!(matches!(
+            classify_upload_create_reply(
+                LinkOutcome::Success {
+                    status: StatusCode::OK,
+                    body: br#"{"status":"already_imported","import_id":"20261125_120000","reason_code":"invalid_operation_for_state","kind":"already_imported"}"#
+                        .to_vec(),
+                },
+                true,
+                32 * 1024 * 1024,
+                cfg,
+            ),
+            UploadCreateReply::AlreadyImported(Some(id)) if id == "20261125_120000"
+        ));
     }
 
     #[cfg(feature = "full-tests")]
@@ -4092,6 +6544,1066 @@ mod tests {
             assert!(h.handle.document().rows.is_empty());
             assert_eq!(h.starts(), 1);
             wait_logind_inhibitors_cleared(pid).await;
+            h.close().await;
+        }
+
+        #[derive(Clone)]
+        struct MockUploadSession {
+            upload_id: String,
+            client_item_id: String,
+            filename: String,
+            total_bytes: u64,
+            expected_sha256: Option<String>,
+            data: Vec<u8>,
+        }
+
+        struct MockJournalState {
+            chunk_bytes: u64,
+            sessions: BTreeMap<String, MockUploadSession>,
+            by_client_item: BTreeMap<String, String>,
+            next_seq: u32,
+            put_offsets: Vec<u64>,
+            get_status_calls: Vec<String>,
+            delete_calls: Vec<String>,
+            committed_bytes: Option<Vec<u8>>,
+            framing_errors: Vec<String>,
+            fail_put_at_offset: Option<(u64, u16, Vec<u8>)>,
+            corrupt_put_once_at_offset: Option<u64>,
+            advance_without_ack_offset: Option<(u64, bool)>,
+            fail_commit_once: Option<(u16, Vec<u8>)>,
+            expire_at_offset: Option<u64>,
+            space_fail_at_offset: Option<u64>,
+            dedup_already_staged: bool,
+            dedup_already_imported: bool,
+            gate_put_at_offset: Option<(u64, Arc<AtomicBool>)>,
+            gated_put_arrived: Arc<Notify>,
+        }
+
+        impl MockJournalState {
+            fn new(chunk_bytes: u64) -> Self {
+                Self {
+                    chunk_bytes,
+                    sessions: BTreeMap::new(),
+                    by_client_item: BTreeMap::new(),
+                    next_seq: 1,
+                    put_offsets: Vec::new(),
+                    get_status_calls: Vec::new(),
+                    delete_calls: Vec::new(),
+                    committed_bytes: None,
+                    framing_errors: Vec::new(),
+                    fail_put_at_offset: None,
+                    corrupt_put_once_at_offset: None,
+                    advance_without_ack_offset: None,
+                    fail_commit_once: None,
+                    expire_at_offset: None,
+                    space_fail_at_offset: None,
+                    dedup_already_staged: false,
+                    dedup_already_imported: false,
+                    gate_put_at_offset: None,
+                    gated_put_arrived: Arc::new(Notify::new()),
+                }
+            }
+
+            fn next_uuid(&mut self) -> String {
+                static NEXT_MOCK_UUID: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(1);
+                let seq = NEXT_MOCK_UUID.fetch_add(1, Ordering::Relaxed);
+                self.next_seq = self.next_seq.wrapping_add(1);
+                format!("550e8400-e29b-41d4-a716-{seq:012x}")
+            }
+        }
+
+        fn install_mock_resumable_journal(
+            peer: &PrivateLinkPeer,
+            threshold_bytes: u64,
+            chunk_bytes: u64,
+        ) -> Arc<Mutex<MockJournalState>> {
+            use crate::private_link_test_peer::{PeerRequest, PeerResponse};
+            let state = Arc::new(Mutex::new(MockJournalState::new(chunk_bytes)));
+            peer.set_route(
+                "/api/system/status",
+                200,
+                json!({
+                    "version": {"current": "2.0.91"},
+                    "capabilities": ["resumable_import_uploads"]
+                })
+                .to_string()
+                .into_bytes(),
+            );
+            peer.set_route(
+                "/app/import/api/sources",
+                200,
+                json!({
+                    "items": [],
+                    "resumable": {
+                        "threshold_bytes": threshold_bytes,
+                        "chunk_bytes": chunk_bytes,
+                        "max_file_bytes": FILE_LIMIT
+                    }
+                })
+                .to_string()
+                .into_bytes(),
+            );
+            peer.set_route(
+                "/app/import/api/start",
+                200,
+                br#"{"status":"ok","task_id":"t1","import_id":"20261125_120000"}"#.to_vec(),
+            );
+            let handler_state = Arc::clone(&state);
+            peer.set_handler(move |req: &PeerRequest| {
+                if req.path == "/app/import/api/uploads" && req.method == "POST" {
+                    let mut st = handler_state.lock().unwrap();
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+                    let client_item_id = body["client_item_id"].as_str().unwrap_or("").to_owned();
+                    let filename = body["filename"].as_str().unwrap_or("file").to_owned();
+                    let total_bytes = body["total_bytes"].as_u64().unwrap_or(0);
+                    let sha256 = body["sha256"].as_str().map(str::to_owned);
+                    if st.dedup_already_imported {
+                        return Some(PeerResponse::plain(
+                            200,
+                            json!({
+                                "status": "already_imported",
+                                "import_id": "20261125_111111",
+                                "reason_code": "invalid_operation_for_state",
+                                "kind": "already_imported"
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        ));
+                    }
+                    if st.dedup_already_staged {
+                        return Some(PeerResponse::plain(
+                            200,
+                            json!({
+                                "status": "already_staged",
+                                "replay": true,
+                                "save_response": {
+                                    "status": "staged",
+                                    "path": format!("/imports/20261125_120000/{filename}"),
+                                    "timestamp": "20261125_120000"
+                                }
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        ));
+                    }
+                    if let Some(existing_id) = st.by_client_item.get(&client_item_id).cloned()
+                        && let Some(session) = st.sessions.get(&existing_id)
+                    {
+                        return Some(PeerResponse::plain(
+                            200,
+                            json!({
+                                "upload_id": session.upload_id,
+                                "client_item_id": session.client_item_id,
+                                "status": "open",
+                                "next_offset": session.data.len() as u64,
+                                "total_bytes": session.total_bytes,
+                                "chunk_bytes": st.chunk_bytes,
+                                "expires_at": "2026-12-02T00:00:00Z"
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        ));
+                    }
+                    let upload_id = st.next_uuid();
+                    let chunk_bytes = st.chunk_bytes;
+                    st.by_client_item
+                        .insert(client_item_id.clone(), upload_id.clone());
+                    st.sessions.insert(
+                        upload_id.clone(),
+                        MockUploadSession {
+                            upload_id: upload_id.clone(),
+                            client_item_id: client_item_id.clone(),
+                            filename,
+                            total_bytes,
+                            expected_sha256: sha256,
+                            data: Vec::new(),
+                        },
+                    );
+                    return Some(PeerResponse::plain(
+                        201,
+                        json!({
+                            "upload_id": upload_id,
+                            "client_item_id": client_item_id,
+                            "status": "open",
+                            "next_offset": 0,
+                            "total_bytes": total_bytes,
+                            "chunk_bytes": chunk_bytes,
+                            "expires_at": "2026-12-02T00:00:00Z"
+                        })
+                        .to_string()
+                        .into_bytes(),
+                    ));
+                }
+                if let Some(rest) = req.path.strip_prefix("/app/import/api/uploads/") {
+                    let mut st = handler_state.lock().unwrap();
+                    if let Some(upload_id) = rest.strip_suffix("/commit")
+                        && req.method == "POST"
+                    {
+                        if let Some((status, body)) = st.fail_commit_once.take() {
+                            return Some(PeerResponse::plain(status, body));
+                        }
+                        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+                        let req_sha = body["sha256"].as_str().map(str::to_owned);
+                        let Some(session) = st.sessions.get(upload_id).cloned() else {
+                            return Some(PeerResponse::plain(
+                                404,
+                                json!({
+                                    "reason_code": "upload_not_found",
+                                    "error": "upload expired"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        };
+                        if session.data.len() as u64 != session.total_bytes {
+                            return Some(PeerResponse::plain(
+                                409,
+                                json!({
+                                    "reason_code": "incomplete_upload",
+                                    "next_offset": session.data.len() as u64,
+                                    "error": "upload incomplete"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        }
+                        let actual_sha = format!("{:x}", Sha256::digest(&session.data));
+                        let expected = req_sha.or(session.expected_sha256);
+                        if expected.as_deref() != Some(actual_sha.as_str()) {
+                            st.sessions.remove(upload_id);
+                            st.by_client_item.remove(&session.client_item_id);
+                            return Some(PeerResponse::plain(
+                                422,
+                                json!({
+                                    "reason_code": "whole_file_checksum_mismatch",
+                                    "error": "checksum mismatch"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        }
+                        st.committed_bytes = Some(session.data.clone());
+                        st.sessions.remove(upload_id);
+                        st.by_client_item.remove(&session.client_item_id);
+                        return Some(PeerResponse::plain(
+                            200,
+                            json!({
+                                "status": "staged",
+                                "path": format!("/imports/20261125_120000/{}", session.filename),
+                                "timestamp": "20261125_120000"
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        ));
+                    }
+
+                    let (upload_id, query) = rest.split_once('?').unwrap_or((rest, ""));
+                    if req.method == "GET" {
+                        st.get_status_calls.push(upload_id.to_owned());
+                        let Some(session) = st.sessions.get(upload_id) else {
+                            return Some(PeerResponse::plain(
+                                404,
+                                json!({
+                                    "reason_code": "upload_not_found",
+                                    "error": "upload expired"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        };
+                        return Some(PeerResponse::plain(
+                            200,
+                            json!({
+                                "upload_id": session.upload_id,
+                                "client_item_id": session.client_item_id,
+                                "filename": session.filename,
+                                "status": "open",
+                                "phase": "sending",
+                                "next_offset": session.data.len() as u64,
+                                "total_bytes": session.total_bytes,
+                                "chunk_bytes": st.chunk_bytes,
+                                "imported_via": "linux",
+                                "device_noun": "computer",
+                                "source_hint": null,
+                                "created_at": "2026-11-25T00:00:00Z",
+                                "last_activity_at": "2026-11-25T00:00:00Z",
+                                "expires_at": "2026-12-02T00:00:00Z"
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        ));
+                    }
+
+                    if req.method == "DELETE" {
+                        st.delete_calls.push(upload_id.to_owned());
+                        if let Some(removed) = st.sessions.remove(upload_id) {
+                            st.by_client_item.remove(&removed.client_item_id);
+                        }
+                        return Some(PeerResponse::plain(
+                            200,
+                            br#"{"status":"aborted"}"#.to_vec(),
+                        ));
+                    }
+
+                    if req.method == "PUT" {
+                        let offset = query
+                            .strip_prefix("offset=")
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(u64::MAX);
+                        st.put_offsets.push(offset);
+
+                        // Assert wire framing invariants on every chunk PUT.
+                        let content_types: Vec<_> = req
+                            .headers
+                            .iter()
+                            .filter(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                            .map(|(_, v)| v.as_str())
+                            .collect();
+                        if content_types != vec!["application/octet-stream"] {
+                            st.framing_errors
+                                .push(format!("bad content-type: {content_types:?}"));
+                        }
+                        let content_lengths: Vec<_> = req
+                            .headers
+                            .iter()
+                            .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, v)| v.as_str())
+                            .collect();
+                        let expected_len = req.body.len().to_string();
+                        if content_lengths != vec![expected_len.as_str()] {
+                            st.framing_errors.push(format!(
+                                "bad content-length: {content_lengths:?} expected {expected_len}"
+                            ));
+                        }
+                        if req
+                            .headers
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+                        {
+                            st.framing_errors
+                                .push("transfer-encoding header forbidden".to_owned());
+                        }
+                        if req
+                            .headers
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("expect"))
+                        {
+                            st.framing_errors.push("expect header forbidden".to_owned());
+                        }
+                        let chunk_sha = req
+                            .headers
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("x-chunk-sha256"))
+                            .map(|(_, v)| v.as_str())
+                            .unwrap_or("");
+                        let actual_chunk_sha = format!("{:x}", Sha256::digest(&req.body));
+                        if chunk_sha != actual_chunk_sha {
+                            st.framing_errors.push(format!(
+                                "bad X-Chunk-Sha256: {chunk_sha} vs {actual_chunk_sha}"
+                            ));
+                        }
+
+                        if st.expire_at_offset == Some(offset) {
+                            st.expire_at_offset = None;
+                            if let Some(removed) = st.sessions.remove(upload_id) {
+                                st.by_client_item.remove(&removed.client_item_id);
+                            }
+                            return Some(PeerResponse::plain(
+                                404,
+                                json!({
+                                    "reason_code": "upload_not_found",
+                                    "error": "upload expired"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        }
+                        if st.space_fail_at_offset == Some(offset) {
+                            st.space_fail_at_offset = None;
+                            return Some(PeerResponse::plain(
+                                507,
+                                json!({
+                                    "reason_code": "insufficient_journal_space",
+                                    "error": "journal storage full"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        }
+                        if let Some((fail_off, code, body)) = st.fail_put_at_offset.clone()
+                            && fail_off == offset
+                        {
+                            return Some(PeerResponse::plain(code, body));
+                        }
+                        if st.corrupt_put_once_at_offset == Some(offset) {
+                            st.corrupt_put_once_at_offset = None;
+                            return Some(PeerResponse::plain(
+                                422,
+                                json!({
+                                    "reason_code": "chunk_checksum_mismatch",
+                                    "error": "chunk checksum mismatch"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        }
+                        if let Some((adv_off, bodyless)) = st.advance_without_ack_offset
+                            && adv_off == offset
+                        {
+                            st.advance_without_ack_offset = None;
+                            if let Some(session) = st.sessions.get_mut(upload_id)
+                                && session.data.len() as u64 == offset
+                            {
+                                session.data.extend_from_slice(&req.body);
+                                let next_offset = session.data.len() as u64;
+                                let body = if bodyless {
+                                    Vec::new()
+                                } else {
+                                    json!({
+                                        "reason_code": "offset_mismatch",
+                                        "next_offset": next_offset,
+                                        "error": "offset mismatch"
+                                    })
+                                    .to_string()
+                                    .into_bytes()
+                                };
+                                return Some(PeerResponse::plain(409, body));
+                            }
+                        }
+
+                        let gate = st
+                            .gate_put_at_offset
+                            .as_ref()
+                            .filter(|(g_off, _)| *g_off == offset)
+                            .map(|(_, g)| Arc::clone(g));
+                        if gate.is_some() {
+                            st.gated_put_arrived.notify_waiters();
+                        }
+                        let Some(session) = st.sessions.get_mut(upload_id) else {
+                            return Some(PeerResponse::plain(
+                                404,
+                                json!({
+                                    "reason_code": "upload_not_found",
+                                    "error": "upload expired"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        };
+                        if offset != session.data.len() as u64 {
+                            return Some(PeerResponse::plain(
+                                409,
+                                json!({
+                                    "reason_code": "offset_mismatch",
+                                    "next_offset": session.data.len() as u64,
+                                    "error": "offset mismatch"
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ));
+                        }
+                        session.data.extend_from_slice(&req.body);
+                        let next_offset = session.data.len() as u64;
+                        let complete = next_offset == session.total_bytes;
+                        let mut resp = PeerResponse::plain(
+                            200,
+                            json!({
+                                "upload_id": session.upload_id,
+                                "next_offset": next_offset,
+                                "total_bytes": session.total_bytes,
+                                "complete": complete,
+                                "expires_at": "2026-12-02T00:00:00Z"
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        );
+                        if let Some(gate) = gate {
+                            resp = resp.with_nonblocking_gate(gate);
+                        }
+                        return Some(resp);
+                    }
+                }
+                None
+            });
+            state
+        }
+
+        #[tokio::test]
+        async fn resumable_capability_gate_threshold_and_exact_chunk_framing() {
+            let h = Harness::new().await;
+            let mock = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+
+            // File below threshold_bytes stays on single-POST /save.
+            let small = vec![b's'; 16 * 1024];
+            let _small_id = h.add(&small).await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(h.saves(), 1);
+            assert!(mock.lock().unwrap().put_offsets.is_empty());
+
+            // File at/above threshold_bytes uses /uploads* with exact chunk framing & SHA-256.
+            let large: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+            let large_id = h.add(&large).await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert!(!h.handle.root.as_ref().unwrap().join(&large_id).exists());
+            assert_eq!(h.saves(), 1, "large file must not use /save");
+            {
+                let st = mock.lock().unwrap();
+                assert!(
+                    st.framing_errors.is_empty(),
+                    "framing errors: {:?}",
+                    st.framing_errors
+                );
+                assert_eq!(st.put_offsets, vec![0, 8192, 16384, 24576, 32768]);
+                assert_eq!(st.committed_bytes.as_deref(), Some(large.as_slice()));
+            }
+            let create_req = h
+                .peer
+                .requests()
+                .into_iter()
+                .find(|r| r.method == "POST" && r.path == "/app/import/api/uploads")
+                .unwrap();
+            let create_json: Value = serde_json::from_slice(&create_req.body).unwrap();
+            assert_eq!(create_json["client_item_id"], large_id);
+            assert_eq!(create_json["imported_via"], "linux");
+            assert_eq!(create_json["device_noun"], "computer");
+            assert_eq!(
+                create_json["sha256"],
+                format!("{:x}", Sha256::digest(&large))
+            );
+
+            // Older journal without resumable_import_uploads stays on /save even for large files.
+            h.peer.set_route(
+                "/api/system/status",
+                200,
+                json!({"version": {"current": "2.0.55"}, "capabilities": []})
+                    .to_string()
+                    .into_bytes(),
+            );
+            let _legacy_id = h.add(&large).await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(h.saves(), 2);
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_transient_backoff_resync_and_restart_never_resends_confirmed_chunks() {
+            let now = Arc::new(std::sync::atomic::AtomicI64::new(10_000));
+            let mut h = Harness::new().await;
+            let now_read = Arc::clone(&now);
+            h.handle = h
+                .handle
+                .with_clock_ms(Arc::new(move || now_read.load(Ordering::Acquire)));
+            let mock = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+
+            let payload: Vec<u8> = (0..40_000u32).map(|i| ((i * 7) % 253) as u8).collect();
+            let id = h.add(&payload).await;
+            mock.lock().unwrap().fail_put_at_offset = Some((16384, 503, b"{}".to_vec()));
+
+            h.pass().await;
+            let doc = h.handle.document();
+            assert_eq!(doc.needs_attention, 0);
+            assert_eq!(doc.waiting, 1);
+            assert!(!doc.sending);
+            assert_eq!(doc.rows.len(), 1);
+            assert_eq!(doc.rows[0].state, "waiting");
+            assert!(doc.rows[0].resumable);
+            assert_eq!(doc.rows[0].bytes_sent, 16384);
+            assert_eq!(doc.rows[0].bytes_total, 40_000);
+            assert_eq!(doc.rows[0].transfer_phase.as_deref(), Some("paused"));
+            assert!(doc.rows[0].can_cancel);
+
+            let bridge = h.handle.handoff_status(&id);
+            assert_eq!(bridge["state"], "waiting");
+            assert_eq!(bridge["resumable"], true);
+            assert_eq!(bridge["bytes_sent"], 16384);
+            assert_eq!(bridge["bytes_total"], 40_000);
+            assert_eq!(bridge["phase"], "paused");
+            assert_eq!(bridge["device_noun"], "computer");
+
+            // Step 0 backoff is 1s +/- 20%.
+            let d0 = h.handle.next_retry_delay().unwrap();
+            assert!(
+                (Duration::from_millis(800)..=Duration::from_millis(1200)).contains(&d0),
+                "unexpected step 0 delay {d0:?}"
+            );
+
+            // Calling pass before backoff expires does not hit the server again.
+            let puts_before = mock.lock().unwrap().put_offsets.len();
+            h.pass().await;
+            assert_eq!(mock.lock().unwrap().put_offsets.len(), puts_before);
+
+            // Advance past step 0 while server still fails -> step 1 is 2s +/- 20%.
+            now.fetch_add(1300, Ordering::AcqRel);
+            h.pass().await;
+            let d1 = h.handle.next_retry_delay().unwrap();
+            assert!(
+                (Duration::from_millis(1600)..=Duration::from_millis(2400)).contains(&d1),
+                "unexpected step 1 delay {d1:?}"
+            );
+
+            // Network back / wake resets backoff immediately.
+            h.handle.on_network_or_wake();
+            assert!(h.handle.next_retry_delay().is_none());
+
+            // Simulate full daemon restart: persisted upload_id + remote_offset survive!
+            let now_read2 = Arc::clone(&now);
+            let restored = ImportHandle::new(
+                h.handle.root.clone().unwrap(),
+                &h.client,
+                SyncTrigger::default(),
+            )
+            .with_clock_ms(Arc::new(move || now_read2.load(Ordering::Acquire)));
+            restored.restore().unwrap();
+            let restored_doc = restored.document();
+            assert_eq!(restored_doc.rows.len(), 1);
+            assert!(restored_doc.rows[0].resumable);
+            assert_eq!(restored_doc.rows[0].bytes_sent, 16384);
+            assert_eq!(
+                restored_doc.rows[0].transfer_phase.as_deref(),
+                Some("paused")
+            );
+
+            // Clear server fault and resume: GET resyncs, chunks 0 and 8192 are never re-sent.
+            mock.lock().unwrap().fail_put_at_offset = None;
+            restored.deliver(&h.client, &h.running).await;
+            assert!(restored.document().rows.is_empty());
+            {
+                let st = mock.lock().unwrap();
+                assert!(!st.get_status_calls.is_empty(), "must GET resync on resume");
+                assert_eq!(
+                    st.put_offsets.iter().filter(|&&o| o == 0).count(),
+                    1,
+                    "offset 0 must never be re-sent: {:?}",
+                    st.put_offsets
+                );
+                assert_eq!(
+                    st.put_offsets.iter().filter(|&&o| o == 8192).count(),
+                    1,
+                    "offset 8192 must never be re-sent: {:?}",
+                    st.put_offsets
+                );
+                assert_eq!(st.committed_bytes.as_deref(), Some(payload.as_slice()));
+            }
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_handles_409_offset_mismatch_422_chunk_retry_and_commit_5xx_retry() {
+            let now = Arc::new(std::sync::atomic::AtomicI64::new(50_000));
+            let mut h = Harness::new().await;
+            let now_read = Arc::clone(&now);
+            h.handle = h
+                .handle
+                .with_clock_ms(Arc::new(move || now_read.load(Ordering::Acquire)));
+            let mock = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+
+            let payload: Vec<u8> = (0..40_000u32).map(|i| ((i * 13) % 251) as u8).collect();
+            let _id = h.add(&payload).await;
+            {
+                let mut st = mock.lock().unwrap();
+                // Chunk 0 gets 422 checksum mismatch once -> re-sends chunk 0.
+                st.corrupt_put_once_at_offset = Some(0);
+                // Chunk 1 commits on server but returns 409 offset_mismatch with body.
+                st.advance_without_ack_offset = Some((8192, false));
+                // Commit fails once with 503 -> pauses and retries commit without re-sending chunks.
+                st.fail_commit_once = Some((503, b"{}".to_vec()));
+            }
+
+            h.pass().await;
+            // After commit 503, item is paused at full size with 0 needs_attention.
+            let paused = h.handle.document();
+            assert_eq!(paused.needs_attention, 0);
+            assert_eq!(paused.rows.len(), 1);
+            assert_eq!(paused.rows[0].bytes_sent, 40_000);
+            assert_eq!(paused.rows[0].transfer_phase.as_deref(), Some("paused"));
+
+            let puts_before_commit_retry = mock.lock().unwrap().put_offsets.len();
+            h.handle.on_network_or_wake();
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(
+                mock.lock().unwrap().put_offsets.len(),
+                puts_before_commit_retry,
+                "commit retry must not re-send any chunks"
+            );
+            assert_eq!(
+                mock.lock().unwrap().committed_bytes.as_deref(),
+                Some(payload.as_slice())
+            );
+
+            // Now verify bodyless 409 falls back to GET /uploads/{id} resync.
+            let _id2 = h.add(&payload).await;
+            mock.lock().unwrap().get_status_calls.clear();
+            mock.lock().unwrap().advance_without_ack_offset = Some((16384, true));
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert!(
+                !mock.lock().unwrap().get_status_calls.is_empty(),
+                "bodyless 409 must fall back to GET /uploads/{{id}}"
+            );
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_dedup_already_staged_and_already_imported_skip_byte_transfer() {
+            let h = Harness::new().await;
+            let mock = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+            let payload = vec![b'd'; 40_000];
+
+            mock.lock().unwrap().dedup_already_staged = true;
+            let _id1 = h.add(&payload).await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert!(mock.lock().unwrap().put_offsets.is_empty());
+            assert_eq!(h.starts(), 1);
+
+            mock.lock().unwrap().dedup_already_staged = false;
+            mock.lock().unwrap().dedup_already_imported = true;
+            let _id2 = h.add(&payload).await;
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert!(mock.lock().unwrap().put_offsets.is_empty());
+            assert_eq!(h.starts(), 1, "already_imported skips /start too");
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_faults_507_422_whole_file_404_expired_enter_needs_attention_and_retry() {
+            let h = Harness::new().await;
+            let mock = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+            let payload: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
+
+            // 1. 507 insufficient_journal_space mid-upload preserves local file + upload_id for resume.
+            let id_507 = h.add(&payload).await;
+            mock.lock().unwrap().space_fail_at_offset = Some(16384);
+            h.pass().await;
+            let doc = h.handle.document();
+            assert_eq!(doc.needs_attention, 1);
+            assert_eq!(doc.rows[0].state, "needs attention");
+            assert!(doc.rows[0].can_retry);
+            assert_eq!(
+                doc.rows[0].reason_code.as_deref(),
+                Some("insufficient_journal_space")
+            );
+            assert!(h.handle.retry(id_507).await);
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(
+                mock.lock()
+                    .unwrap()
+                    .put_offsets
+                    .iter()
+                    .filter(|&&o| o == 0)
+                    .count(),
+                1,
+                "507 retry resumes from confirmed offset without re-sending offset 0"
+            );
+
+            // 2. 422 whole_file_checksum_mismatch enters needs_attention and retry re-uploads cleanly.
+            let id_422 = h.add(&payload).await;
+            mock.lock().unwrap().fail_commit_once = Some((
+                422,
+                json!({
+                    "reason_code": "whole_file_checksum_mismatch",
+                    "error": "checksum mismatch"
+                })
+                .to_string()
+                .into_bytes(),
+            ));
+            h.pass().await;
+            let doc = h.handle.document();
+            assert_eq!(doc.needs_attention, 1);
+            assert!(doc.rows[0].can_retry);
+            assert_eq!(
+                doc.rows[0].reason_code.as_deref(),
+                Some("whole_file_checksum_mismatch")
+            );
+            assert!(h.handle.retry(id_422).await);
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+
+            // 3. 404 upload_not_found when resumable_import_uploads is advertised enters
+            //    needs_attention and NEVER falls back to /save.
+            let id_404 = h.add(&payload).await;
+            mock.lock().unwrap().expire_at_offset = Some(16384);
+            h.pass().await;
+            let doc = h.handle.document();
+            assert_eq!(doc.needs_attention, 1);
+            assert!(doc.rows[0].can_retry);
+            assert_eq!(doc.rows[0].reason_code.as_deref(), Some("upload_not_found"));
+            assert_eq!(
+                h.saves(),
+                0,
+                "404 upload_not_found must never fall back to /save"
+            );
+            assert!(h.handle.retry(id_404).await);
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(h.saves(), 0);
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_pairing_switch_discards_old_upload_id_and_starts_at_zero_on_new_journal()
+        {
+            let h = Harness::new().await;
+            let mock_a = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+            let payload: Vec<u8> = (0..40_000u32).map(|i| ((i * 5) % 239) as u8).collect();
+            let id = h.add(&payload).await;
+            mock_a.lock().unwrap().fail_put_at_offset = Some((16384, 503, b"{}".to_vec()));
+            h.pass().await;
+            let old_upload_id = h
+                .handle
+                .state
+                .lock()
+                .unwrap()
+                .items
+                .get(&id)
+                .unwrap()
+                .upload
+                .as_ref()
+                .unwrap()
+                .upload_id
+                .clone();
+
+            let peer_b = PrivateLinkPeer::start().await;
+            let mock_b = install_mock_resumable_journal(&peer_b, 32 * 1024, 8 * 1024);
+            let session_b = start_private_link_session(
+                &h.temp.path().join("link-b-resumable"),
+                peer_b.credential(),
+                "desktop",
+            )
+            .await
+            .unwrap();
+            h.client.prepare_new_owner();
+            h.client.install_capability(session_b.capability());
+            h.pass().await;
+
+            assert!(h.handle.document().rows.is_empty());
+            assert!(
+                !peer_b
+                    .requests()
+                    .iter()
+                    .any(|r| r.path.contains(&old_upload_id)),
+                "must never send Journal A upload_id to Journal B"
+            );
+            assert_eq!(
+                mock_b.lock().unwrap().put_offsets,
+                vec![0, 8192, 16384, 24576, 32768]
+            );
+            assert_eq!(
+                mock_b.lock().unwrap().committed_bytes.as_deref(),
+                Some(payload.as_slice())
+            );
+            let _ = session_b.shutdown().await;
+            peer_b.shutdown().await;
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_cancel_aborts_in_flight_transfer_deletes_remote_and_cleans_local() {
+            use crate::sleep_inhibit::{
+                SleepInhibit,
+                tests::{FakeBackend, FakeOutcome},
+            };
+
+            let mut h = Harness::new().await;
+            let backend = FakeBackend::new(|_| FakeOutcome::Allow);
+            h.handle = h.handle.with_sleep_inhibit(SleepInhibit::with_backend(
+                backend.clone(),
+                Duration::from_secs(1),
+            ));
+            let mock = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+            let gate = Arc::new(AtomicBool::new(false));
+            mock.lock().unwrap().gate_put_at_offset = Some((8192, Arc::clone(&gate)));
+
+            let payload = vec![b'c'; 40_000];
+            let id = h.add(&payload).await;
+            let handle = h.handle.clone();
+            let client = h.client.clone();
+            let running = h.running.clone();
+            let task = tokio::spawn(async move {
+                handle.deliver(&client, &running).await;
+            });
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if mock.lock().unwrap().put_offsets.contains(&8192) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+
+            let live = h.handle.handoff_status(&id);
+            assert_eq!(live["state"], "uploading");
+            assert_eq!(live["resumable"], true);
+            assert_eq!(live["bytes_sent"], 8192);
+            assert_eq!(live["bytes_total"], 40_000);
+            assert_eq!(live["phase"], "sending");
+            assert_eq!(live["device_noun"], "computer");
+            assert!(h.handle.document().rows[0].can_cancel);
+
+            assert!(h.handle.cancel(id.clone()).await);
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(h.handle.document().rows.is_empty());
+            assert!(!h.handle.root.as_ref().unwrap().join(&id).exists());
+            assert_eq!(mock.lock().unwrap().delete_calls.len(), 1);
+            assert_eq!(backend.active_count(), 0);
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_prepare_for_sleep_pauses_at_chunk_boundary_and_resumes_without_resending()
+         {
+            use crate::sleep_inhibit::{
+                LockKind, SleepInhibit,
+                tests::{FakeBackend, FakeOutcome},
+            };
+
+            let mut h = Harness::new().await;
+            let backend = FakeBackend::new(|_| FakeOutcome::Allow);
+            let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
+            h.handle = h.handle.with_sleep_inhibit(sleep.clone());
+            let mock = install_mock_resumable_journal(&h.peer, 32 * 1024, 8 * 1024);
+            let gate = Arc::new(AtomicBool::new(false));
+            mock.lock().unwrap().gate_put_at_offset = Some((16384, Arc::clone(&gate)));
+
+            let payload: Vec<u8> = (0..40_000u32).map(|i| ((i * 11) % 251) as u8).collect();
+            let id = h.add(&payload).await;
+            let handle = h.handle.clone();
+            let client = h.client.clone();
+            let running = h.running.clone();
+            let task = tokio::spawn(async move {
+                handle.deliver(&client, &running).await;
+            });
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if mock.lock().unwrap().put_offsets.contains(&16384) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                backend.active_kinds(),
+                vec![LockKind::SleepDelay, LockKind::GnomeSessionSuspend]
+            );
+
+            // PrepareForSleep(true) aborts the gated PUT, releases all sleep locks, and pauses cleanly.
+            sleep.on_prepare_for_sleep(true, || {}).await;
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(backend.active_count(), 0);
+            assert_eq!(backend.async_release_count(), 1);
+            let paused = h.handle.document();
+            assert!(!paused.sending);
+            assert_eq!(paused.needs_attention, 0);
+            assert_eq!(paused.rows.len(), 1);
+            assert_eq!(paused.rows[0].bytes_sent, 16384);
+            assert_eq!(paused.rows[0].transfer_phase.as_deref(), Some("paused"));
+
+            // While sleeping, another pass sends nothing and acquires no locks.
+            let puts_while_sleeping = mock.lock().unwrap().put_offsets.len();
+            h.pass().await;
+            assert_eq!(mock.lock().unwrap().put_offsets.len(), puts_while_sleeping);
+            assert_eq!(backend.active_count(), 0);
+
+            // Wake: GET resyncs (seeing server already applied offset 16384 -> next_offset 24576!)
+            // and finishes without re-sending any confirmed chunk!
+            gate.store(true, Ordering::Release);
+            h.peer.notify_response_gates();
+            mock.lock().unwrap().gate_put_at_offset = None;
+            sleep.on_prepare_for_sleep(false, || {}).await;
+            h.handle.on_network_or_wake();
+            h.pass().await;
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(backend.active_count(), 0);
+            assert!(!h.handle.root.as_ref().unwrap().join(&id).exists());
+            {
+                let st = mock.lock().unwrap();
+                assert!(!st.get_status_calls.is_empty());
+                assert_eq!(
+                    st.put_offsets,
+                    vec![0, 8192, 16384, 24576, 32768],
+                    "confirmed chunks including the in-flight chunk must never be re-sent"
+                );
+                assert_eq!(st.committed_bytes.as_deref(), Some(payload.as_slice()));
+            }
+            h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_unprobed_404_and_405_fall_back_identically_to_save() {
+            let h = Harness::new().await;
+            let payload = vec![b'f'; 40_000];
+            for status in [404u16, 405u16] {
+                h.peer
+                    .set_route("/app/import/api/uploads", status, b"{}".to_vec());
+                let id = h.add(&payload).await;
+                let item = h.handle.state.lock().unwrap().items[&id].clone();
+                let assoc = h.client.capture_association();
+                let cap = assoc.capability.clone().unwrap();
+                let bind = binding(&cap);
+                let cancel = CancellationToken::new();
+                let cfg = ResumableConfig {
+                    threshold_bytes: 32 * 1024,
+                    chunk_bytes: 8 * 1024,
+                    max_file_bytes: FILE_LIMIT,
+                };
+                let step = h
+                    .handle
+                    .send_item_resumable(
+                        item,
+                        &h.client,
+                        &assoc,
+                        &cap,
+                        &bind,
+                        Some("2.0.55"),
+                        &h.running,
+                        cfg,
+                        false,
+                        &cancel,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(step, ResumableStep::FallbackToSave(_)),
+                    "expected FallbackToSave on unprobed {status}"
+                );
+                let ResumableStep::FallbackToSave(fallback_item) = step else {
+                    unreachable!();
+                };
+                h.handle
+                    .send_item_single_post(
+                        *fallback_item,
+                        &h.client,
+                        &assoc,
+                        &cap,
+                        &bind,
+                        Some("2.0.55"),
+                        &h.running,
+                        &cancel,
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert!(h.handle.document().rows.is_empty());
+            assert_eq!(h.saves(), 2);
             h.close().await;
         }
     }

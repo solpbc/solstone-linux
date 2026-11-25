@@ -281,6 +281,11 @@ impl ControlClient {
             .await
     }
 
+    pub async fn import_cancel(&self, id: &str) -> Result<String, ControlClientError> {
+        self.call_method("ImportCancel", &(id,), Duration::from_secs(30))
+            .await
+    }
+
     pub async fn retry_screen(&self) -> Result<String, ControlClientError> {
         self.call_method("RetryScreen", &(), DEFAULT_TIMEOUT).await
     }

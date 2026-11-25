@@ -297,6 +297,7 @@ impl FreshCheck {
 /// comes back.
 #[derive(Clone)]
 pub(crate) struct NewEpisode {
+    imports: crate::import::ImportHandle,
     facts: Arc<Mutex<SyncFacts>>,
     presenter: Arc<Mutex<Presenter>>,
     clock: Arc<dyn Clock + Send + Sync>,
@@ -327,6 +328,7 @@ impl NewEpisode {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .no_network = false;
+        self.imports.on_network_or_wake();
         self.fresh_check.request();
     }
 }
@@ -574,6 +576,7 @@ impl SyncService {
 
     pub(crate) fn new_episode_handle(&self) -> NewEpisode {
         NewEpisode {
+            imports: self.imports.clone(),
             facts: Arc::clone(&self.facts),
             presenter: Arc::clone(&self.presenter),
             clock: Arc::clone(&self.clock),
@@ -884,8 +887,13 @@ impl SyncWorker {
                 }
                 continue;
             }
+            let resumable_due =
+                !self.circuit_open_permanent && self.imports.has_resumable_retry_due();
             let probed = self.circuit_open;
-            if self.circuit_open && !self.try_probe(fresh_check).await {
+            if self.circuit_open && !self.try_probe(fresh_check || resumable_due).await {
+                if resumable_due {
+                    self.imports.note_transient_offline();
+                }
                 self.finish_confirmed_locally();
                 continue;
             }
@@ -896,6 +904,7 @@ impl SyncWorker {
                 || (notified && !fresh_check)
                 || self.clock.monotonic_seconds() - self.last_pass >= PASS_INTERVAL;
             if !pass_due {
+                let mut delivered_imports = false;
                 if fresh_check || self.check_due() {
                     let err = self.check_journal().await;
                     if fresh_check
@@ -904,9 +913,20 @@ impl SyncWorker {
                         && self.imports.has_deliverable_items()
                     {
                         self.imports.deliver(&self.client, &self.running).await;
+                        delivered_imports = true;
                         if let Some(status) = self.imports.take_auth_status() {
                             self.record_failure(Some(ErrorType::Auth), Some(i64::from(status)));
                         }
+                    }
+                }
+                if !delivered_imports
+                    && resumable_due
+                    && self.is_running()
+                    && self.imports.has_deliverable_items()
+                {
+                    self.imports.deliver(&self.client, &self.running).await;
+                    if let Some(status) = self.imports.take_auth_status() {
+                        self.record_failure(Some(ErrorType::Auth), Some(i64::from(status)));
                     }
                 }
                 if self.imports.has_review_items()
@@ -982,6 +1002,14 @@ impl SyncWorker {
             let until_review = REVIEW_RECONCILE_INTERVAL
                 - (self.clock.monotonic_seconds() - self.last_review_reconcile);
             wake = wake.min(until_review);
+        }
+        if !self.circuit_open_permanent
+            && let Some(retry_delay) = self.imports.next_retry_delay()
+        {
+            return Duration::from_secs_f64(
+                wake.min(retry_delay.as_secs_f64())
+                    .clamp(0.05, PASS_INTERVAL),
+            );
         }
         Duration::from_secs_f64(wake.clamp(MIN_WAKE, PASS_INTERVAL))
     }
