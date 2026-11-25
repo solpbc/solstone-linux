@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 sol pbc
 
-//! Holds off idle sleep while an import is actively being sent to the journal, and pauses
-//! active import delivery cleanly when the system prepares to sleep so it resumes on wake.
+//! Holds off automatic idle sleep while an import is actively being sent to the journal,
+//! while keeping screen blanking, screen locking, and owner-requested sleep working cleanly
+//! so an active delivery pauses on sleep and resumes immediately on wake.
 
 use std::{
     future::Future,
@@ -19,74 +20,178 @@ use crate::sync::NewEpisode;
 const LOGIN1_BUS: &str = "org.freedesktop.login1";
 const LOGIN1_PATH: &str = "/org/freedesktop/login1";
 const LOGIN1_MANAGER: &str = "org.freedesktop.login1.Manager";
+const LOGIN1_USER_SELF_PATH: &str = "/org/freedesktop/login1/user/self";
+const LOGIN1_USER_INTERFACE: &str = "org.freedesktop.login1.User";
+const LOGIN1_SESSION_INTERFACE: &str = "org.freedesktop.login1.Session";
+
+const GNOME_SESSION_BUS: &str = "org.gnome.SessionManager";
+const GNOME_SESSION_PATH: &str = "/org/gnome/SessionManager";
+const GNOME_SESSION_INTERFACE: &str = "org.gnome.SessionManager";
+/// `GSM_INHIBITOR_FLAG_SUSPEND`: holds off automatic idle suspend without setting
+/// `GSM_INHIBITOR_FLAG_IDLE` (8), so screen blanking and screen lock still run on schedule.
+const GSM_INHIBITOR_FLAG_SUSPEND: u32 = 4;
+
+const POWER_MGMT_BUS: &str = "org.freedesktop.PowerManagement.Inhibit";
+const POWER_MGMT_PATH: &str = "/org/freedesktop/PowerManagement/Inhibit";
+const POWER_MGMT_INTERFACE: &str = "org.freedesktop.PowerManagement.Inhibit";
+
 const INHIBIT_TIMEOUT: Duration = Duration::from_secs(2);
-/// Upper bound to wait for an in-flight delivery to unwind before releasing the delay lock
+const RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Upper bound to wait for an in-flight delivery to unwind before releasing held locks
 /// on `PrepareForSleep(true)`. Stays well inside logind's default 5 s `InhibitDelayMaxSec`.
 const PAUSE_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LockKind {
-    /// Postpones sleep for up to `InhibitDelayMaxSec` so an active delivery can pause cleanly.
+    /// `org.freedesktop.login1` `sleep` `delay` lock: postpones sleep briefly so an active
+    /// delivery can pause cleanly and resume on wake without blocking owner-requested sleep.
     SleepDelay,
-    /// Prevents automatic idle sleep on active desktop seats.
-    SleepIdleBlock,
-    /// Fallback when polkit refuses `sleep` block (for example over SSH or headless):
-    /// prevents `logind` idle suspend (`allow_any=yes`).
+    /// `org.gnome.SessionManager` `SUSPEND` (flag 4) inhibitor: holds off GNOME automatic
+    /// idle suspend while allowing screen blanking, screen lock, and owner-requested sleep.
+    GnomeSessionSuspend,
+    /// `org.freedesktop.PowerManagement.Inhibit` inhibitor: holds off KDE and freedesktop
+    /// desktop automatic idle suspend while allowing screen lock and owner-requested sleep.
+    PowerManagementInhibit,
+    /// `org.freedesktop.login1` `idle` `block` lock: fallback for headless (non-graphical)
+    /// sessions where no desktop session inhibitor exists and no desktop screen locker is
+    /// suppressed by `idle` block.
     IdleBlock,
-}
-
-impl LockKind {
-    pub(crate) fn what(self) -> &'static str {
-        match self {
-            Self::SleepDelay => "sleep",
-            Self::SleepIdleBlock => "sleep:idle",
-            Self::IdleBlock => "idle",
-        }
-    }
-
-    pub(crate) fn mode(self) -> &'static str {
-        match self {
-            Self::SleepDelay => "delay",
-            Self::SleepIdleBlock | Self::IdleBlock => "block",
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum InhibitError {
-    /// Polkit or logind refused this lock kind; a weaker lock kind may still succeed.
+    /// Polkit or the desktop service refused this lock kind; another kind may still succeed.
     Refused(String),
-    /// System D-Bus or `org.freedesktop.login1` is unavailable or timed out.
+    /// The target bus or service is unavailable or timed out.
     Unavailable(String),
 }
 
+pub(crate) type ReleaseFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+pub(crate) trait LockGuard: Send + Sync + 'static {
+    /// Optional async cleanup (for example calling D-Bus `Uninhibit`) before dropping.
+    fn release(self: Box<Self>) -> ReleaseFuture {
+        Box::pin(async move {
+            drop(self);
+        })
+    }
+}
+
 pub(crate) struct LockToken {
-    _guard: Box<dyn Send + Sync>,
+    guard: Option<Box<dyn LockGuard>>,
 }
 
 impl LockToken {
-    pub(crate) fn new(guard: impl Send + Sync + 'static) -> Self {
+    pub(crate) fn new(guard: impl LockGuard + 'static) -> Self {
         Self {
-            _guard: Box::new(guard),
+            guard: Some(Box::new(guard)),
+        }
+    }
+
+    pub(crate) async fn release(mut self) {
+        if let Some(guard) = self.guard.take() {
+            guard.release().await;
         }
     }
 }
 
 pub(crate) type InhibitFuture<'a> =
     Pin<Box<dyn Future<Output = Result<LockToken, InhibitError>> + Send + 'a>>;
+pub(crate) type GraphicalSessionFuture<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 
 pub(crate) trait SleepBackend: Send + Sync {
     fn inhibit<'a>(&'a self, kind: LockKind, who: &'a str, why: &'a str) -> InhibitFuture<'a>;
+    fn has_graphical_session<'a>(&'a self) -> GraphicalSessionFuture<'a>;
+}
+
+struct FdGuard {
+    _fd: std::os::fd::OwnedFd,
+}
+
+impl LockGuard for FdGuard {}
+
+struct SessionInhibitorState {
+    connection: zbus::Connection,
+    bus: &'static str,
+    path: &'static str,
+    interface: &'static str,
+    uninhibit_method: &'static str,
+    cookie: u32,
+}
+
+impl SessionInhibitorState {
+    async fn uninhibit(self) {
+        let call = async {
+            let proxy =
+                zbus::Proxy::new(&self.connection, self.bus, self.path, self.interface).await?;
+            proxy
+                .call::<_, _, ()>(self.uninhibit_method, &(self.cookie,))
+                .await
+        };
+        let _ = tokio::time::timeout(RELEASE_TIMEOUT, call).await;
+        // Dropping `self.connection` closes the dedicated socket cleanly.
+        drop(self.connection);
+    }
+}
+
+struct SessionInhibitorGuard {
+    state: Option<SessionInhibitorState>,
+}
+
+impl SessionInhibitorGuard {
+    fn new(
+        connection: zbus::Connection,
+        bus: &'static str,
+        path: &'static str,
+        interface: &'static str,
+        uninhibit_method: &'static str,
+        cookie: u32,
+    ) -> Self {
+        Self {
+            state: Some(SessionInhibitorState {
+                connection,
+                bus,
+                path,
+                interface,
+                uninhibit_method,
+                cookie,
+            }),
+        }
+    }
+}
+
+impl LockGuard for SessionInhibitorGuard {
+    fn release(mut self: Box<Self>) -> ReleaseFuture {
+        let state = self.state.take();
+        Box::pin(async move {
+            if let Some(state) = state {
+                state.uninhibit().await;
+            }
+        })
+    }
+}
+
+impl Drop for SessionInhibitorGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn(state.uninhibit());
+        }
+        // If no Tokio runtime handle is available (for example during shutdown), `state`
+        // drops here and closes the dedicated session D-Bus socket immediately, which
+        // clears the inhibitor via `NameOwnerChanged`.
+    }
 }
 
 #[derive(Default)]
-struct LogindBackend {
-    connection: tokio::sync::Mutex<Option<zbus::Connection>>,
+struct SystemSleepBackend {
+    system_connection: tokio::sync::Mutex<Option<zbus::Connection>>,
 }
 
-impl LogindBackend {
-    async fn connection(&self) -> Result<zbus::Connection, InhibitError> {
-        let mut slot = self.connection.lock().await;
+impl SystemSleepBackend {
+    async fn system_connection(&self) -> Result<zbus::Connection, InhibitError> {
+        let mut slot = self.system_connection.lock().await;
         if let Some(existing) = slot.as_ref() {
             return Ok(existing.clone());
         }
@@ -98,9 +203,160 @@ impl LogindBackend {
         Ok(connected)
     }
 
-    async fn clear_connection(&self) {
-        *self.connection.lock().await = None;
+    async fn clear_system_connection(&self) {
+        *self.system_connection.lock().await = None;
     }
+
+    async fn inhibit_logind(
+        &self,
+        what: &str,
+        mode: &str,
+        who: &str,
+        why: &str,
+    ) -> Result<LockToken, InhibitError> {
+        let connection = self.system_connection().await?;
+        let call = async {
+            let proxy =
+                zbus::Proxy::new(&connection, LOGIN1_BUS, LOGIN1_PATH, LOGIN1_MANAGER).await?;
+            proxy
+                .call::<_, _, zbus::zvariant::OwnedFd>("Inhibit", &(what, who, why, mode))
+                .await
+        };
+        match tokio::time::timeout(INHIBIT_TIMEOUT, call).await {
+            Ok(Ok(fd)) => {
+                let fd: std::os::fd::OwnedFd = fd.into();
+                let _ = rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC);
+                Ok(LockToken::new(FdGuard { _fd: fd }))
+            }
+            Ok(Err(error)) => {
+                let classified = classify_zbus_error(error);
+                if matches!(classified, InhibitError::Unavailable(_)) {
+                    self.clear_system_connection().await;
+                }
+                Err(classified)
+            }
+            Err(_) => {
+                self.clear_system_connection().await;
+                Err(InhibitError::Unavailable("logind Inhibit timed out".into()))
+            }
+        }
+    }
+
+    async fn inhibit_gnome_session(&self, who: &str, why: &str) -> Result<LockToken, InhibitError> {
+        // Each session inhibitor uses a dedicated session-bus connection so any early
+        // cancellation, crash, or exit drops the socket and clears the inhibitor via
+        // `NameOwnerChanged`.
+        let connection = tokio::time::timeout(INHIBIT_TIMEOUT, zbus::Connection::session())
+            .await
+            .map_err(|_| InhibitError::Unavailable("session bus connect timed out".into()))?
+            .map_err(|error| InhibitError::Unavailable(error.to_string()))?;
+        let call = async {
+            let proxy = zbus::Proxy::new(
+                &connection,
+                GNOME_SESSION_BUS,
+                GNOME_SESSION_PATH,
+                GNOME_SESSION_INTERFACE,
+            )
+            .await?;
+            proxy
+                .call::<_, _, u32>("Inhibit", &(who, 0u32, why, GSM_INHIBITOR_FLAG_SUSPEND))
+                .await
+        };
+        match tokio::time::timeout(INHIBIT_TIMEOUT, call).await {
+            Ok(Ok(cookie)) => Ok(LockToken::new(SessionInhibitorGuard::new(
+                connection,
+                GNOME_SESSION_BUS,
+                GNOME_SESSION_PATH,
+                GNOME_SESSION_INTERFACE,
+                "Uninhibit",
+                cookie,
+            ))),
+            Ok(Err(error)) => Err(classify_zbus_error(error)),
+            Err(_) => Err(InhibitError::Unavailable(
+                "org.gnome.SessionManager.Inhibit timed out".into(),
+            )),
+        }
+    }
+
+    async fn inhibit_power_management(
+        &self,
+        who: &str,
+        why: &str,
+    ) -> Result<LockToken, InhibitError> {
+        let connection = tokio::time::timeout(INHIBIT_TIMEOUT, zbus::Connection::session())
+            .await
+            .map_err(|_| InhibitError::Unavailable("session bus connect timed out".into()))?
+            .map_err(|error| InhibitError::Unavailable(error.to_string()))?;
+        let call = async {
+            let proxy = zbus::Proxy::new(
+                &connection,
+                POWER_MGMT_BUS,
+                POWER_MGMT_PATH,
+                POWER_MGMT_INTERFACE,
+            )
+            .await?;
+            proxy.call::<_, _, u32>("Inhibit", &(who, why)).await
+        };
+        match tokio::time::timeout(INHIBIT_TIMEOUT, call).await {
+            Ok(Ok(cookie)) => Ok(LockToken::new(SessionInhibitorGuard::new(
+                connection,
+                POWER_MGMT_BUS,
+                POWER_MGMT_PATH,
+                POWER_MGMT_INTERFACE,
+                "UnInhibit",
+                cookie,
+            ))),
+            Ok(Err(error)) => Err(classify_zbus_error(error)),
+            Err(_) => Err(InhibitError::Unavailable(
+                "org.freedesktop.PowerManagement.Inhibit timed out".into(),
+            )),
+        }
+    }
+
+    async fn logind_has_graphical_session(&self) -> bool {
+        let Ok(connection) = self.system_connection().await else {
+            return false;
+        };
+        let query = async {
+            let user_proxy = zbus::Proxy::new(
+                &connection,
+                LOGIN1_BUS,
+                LOGIN1_USER_SELF_PATH,
+                LOGIN1_USER_INTERFACE,
+            )
+            .await?;
+            let (session_id, session_path): (String, zbus::zvariant::OwnedObjectPath) =
+                user_proxy.get_property("Display").await?;
+            if session_id.is_empty() || session_path.as_str() == "/" {
+                return Ok::<bool, zbus::Error>(false);
+            }
+            let session_proxy = zbus::Proxy::new(
+                &connection,
+                LOGIN1_BUS,
+                session_path,
+                LOGIN1_SESSION_INTERFACE,
+            )
+            .await?;
+            let session_type: String = session_proxy.get_property("Type").await?;
+            Ok(matches!(session_type.as_str(), "wayland" | "x11"))
+        };
+        matches!(
+            tokio::time::timeout(INHIBIT_TIMEOUT, query).await,
+            Ok(Ok(true))
+        )
+    }
+}
+
+fn env_has_graphical_session() -> bool {
+    fn non_empty(var: &str) -> bool {
+        std::env::var_os(var).is_some_and(|value| !value.is_empty())
+    }
+    if non_empty("WAYLAND_DISPLAY") || non_empty("DISPLAY") || non_empty("XDG_CURRENT_DESKTOP") {
+        return true;
+    }
+    std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| {
+        value.eq_ignore_ascii_case("wayland") || value.eq_ignore_ascii_case("x11")
+    })
 }
 
 fn classify_zbus_error(error: zbus::Error) -> InhibitError {
@@ -117,38 +373,24 @@ fn classify_zbus_error(error: zbus::Error) -> InhibitError {
     }
 }
 
-impl SleepBackend for LogindBackend {
+impl SleepBackend for SystemSleepBackend {
     fn inhibit<'a>(&'a self, kind: LockKind, who: &'a str, why: &'a str) -> InhibitFuture<'a> {
         Box::pin(async move {
-            let connection = self.connection().await?;
-            let call = async {
-                let proxy =
-                    zbus::Proxy::new(&connection, LOGIN1_BUS, LOGIN1_PATH, LOGIN1_MANAGER).await?;
-                proxy
-                    .call::<_, _, zbus::zvariant::OwnedFd>(
-                        "Inhibit",
-                        &(kind.what(), who, why, kind.mode()),
-                    )
-                    .await
-            };
-            match tokio::time::timeout(INHIBIT_TIMEOUT, call).await {
-                Ok(Ok(fd)) => {
-                    let fd: std::os::fd::OwnedFd = fd.into();
-                    let _ = rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC);
-                    Ok(LockToken::new(fd))
-                }
-                Ok(Err(error)) => {
-                    let classified = classify_zbus_error(error);
-                    if matches!(classified, InhibitError::Unavailable(_)) {
-                        self.clear_connection().await;
-                    }
-                    Err(classified)
-                }
-                Err(_) => {
-                    self.clear_connection().await;
-                    Err(InhibitError::Unavailable("logind Inhibit timed out".into()))
-                }
+            match kind {
+                LockKind::SleepDelay => self.inhibit_logind("sleep", "delay", who, why).await,
+                LockKind::GnomeSessionSuspend => self.inhibit_gnome_session(who, why).await,
+                LockKind::PowerManagementInhibit => self.inhibit_power_management(who, why).await,
+                LockKind::IdleBlock => self.inhibit_logind("idle", "block", who, why).await,
             }
+        })
+    }
+
+    fn has_graphical_session<'a>(&'a self) -> GraphicalSessionFuture<'a> {
+        Box::pin(async move {
+            if env_has_graphical_session() {
+                return true;
+            }
+            self.logind_has_graphical_session().await
         })
     }
 }
@@ -156,38 +398,82 @@ impl SleepBackend for LogindBackend {
 #[derive(Default)]
 struct ActiveLocks {
     delay: Option<LockToken>,
-    block: Option<LockToken>,
+    idle: Option<LockToken>,
+}
+
+impl ActiveLocks {
+    async fn release(mut self) {
+        // Drop the logind sleep-delay FD first so sleep can proceed immediately without
+        // waiting on any session-bus Uninhibit round-trip.
+        drop(self.delay.take());
+        if let Some(idle) = self.idle.take() {
+            idle.release().await;
+        }
+    }
 }
 
 async fn acquire_locks(backend: &dyn SleepBackend) -> ActiveLocks {
     let who = text!("linux.metadata.name");
     let why = text!("linux.import.sendingtojournal");
     let mut locks = ActiveLocks::default();
-    match backend.inhibit(LockKind::SleepDelay, who, why).await {
-        Ok(token) => locks.delay = Some(token),
-        Err(InhibitError::Unavailable(error)) => {
-            tracing::debug!(%error, "Sleep inhibitor unavailable");
-            return locks;
+
+    let logind_available = match backend.inhibit(LockKind::SleepDelay, who, why).await {
+        Ok(token) => {
+            locks.delay = Some(token);
+            true
         }
         Err(InhibitError::Refused(error)) => {
             tracing::debug!(%error, "Sleep delay inhibitor refused");
-        }
-    }
-    match backend.inhibit(LockKind::SleepIdleBlock, who, why).await {
-        Ok(token) => locks.block = Some(token),
-        Err(InhibitError::Refused(error)) => {
-            tracing::debug!(%error, "Sleep block inhibitor refused; falling back to idle block");
-            match backend.inhibit(LockKind::IdleBlock, who, why).await {
-                Ok(token) => locks.block = Some(token),
-                Err(InhibitError::Refused(error) | InhibitError::Unavailable(error)) => {
-                    tracing::debug!(%error, "Idle block inhibitor unavailable");
-                }
-            }
+            true
         }
         Err(InhibitError::Unavailable(error)) => {
-            tracing::debug!(%error, "Sleep block inhibitor unavailable");
+            tracing::debug!(%error, "Sleep delay inhibitor unavailable");
+            false
+        }
+    };
+
+    // Always try desktop session-bus inhibitors first regardless of env vars (systemd user
+    // units on KDE may not inherit WAYLAND_DISPLAY or DISPLAY). These hold off automatic
+    // idle suspend without suppressing screen lock or owner-requested sleep.
+    match backend
+        .inhibit(LockKind::GnomeSessionSuspend, who, why)
+        .await
+    {
+        Ok(token) => {
+            locks.idle = Some(token);
+            return locks;
+        }
+        Err(InhibitError::Refused(error) | InhibitError::Unavailable(error)) => {
+            tracing::debug!(%error, "GNOME session suspend inhibitor unavailable");
         }
     }
+
+    match backend
+        .inhibit(LockKind::PowerManagementInhibit, who, why)
+        .await
+    {
+        Ok(token) => {
+            locks.idle = Some(token);
+            return locks;
+        }
+        Err(InhibitError::Refused(error) | InhibitError::Unavailable(error)) => {
+            tracing::debug!(%error, "PowerManagement suspend inhibitor unavailable");
+        }
+    }
+
+    // Fall back to logind `idle` block only on headless (non-graphical) sessions: on a
+    // graphical desktop without a session inhibitor, logind `idle` block can stop the
+    // screen from locking, and screen locking always takes priority over holding off idle
+    // suspend.
+    if logind_available && !backend.has_graphical_session().await {
+        match backend.inhibit(LockKind::IdleBlock, who, why).await {
+            Ok(token) => locks.idle = Some(token),
+            Err(InhibitError::Refused(error) | InhibitError::Unavailable(error)) => {
+                tracing::debug!(%error, "Idle block inhibitor unavailable");
+            }
+        }
+    }
+
     locks
 }
 
@@ -196,11 +482,12 @@ struct SharedState {
     sleeping: bool,
     sleep_epoch: u64,
     active_deliveries: usize,
+    releasing: usize,
     locks: Option<ActiveLocks>,
 }
 
-/// Coordinates `org.freedesktop.login1` sleep inhibition and `PrepareForSleep` pause/resume
-/// for active import deliveries.
+/// Coordinates desktop idle-suspend inhibition and `org.freedesktop.login1` sleep-delay /
+/// `PrepareForSleep` pause-and-resume for active import deliveries.
 #[derive(Clone)]
 pub(crate) struct SleepInhibit {
     backend: Option<Arc<dyn SleepBackend>>,
@@ -217,35 +504,84 @@ impl Default for SleepInhibit {
 }
 
 pub(crate) enum AcquireOutcome {
-    /// Delivery may proceed while holding this guard; dropping it releases all locks.
+    /// Delivery may proceed while holding this guard; releasing or dropping it clears all locks.
     Held(DeliveryHold),
     /// System is preparing to sleep or asleep; caller should pause and wait for wake.
     Sleeping,
 }
 
-/// RAII guard for an active import delivery. Dropping it releases every held sleep lock
-/// once no deliveries remain active.
-pub(crate) struct DeliveryHold {
+struct ReleaseCounterGuard {
     inhibit: SleepInhibit,
 }
 
-impl Drop for DeliveryHold {
+impl Drop for ReleaseCounterGuard {
     fn drop(&mut self) {
-        let (released, became_idle) = {
+        let idle = {
             let mut state = self
                 .inhibit
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.active_deliveries = state.active_deliveries.saturating_sub(1);
-            if state.active_deliveries == 0 {
-                (state.locks.take(), true)
-            } else {
-                (None, false)
-            }
+            state.releasing = state.releasing.saturating_sub(1);
+            state.active_deliveries == 0 && state.releasing == 0
         };
-        drop(released);
-        if became_idle {
+        if idle {
+            self.inhibit.idle_notify.notify_waiters();
+        }
+    }
+}
+
+/// RAII guard for an active import delivery. Calling `release().await` cleanly uninhibits
+/// desktop session locks and closes any logind FDs; dropping it also releases every held
+/// lock once no deliveries remain active.
+pub(crate) struct DeliveryHold {
+    inhibit: SleepInhibit,
+    released: bool,
+}
+
+impl DeliveryHold {
+    fn begin_release(&mut self, track_async_release: bool) -> (Option<ActiveLocks>, bool) {
+        if self.released {
+            return (None, false);
+        }
+        self.released = true;
+        let mut state = self
+            .inhibit
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_deliveries = state.active_deliveries.saturating_sub(1);
+        if state.active_deliveries == 0 {
+            let locks = state.locks.take();
+            if track_async_release && locks.is_some() {
+                state.releasing += 1;
+                (locks, false)
+            } else {
+                (locks, state.releasing == 0)
+            }
+        } else {
+            (None, false)
+        }
+    }
+
+    pub(crate) async fn release(mut self) {
+        let (locks, notify_now) = self.begin_release(true);
+        if let Some(locks) = locks {
+            let _counter = ReleaseCounterGuard {
+                inhibit: self.inhibit.clone(),
+            };
+            locks.release().await;
+        } else if notify_now {
+            self.inhibit.idle_notify.notify_waiters();
+        }
+    }
+}
+
+impl Drop for DeliveryHold {
+    fn drop(&mut self) {
+        let (locks, notify_now) = self.begin_release(false);
+        drop(locks);
+        if notify_now {
             self.inhibit.idle_notify.notify_waiters();
         }
     }
@@ -256,8 +592,8 @@ impl SleepInhibit {
         Self::build(None, PAUSE_WAIT)
     }
 
-    pub(crate) fn logind() -> Self {
-        Self::build(Some(Arc::new(LogindBackend::default())), PAUSE_WAIT)
+    pub(crate) fn system() -> Self {
+        Self::build(Some(Arc::new(SystemSleepBackend::default())), PAUSE_WAIT)
     }
 
     #[cfg(test)]
@@ -286,7 +622,7 @@ impl SleepInhibit {
 
     /// Registers an active import delivery and acquires inhibitor locks if the system is not
     /// sleeping. Returns `Sleeping` if `PrepareForSleep(true)` is active or arrives while
-    /// acquiring locks (in which case any acquired lock FDs are closed immediately).
+    /// acquiring locks (in which case any acquired locks are released immediately).
     pub(crate) async fn acquire(&self) -> AcquireOutcome {
         let (need_locks, start_epoch) = {
             let mut state = self
@@ -303,28 +639,32 @@ impl SleepInhibit {
             )
         };
         // Construct the guard before awaiting so cancellation or panic always unwinds
-        // `active_deliveries` and drops any locks.
+        // `active_deliveries` and releases any locks.
         let hold = DeliveryHold {
             inhibit: self.clone(),
+            released: false,
         };
         if need_locks && let Some(backend) = self.backend.as_ref() {
             let acquired = acquire_locks(backend.as_ref()).await;
-            let interrupted = {
+            let (interrupted, surplus) = {
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if state.sleeping || state.sleep_epoch != start_epoch {
-                    true
+                    (true, Some(acquired))
+                } else if state.locks.is_none() {
+                    state.locks = Some(acquired);
+                    (false, None)
                 } else {
-                    if state.locks.is_none() {
-                        state.locks = Some(acquired);
-                    }
-                    false
+                    (false, Some(acquired))
                 }
             };
+            if let Some(surplus) = surplus {
+                surplus.release().await;
+            }
             if interrupted {
-                drop(hold);
+                hold.release().await;
                 return AcquireOutcome::Sleeping;
             }
         }
@@ -334,7 +674,7 @@ impl SleepInhibit {
     /// Handles a `PrepareForSleep(going_to_sleep)` transition.
     ///
     /// On `true`, signals active deliveries to pause, waits briefly for them to unwind and
-    /// drop their holds, then releases any remaining lock FDs so sleep can proceed.
+    /// release their holds, then releases any remaining locks so sleep can proceed.
     /// On `false`, clears the sleep flag and calls `on_wake` so paused deliveries resume.
     pub(crate) async fn on_prepare_for_sleep(&self, going_to_sleep: bool, on_wake: impl FnOnce()) {
         if going_to_sleep {
@@ -345,7 +685,7 @@ impl SleepInhibit {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.sleeping = true;
                 state.sleep_epoch = state.sleep_epoch.wrapping_add(1);
-                state.active_deliveries == 0
+                state.active_deliveries == 0 && state.releasing == 0
             };
             self.sleep_tx.send_replace(true);
             if !already_idle {
@@ -354,21 +694,21 @@ impl SleepInhibit {
                         let notified = self.idle_notify.notified();
                         tokio::pin!(notified);
                         notified.as_mut().enable();
-                        if self
-                            .state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .active_deliveries
-                            == 0
                         {
-                            break;
+                            let state = self
+                                .state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if state.active_deliveries == 0 && state.releasing == 0 {
+                                break;
+                            }
                         }
                         notified.await;
                     }
                 })
                 .await;
             }
-            self.release_all();
+            self.release_all_async().await;
         } else {
             {
                 let mut state = self
@@ -379,6 +719,19 @@ impl SleepInhibit {
             }
             self.sleep_tx.send_replace(false);
             on_wake();
+        }
+    }
+
+    /// Releases any currently held inhibitor locks asynchronously.
+    pub(crate) async fn release_all_async(&self) {
+        let released = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .locks
+            .take();
+        if let Some(locks) = released {
+            locks.release().await;
         }
     }
 
@@ -449,8 +802,10 @@ pub(crate) mod tests {
 
     pub(crate) struct FakeBackend {
         decisions: Mutex<Box<dyn Fn(LockKind) -> FakeOutcome + Send>>,
+        graphical_session: AtomicBool,
         calls: Mutex<Vec<(LockKind, String, String)>>,
         active: Arc<AtomicUsize>,
+        async_releases: Arc<AtomicUsize>,
         active_kinds: Arc<Mutex<Vec<LockKind>>>,
         gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
         entered: Arc<tokio::sync::Notify>,
@@ -459,7 +814,17 @@ pub(crate) mod tests {
     struct FakeToken {
         kind: LockKind,
         active: Arc<AtomicUsize>,
+        async_releases: Arc<AtomicUsize>,
         active_kinds: Arc<Mutex<Vec<LockKind>>>,
+    }
+
+    impl LockGuard for FakeToken {
+        fn release(self: Box<Self>) -> ReleaseFuture {
+            Box::pin(async move {
+                self.async_releases.fetch_add(1, Ordering::AcqRel);
+                drop(self);
+            })
+        }
     }
 
     impl Drop for FakeToken {
@@ -474,10 +839,19 @@ pub(crate) mod tests {
 
     impl FakeBackend {
         pub(crate) fn new(decide: impl Fn(LockKind) -> FakeOutcome + Send + 'static) -> Arc<Self> {
+            Self::with_graphical(true, decide)
+        }
+
+        pub(crate) fn with_graphical(
+            graphical: bool,
+            decide: impl Fn(LockKind) -> FakeOutcome + Send + 'static,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 decisions: Mutex::new(Box::new(decide)),
+                graphical_session: AtomicBool::new(graphical),
                 calls: Mutex::new(Vec::new()),
                 active: Arc::new(AtomicUsize::new(0)),
+                async_releases: Arc::new(AtomicUsize::new(0)),
                 active_kinds: Arc::new(Mutex::new(Vec::new())),
                 gate: Mutex::new(None),
                 entered: Arc::new(tokio::sync::Notify::new()),
@@ -492,6 +866,10 @@ pub(crate) mod tests {
 
         pub(crate) fn active_count(&self) -> usize {
             self.active.load(Ordering::Acquire)
+        }
+
+        pub(crate) fn async_release_count(&self) -> usize {
+            self.async_releases.load(Ordering::Acquire)
         }
 
         pub(crate) fn active_kinds(&self) -> Vec<LockKind> {
@@ -527,6 +905,7 @@ pub(crate) mod tests {
                         Ok(LockToken::new(FakeToken {
                             kind,
                             active: self.active.clone(),
+                            async_releases: self.async_releases.clone(),
                             active_kinds: self.active_kinds.clone(),
                         }))
                     }
@@ -535,10 +914,15 @@ pub(crate) mod tests {
                 }
             })
         }
+
+        fn has_graphical_session<'a>(&'a self) -> GraphicalSessionFuture<'a> {
+            let graphical = self.graphical_session.load(Ordering::Acquire);
+            Box::pin(async move { graphical })
+        }
     }
 
     #[tokio::test]
-    async fn acquires_delay_and_sleep_idle_block_and_releases_on_drop() {
+    async fn acquires_delay_and_gnome_suspend_and_releases_on_async_release_and_drop() {
         let backend = FakeBackend::new(|_| FakeOutcome::Allow);
         let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
         assert_eq!(backend.active_count(), 0);
@@ -548,23 +932,32 @@ pub(crate) mod tests {
         };
         assert_eq!(
             backend.called_kinds(),
-            vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+            vec![LockKind::SleepDelay, LockKind::GnomeSessionSuspend]
         );
         assert_eq!(
             backend.active_kinds(),
-            vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+            vec![LockKind::SleepDelay, LockKind::GnomeSessionSuspend]
         );
         assert_eq!(backend.active_count(), 2);
 
-        drop(hold);
+        hold.release().await;
+        assert_eq!(backend.active_count(), 0);
+        assert!(backend.active_kinds().is_empty());
+        assert_eq!(backend.async_release_count(), 1);
+
+        let AcquireOutcome::Held(hold2) = sleep.acquire().await else {
+            panic!("expected Held");
+        };
+        assert_eq!(backend.active_count(), 2);
+        drop(hold2);
         assert_eq!(backend.active_count(), 0);
         assert!(backend.active_kinds().is_empty());
     }
 
     #[tokio::test]
-    async fn polkit_refusal_of_sleep_block_falls_back_to_idle_block() {
+    async fn falls_back_to_power_management_on_kde_without_taking_idle_block() {
         let backend = FakeBackend::new(|kind| match kind {
-            LockKind::SleepIdleBlock => FakeOutcome::Refuse("AccessDenied"),
+            LockKind::GnomeSessionSuspend => FakeOutcome::Unavailable("ServiceUnknown"),
             _ => FakeOutcome::Allow,
         });
         let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
@@ -576,7 +969,62 @@ pub(crate) mod tests {
             backend.called_kinds(),
             vec![
                 LockKind::SleepDelay,
-                LockKind::SleepIdleBlock,
+                LockKind::GnomeSessionSuspend,
+                LockKind::PowerManagementInhibit,
+            ]
+        );
+        assert_eq!(
+            backend.active_kinds(),
+            vec![LockKind::SleepDelay, LockKind::PowerManagementInhibit]
+        );
+        hold.release().await;
+        assert_eq!(backend.active_count(), 0);
+        assert_eq!(backend.async_release_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn bare_graphical_session_skips_logind_idle_block_to_protect_screen_lock() {
+        let backend = FakeBackend::with_graphical(true, |kind| match kind {
+            LockKind::SleepDelay => FakeOutcome::Allow,
+            _ => FakeOutcome::Unavailable("ServiceUnknown"),
+        });
+        let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
+
+        let AcquireOutcome::Held(hold) = sleep.acquire().await else {
+            panic!("expected Held");
+        };
+        assert_eq!(
+            backend.called_kinds(),
+            vec![
+                LockKind::SleepDelay,
+                LockKind::GnomeSessionSuspend,
+                LockKind::PowerManagementInhibit,
+            ]
+        );
+        assert_eq!(backend.active_kinds(), vec![LockKind::SleepDelay]);
+        hold.release().await;
+        assert_eq!(backend.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn headless_session_falls_back_to_logind_idle_block() {
+        let backend = FakeBackend::with_graphical(false, |kind| match kind {
+            LockKind::GnomeSessionSuspend | LockKind::PowerManagementInhibit => {
+                FakeOutcome::Unavailable("NoSessionBus")
+            }
+            _ => FakeOutcome::Allow,
+        });
+        let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
+
+        let AcquireOutcome::Held(hold) = sleep.acquire().await else {
+            panic!("expected Held");
+        };
+        assert_eq!(
+            backend.called_kinds(),
+            vec![
+                LockKind::SleepDelay,
+                LockKind::GnomeSessionSuspend,
+                LockKind::PowerManagementInhibit,
                 LockKind::IdleBlock,
             ]
         );
@@ -584,41 +1032,100 @@ pub(crate) mod tests {
             backend.active_kinds(),
             vec![LockKind::SleepDelay, LockKind::IdleBlock]
         );
-        drop(hold);
+        hold.release().await;
         assert_eq!(backend.active_count(), 0);
     }
 
     #[tokio::test]
+    async fn polkit_refusal_of_sleep_delay_still_takes_desktop_or_headless_idle_hold() {
+        let desktop_backend = FakeBackend::new(|kind| match kind {
+            LockKind::SleepDelay => FakeOutcome::Refuse("AccessDenied"),
+            _ => FakeOutcome::Allow,
+        });
+        let desktop_sleep =
+            SleepInhibit::with_backend(desktop_backend.clone(), Duration::from_secs(1));
+        let AcquireOutcome::Held(hold) = desktop_sleep.acquire().await else {
+            panic!("expected Held");
+        };
+        assert_eq!(
+            desktop_backend.active_kinds(),
+            vec![LockKind::GnomeSessionSuspend]
+        );
+        hold.release().await;
+        assert_eq!(desktop_backend.active_count(), 0);
+
+        let headless_backend = FakeBackend::with_graphical(false, |kind| match kind {
+            LockKind::SleepDelay => FakeOutcome::Refuse("AccessDenied"),
+            LockKind::GnomeSessionSuspend | LockKind::PowerManagementInhibit => {
+                FakeOutcome::Unavailable("NoSessionBus")
+            }
+            LockKind::IdleBlock => FakeOutcome::Allow,
+        });
+        let headless_sleep =
+            SleepInhibit::with_backend(headless_backend.clone(), Duration::from_secs(1));
+        let AcquireOutcome::Held(hold) = headless_sleep.acquire().await else {
+            panic!("expected Held");
+        };
+        assert_eq!(headless_backend.active_kinds(), vec![LockKind::IdleBlock]);
+        hold.release().await;
+        assert_eq!(headless_backend.active_count(), 0);
+    }
+
+    #[tokio::test]
     async fn polkit_refusal_of_all_locks_degrades_cleanly_without_blocking_delivery() {
-        let backend = FakeBackend::new(|_| FakeOutcome::Refuse("AccessDenied"));
+        let backend = FakeBackend::with_graphical(false, |_| FakeOutcome::Refuse("AccessDenied"));
         let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
 
         let AcquireOutcome::Held(hold) = sleep.acquire().await else {
-            panic!("delivery must proceed even when polkit refuses every lock");
+            panic!("delivery must proceed even when every lock is refused");
         };
         assert_eq!(
             backend.called_kinds(),
             vec![
                 LockKind::SleepDelay,
-                LockKind::SleepIdleBlock,
+                LockKind::GnomeSessionSuspend,
+                LockKind::PowerManagementInhibit,
                 LockKind::IdleBlock,
             ]
         );
         assert_eq!(backend.active_count(), 0);
-        drop(hold);
+        hold.release().await;
     }
 
     #[tokio::test]
-    async fn unavailable_logind_stops_after_first_probe_and_degrades_cleanly() {
-        let backend = FakeBackend::new(|_| FakeOutcome::Unavailable("ServiceUnknown"));
-        let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_secs(1));
-
-        let AcquireOutcome::Held(hold) = sleep.acquire().await else {
+    async fn unavailable_logind_still_tries_desktop_inhibitors_and_skips_idle_block() {
+        let desktop_backend = FakeBackend::new(|kind| match kind {
+            LockKind::SleepDelay => FakeOutcome::Unavailable("ServiceUnknown"),
+            _ => FakeOutcome::Allow,
+        });
+        let desktop_sleep =
+            SleepInhibit::with_backend(desktop_backend.clone(), Duration::from_secs(1));
+        let AcquireOutcome::Held(hold) = desktop_sleep.acquire().await else {
             panic!("delivery must proceed when logind is absent");
         };
-        assert_eq!(backend.called_kinds(), vec![LockKind::SleepDelay]);
-        assert_eq!(backend.active_count(), 0);
-        drop(hold);
+        assert_eq!(
+            desktop_backend.active_kinds(),
+            vec![LockKind::GnomeSessionSuspend]
+        );
+        hold.release().await;
+
+        let headless_backend =
+            FakeBackend::with_graphical(false, |_| FakeOutcome::Unavailable("ServiceUnknown"));
+        let headless_sleep =
+            SleepInhibit::with_backend(headless_backend.clone(), Duration::from_secs(1));
+        let AcquireOutcome::Held(hold) = headless_sleep.acquire().await else {
+            panic!("delivery must proceed when all backends are absent");
+        };
+        assert_eq!(
+            headless_backend.called_kinds(),
+            vec![
+                LockKind::SleepDelay,
+                LockKind::GnomeSessionSuspend,
+                LockKind::PowerManagementInhibit,
+            ]
+        );
+        assert_eq!(headless_backend.active_count(), 0);
+        hold.release().await;
     }
 
     #[tokio::test]
@@ -633,21 +1140,22 @@ pub(crate) mod tests {
 
         let mut rx = sleep.subscribe();
         let delivery = tokio::spawn(async move {
-            let _hold = hold;
             loop {
                 rx.changed().await.unwrap();
                 if *rx.borrow_and_update() {
                     break;
                 }
             }
+            hold.release().await;
         });
 
         sleep.on_prepare_for_sleep(true, || {}).await;
         assert!(sleep.is_sleeping());
         assert_eq!(backend.active_count(), 0);
+        assert_eq!(backend.async_release_count(), 1);
         delivery.await.unwrap();
 
-        // While sleeping, acquire returns Sleeping without calling logind.
+        // While sleeping, acquire returns Sleeping without calling any backend.
         let calls_before = backend.called_kinds().len();
         assert!(matches!(sleep.acquire().await, AcquireOutcome::Sleeping));
         assert_eq!(backend.called_kinds().len(), calls_before);
@@ -666,7 +1174,7 @@ pub(crate) mod tests {
             panic!("expected Held after wake");
         };
         assert_eq!(backend.active_count(), 2);
-        drop(hold2);
+        hold2.release().await;
         assert_eq!(backend.active_count(), 0);
     }
 
@@ -680,15 +1188,16 @@ pub(crate) mod tests {
         };
         assert_eq!(backend.active_count(), 2);
 
-        // Do not drop `hold` during PrepareForSleep(true); pause_wait must force-release.
+        // Do not release `hold` during PrepareForSleep(true); pause_wait must force-release.
         sleep.on_prepare_for_sleep(true, || {}).await;
         assert_eq!(backend.active_count(), 0);
+        assert_eq!(backend.async_release_count(), 1);
         drop(hold);
         assert_eq!(backend.active_count(), 0);
     }
 
     #[tokio::test]
-    async fn prepare_for_sleep_during_in_flight_inhibit_drops_late_fds_immediately() {
+    async fn prepare_for_sleep_during_in_flight_inhibit_drops_late_locks_immediately() {
         let backend = FakeBackend::new(|_| FakeOutcome::Allow);
         let gate = backend.block_calls();
         let sleep = SleepInhibit::with_backend(backend.clone(), Duration::from_millis(20));
@@ -713,6 +1222,7 @@ pub(crate) mod tests {
         assert!(matches!(acquirer.await.unwrap(), AcquireOutcome::Sleeping));
         sleeper.await.unwrap();
         assert_eq!(backend.active_count(), 0);
+        assert_eq!(backend.async_release_count(), 1);
     }
 
     #[tokio::test]
@@ -748,6 +1258,11 @@ pub(crate) mod tests {
     #[cfg(feature = "full-tests")]
     pub(crate) async fn lock_real_logind_test() -> tokio::sync::MutexGuard<'static, ()> {
         REAL_LOGIND_TEST_MUTEX.lock().await
+    }
+
+    #[cfg(feature = "full-tests")]
+    pub(crate) async fn real_has_graphical_session() -> bool {
+        SystemSleepBackend::default().has_graphical_session().await
     }
 
     #[cfg(feature = "full-tests")]
@@ -805,10 +1320,10 @@ pub(crate) mod tests {
             .call(
                 "Inhibit",
                 &(
-                    LockKind::SleepDelay.what(),
+                    "sleep",
                     text!("linux.metadata.name"),
                     text!("linux.import.sendingtojournal"),
-                    LockKind::SleepDelay.mode(),
+                    "delay",
                 ),
             )
             .await
@@ -823,12 +1338,13 @@ pub(crate) mod tests {
         drop(raw_fd);
         wait_logind_inhibitors_cleared(pid).await;
 
-        let sleep = SleepInhibit::logind();
+        let graphical = real_has_graphical_session().await;
+        let sleep = SleepInhibit::system();
         let AcquireOutcome::Held(hold) = sleep.acquire().await else {
             panic!("expected Held");
         };
         let ours = list_logind_inhibitors_for_pid(pid).await;
-        println!("logind inhibitors during hold (pid {pid}): {ours:?}");
+        println!("logind inhibitors during hold (pid {pid}, graphical={graphical}): {ours:?}");
         assert!(
             ours.iter().any(|(what, who, _, mode, _, _)| what == "sleep"
                 && who == text!("linux.metadata.name")
@@ -836,15 +1352,36 @@ pub(crate) mod tests {
             "expected sleep delay lock for PID {pid}, got {ours:?}"
         );
         assert!(
-            ours.iter().any(|(what, who, _, mode, _, _)| {
-                (what == "sleep:idle" || what == "idle")
-                    && who == text!("linux.metadata.name")
-                    && mode == "block"
-            }),
-            "expected sleep:idle or idle block lock for PID {pid}, got {ours:?}"
+            !ours
+                .iter()
+                .any(|(what, _, _, mode, _, _)| mode == "block" && what.contains("sleep")),
+            "must never take a logind sleep block lock, got {ours:?}"
         );
+        if graphical {
+            assert!(
+                !ours
+                    .iter()
+                    .any(|(what, _, _, mode, _, _)| what == "idle" && mode == "block"),
+                "must not take logind idle block on a graphical session, got {ours:?}"
+            );
+        } else {
+            assert!(
+                ours.iter().any(|(what, who, _, mode, _, _)| what == "idle"
+                    && who == text!("linux.metadata.name")
+                    && mode == "block"),
+                "expected headless idle block lock for PID {pid}, got {ours:?}"
+            );
+        }
 
-        drop(hold);
+        hold.release().await;
+        wait_logind_inhibitors_cleared(pid).await;
+
+        // Also verify synchronous Drop releases every logind lock.
+        let AcquireOutcome::Held(hold2) = sleep.acquire().await else {
+            panic!("expected Held");
+        };
+        assert!(!list_logind_inhibitors_for_pid(pid).await.is_empty());
+        drop(hold2);
         wait_logind_inhibitors_cleared(pid).await;
     }
 }

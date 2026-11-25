@@ -3401,7 +3401,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             backend.active_kinds(),
-            vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+            vec![LockKind::SleepDelay, LockKind::GnomeSessionSuspend]
         );
 
         // Sleep arrives: delivery pauses cleanly and drops all locks before sleep proceeds.

@@ -1851,7 +1851,9 @@ impl ImportHandle {
                 tracing::warn!(%error, "import retained after local storage failure");
             }
         }
-        drop(sleep_hold);
+        if let Some(hold) = sleep_hold {
+            hold.release().await;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3805,7 +3807,8 @@ mod tests {
             assert!(backend.called_kinds().is_empty());
             assert_eq!(backend.active_count(), 0);
 
-            // Active delivery holds both delay and sleep:idle block while /save is in flight.
+            // Active delivery holds both sleep delay and desktop idle-suspend inhibitor while
+            // /save is in flight.
             let _id = h.add(b"sleep hold bytes").await;
             let gate = Arc::new(AtomicBool::new(false));
             h.peer.set_pending_route(
@@ -3825,7 +3828,7 @@ mod tests {
             h.wait_save().await;
             assert_eq!(
                 backend.active_kinds(),
-                vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+                vec![LockKind::SleepDelay, LockKind::GnomeSessionSuspend]
             );
             gate.store(true, Ordering::Release);
             h.peer.notify_response_gates();
@@ -3835,13 +3838,15 @@ mod tests {
                 .unwrap();
             assert!(h.handle.document().rows.is_empty());
             assert_eq!(backend.active_count(), 0);
+            assert_eq!(backend.async_release_count(), 1);
 
-            // Transient failure and client refusal both release their locks on exit.
+            // Transient failure and client refusal both release their locks cleanly on exit.
             let _id2 = h.add(b"fail exit bytes").await;
             h.peer
                 .set_route("/app/import/api/save", 500, br#"{"error":"busy"}"#.to_vec());
             h.pass().await;
             assert_eq!(backend.active_count(), 0);
+            assert_eq!(backend.async_release_count(), 2);
 
             h.peer.set_route(
                 "/app/import/api/save",
@@ -3850,6 +3855,7 @@ mod tests {
             );
             h.pass().await;
             assert_eq!(backend.active_count(), 0);
+            assert_eq!(backend.async_release_count(), 3);
             h.close().await;
         }
 
@@ -3885,16 +3891,17 @@ mod tests {
             assert!(h.handle.document().sending);
             assert_eq!(
                 backend.active_kinds(),
-                vec![LockKind::SleepDelay, LockKind::SleepIdleBlock]
+                vec![LockKind::SleepDelay, LockKind::GnomeSessionSuspend]
             );
 
-            // Owner initiates sleep: delivery pauses, drops its locks, keeps item waiting.
+            // Owner initiates sleep: delivery pauses, releases its locks, keeps item waiting.
             sleep.on_prepare_for_sleep(true, || {}).await;
             tokio::time::timeout(Duration::from_secs(2), task)
                 .await
                 .unwrap()
                 .unwrap();
             assert_eq!(backend.active_count(), 0);
+            assert_eq!(backend.async_release_count(), 1);
             assert_eq!(h.starts(), 0);
             let paused_doc = h.handle.document();
             assert!(!paused_doc.sending);
@@ -3948,28 +3955,33 @@ mod tests {
             };
 
             let mut h = Harness::new().await;
-            let fallback_backend = FakeBackend::new(|kind| match kind {
-                LockKind::SleepIdleBlock => FakeOutcome::Refuse("AccessDenied"),
-                _ => FakeOutcome::Allow,
+            let headless_fallback = FakeBackend::with_graphical(false, |kind| match kind {
+                LockKind::SleepDelay => FakeOutcome::Refuse("AccessDenied"),
+                LockKind::GnomeSessionSuspend | LockKind::PowerManagementInhibit => {
+                    FakeOutcome::Unavailable("NoSessionBus")
+                }
+                LockKind::IdleBlock => FakeOutcome::Allow,
             });
             h.handle = h.handle.with_sleep_inhibit(SleepInhibit::with_backend(
-                fallback_backend.clone(),
+                headless_fallback.clone(),
                 Duration::from_secs(1),
             ));
             let _ = h.add(b"fallback idle lock").await;
             h.pass().await;
             assert!(h.handle.document().rows.is_empty());
             assert_eq!(
-                fallback_backend.called_kinds(),
+                headless_fallback.called_kinds(),
                 vec![
                     LockKind::SleepDelay,
-                    LockKind::SleepIdleBlock,
+                    LockKind::GnomeSessionSuspend,
+                    LockKind::PowerManagementInhibit,
                     LockKind::IdleBlock,
                 ]
             );
-            assert_eq!(fallback_backend.active_count(), 0);
+            assert_eq!(headless_fallback.active_count(), 0);
 
-            let denied_backend = FakeBackend::new(|_| FakeOutcome::Refuse("AccessDenied"));
+            let denied_backend =
+                FakeBackend::with_graphical(false, |_| FakeOutcome::Refuse("AccessDenied"));
             h.handle = h.handle.with_sleep_inhibit(SleepInhibit::with_backend(
                 denied_backend.clone(),
                 Duration::from_secs(1),
@@ -3987,7 +3999,7 @@ mod tests {
                 SleepInhibit,
                 tests::{
                     list_logind_inhibitors_for_pid, lock_real_logind_test,
-                    wait_logind_inhibitors_cleared,
+                    real_has_graphical_session, wait_logind_inhibitors_cleared,
                 },
             };
 
@@ -3995,8 +4007,9 @@ mod tests {
             let pid = std::process::id();
             wait_logind_inhibitors_cleared(pid).await;
 
+            let graphical = real_has_graphical_session().await;
             let mut h = Harness::new().await;
-            let sleep = SleepInhibit::logind();
+            let sleep = SleepInhibit::system();
             h.handle = h.handle.with_sleep_inhibit(sleep.clone());
 
             let _id = h.add(b"live logind delivery bytes").await;
@@ -4018,7 +4031,9 @@ mod tests {
             h.wait_save().await;
 
             let during = list_logind_inhibitors_for_pid(pid).await;
-            println!("live import delivery logind inhibitors (pid {pid}): {during:?}");
+            println!(
+                "live import delivery logind inhibitors (pid {pid}, graphical={graphical}): {during:?}"
+            );
             assert!(
                 during
                     .iter()
@@ -4028,13 +4043,28 @@ mod tests {
                 "expected sleep delay lock during live import delivery, got {during:?}"
             );
             assert!(
-                during.iter().any(|(what, who, _, mode, _, _)| {
-                    (what == "sleep:idle" || what == "idle")
-                        && who == text!("linux.metadata.name")
-                        && mode == "block"
-                }),
-                "expected sleep:idle or idle block lock during live import delivery, got {during:?}"
+                !during
+                    .iter()
+                    .any(|(what, _, _, mode, _, _)| mode == "block" && what.contains("sleep")),
+                "must never take a logind sleep block lock during import delivery, got {during:?}"
             );
+            if graphical {
+                assert!(
+                    !during
+                        .iter()
+                        .any(|(what, _, _, mode, _, _)| what == "idle" && mode == "block"),
+                    "must not take logind idle block on a graphical session, got {during:?}"
+                );
+            } else {
+                assert!(
+                    during
+                        .iter()
+                        .any(|(what, who, _, mode, _, _)| what == "idle"
+                            && who == text!("linux.metadata.name")
+                            && mode == "block"),
+                    "expected headless idle block lock during live import delivery, got {during:?}"
+                );
+            }
 
             // Simulate PrepareForSleep(true) while /save is still gated: delivery pauses
             // and logind clears every held lock immediately.
