@@ -260,7 +260,7 @@ linux.copy.audio = audio
 
 linux.copy.audiointakecancontinue = l'ingresso audio può continuare.
 
-linux.copy.availablelogsareshownbelowcheckthenotesforg = i registri disponibili sono mostrati sotto. controlla le note per le lacune prima di salvare una copia.
+linux.copy.availablelogsareshownbelowcheckthenotesforg = i registri disponibili sono sotto. controlla le note per i vuoti prima di salvare una copia.
 
 linux.copy.cancelpairing = annulla l'accoppiamento
 
@@ -324,7 +324,7 @@ linux.copy.couldntsaveactivityintaketryagain = non è stato possibile salvare l'
 
 linux.copy.couldntsaveallyoursettingsyoureditsarestill = non è stato possibile salvare tutte le tue impostazioni. le tue modifiche sono ancora qui. riprova.
 
-linux.copy.couldntsavethecopytrysavingtoanotherfolder = non è stato possibile salvare la copia. prova a salvarla in un'altra cartella.
+linux.copy.couldntsavethecopytrysavingtoanotherfolder = non è stato possibile salvare la copia. prova a salvare in un'altra cartella.
 
 linux.copy.couldntsaveyouranswertryagain = non è stato possibile salvare la tua risposta. riprova.
 
@@ -356,7 +356,7 @@ linux.copy.desktopactivity = attività sul desktop
 
 linux.copy.desktopactivityisonwheneverthesolstoneapptak = l'attività sul desktop è attiva ogni volta che l'app di solstone prende il tuo schermo, e la pausa mette in pausa entrambi. l'app di solstone prende l'app, il titolo della finestra, gli indirizzi web e il tempo attivo o inattivo che condividi con lei, e tutto va nel tuo diario.
 
-linux.copy.doesthismatchyourjournal = questo corrisponde al tuo diario?
+linux.copy.doesthismatchyourjournal = corrisponde al tuo diario?
 
 linux.copy.drawcursor = disegna il cursore
 
@@ -366,7 +366,7 @@ linux.copy.foundjournalthiscomputer = trovato il tuo diario su questo computer
 
 linux.copy.from = da { $folder }
 
-linux.copy.getafreshlink = ottieni un nuovo link
+linux.copy.getafreshlink = ottieni un link nuovo
 
 linux.copy.gethelp = ottieni aiuto
 
@@ -438,9 +438,9 @@ linux.copy.newpairingcancelled = nuovo accoppiamento annullato
 
 linux.copy.newpairingcancelledyourcurrentpairingstaysin = nuovo accoppiamento annullato. il tuo accoppiamento attuale resta in uso.
 
-linux.copy.nologfilesareavailableyettryagainafterusing = non sono ancora disponibili file di registro. riprova dopo aver usato l'app.
+linux.copy.nologfilesareavailableyettryagainafterusing = non ci sono ancora file di registro. riprova dopo aver usato l'app.
 
-linux.copy.norecentlogsareavailableyettryagainafterusi = non sono ancora disponibili registri recenti. riprova dopo aver usato l'app.
+linux.copy.norecentlogsareavailableyettryagainafterusi = non ci sono ancora registri recenti. riprova dopo aver usato l'app.
 
 linux.copy.not = non
 
@@ -450,7 +450,7 @@ linux.copy.nothingwaitinggoesintoyourjournaluntilyoudo = niente in attesa va nel
 
 linux.copy.notpaired = non accoppiato
 
-linux.copy.notreachingyourjournalrightnow = non ci si può connettere al tuo diario in questo momento
+linux.copy.notreachingyourjournalrightnow = non si connette al tuo diario in questo momento
 
 linux.copy.notthisdevice = non su questo dispositivo
 
@@ -458,13 +458,13 @@ linux.copy.notyet = non ancora
 
 linux.copy.obsidian = { $literal1 }
 
-linux.copy.obsidianwarning = il tuo diario ha già un vault chiamato { $vault } da un altro dispositivo. se continui, le modifiche da entrambi i dispositivi vanno nel tuo diario.
+linux.copy.obsidianwarning = il tuo diario ha già un vault chiamato { $vault } da un altro dispositivo. se continui, le modifiche di entrambi i dispositivi vanno nel tuo diario.
 
-linux.copy.obsidianwarningdate = il tuo diario ha già un vault chiamato { $vault } da un altro dispositivo, aggiornato l'ultima volta { $date }. se continui, le modifiche da entrambi i dispositivi vanno nel tuo diario.
+linux.copy.obsidianwarningdate = il tuo diario ha già un vault chiamato { $vault } da un altro dispositivo, aggiornato l'ultima volta { $date }. se continui, le modifiche di entrambi i dispositivi vanno nel tuo diario.
 
-linux.copy.obsidianwarningdevice = il tuo diario ha già un vault chiamato { $vault } da { $device }. se continui, le modifiche da entrambi i dispositivi vanno nel tuo diario.
+linux.copy.obsidianwarningdevice = il tuo diario ha già un vault chiamato { $vault } da { $device }. se continui, le modifiche di entrambi i dispositivi vanno nel tuo diario.
 
-linux.copy.obsidianwarningdevicedate = il tuo diario ha già un vault chiamato { $vault } da { $device }, aggiornato l'ultima volta { $date }. se continui, le modifiche da entrambi i dispositivi vanno nel tuo diario.
+linux.copy.obsidianwarningdevicedate = il tuo diario ha già un vault chiamato { $vault } da { $device }, aggiornato l'ultima volta { $date }. se continui, le modifiche di entrambi i dispositivi vanno nel tuo diario.
 
 linux.copy.off = disattivo
 
@@ -500,7 +500,7 @@ linux.copy.pairingdidntgothroughgetanewpairinglinkfro = l'accoppiamento non è r
 
 linux.copy.pairinglink = link di accoppiamento
 
-linux.copy.partthisvaultcant = una parte di questo vault non può essere letta. controlla i permessi sulle cartelle al suo interno. il resto del vault continua ad andare nel tuo diario.
+linux.copy.partthisvaultcant = una parte di questo vault non si può leggere. controlla i permessi delle cartelle al suo interno. il resto del vault continua ad andare nel tuo diario.
 
 linux.copy.pasteapairinglinkfromyourjournal = incolla un link di accoppiamento dal tuo diario.
 
@@ -524,7 +524,7 @@ linux.copy.readrecentlogs = leggi i registri recenti
 
 linux.copy.readsettingsagain = leggi di nuovo le impostazioni
 
-linux.copy.readthelogsbelowthenchoosewhethertosaveaco = leggi i registri qui sotto, poi scegli se salvare una copia.
+linux.copy.readthelogsbelowthenchoosewhethertosaveaco = leggi i registri sotto, poi scegli se salvare una copia.
 
 linux.copy.readthesolstoneappsrecentlogsbeforesavinga = leggi i registri recenti dell'app di solstone prima di salvare una copia per un rapporto di supporto. niente viene inviato da qui.
 
@@ -546,7 +546,7 @@ linux.copy.s10counting = controllo…
 
 linux.copy.s10today = inizia da oggi
 
-linux.copy.s11 = scegli quanto indietro iniziare, poi portali dentro.
+linux.copy.s11 = scegli da quanto indietro iniziare, poi portali.
 
 linux.copy.s12 = non è stato possibile contare i tuoi screenshot.
 
@@ -612,13 +612,13 @@ linux.copy.settingsactivityonlyhelp = solo l'attività sul desktop, con lo scher
 
 linux.copy.settingssaved = impostazioni salvate.
 
-linux.copy.solstoneappcantread = l'app di solstone non può leggere questo vault. controlla che la sua cartella ci sia e che il disco su cui si trova sia connesso. niente cambia nel tuo diario mentre non è raggiungibile.
+linux.copy.solstoneappcantread = l'app di solstone non può leggere questo vault. controlla che la sua cartella ci sia e che l'unità su cui si trova sia connessa. niente cambia nel tuo diario mentre non è raggiungibile.
 
 linux.copy.solstoneappcouldntsave = non è stato possibile salvare la posizione dell'app di solstone per questo vault. controlla che questo computer abbia spazio libero.
 
 linux.copy.solstoneappdidntfind = l'app di solstone non ha trovato un vault su questo computer. scegli invece la sua cartella.
 
-linux.copy.solstoneapptakesnotesone = l'app di solstone prende le note in un solo vault su questo computer. tutte vanno nel tuo diario, poi ciascuna quando cambia. il tuo vault resta com'è.
+linux.copy.solstoneapptakesnotesone = l'app di solstone prende le note di un vault su questo computer. tutte vanno nel tuo diario, poi ognuna quando cambia. il tuo vault resta com'è.
 
 linux.copy.somenotescouldntgo = non è stato possibile far entrare alcune note nel tuo diario. l'app di solstone le riprova la prossima volta che si avvia.
 
@@ -642,7 +642,7 @@ linux.copy.takestmuxsessionsallit = prende le tue sessioni { $literal1 }, e tutt
 
 linux.copy.terminal = terminale
 
-linux.copy.thatdoesntmatch = quello non corrisponde
+linux.copy.thatdoesntmatch = non corrisponde
 
 linux.copy.thatfolderisntobsidian = quella cartella non è un vault { $literal1 }, quindi l'app di solstone non l'ha aggiunta. scegli la cartella propria del vault.
 
@@ -682,7 +682,7 @@ linux.copy.toolargebring = troppo grande da prendere
 
 linux.copy.tryagain = riprova
 
-linux.copy.turningthisoffstopsbringing = disattivare questo smette di prendere le modifiche. ciò che è già nel tuo diario resta lì, e ciò che è in attesa resta su questo computer finché non lo attivi di nuovo.
+linux.copy.turningthisoffstopsbringing = disattivare questo smette di portare le modifiche. ciò che è già nel tuo diario resta lì, e ciò che è in attesa resta su questo computer finché non lo attivi di nuovo.
 
 linux.copy.turnoff = disattiva
 
@@ -696,7 +696,7 @@ linux.copy.usethisvault = usa questo vault
 
 linux.copy.vault = vault
 
-linux.copy.vaultsthiscomputer = i vault su questo computer
+linux.copy.vaultsthiscomputer = vault su questo computer
 
 linux.copy.vaultwiththisnameis = un vault con questo nome è già nel tuo diario
 
@@ -1064,7 +1064,7 @@ linux.import.filekind = il tuo diario non può prendere questo tipo di file
 
 linux.import.filemissing = manca la copia su questo dispositivo
 
-linux.import.filenotread = non è stato possibile leggere questo. aggiungilo di nuovo
+linux.import.filenotread = non è stato possibile leggerlo. aggiungilo di nuovo
 
 linux.import.filetoolarge = è più grande di quanto il tuo diario prende
 
@@ -1102,7 +1102,7 @@ linux.import.recentrow.a11y = { $name }, nel tuo diario, { $when }. apri nel tuo
 
 linux.import.remove.a11y = rimuovi { $name }
 
-linux.import.removeerror = non è stato possibile rimuovere questo. riprova.
+linux.import.removeerror = non è stato possibile rimuoverlo. riprova.
 
 linux.import.removereadytoreview = questo rimuove la copia su questo dispositivo. la copia in attesa nel tuo diario resta lì finché non la scarti o non scade.
 
@@ -1124,11 +1124,11 @@ linux.import.sendagain = invia di nuovo per rivedere
 
 linux.import.sendagain.a11y = invia di nuovo { $name } per rivedere
 
-linux.import.sending = in invio
+linux.import.sending = invio
 
-linux.import.sendingellipsis = in invio al tuo diario…
+linux.import.sendingellipsis = invio al tuo diario in corso…
 
-linux.import.sendingtojournal = in invio al tuo diario.
+linux.import.sendingtojournal = invio al tuo diario.
 
 linux.import.statusneedsyou = le importazioni hanno bisogno di te
 
@@ -1352,7 +1352,7 @@ linux.screenshots.unreadablecount = { $count ->
    *[other] non è stato possibile leggere { $formatted } screenshot.
     }
 
-linux.service.currentexecutablehasnoparentdirectory = l'eseguibile attuale non ha una directory superiore
+linux.service.currentexecutablehasnoparentdirectory = l'eseguibile attuale non ha una cartella superiore
 
 linux.service.errorremovingxx = Errore nella rimozione di { $value1 }: { $error }
 
@@ -1444,7 +1444,7 @@ linux.shell.amountsince = { $total }, da { $date }
 
 linux.shell.attention = richiede attenzione
 
-linux.shell.browserunavailable = le pagine del browser non possono iniziare ora.
+linux.shell.browserunavailable = le pagine del browser non possono avviarsi ora.
 
 linux.shell.checking = controllo…
 
@@ -1506,9 +1506,9 @@ linux.shell.month.october = ottobre
 
 linux.shell.month.september = settembre
 
-linux.shell.monthday = { $month } { $day }
+linux.shell.monthday = { $day } { $month }
 
-linux.shell.monthdayyear = { $month } { $day }, { $year }
+linux.shell.monthdayyear = { $day } { $month } { $year }
 
 linux.shell.morning = buongiorno
 
@@ -1524,7 +1524,7 @@ linux.shell.pagecount = { $count ->
    *[other] { $display } pagine
     }
 
-linux.shell.pauseleft = in pausa, { $minutes } min rimanenti
+linux.shell.pauseleft = in pausa, { $minutes } min rimasti
 
 linux.shell.readytosetup = pronto per configurare
 
@@ -1768,7 +1768,7 @@ linux.window.brightharbor = bright · harbor
 
 linux.window.browsers = browser
 
-linux.window.browsersbreath = sui siti che consenti, l'estensione di solstone prende il testo e la disposizione approssimativa della pagina, e tutto va nel tuo diario.
+linux.window.browsersbreath = sui siti che consenti, l'estensione di solstone prende il testo della pagina e la disposizione approssimativa, e tutto va nel tuo diario.
 
 linux.window.browsersgap = le pagine arrivano dall'estensione di solstone. qui non c'è un interruttore per lei.
 
@@ -1794,7 +1794,7 @@ linux.window.files = file
 
 linux.window.foregroundtitleurlidle = { $route }; primo piano { $foreground }; titolo { $title }; url { $url }; inattivo { $idle }
 
-linux.window.goesalongwithit = va insieme a questo
+linux.window.goesalongwithit = va insieme
 
 linux.window.help = aiuto
 
@@ -1868,7 +1868,7 @@ linux.window.sidebar = barra laterale
 
 linux.window.sofar = finora
 
-linux.window.somethingyouwereaddingdidntfinish = qualcosa che stavi aggiungendo non ha completato il salvataggio. aggiungilo di nuovo.
+linux.window.somethingyouwereaddingdidntfinish = qualcosa che stavi aggiungendo non ha finito di salvarsi. aggiungilo di nuovo.
 
 linux.window.sources = fonti
 
