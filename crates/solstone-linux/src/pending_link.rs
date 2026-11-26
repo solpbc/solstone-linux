@@ -95,8 +95,13 @@ mod tests {
         assert!(clicked_link("solstone://pair/#FRAG").is_some());
         assert!(clicked_link("SOLSTONE://pair#FRAG").is_some());
         assert!(clicked_link("solstone://pair").is_none());
+        assert!(clicked_link("https://go.solstone.app/p#FRAG").is_some());
         assert!(clicked_link("solstone://open#FRAG").is_some());
         assert!(clicked_link("solstone://open?bad#FRAG").is_some());
+        assert!(clicked_link("https://go.solstone.app/j#FRAG").is_some());
+        assert!(clicked_link("https://go.solstone.app/j?utm_source=chatgpt.com#FRAG").is_some());
+        assert!(clicked_link("https://go.solstone.app/j").is_some());
+        assert!(clicked_link("https://example.com/j#FRAG").is_none());
         assert!(clicked_link("--in-scope").is_none());
     }
 
@@ -110,6 +115,10 @@ mod tests {
             "solstone://user@open#abc",
             "solstone://open/#abc",
             "solstone://open?bad#abc",
+            "https://go.solstone.app/j#abc~090020",
+            "https://go.solstone.app/j?utm_source=chatgpt.com#abc~090020",
+            "https://go.solstone.app/j",
+            "https://user@go.solstone.app/j#abc",
         ] {
             store(&path, &clicked_link(url).unwrap()).unwrap();
             assert_eq!(take(&path).as_deref(), Some(url));
