@@ -6,10 +6,12 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.54] - 2026-11-26
+
 ### Added
 
-- with your journal up to date, large files you choose or drop on the app's import page now send in pieces so a transfer picks up where it left off after a network switch, restart, or sleep instead of starting over. the import tile and the app's import page show how much your journal has received and when a transfer is paused, and the import page lets you cancel an unfinished transfer.
-- the solstone app on linux now also opens `https://go.solstone.app/j` journal links handed to it directly, such as from a desktop link chooser or `solstone-linux window`, taking you to that place in your journal.
+- when your journal is up to date, large files you choose or drop on the app's import page now send in pieces so a transfer picks up where it left off after a network switch, restart, or sleep instead of starting over. the import tile and the app's import page show how much your journal has received and when a transfer is paused, and the import page lets you cancel an unfinished transfer.
+- the solstone app on linux now also opens `https://go.solstone.app/j` journal links handed to it directly, such as with `solstone-linux window`, taking you to that place in your journal.
 
 ## [2.0.53] - 2026-11-25
 
