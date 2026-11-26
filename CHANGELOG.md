@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- when one piece of a large file times out during import, the app checks what your journal received. if that piece didn't arrive, the app can try a smaller one.
+
 ## [2.0.54] - 2026-11-26
 
 ### Added

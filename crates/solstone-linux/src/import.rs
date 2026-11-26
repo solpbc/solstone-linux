@@ -170,6 +170,34 @@ struct ResumableUpload {
     remote_offset: u64,
     chunk_bytes: u64,
     total_bytes: u64,
+    // Effective ceiling after the journal confirms a timed-out PUT did not advance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry_chunk_limit: Option<u64>,
+    // Attempted at remote_offset. Only a valid status read consumes this evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timed_out_chunk_bytes: Option<u64>,
+}
+
+impl ResumableUpload {
+    fn reconcile(&mut self, next_offset: u64, advertised_chunk: u64) {
+        if let Some(attempted) = self.timed_out_chunk_bytes.take()
+            && next_offset == self.remote_offset
+        {
+            // The journal confirmed no bytes from this PUT. Further timeouts can shrink
+            // the piece again. Always leave at least a 1 KiB ceiling for tiny tail pieces.
+            self.retry_chunk_limit =
+                Some((attempted / 2).clamp(MIN_RESUMABLE_CHUNK_BYTES, 512 * 1024));
+        }
+        self.chunk_bytes = advertised_chunk;
+        self.remote_offset = next_offset;
+    }
+
+    fn next_chunk_len(&self) -> usize {
+        let limit = self
+            .chunk_bytes
+            .min(self.retry_chunk_limit.unwrap_or(self.chunk_bytes));
+        (self.total_bytes - self.remote_offset).min(limit) as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2571,9 +2599,20 @@ impl ImportHandle {
                 id: id.clone(),
             };
             self.publish_status();
+            let current_upload = item.upload.as_ref().filter(|upload| {
+                upload.binding == binding
+                    && upload.instance_id == capability.writer().identity_key()
+            });
+            if current_upload.is_some_and(|upload| upload.timed_out_chunk_bytes.is_some())
+                && resumable_config.is_none()
+            {
+                // An unanswered PUT must be reconciled before choosing either delivery path.
+                self.schedule_resumable_backoff(&item.id, true);
+                continue;
+            }
             let send_result = if let Some(config) = resumable_config
                 && advertises_resumable
-                && item.size >= config.threshold_bytes
+                && (current_upload.is_some() || item.size >= config.threshold_bytes)
             {
                 match self
                     .send_item_resumable(
@@ -2585,7 +2624,7 @@ impl ImportHandle {
                         version.as_deref(),
                         running,
                         config,
-                        true,
+                        advertises_resumable,
                         &cancel_token,
                     )
                     .await
@@ -2850,7 +2889,7 @@ impl ImportHandle {
             .is_some_and(|t| t.needs_resync);
 
         if let Some(existing_upload) = item.upload.clone() {
-            if needs_resync {
+            if needs_resync || existing_upload.timed_out_chunk_bytes.is_some() {
                 self.set_transfer_phase(&item.id, TransferPhase::Resuming, true);
                 let Some(outcome) = guarded_with_cancel(
                     client,
@@ -2875,18 +2914,16 @@ impl ImportHandle {
                 {
                     return Ok(ResumableStep::Done);
                 }
-                match classify_upload_status_reply(outcome, item.size) {
+                match classify_upload_status_reply(outcome, &item.id, &existing_upload) {
                     UploadStatusReply::Open {
                         next_offset,
                         chunk_bytes,
                     } => {
                         let advanced = next_offset > existing_upload.remote_offset;
                         if let Some(upload) = &mut item.upload {
-                            upload.remote_offset = next_offset;
-                            if let Some(cb) = chunk_bytes {
-                                upload.chunk_bytes = cb;
-                            }
+                            upload.reconcile(next_offset, chunk_bytes);
                         }
+                        self.publish(item.clone())?;
                         if advanced {
                             self.reset_resumable_backoff(&item.id, TransferPhase::Sending);
                         } else {
@@ -2901,7 +2938,6 @@ impl ImportHandle {
                             }
                             self.publish_status();
                         }
-                        self.publish(item.clone())?;
                     }
                     UploadStatusReply::NotFound(reason) => {
                         item.upload = None;
@@ -3015,6 +3051,8 @@ impl ImportHandle {
                         remote_offset: next_offset,
                         chunk_bytes,
                         total_bytes: item.size,
+                        retry_chunk_limit: None,
+                        timed_out_chunk_bytes: None,
                     });
                     self.reset_resumable_backoff(&item.id, TransferPhase::Sending);
                     self.publish(item.clone())?;
@@ -3108,7 +3146,7 @@ impl ImportHandle {
                     return Ok(ResumableStep::Done);
                 }
                 let offset = upload.remote_offset;
-                let chunk_len = (item.size - offset).min(upload.chunk_bytes) as usize;
+                let chunk_len = upload.next_chunk_len();
                 let read_path = payload_path.clone();
                 let expected_size = item.size;
                 let chunk_read = tokio::task::spawn_blocking(move || {
@@ -3159,6 +3197,18 @@ impl ImportHandle {
                     }
                     return Ok(ResumableStep::Done);
                 };
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) if error.is_timeout() && !error.is_connect() => {
+                        if let Some(active) = &mut item.upload {
+                            active.timed_out_chunk_bytes = Some(chunk_len as u64);
+                        }
+                        self.schedule_resumable_backoff(&item.id, true);
+                        self.publish(item)?;
+                        return Ok(ResumableStep::Done);
+                    }
+                    Err(_) => LinkOutcome::TransportUnavailable,
+                };
                 self.auth_answer(client, association, &outcome);
                 if outcome
                     .status_code()
@@ -3167,7 +3217,7 @@ impl ImportHandle {
                 {
                     return Ok(ResumableStep::Done);
                 }
-                match classify_upload_chunk_reply(outcome, offset, item.size) {
+                match classify_upload_chunk_reply(outcome, offset + chunk_len as u64, item.size) {
                     UploadChunkReply::Accepted { next_offset } => {
                         checksum_retries = 0;
                         offset_resyncs = 0;
@@ -3210,8 +3260,16 @@ impl ImportHandle {
                             {
                                 return Ok(ResumableStep::Done);
                             }
-                            match classify_upload_status_reply(status_outcome, item.size) {
-                                UploadStatusReply::Open { next_offset, .. } => Some(next_offset),
+                            match classify_upload_status_reply(status_outcome, &item.id, &upload) {
+                                UploadStatusReply::Open {
+                                    next_offset,
+                                    chunk_bytes,
+                                } => {
+                                    if let Some(active) = &mut item.upload {
+                                        active.chunk_bytes = chunk_bytes;
+                                    }
+                                    Some(next_offset)
+                                }
                                 UploadStatusReply::NotFound(reason) => {
                                     item.upload = None;
                                     self.state
@@ -3987,12 +4045,12 @@ fn parse_resumable_config(body: &[u8]) -> Option<ResumableConfig> {
     let threshold_bytes = obj.get("threshold_bytes")?.as_u64()?;
     let chunk_bytes = obj.get("chunk_bytes")?.as_u64()?;
     let max_file_bytes = obj.get("max_file_bytes")?.as_u64()?;
-    if threshold_bytes == 0 || max_file_bytes == 0 {
+    if threshold_bytes == 0 || chunk_bytes == 0 || max_file_bytes == 0 {
         return None;
     }
     Some(ResumableConfig {
         threshold_bytes,
-        chunk_bytes: chunk_bytes.clamp(MIN_RESUMABLE_CHUNK_BYTES, MAX_RESUMABLE_CHUNK_BYTES),
+        chunk_bytes: chunk_bytes.min(MAX_RESUMABLE_CHUNK_BYTES),
         max_file_bytes,
     })
 }
@@ -4107,9 +4165,8 @@ fn classify_upload_create_reply(
                     let chunk_bytes = root
                         .get("chunk_bytes")
                         .and_then(Value::as_u64)
-                        .map_or(config.chunk_bytes, |v| {
-                            v.clamp(MIN_RESUMABLE_CHUNK_BYTES, MAX_RESUMABLE_CHUNK_BYTES)
-                        });
+                        .filter(|&v| v > 0)
+                        .map_or(config.chunk_bytes, |v| v.min(MAX_RESUMABLE_CHUNK_BYTES));
                     return UploadCreateReply::Open {
                         upload_id,
                         next_offset,
@@ -4141,16 +4198,17 @@ fn classify_upload_create_reply(
 
 #[derive(Debug)]
 enum UploadStatusReply {
-    Open {
-        next_offset: u64,
-        chunk_bytes: Option<u64>,
-    },
+    Open { next_offset: u64, chunk_bytes: u64 },
     NotFound(String),
     Transient,
     Refused(Refusal),
 }
 
-fn classify_upload_status_reply(outcome: LinkOutcome, expected_total: u64) -> UploadStatusReply {
+fn classify_upload_status_reply(
+    outcome: LinkOutcome,
+    item_id: &str,
+    upload: &ResumableUpload,
+) -> UploadStatusReply {
     let LinkOutcome::Success { status, body } = outcome else {
         return UploadStatusReply::Transient;
     };
@@ -4172,6 +4230,11 @@ fn classify_upload_status_reply(outcome: LinkOutcome, expected_total: u64) -> Up
         return UploadStatusReply::Transient;
     }
     if code == 404 {
+        if upload.timed_out_chunk_bytes.is_some()
+            && root.get("reason_code").and_then(Value::as_str) != Some("upload_not_found")
+        {
+            return UploadStatusReply::Transient;
+        }
         let reason = json_string(&root, "error")
             .unwrap_or_else(|| text!("linux.import.journalrefusal").to_owned());
         return UploadStatusReply::NotFound(reason);
@@ -4179,15 +4242,17 @@ fn classify_upload_status_reply(outcome: LinkOutcome, expected_total: u64) -> Up
     if code == 200
         && json_string(&root, "status").as_deref() == Some("open")
         && let Some(next_offset) = root.get("next_offset").and_then(Value::as_u64)
-        && next_offset <= expected_total
+        && root.get("upload_id").and_then(Value::as_str) == Some(&upload.upload_id)
+        && root.get("client_item_id").and_then(Value::as_str) == Some(item_id)
+        && root.get("total_bytes").and_then(Value::as_u64) == Some(upload.total_bytes)
+        && next_offset <= upload.total_bytes
+        && (upload.timed_out_chunk_bytes.is_none() || next_offset >= upload.remote_offset)
+        && let Some(chunk_bytes) = root.get("chunk_bytes").and_then(Value::as_u64)
+        && chunk_bytes > 0
     {
-        let chunk_bytes = root
-            .get("chunk_bytes")
-            .and_then(Value::as_u64)
-            .map(|v| v.clamp(MIN_RESUMABLE_CHUNK_BYTES, MAX_RESUMABLE_CHUNK_BYTES));
         return UploadStatusReply::Open {
             next_offset,
-            chunk_bytes,
+            chunk_bytes: chunk_bytes.min(MAX_RESUMABLE_CHUNK_BYTES),
         };
     }
     if status.is_success() {
@@ -4209,7 +4274,7 @@ enum UploadChunkReply {
 
 fn classify_upload_chunk_reply(
     outcome: LinkOutcome,
-    sent_offset: u64,
+    expected_end: u64,
     expected_total: u64,
 ) -> UploadChunkReply {
     let LinkOutcome::Success { status, body } = outcome else {
@@ -4230,7 +4295,7 @@ fn classify_upload_chunk_reply(
     }
     if code == 200 {
         if let Some(next_offset) = root.get("next_offset").and_then(Value::as_u64)
-            && next_offset >= sent_offset
+            && next_offset == expected_end
             && next_offset <= expected_total
         {
             return UploadChunkReply::Accepted { next_offset };
@@ -5122,6 +5187,95 @@ mod tests {
         .unwrap();
         assert!(legacy_item.sha256.is_none());
         assert!(legacy_item.upload.is_none());
+    }
+
+    #[test]
+    fn timed_out_pieces_respect_journal_limits_and_tiny_tails() {
+        // Old persisted upload records have neither of the optional recovery fields.
+        let mut upload: ResumableUpload = serde_json::from_value(json!({
+            "upload_id": "550e8400-e29b-41d4-a716-446655440000",
+            "instance_id": "home", "binding": "device", "total_bytes": 5 * 1024 * 1024 + 10,
+            "remote_offset": 0, "chunk_bytes": 4 * 1024 * 1024
+        }))
+        .unwrap();
+        assert_eq!(upload.next_chunk_len(), 4 * 1024 * 1024);
+        upload.timed_out_chunk_bytes = Some(upload.next_chunk_len() as u64);
+        upload.reconcile(0, upload.chunk_bytes);
+        assert_eq!(upload.next_chunk_len(), 512 * 1024);
+        upload.reconcile(0, 32 * 1024);
+        assert_eq!(upload.next_chunk_len(), 32 * 1024);
+        upload.timed_out_chunk_bytes = Some(32 * 1024);
+        upload.reconcile(0, 4 * 1024 * 1024);
+        assert_eq!(upload.next_chunk_len(), 16 * 1024);
+        upload.remote_offset = upload.total_bytes - 10;
+        upload.timed_out_chunk_bytes = Some(10);
+        upload.reconcile(upload.remote_offset, 128);
+        assert_eq!(upload.next_chunk_len(), 10);
+    }
+
+    #[test]
+    fn only_the_same_open_upload_can_confirm_a_timed_out_put() {
+        let upload = ResumableUpload {
+            upload_id: "fixture-id".into(),
+            instance_id: "home".into(),
+            binding: "device".into(),
+            remote_offset: 1000,
+            chunk_bytes: 4096,
+            total_bytes: 5000,
+            retry_chunk_limit: None,
+            timed_out_chunk_bytes: Some(4000),
+        };
+        let open = json!({"upload_id":"fixture-id","client_item_id":"item","status":"open",
+            "total_bytes":5000,"next_offset":1000,"chunk_bytes":512});
+        let classify = |body: &Value| {
+            classify_upload_status_reply(
+                LinkOutcome::Success {
+                    status: reqwest::StatusCode::OK,
+                    body: serde_json::to_vec(body).unwrap(),
+                },
+                "item",
+                &upload,
+            )
+        };
+        assert!(matches!(
+            classify(&open),
+            UploadStatusReply::Open {
+                next_offset: 1000,
+                chunk_bytes: 512
+            }
+        ));
+        for (key, value) in [
+            ("next_offset", json!(999)),
+            ("next_offset", json!(5001)),
+            ("status", json!("closed")),
+            ("client_item_id", json!("other")),
+            ("upload_id", json!("other")),
+            ("total_bytes", json!(4000)),
+            ("chunk_bytes", Value::Null),
+            ("chunk_bytes", json!(0)),
+        ] {
+            let mut wrong = open.clone();
+            wrong[key] = value;
+            assert!(
+                matches!(classify(&wrong), UploadStatusReply::Transient),
+                "{key}"
+            );
+        }
+        let missing = |body| {
+            classify_upload_status_reply(
+                LinkOutcome::Success {
+                    status: reqwest::StatusCode::NOT_FOUND,
+                    body,
+                },
+                "item",
+                &upload,
+            )
+        };
+        assert!(matches!(missing(Vec::new()), UploadStatusReply::Transient));
+        assert!(matches!(
+            missing(br#"{"reason_code":"upload_not_found"}"#.to_vec()),
+            UploadStatusReply::NotFound(_)
+        ));
     }
 
     #[test]
@@ -6577,6 +6731,8 @@ mod tests {
             dedup_already_imported: bool,
             gate_put_at_offset: Option<(u64, Arc<AtomicBool>)>,
             gated_put_arrived: Arc<Notify>,
+            discard_gated_put: bool,
+            fail_next_status: bool,
         }
 
         impl MockJournalState {
@@ -6601,6 +6757,8 @@ mod tests {
                     dedup_already_imported: false,
                     gate_put_at_offset: None,
                     gated_put_arrived: Arc::new(Notify::new()),
+                    discard_gated_put: false,
+                    fail_next_status: false,
                 }
             }
 
@@ -6801,6 +6959,9 @@ mod tests {
                     let (upload_id, query) = rest.split_once('?').unwrap_or((rest, ""));
                     if req.method == "GET" {
                         st.get_status_calls.push(upload_id.to_owned());
+                        if std::mem::take(&mut st.fail_next_status) {
+                            return Some(PeerResponse::plain(503, Vec::new()));
+                        }
                         let Some(session) = st.sessions.get(upload_id) else {
                             return Some(PeerResponse::plain(
                                 404,
@@ -6977,8 +7138,14 @@ mod tests {
                             .as_ref()
                             .filter(|(g_off, _)| *g_off == offset)
                             .map(|(_, g)| Arc::clone(g));
-                        if gate.is_some() {
+                        if let Some(gate) = &gate {
                             st.gated_put_arrived.notify_waiters();
+                            if st.discard_gated_put {
+                                return Some(
+                                    PeerResponse::plain(503, Vec::new())
+                                        .with_nonblocking_gate(Arc::clone(gate)),
+                                );
+                            }
                         }
                         let Some(session) = st.sessions.get_mut(upload_id) else {
                             return Some(PeerResponse::plain(
@@ -7074,7 +7241,13 @@ mod tests {
                 format!("{:x}", Sha256::digest(&large))
             );
 
-            // Older journal without resumable_import_uploads stays on /save even for large files.
+            // A same-journal rollback keeps the existing single-POST fallback for an upload
+            // whose last PUT returned a transient HTTP status rather than timing out.
+            let _legacy_id = h.add(&large).await;
+            mock.lock().unwrap().fail_put_at_offset = Some((0, 503, b"{}".to_vec()));
+            h.pass().await;
+            assert!(h.handle.next_retry_delay().is_some());
+            h.handle.on_network_or_wake();
             h.peer.set_route(
                 "/api/system/status",
                 200,
@@ -7082,7 +7255,6 @@ mod tests {
                     .to_string()
                     .into_bytes(),
             );
-            let _legacy_id = h.add(&large).await;
             h.pass().await;
             assert!(h.handle.document().rows.is_empty());
             assert_eq!(h.saves(), 2);
@@ -7189,6 +7361,120 @@ mod tests {
                 assert_eq!(st.committed_bytes.as_deref(), Some(payload.as_slice()));
             }
             h.close().await;
+        }
+
+        #[tokio::test]
+        async fn resumable_timeout_resyncs_before_retry_and_preserves_bytes_across_restart() {
+            const CHUNK: usize = 2 * 1024 * 1024;
+            for committed_before_timeout in [false, true] {
+                let h = Harness::new().await;
+                let mock = install_mock_resumable_journal(&h.peer, 1024, CHUNK as u64);
+                let gate = Arc::new(AtomicBool::new(false));
+                {
+                    let mut st = mock.lock().unwrap();
+                    st.gate_put_at_offset = Some((CHUNK as u64, gate.clone()));
+                    st.discard_gated_put = !committed_before_timeout;
+                }
+                let payload: Vec<u8> = (0..3 * CHUNK + 43).map(|n| (n % 251) as u8).collect();
+                let id = h.add(&payload).await;
+                let handle = h.handle.clone();
+                let client = h.client.clone();
+                let running = h.running.clone();
+                let delivery = tokio::spawn(async move { handle.deliver(&client, &running).await });
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    while mock.lock().unwrap().put_offsets.len() < 2 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                // Expire the real reqwest request deadline after the peer received the PUT.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(301)).await;
+                tokio::time::resume();
+                tokio::time::timeout(Duration::from_secs(5), delivery)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(h.handle.next_retry_delay().is_some());
+                assert_eq!(h.handle.handoff_status(&id)["bytes_sent"], CHUNK);
+                assert_eq!(h.handle.handoff_status(&id)["phase"], "paused");
+
+                let staged = h.handle.root.as_ref().unwrap().join(&id).join("payload");
+                assert_eq!(fs::read(&staged).unwrap(), payload);
+                gate.store(true, Ordering::Release);
+                h.peer.notify_response_gates();
+                {
+                    let mut st = mock.lock().unwrap();
+                    st.gate_put_at_offset = None;
+                    st.fail_next_status = true;
+                }
+                let restored = ImportHandle::new(
+                    h.handle.root.clone().unwrap(),
+                    &h.client,
+                    SyncTrigger::default(),
+                );
+                restored.restore().unwrap();
+                let status_route = "/api/system/status";
+                let set_capabilities = |caps: Value| {
+                    h.peer.set_route(
+                        status_route,
+                        200,
+                        json!({"version":{"current":"2.0.55"},"capabilities":caps})
+                            .to_string()
+                            .into_bytes(),
+                    )
+                };
+                set_capabilities(json!([]));
+                restored.deliver(&h.client, &h.running).await;
+                assert_eq!(h.saves(), 0);
+                assert!(mock.lock().unwrap().get_status_calls.is_empty());
+                assert!(restored.next_retry_delay().is_some());
+                set_capabilities(json!([RESUMABLE_CAPABILITY]));
+                restored.on_network_or_wake();
+
+                restored.deliver(&h.client, &h.running).await;
+                assert_eq!(mock.lock().unwrap().put_offsets, vec![0, CHUNK as u64]);
+                assert_eq!(restored.handoff_status(&id)["bytes_sent"], CHUNK);
+                assert!(restored.next_retry_delay().is_some());
+                restored.on_network_or_wake();
+                restored.deliver(&h.client, &h.running).await;
+                assert!(restored.document().rows.is_empty());
+                assert!(!staged.exists());
+                {
+                    let st = mock.lock().unwrap();
+                    assert_eq!(st.committed_bytes.as_ref(), Some(&payload));
+                    assert!(st.framing_errors.is_empty(), "{:?}", st.framing_errors);
+                    assert_eq!(st.get_status_calls.len(), 2);
+                }
+                let lengths: Vec<_> = h
+                    .peer
+                    .requests()
+                    .iter()
+                    .filter(|req| req.method == "PUT")
+                    .map(|req| req.body.len())
+                    .collect();
+                if committed_before_timeout {
+                    assert_eq!(lengths, vec![CHUNK, CHUNK, CHUNK, 43]);
+                } else {
+                    assert_eq!(&lengths[..2], &[CHUNK; 2]);
+                    assert_eq!(&lengths[2..10], &[512 * 1024; 8]);
+                    assert_eq!(lengths[10], 43);
+                }
+                let mut h = h;
+                h.handle = restored;
+                h.add(&vec![b'n'; CHUNK + 1]).await;
+                h.pass().await;
+                let lengths: Vec<_> = h
+                    .peer
+                    .requests()
+                    .iter()
+                    .filter(|req| req.method == "PUT")
+                    .map(|req| req.body.len())
+                    .collect();
+                assert!(lengths.ends_with(&[CHUNK, 1]));
+                h.close().await;
+            }
         }
 
         #[tokio::test]

@@ -2447,12 +2447,22 @@ impl PrivateLinkCapability {
         timeout: Duration,
         max_bytes: usize,
     ) -> LinkOutcome {
-        let Ok(mut response) = builder.timeout(timeout).send().await else {
-            return LinkOutcome::TransportUnavailable;
-        };
+        self.try_send_import_bounded(builder, timeout, max_bytes, false)
+            .await
+            .unwrap_or(LinkOutcome::TransportUnavailable)
+    }
+
+    async fn try_send_import_bounded(
+        &self,
+        builder: RequestBuilder,
+        timeout: Duration,
+        max_bytes: usize,
+        chunk_put: bool,
+    ) -> Result<LinkOutcome, reqwest::Error> {
+        let mut response = builder.timeout(timeout).send().await?;
         let status = response.status();
         if status == StatusCode::FORBIDDEN || self.refused_gateway(status) {
-            return LinkOutcome::Forbidden;
+            return Ok(LinkOutcome::Forbidden);
         }
         let mut body = Vec::new();
         loop {
@@ -2460,8 +2470,20 @@ impl PrivateLinkCapability {
                 Ok(Some(chunk)) if chunk.len() <= max_bytes - body.len() => {
                     body.extend_from_slice(&chunk);
                 }
-                Ok(None) => return LinkOutcome::Success { status, body },
-                _ => return LinkOutcome::TransportUnavailable,
+                Ok(None) => return Ok(LinkOutcome::Success { status, body }),
+                Ok(Some(_)) => return Ok(LinkOutcome::TransportUnavailable),
+                Err(_) if chunk_put && !status.is_success() => {
+                    // Received error headers already answer the PUT; a stalled error body
+                    // cannot establish that the upload timed out without progress.
+                    return Ok(match status.as_u16() {
+                        401 | 507 => LinkOutcome::Success {
+                            status,
+                            body: Vec::new(),
+                        },
+                        _ => LinkOutcome::TransportUnavailable,
+                    });
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -2499,24 +2521,24 @@ impl PrivateLinkCapability {
         offset: u64,
         bytes: Vec<u8>,
         chunk_sha256: &str,
-    ) -> LinkOutcome {
+    ) -> Result<LinkOutcome, reqwest::Error> {
         if !crate::import::valid_upload_id(upload_id)
             || !crate::import::valid_sha256_hex(chunk_sha256)
         {
-            return LinkOutcome::LocalRejected {
+            return Ok(LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
-            };
+            });
         }
         let path = format!("/app/import/api/uploads/{upload_id}");
         let Ok(mut url) = confine_path(&self.inner.origin, &path) else {
-            return LinkOutcome::LocalRejected {
+            return Ok(LinkOutcome::LocalRejected {
                 status: StatusCode::BAD_REQUEST,
-            };
+            });
         };
         url.query_pairs_mut()
             .append_pair("offset", &offset.to_string());
         let len = bytes.len();
-        self.send_import(
+        self.try_send_import_bounded(
             self.inner
                 .client
                 .put(url)
@@ -2525,6 +2547,8 @@ impl PrivateLinkCapability {
                 .header("X-Chunk-Sha256", chunk_sha256)
                 .body(bytes),
             IMPORT_CHUNK_TIMEOUT,
+            MAX_IMPORT_RESPONSE_BYTES,
+            true,
         )
         .await
     }
@@ -7612,6 +7636,49 @@ pub(crate) mod tests {
             }
         ));
 
+        session.shutdown().await.unwrap();
+        peer.shutdown().await;
+    }
+
+    #[cfg(feature = "full-tests")]
+    #[tokio::test]
+    async fn import_put_body_deadline_preserves_known_refusals() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let peer = PrivateLinkPeer::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let session = start_private_link_session(temp.path(), peer.credential(), "stream")
+            .await
+            .unwrap();
+        let capability = session.capability();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        for (status, hold_open) in [
+            (200, true),
+            (200, false),
+            (401, true),
+            (507, true),
+            (503, true),
+        ] {
+            let reply = async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Length: 2\r\nConnection: close\r\n\r\nx").as_bytes()).await.unwrap();
+                // Keep the socket alive in join!'s result while the client awaits the last byte.
+                hold_open.then_some(socket)
+            };
+            let put = capability.inner.client.put(&url);
+            let (outcome, _held_socket) = tokio::join!(
+                capability.try_send_import_bounded(put, Duration::from_secs(1), 16, true),
+                reply
+            );
+            match status {
+                200 => assert_eq!(outcome.unwrap_err().is_timeout(), hold_open),
+                401 | 507 => assert_eq!(outcome.unwrap().status_code(), Some(status)),
+                _ => assert_eq!(outcome.unwrap(), LinkOutcome::TransportUnavailable),
+            }
+        }
         session.shutdown().await.unwrap();
         peer.shutdown().await;
     }
