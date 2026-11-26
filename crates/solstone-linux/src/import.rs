@@ -192,6 +192,20 @@ impl ResumableUpload {
         self.remote_offset = next_offset;
     }
 
+    fn acknowledge_chunk(&mut self, next_offset: u64, elapsed: Duration) {
+        let accepted = next_offset - self.remote_offset;
+        self.remote_offset = next_offset;
+        if let Some(limit) = self.retry_chunk_limit
+            && accepted == limit
+            && elapsed <= Duration::from_secs(4)
+        {
+            // Double only on a prompt journal receipt. A slow but working link
+            // can keep sending small pieces without paying another timeout.
+            let next_limit = limit.saturating_mul(2);
+            self.retry_chunk_limit = (next_limit < self.chunk_bytes).then_some(next_limit);
+        }
+    }
+
     fn next_chunk_len(&self) -> usize {
         let limit = self
             .chunk_bytes
@@ -3172,6 +3186,7 @@ impl ImportHandle {
                 };
                 let chunk_sha256 = format!("{:x}", Sha256::digest(&chunk_bytes));
                 self.set_transfer_phase(&item.id, TransferPhase::Sending, true);
+                let put_started = Instant::now();
                 let Some(outcome) = guarded_with_cancel(
                     client,
                     association,
@@ -3222,7 +3237,7 @@ impl ImportHandle {
                         checksum_retries = 0;
                         offset_resyncs = 0;
                         if let Some(active) = &mut item.upload {
-                            active.remote_offset = next_offset;
+                            active.acknowledge_chunk(next_offset, put_started.elapsed());
                         }
                         self.reset_resumable_backoff(&item.id, TransferPhase::Sending);
                         self.publish(item.clone())?;
@@ -5202,15 +5217,45 @@ mod tests {
         upload.timed_out_chunk_bytes = Some(upload.next_chunk_len() as u64);
         upload.reconcile(0, upload.chunk_bytes);
         assert_eq!(upload.next_chunk_len(), 512 * 1024);
-        upload.reconcile(0, 32 * 1024);
+        upload.acknowledge_chunk(512 * 1024, Duration::from_secs(60));
+        assert_eq!(upload.next_chunk_len(), 512 * 1024);
+        upload.reconcile(upload.remote_offset, 32 * 1024);
         assert_eq!(upload.next_chunk_len(), 32 * 1024);
         upload.timed_out_chunk_bytes = Some(32 * 1024);
-        upload.reconcile(0, 4 * 1024 * 1024);
+        upload.reconcile(upload.remote_offset, 4 * 1024 * 1024);
         assert_eq!(upload.next_chunk_len(), 16 * 1024);
         upload.remote_offset = upload.total_bytes - 10;
         upload.timed_out_chunk_bytes = Some(10);
         upload.reconcile(upload.remote_offset, 128);
         assert_eq!(upload.next_chunk_len(), 10);
+    }
+
+    #[test]
+    fn a_recovered_link_regrows_pieces_on_the_same_upload() {
+        let mut upload: ResumableUpload = serde_json::from_value(json!({
+            "upload_id": "existing", "instance_id": "home", "binding": "device",
+            "total_bytes": 32 * 1024 * 1024, "remote_offset": 0,
+            "chunk_bytes": 4 * 1024 * 1024, "timed_out_chunk_bytes": 4 * 1024 * 1024
+        }))
+        .unwrap();
+        upload.reconcile(0, upload.chunk_bytes);
+        let recovery = 512 * 1024;
+        for (expected_size, elapsed_secs) in [
+            (recovery, 60),
+            (recovery, 5),
+            (recovery, 4),
+            (2 * recovery, 1),
+            (4 * recovery, 1),
+            (8 * recovery, 1),
+        ] {
+            assert_eq!(upload.next_chunk_len(), expected_size);
+            upload.acknowledge_chunk(
+                upload.remote_offset + expected_size as u64,
+                Duration::from_secs(elapsed_secs),
+            );
+        }
+        assert_eq!(upload.retry_chunk_limit, None);
+        assert_eq!(upload.next_chunk_len(), upload.chunk_bytes as usize);
     }
 
     #[test]
@@ -7457,9 +7502,9 @@ mod tests {
                 if committed_before_timeout {
                     assert_eq!(lengths, vec![CHUNK, CHUNK, CHUNK, 43]);
                 } else {
-                    assert_eq!(&lengths[..2], &[CHUNK; 2]);
-                    assert_eq!(&lengths[2..10], &[512 * 1024; 8]);
-                    assert_eq!(lengths[10], 43);
+                    // Startup and the first verified retry are independent of host speed.
+                    // Later PUT sizes depend on their measured acknowledgement times.
+                    assert_eq!(&lengths[..3], &[CHUNK, CHUNK, 512 * 1024]);
                 }
                 let mut h = h;
                 h.handle = restored;
