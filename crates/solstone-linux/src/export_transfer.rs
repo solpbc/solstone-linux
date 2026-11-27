@@ -429,6 +429,13 @@ impl ExportTransferHandle {
                     .map(|meta| meta.len())
                     .unwrap_or(0);
                 (Some(prev.part_path.clone()), len)
+            } else if state.active.is_none() {
+                // Recover a preserved partial written by a prior daemon instance for
+                // this exact export_id so restart preflight credits already-downloaded
+                // bytes instead of double-counting the full archive size.
+                discover_existing_part_file(parent, &req.export_id, req.size_bytes)
+                    .map(|(path, len)| (Some(path), len))
+                    .unwrap_or((None, 0))
             } else {
                 (None, 0)
             }
@@ -482,9 +489,18 @@ impl ExportTransferHandle {
             };
             state.next_generation = state.next_generation.wrapping_add(1);
             let generation = state.next_generation;
-            let chosen_part_path = reused_part
-                .or(part_path)
-                .unwrap_or_else(|| sibling_part_path(parent, &req.export_id, generation));
+            let unique_part_path = sibling_part_path(parent, &req.export_id, generation);
+            let chosen_part_path = if let Some(existing) = reused_part.or(part_path) {
+                if existing == unique_part_path {
+                    existing
+                } else if fs::rename(&existing, &unique_part_path).is_ok() {
+                    unique_part_path
+                } else {
+                    existing
+                }
+            } else {
+                unique_part_path
+            };
             let actual_existing_len = fs::symlink_metadata(&chosen_part_path)
                 .ok()
                 .filter(|meta| meta.file_type().is_file())
@@ -1486,6 +1502,65 @@ fn sibling_part_path(parent: &Path, export_id: &str, generation: u64) -> PathBuf
     parent.join(format!(".solstone-export-{export_id}-{generation}.part"))
 }
 
+/// Discover a preserved regular non-symlink partial file for `export_id` written by
+/// a prior daemon process (supporting both generation-suffixed and unsuffixed legacy
+/// names). Picks the largest candidate strictly `<= expected_size` and cleans up
+/// any stale smaller duplicates for the same `export_id`.
+fn discover_existing_part_file(
+    parent: &Path,
+    export_id: &str,
+    expected_size: u64,
+) -> Option<(PathBuf, u64)> {
+    let exact_legacy = format!(".solstone-export-{export_id}.part");
+    let gen_prefix = format!(".solstone-export-{export_id}-");
+    let mut best: Option<(PathBuf, u64)> = None;
+    let mut extras: Vec<PathBuf> = Vec::new();
+    let entries = fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let matches = if name_str == exact_legacy {
+            true
+        } else if let Some(rest) = name_str
+            .strip_prefix(&gen_prefix)
+            .and_then(|s| s.strip_suffix(".part"))
+        {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+        } else {
+            false
+        };
+        if !matches {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        let len = meta.len();
+        if len == 0 || len > expected_size {
+            extras.push(path);
+            continue;
+        }
+        match &best {
+            Some((_, best_len)) if len <= *best_len => extras.push(path),
+            Some((prev_path, _)) => {
+                extras.push(prev_path.clone());
+                best = Some((path, len));
+            }
+            None => best = Some((path, len)),
+        }
+    }
+    for stale in extras {
+        let _ = fs::remove_file(stale);
+    }
+    best
+}
+
 pub(crate) fn required_device_bytes(remaining_bytes: u64) -> u64 {
     let headroom = (remaining_bytes / 100).clamp(1024 * 1024, 64 * 1024 * 1024);
     remaining_bytes.saturating_add(headroom)
@@ -2199,6 +2274,125 @@ mod tests {
         assert_eq!(saved["verified"], true);
         assert_eq!(fs::read(&dest).unwrap(), payload);
         assert!(!has_any_part_file(tmp.path(), "exp_vcan_1"));
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_on_disk_partial_from_first_and_later_generations_under_tight_space() {
+        let payload: Vec<u8> = (0..(16 * 1024 * 1024))
+            .map(|i| ((i * 41 + (i >> 7)) & 0xff) as u8)
+            .collect();
+        let sha = sha_hex(&payload);
+        let etag = format!("\"sha256-{sha}\"");
+        let split = 12 * 1024 * 1024usize;
+        let remaining = (payload.len() - split) as u64; // 4 MiB
+        // Tight free space: 5 MiB (4 MiB outstanding + 1 MiB reserve). Fails if full 16 MiB is demanded!
+        let tight_free = remaining + 1024 * 1024;
+
+        for (case_label, pre_cancel_first) in [("gen1", false), ("later_gen", true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dest = tmp.path().join(format!("restart-{case_label}.zip"));
+            let export_id = format!("exp_rst_{case_label}");
+            let mut streams = Vec::new();
+            if pre_cancel_first {
+                // Burn generation 1 via a quick pause/cancel so the disconnected partial
+                // is written by a later generation (> 1) in the first daemon instance.
+                streams.push(Ok(OpenedExportStream {
+                    status: 200,
+                    content_range: None,
+                    etag: Some(etag.clone()),
+                    transport: "local",
+                    body: Box::new(ScriptedStream {
+                        chunks: VecDeque::from(vec![Ok(payload[..64 * 1024].to_vec()), Err(())]),
+                    }),
+                }));
+            }
+            streams.push(Ok(OpenedExportStream {
+                status: 200,
+                content_range: None,
+                etag: Some(etag.clone()),
+                transport: "local",
+                body: Box::new(ScriptedStream {
+                    chunks: VecDeque::from(vec![Ok(payload[..split].to_vec()), Err(())]),
+                }),
+            }));
+
+            let daemon1_opener = Arc::new(ScriptedOpener::new(streams));
+            let daemon1 = ExportTransferHandle::with_opener_for_test(
+                daemon1_opener,
+                SleepInhibit::disabled(),
+                Arc::new(|_| Some(500 * 1024 * 1024)),
+            );
+            let start_req = serde_json::json!({
+                "id": "rs1",
+                "export_id": export_id,
+                "download_path": format!("/app/export/api/ready/{export_id}/download"),
+                "size_bytes": payload.len(),
+                "sha256": sha,
+                "etag": etag,
+                "destination_path": dest.to_string_lossy(),
+            })
+            .to_string();
+
+            if pre_cancel_first {
+                let _ = daemon1.start(&start_req).await;
+                let _ = wait_for_phase(&daemon1, &export_id, "paused").await;
+                let _ = daemon1
+                    .cancel(&serde_json::json!({"id": "c0", "export_id": export_id}).to_string())
+                    .await;
+            }
+
+            let _ = daemon1.start(&start_req).await;
+            let paused = wait_for_phase(&daemon1, &export_id, "paused").await;
+            assert_eq!(paused["bytes_written"], split as u64, "case={case_label}");
+            drop(daemon1); // Simulate daemon restart: in-memory active state is gone.
+
+            // Fresh daemon manager with only 5 MiB free must discover the 12 MiB on-disk partial,
+            // pass preflight (4 MiB remaining + 1 MiB reserve = 5 MiB), resume from bytes=12582912-,
+            // verify SHA-256, publish dest, and leave zero .part files behind.
+            let daemon2_opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
+                status: 206,
+                content_range: Some(format!(
+                    "bytes {split}-{}/{}",
+                    payload.len() - 1,
+                    payload.len()
+                )),
+                etag: Some(etag.clone()),
+                transport: "local",
+                body: Box::new(ScriptedStream {
+                    chunks: VecDeque::from(vec![Ok(payload[split..].to_vec())]),
+                }),
+            })]));
+            let daemon2 = ExportTransferHandle::with_opener_for_test(
+                daemon2_opener.clone(),
+                SleepInhibit::disabled(),
+                Arc::new(move |_| Some(tight_free)),
+            );
+            let resp: serde_json::Value =
+                serde_json::from_str(&daemon2.start(&start_req).await).unwrap();
+            assert_eq!(resp["phase"], "transferring", "case={case_label}: {resp}");
+            assert_eq!(resp["bytes_written"], split as u64, "case={case_label}");
+
+            let saved = wait_for_phase(&daemon2, &export_id, "saved").await;
+            assert_eq!(saved["verified"], true, "case={case_label}");
+            assert_eq!(fs::read(&dest).unwrap(), payload, "case={case_label}");
+            assert!(
+                !has_any_part_file(tmp.path(), &export_id),
+                "case={case_label}"
+            );
+
+            let seen = daemon2_opener.seen_ranges.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "case={case_label}");
+            assert_eq!(
+                seen[0].0.as_deref(),
+                Some(format!("bytes={split}-").as_str()),
+                "case={case_label}"
+            );
+            assert_eq!(
+                seen[0].1.as_deref(),
+                Some(etag.as_str()),
+                "case={case_label}"
+            );
+        }
     }
 
     #[test]
