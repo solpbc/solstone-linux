@@ -108,6 +108,10 @@ struct TmuxContent<'a> {
     window: ActiveWindow<'a>,
     windows: Vec<Window<'a>>,
     panes: Vec<Pane<'a>>,
+    // Present only for a session the owner listed in `output_sessions`, on
+    // every frame of it, cursor or not; other frames keep their old shape.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    output_session: bool,
 }
 
 #[derive(Serialize)]
@@ -219,6 +223,7 @@ pub fn serialize_frame(
                     .iter()
                     .map(|pane| Pane::new(pane, !result.output_only))
                     .collect(),
+                output_session: result.listed,
             },
         },
     };

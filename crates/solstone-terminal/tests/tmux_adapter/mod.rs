@@ -1060,6 +1060,7 @@ mod tmux_adapter_cases {
         assert_eq!(poll.captures.len(), 1);
         assert_eq!(poll.captures[0].session, "agent-1");
         assert!(poll.captures[0].output_only);
+        assert!(poll.captures[0].listed);
         runner.assert_finished().expect("all fixture calls used");
     }
 
@@ -1090,6 +1091,7 @@ mod tmux_adapter_cases {
 
         assert_eq!(poll.captures.len(), 1);
         assert!(!poll.captures[0].output_only);
+        assert!(poll.captures[0].listed);
         runner.assert_finished().expect("all fixture calls used");
     }
 

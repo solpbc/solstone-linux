@@ -41,6 +41,9 @@ pub struct CaptureResult {
     /// Taken in because the session's output changed while nobody used it.
     /// Its frames carry no cursor, so nothing on screen reads as typed.
     pub output_only: bool,
+    /// The session matches an `output_sessions` pattern, whether or not a
+    /// client is using it, so the journal can tell the owner listed it.
+    pub listed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

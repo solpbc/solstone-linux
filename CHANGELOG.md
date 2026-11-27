@@ -8,6 +8,7 @@ and this project adheres to Semantic Versioning.
 
 ### Fixed
 
+- terminal now marks every tmux session you've listed in `output_sessions`, even while you're using it, so an updated journal can tell the agent's work there from yours. thanks @dvanduzer.
 - when one piece of a large file times out during import, the app checks what your journal received. if that piece didn't arrive, the app can try a smaller one.
 
 ## [2.0.54] - 2026-11-26

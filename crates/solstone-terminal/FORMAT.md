@@ -25,6 +25,11 @@ A frame taken in only because an `output_sessions` session's output changed,
 with nobody using the session, leaves out `cursor_x`, `cursor_y` and
 `cursor_visible`, so a reader finds no typed input in it.
 
+Every frame of a session that matches an `output_sessions` pattern also carries
+`"output_session": true` in the tmux object, whether or not someone is using the
+session, so a reader can tell the owner listed it even when every frame has the
+cursor. Frames of other sessions leave the key out and keep their earlier shape.
+
 All five formats exist in [tmux 1.8's upstream source](https://github.com/tmux/tmux/blob/1.8/format.c).
 That is the verified format floor.
 An alternate screen is common in editors, but does not identify every full-screen

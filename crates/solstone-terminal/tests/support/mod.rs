@@ -260,6 +260,7 @@ pub fn golden_capture(session: &str) -> CaptureResult {
             },
         ],
         output_only: false,
+        listed: false,
     }
 }
 

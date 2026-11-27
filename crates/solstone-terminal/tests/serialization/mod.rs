@@ -104,4 +104,22 @@ mod serialization_cases {
             assert!(pane.get("pane_in_mode").is_some());
         }
     }
+
+    #[test]
+    fn every_frame_of_a_listed_session_says_so_and_others_keep_their_shape() {
+        let mut capture = golden_capture("agent");
+        let unlisted = serialize_frame(&capture, 1, 0.25).expect("serialize frame");
+        let unlisted: serde_json::Value = serde_json::from_slice(&unlisted).expect("frame json");
+        assert!(unlisted["content"]["tmux"].get("output_session").is_none());
+
+        capture.listed = true;
+        let watched = serialize_frame(&capture, 1, 0.25).expect("serialize frame");
+        let watched: serde_json::Value = serde_json::from_slice(&watched).expect("frame json");
+        assert_eq!(watched["content"]["tmux"]["output_session"], true);
+        assert!(
+            watched["content"]["tmux"]["panes"][0]
+                .get("cursor_x")
+                .is_some()
+        );
+    }
 }

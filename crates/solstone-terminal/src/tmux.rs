@@ -228,6 +228,10 @@ where
                 }
             };
             capture.output_only = output_only;
+            capture.listed = self
+                .output_sessions
+                .iter()
+                .any(|pattern| matches_session_pattern(pattern, &session));
             if self.pane_title || self.working_directory || self.executable_enabled {
                 for pane in &capture.panes {
                     let mut pane_title = None;
@@ -482,6 +486,7 @@ where
             windows,
             panes,
             output_only: false,
+            listed: false,
         })
     }
 
