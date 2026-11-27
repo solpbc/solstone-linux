@@ -44,6 +44,7 @@ const FILE_MANAGER_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct OpenedExportStream {
     pub(crate) status: u16,
+    pub(crate) content_length: Option<u64>,
     pub(crate) content_range: Option<String>,
     pub(crate) etag: Option<String>,
     pub(crate) transport: &'static str,
@@ -137,6 +138,7 @@ impl ExportStreamOpener for UploadExportOpener {
                 .await?;
             Ok(OpenedExportStream {
                 status: stream.status.as_u16(),
+                content_length: stream.content_length,
                 content_range: stream.content_range.clone(),
                 etag: stream.etag.clone(),
                 transport: stream.transport,
@@ -816,23 +818,23 @@ impl ExportTransferHandle {
                 .map(|m| m.len())
                 .unwrap_or(0);
 
-            if part_len >= params.size_bytes && part_len == params.size_bytes {
-                // Already downloaded all bytes on disk; jump straight to verification and rename.
-                self.verify_and_finalize(generation, &params).await;
-                hold.release().await;
-                return;
-            }
-
-            let (range_header, if_range_header, requested_offset) =
-                if part_len > 0 && part_len < params.size_bytes {
-                    (
-                        Some(format!("bytes={part_len}-")),
-                        Some(params.etag.clone()),
-                        part_len,
-                    )
-                } else {
-                    (None, None, 0)
-                };
+            let is_full_partial = part_len == params.size_bytes && params.size_bytes > 0;
+            let (range_header, if_range_header, requested_offset) = if is_full_partial {
+                let last_byte = params.size_bytes - 1;
+                (
+                    Some(format!("bytes={last_byte}-{last_byte}")),
+                    Some(params.etag.clone()),
+                    last_byte,
+                )
+            } else if part_len > 0 && part_len < params.size_bytes {
+                (
+                    Some(format!("bytes={part_len}-")),
+                    Some(params.etag.clone()),
+                    part_len,
+                )
+            } else {
+                (None, None, 0)
+            };
 
             let opened = tokio::select! {
                 res = self.inner.opener.open(
@@ -875,7 +877,7 @@ impl ExportTransferHandle {
                     return;
                 }
                 Err(ExportOpenError::TransportUnavailable) => {
-                    self.mark_paused_if_current(generation, "disconnected", None);
+                    self.mark_paused_if_current(generation, "disconnected", Some(part_len));
                     hold.release().await;
                     return;
                 }
@@ -883,14 +885,114 @@ impl ExportTransferHandle {
 
             // Enforce LAN-to-relay transition pause unless the owner explicitly resumed on relay.
             if self.record_transport_and_check_relay_pause(generation, stream.transport) {
-                self.mark_paused_if_current(generation, "relay_switched", None);
+                self.mark_paused_if_current(generation, "relay_switched", Some(part_len));
                 hold.release().await;
                 return;
             }
 
             match stream.status {
-                200 => {}
+                200 => {
+                    if is_full_partial {
+                        let raw_etag = stream
+                            .etag
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|val| !val.is_empty());
+                        let has_validator = raw_etag.is_some();
+                        let length_matches = stream
+                            .content_length
+                            .is_none_or(|len| len == params.size_bytes);
+                        if has_validator || !length_matches {
+                            let validator_matches = has_validator
+                                && matches_strong_etag(raw_etag, &params.etag)
+                                && length_matches;
+                            // Cancel the Range-ignoring 200 body at headers without
+                            // downloading a second copy of the archive.
+                            drop(stream);
+                            if validator_matches {
+                                self.verify_and_finalize(generation, &params).await;
+                            } else {
+                                self.fail_and_cleanup(generation, "export_copy_unconfirmed");
+                            }
+                            hold.release().await;
+                            return;
+                        }
+                        // Absent ETag with matching length: fall through to stream the live
+                        // 200 body from byte 0 and verify SHA-256 before publish.
+                    }
+                }
                 206 => {
+                    if is_full_partial {
+                        if !matches_content_range(
+                            stream.content_range.as_deref(),
+                            requested_offset,
+                            params.size_bytes,
+                        ) || !matches_strong_etag(stream.etag.as_deref(), &params.etag)
+                        {
+                            drop(stream);
+                            self.fail_and_cleanup(generation, "export_copy_unconfirmed");
+                            hold.release().await;
+                            return;
+                        }
+                        let mut probe_bytes: usize = 0;
+                        loop {
+                            let next = tokio::select! {
+                                biased;
+                                _ = wait_control_stop(&mut control_rx) => {
+                                    drop(stream);
+                                    match *control_rx.borrow() {
+                                        ControlSignal::Cancel => {
+                                            let _ = fs::remove_file(&params.part_path);
+                                        }
+                                        ControlSignal::PauseOwner => {
+                                            self.mark_paused_if_current(generation, "owner", Some(part_len));
+                                        }
+                                        ControlSignal::Run => {}
+                                    }
+                                    hold.release().await;
+                                    return;
+                                }
+                                _ = wait_sleep_start(&mut sleep_rx) => {
+                                    drop(stream);
+                                    self.mark_paused_if_current(generation, "sleep", Some(part_len));
+                                    hold.release().await;
+                                    return;
+                                }
+                                chunk = stream.body.next_chunk() => chunk,
+                            };
+                            match next {
+                                Ok(Some(bytes)) => {
+                                    probe_bytes = probe_bytes.saturating_add(bytes.len());
+                                    if probe_bytes > 1 {
+                                        drop(stream);
+                                        self.fail_and_cleanup(generation, "checksum_mismatch");
+                                        hold.release().await;
+                                        return;
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(()) => {
+                                    drop(stream);
+                                    self.mark_paused_if_current(
+                                        generation,
+                                        "disconnected",
+                                        Some(part_len),
+                                    );
+                                    hold.release().await;
+                                    return;
+                                }
+                            }
+                        }
+                        drop(stream);
+                        if probe_bytes != 1 {
+                            self.mark_paused_if_current(generation, "disconnected", Some(part_len));
+                            hold.release().await;
+                            return;
+                        }
+                        self.verify_and_finalize(generation, &params).await;
+                        hold.release().await;
+                        return;
+                    }
                     if !matches_content_range(
                         stream.content_range.as_deref(),
                         requested_offset,
@@ -913,6 +1015,11 @@ impl ExportTransferHandle {
                     }
                 }
                 416 => {
+                    if is_full_partial {
+                        self.fail_and_cleanup(generation, "export_copy_unconfirmed");
+                        hold.release().await;
+                        return;
+                    }
                     if !reset_and_retry_once {
                         reset_and_retry_once = true;
                         let _ = fs::remove_file(&params.part_path);
@@ -1841,6 +1948,7 @@ mod tests {
 
         let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
             status: 200,
+            content_length: None,
             content_range: None,
             etag: Some(etag.clone()),
             transport: "local",
@@ -1896,6 +2004,7 @@ mod tests {
         let opener = Arc::new(ScriptedOpener::new(vec![
             Ok(OpenedExportStream {
                 status: 200,
+                content_length: None,
                 content_range: None,
                 etag: Some(etag.clone()),
                 transport: "local",
@@ -1905,6 +2014,7 @@ mod tests {
             }),
             Ok(OpenedExportStream {
                 status: 206,
+                content_length: None,
                 content_range: Some(format!(
                     "bytes {split}-{}/{}",
                     payload.len() - 1,
@@ -1966,6 +2076,7 @@ mod tests {
         let opener = Arc::new(ScriptedOpener::new(vec![
             Ok(OpenedExportStream {
                 status: 200,
+                content_length: None,
                 content_range: None,
                 etag: Some(etag.clone()),
                 transport: "local",
@@ -1975,6 +2086,7 @@ mod tests {
             }),
             Ok(OpenedExportStream {
                 status: 206,
+                content_length: None,
                 content_range: Some(format!(
                     "bytes {split}-{}/{}",
                     payload.len() - 1,
@@ -1988,6 +2100,7 @@ mod tests {
             }),
             Ok(OpenedExportStream {
                 status: 206,
+                content_length: None,
                 content_range: Some(format!(
                     "bytes {split}-{}/{}",
                     payload.len() - 1,
@@ -2040,6 +2153,7 @@ mod tests {
 
         let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
             status: 410,
+            content_length: None,
             content_range: None,
             etag: None,
             transport: "local",
@@ -2098,6 +2212,7 @@ mod tests {
         let opener = Arc::new(ScriptedOpener::new(vec![
             Ok(OpenedExportStream {
                 status: 200,
+                content_length: None,
                 content_range: None,
                 etag: Some(etag.clone()),
                 transport: "local",
@@ -2107,6 +2222,7 @@ mod tests {
             }),
             Ok(OpenedExportStream {
                 status: 206,
+                content_length: None,
                 content_range: Some(format!(
                     "bytes {split}-{}/{}",
                     payload.len() - 1,
@@ -2120,6 +2236,7 @@ mod tests {
             }),
             Ok(OpenedExportStream {
                 status: 200,
+                content_length: None,
                 content_range: None,
                 etag: Some(etag.clone()),
                 transport: "local",
@@ -2186,6 +2303,7 @@ mod tests {
         let opener = Arc::new(ScriptedOpener::new(vec![
             Ok(OpenedExportStream {
                 status: 200,
+                content_length: None,
                 content_range: None,
                 etag: Some(etag.clone()),
                 transport: "local",
@@ -2195,6 +2313,7 @@ mod tests {
             }),
             Ok(OpenedExportStream {
                 status: 200,
+                content_length: None,
                 content_range: None,
                 etag: Some(etag.clone()),
                 transport: "local",
@@ -2298,6 +2417,7 @@ mod tests {
                 // is written by a later generation (> 1) in the first daemon instance.
                 streams.push(Ok(OpenedExportStream {
                     status: 200,
+                    content_length: None,
                     content_range: None,
                     etag: Some(etag.clone()),
                     transport: "local",
@@ -2308,6 +2428,7 @@ mod tests {
             }
             streams.push(Ok(OpenedExportStream {
                 status: 200,
+                content_length: None,
                 content_range: None,
                 etag: Some(etag.clone()),
                 transport: "local",
@@ -2351,6 +2472,7 @@ mod tests {
             // verify SHA-256, publish dest, and leave zero .part files behind.
             let daemon2_opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
                 status: 206,
+                content_length: None,
                 content_range: Some(format!(
                     "bytes {split}-{}/{}",
                     payload.len() - 1,
@@ -2392,6 +2514,383 @@ mod tests {
                 Some(etag.as_str()),
                 "case={case_label}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovered_full_partial_probes_live_journal_eligibility_and_preserves_destination() {
+        use std::sync::atomic::AtomicU64;
+        struct CountingStream {
+            chunks: VecDeque<Result<Vec<u8>, ()>>,
+            body_chunks_read: Arc<AtomicU64>,
+            body_bytes_read: Arc<AtomicU64>,
+        }
+        impl ExportByteStream for CountingStream {
+            fn next_chunk<'a>(&'a mut self) -> BoxFuture<'a, Result<Option<Vec<u8>>, ()>> {
+                Box::pin(async move {
+                    match self.chunks.pop_front() {
+                        Some(Ok(bytes)) => {
+                            self.body_chunks_read.fetch_add(1, Ordering::SeqCst);
+                            self.body_bytes_read
+                                .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+                            Ok(Some(bytes))
+                        }
+                        Some(Err(())) => Err(()),
+                        None => Ok(None),
+                    }
+                })
+            }
+
+            fn read_bounded<'a>(&'a mut self, max_bytes: usize) -> BoxFuture<'a, Vec<u8>> {
+                Box::pin(async move {
+                    let mut out = Vec::new();
+                    while out.len() < max_bytes {
+                        match self.chunks.pop_front() {
+                            Some(Ok(bytes)) => {
+                                let take = bytes.len().min(max_bytes - out.len());
+                                out.extend_from_slice(&bytes[..take]);
+                            }
+                            _ => break,
+                        }
+                    }
+                    out
+                })
+            }
+        }
+
+        let payload: Vec<u8> = (0usize..(4 * 1024 * 1024))
+            .map(|i| ((i.wrapping_mul(37) + 19) % 251) as u8)
+            .collect();
+        let sha = sha_hex(&payload);
+        let etag = format!("\"{sha}\"");
+        let sentinel = b"existing-owner-zip-must-be-preserved".to_vec();
+        let last_byte = payload.len() - 1;
+        let expected_range = format!("bytes={last_byte}-{last_byte}");
+
+        // 1. 206 1-byte matching validator -> verifies local partial & publishes without redownload.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let dest = tmp.path().join("export-206.zip");
+            fs::write(&dest, &sentinel).unwrap();
+            let export_id = "exp_full_206";
+            let part = tmp
+                .path()
+                .join(format!(".solstone-export-{export_id}-1.part"));
+            fs::write(&part, &payload).unwrap();
+
+            let chunks_read = Arc::new(AtomicU64::new(0));
+            let bytes_read = Arc::new(AtomicU64::new(0));
+            let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
+                status: 206,
+                content_length: Some(1),
+                content_range: Some(format!("bytes {last_byte}-{last_byte}/{}", payload.len())),
+                etag: Some(etag.clone()),
+                transport: "local",
+                body: Box::new(CountingStream {
+                    chunks: VecDeque::from(vec![Ok(vec![payload[last_byte]])]),
+                    body_chunks_read: Arc::clone(&chunks_read),
+                    body_bytes_read: Arc::clone(&bytes_read),
+                }),
+            })]));
+            let handle = ExportTransferHandle::with_opener_for_test(
+                opener.clone(),
+                SleepInhibit::disabled(),
+                Arc::new(|_| Some(2 * 1024 * 1024)),
+            );
+            let req = serde_json::json!({
+                "id": "fp-206",
+                "export_id": export_id,
+                "download_path": format!("/app/export/api/ready/{export_id}/download"),
+                "filename": "export-206.zip",
+                "size_bytes": payload.len() as u64,
+                "sha256": sha,
+                "etag": etag,
+                "destination_path": dest.to_string_lossy(),
+            })
+            .to_string();
+            let _ = handle.start(&req).await;
+            let done = wait_for_phase(&handle, export_id, "saved").await;
+            assert_eq!(done["verified"], true);
+            assert_eq!(fs::read(&dest).unwrap(), payload);
+            assert_eq!(bytes_read.load(Ordering::SeqCst), 1);
+            assert!(!has_any_part_file(tmp.path(), export_id));
+            let seen = opener.seen_ranges.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].0.as_deref(), Some(expected_range.as_str()));
+            assert_eq!(seen[0].1.as_deref(), Some(etag.as_str()));
+        }
+
+        // 2. 410 erasure & 410 expired -> removes .part, preserves original destination.
+        for (case_id, expected_code) in [
+            ("exp_full_410_erased", "export_invalidated_by_erasure"),
+            ("exp_full_410_expired", "export_expired"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dest = tmp.path().join(format!("{case_id}.zip"));
+            fs::write(&dest, &sentinel).unwrap();
+            let part = tmp
+                .path()
+                .join(format!(".solstone-export-{case_id}-1.part"));
+            fs::write(&part, &payload).unwrap();
+
+            let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
+                status: 410,
+                content_length: None,
+                content_range: None,
+                etag: None,
+                transport: "local",
+                body: Box::new(ScriptedStream {
+                    chunks: VecDeque::from(vec![Ok(
+                        format!(r#"{{"code":"{expected_code}"}}"#).into_bytes()
+                    )]),
+                }),
+            })]));
+            let handle = ExportTransferHandle::with_opener_for_test(
+                opener.clone(),
+                SleepInhibit::disabled(),
+                Arc::new(|_| Some(2 * 1024 * 1024)),
+            );
+            let req = serde_json::json!({
+                "id": case_id,
+                "export_id": case_id,
+                "download_path": format!("/app/export/api/ready/{case_id}/download"),
+                "filename": format!("{case_id}.zip"),
+                "size_bytes": payload.len() as u64,
+                "sha256": sha,
+                "etag": etag,
+                "destination_path": dest.to_string_lossy(),
+            })
+            .to_string();
+            let _ = handle.start(&req).await;
+            let err = wait_for_phase(&handle, case_id, "error").await;
+            assert_eq!(err["error_code"], expected_code);
+            assert_eq!(fs::read(&dest).unwrap(), sentinel);
+            assert!(!has_any_part_file(tmp.path(), case_id));
+        }
+
+        // 3. Range-ignoring 200 with MATCHING strong ETag: cancels at headers (0 body bytes read)
+        //    and validates local partial (valid -> saved; 1 flipped byte -> checksum_mismatch preserving dest).
+        for corrupt_local in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let export_id = if corrupt_local {
+                "exp_full_200_corrupt"
+            } else {
+                "exp_full_200_match"
+            };
+            let dest = tmp.path().join(format!("{export_id}.zip"));
+            fs::write(&dest, &sentinel).unwrap();
+            let part = tmp
+                .path()
+                .join(format!(".solstone-export-{export_id}-1.part"));
+            let mut local_bytes = payload.clone();
+            if corrupt_local {
+                local_bytes[0] ^= 0xFF;
+            }
+            fs::write(&part, &local_bytes).unwrap();
+
+            let chunks_read = Arc::new(AtomicU64::new(0));
+            let bytes_read = Arc::new(AtomicU64::new(0));
+            let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
+                status: 200,
+                content_length: Some(payload.len() as u64),
+                content_range: None,
+                etag: Some(etag.clone()),
+                transport: "local",
+                body: Box::new(CountingStream {
+                    chunks: VecDeque::from(vec![Ok(payload.clone())]),
+                    body_chunks_read: Arc::clone(&chunks_read),
+                    body_bytes_read: Arc::clone(&bytes_read),
+                }),
+            })]));
+            let handle = ExportTransferHandle::with_opener_for_test(
+                opener,
+                SleepInhibit::disabled(),
+                Arc::new(|_| Some(2 * 1024 * 1024)),
+            );
+            let req = serde_json::json!({
+                "id": export_id,
+                "export_id": export_id,
+                "download_path": format!("/app/export/api/ready/{export_id}/download"),
+                "filename": format!("{export_id}.zip"),
+                "size_bytes": payload.len() as u64,
+                "sha256": sha,
+                "etag": etag,
+                "destination_path": dest.to_string_lossy(),
+            })
+            .to_string();
+            let _ = handle.start(&req).await;
+            if corrupt_local {
+                let err = wait_for_phase(&handle, export_id, "error").await;
+                assert_eq!(err["error_code"], "checksum_mismatch");
+                assert_eq!(fs::read(&dest).unwrap(), sentinel);
+            } else {
+                let done = wait_for_phase(&handle, export_id, "saved").await;
+                assert_eq!(done["verified"], true);
+                assert_eq!(fs::read(&dest).unwrap(), payload);
+            }
+            assert_eq!(chunks_read.load(Ordering::SeqCst), 0);
+            assert_eq!(bytes_read.load(Ordering::SeqCst), 0);
+            assert!(!has_any_part_file(tmp.path(), export_id));
+        }
+
+        // 4. Range-ignoring 200 with CHANGED strong ETag, WEAK ETag, or mismatched length ->
+        //    0 body bytes read, fails export_copy_unconfirmed, preserves destination.
+        for (export_id, server_etag, server_len) in [
+            (
+                "exp_full_200_changed",
+                Some("\"different-etag\"".to_owned()),
+                Some(payload.len() as u64),
+            ),
+            (
+                "exp_full_200_weak",
+                Some(format!("W/{etag}")),
+                Some(payload.len() as u64),
+            ),
+            (
+                "exp_full_200_badlen",
+                Some(etag.clone()),
+                Some((payload.len() + 17) as u64),
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dest = tmp.path().join(format!("{export_id}.zip"));
+            fs::write(&dest, &sentinel).unwrap();
+            let part = tmp
+                .path()
+                .join(format!(".solstone-export-{export_id}-1.part"));
+            fs::write(&part, &payload).unwrap();
+
+            let chunks_read = Arc::new(AtomicU64::new(0));
+            let bytes_read = Arc::new(AtomicU64::new(0));
+            let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
+                status: 200,
+                content_length: server_len,
+                content_range: None,
+                etag: server_etag,
+                transport: "local",
+                body: Box::new(CountingStream {
+                    chunks: VecDeque::from(vec![Ok(payload.clone())]),
+                    body_chunks_read: Arc::clone(&chunks_read),
+                    body_bytes_read: Arc::clone(&bytes_read),
+                }),
+            })]));
+            let handle = ExportTransferHandle::with_opener_for_test(
+                opener,
+                SleepInhibit::disabled(),
+                Arc::new(|_| Some(2 * 1024 * 1024)),
+            );
+            let req = serde_json::json!({
+                "id": export_id,
+                "export_id": export_id,
+                "download_path": format!("/app/export/api/ready/{export_id}/download"),
+                "filename": format!("{export_id}.zip"),
+                "size_bytes": payload.len() as u64,
+                "sha256": sha,
+                "etag": etag,
+                "destination_path": dest.to_string_lossy(),
+            })
+            .to_string();
+            let _ = handle.start(&req).await;
+            let err = wait_for_phase(&handle, export_id, "error").await;
+            assert_eq!(err["error_code"], "export_copy_unconfirmed");
+            assert_eq!(chunks_read.load(Ordering::SeqCst), 0);
+            assert_eq!(bytes_read.load(Ordering::SeqCst), 0);
+            assert_eq!(fs::read(&dest).unwrap(), sentinel);
+            assert!(!has_any_part_file(tmp.path(), export_id));
+        }
+
+        // 5. Range-ignoring 200 with ABSENT ETag + stale local partial -> streams fresh 200 from 0 & saves.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let export_id = "exp_full_200_absent";
+            let dest = tmp.path().join(format!("{export_id}.zip"));
+            fs::write(&dest, &sentinel).unwrap();
+            let part = tmp
+                .path()
+                .join(format!(".solstone-export-{export_id}-1.part"));
+            let mut stale = payload.clone();
+            stale[0] ^= 0xAA;
+            fs::write(&part, &stale).unwrap();
+
+            let bytes_read = Arc::new(AtomicU64::new(0));
+            let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
+                status: 200,
+                content_length: Some(payload.len() as u64),
+                content_range: None,
+                etag: None,
+                transport: "local",
+                body: Box::new(CountingStream {
+                    chunks: VecDeque::from(vec![Ok(payload.clone())]),
+                    body_chunks_read: Arc::new(AtomicU64::new(0)),
+                    body_bytes_read: Arc::clone(&bytes_read),
+                }),
+            })]));
+            let handle = ExportTransferHandle::with_opener_for_test(
+                opener,
+                SleepInhibit::disabled(),
+                Arc::new(|_| Some(2 * 1024 * 1024)),
+            );
+            let req = serde_json::json!({
+                "id": export_id,
+                "export_id": export_id,
+                "download_path": format!("/app/export/api/ready/{export_id}/download"),
+                "filename": format!("{export_id}.zip"),
+                "size_bytes": payload.len() as u64,
+                "sha256": sha,
+                "etag": etag,
+                "destination_path": dest.to_string_lossy(),
+            })
+            .to_string();
+            let _ = handle.start(&req).await;
+            let done = wait_for_phase(&handle, export_id, "saved").await;
+            assert_eq!(done["verified"], true);
+            assert_eq!(bytes_read.load(Ordering::SeqCst), payload.len() as u64);
+            assert_eq!(fs::read(&dest).unwrap(), payload);
+            assert!(!has_any_part_file(tmp.path(), export_id));
+        }
+
+        // 6. 206 probe with mismatched/weak ETag -> fails export_copy_unconfirmed, preserves dest.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let export_id = "exp_full_206_badetag";
+            let dest = tmp.path().join(format!("{export_id}.zip"));
+            fs::write(&dest, &sentinel).unwrap();
+            let part = tmp
+                .path()
+                .join(format!(".solstone-export-{export_id}-1.part"));
+            fs::write(&part, &payload).unwrap();
+
+            let opener = Arc::new(ScriptedOpener::new(vec![Ok(OpenedExportStream {
+                status: 206,
+                content_length: Some(1),
+                content_range: Some(format!("bytes {last_byte}-{last_byte}/{}", payload.len())),
+                etag: Some("\"other-etag\"".to_owned()),
+                transport: "local",
+                body: Box::new(ScriptedStream {
+                    chunks: VecDeque::from(vec![Ok(vec![payload[last_byte]])]),
+                }),
+            })]));
+            let handle = ExportTransferHandle::with_opener_for_test(
+                opener,
+                SleepInhibit::disabled(),
+                Arc::new(|_| Some(2 * 1024 * 1024)),
+            );
+            let req = serde_json::json!({
+                "id": export_id,
+                "export_id": export_id,
+                "download_path": format!("/app/export/api/ready/{export_id}/download"),
+                "filename": format!("{export_id}.zip"),
+                "size_bytes": payload.len() as u64,
+                "sha256": sha,
+                "etag": etag,
+                "destination_path": dest.to_string_lossy(),
+            })
+            .to_string();
+            let _ = handle.start(&req).await;
+            let err = wait_for_phase(&handle, export_id, "error").await;
+            assert_eq!(err["error_code"], "export_copy_unconfirmed");
+            assert_eq!(fs::read(&dest).unwrap(), sentinel);
+            assert!(!has_any_part_file(tmp.path(), export_id));
         }
     }
 

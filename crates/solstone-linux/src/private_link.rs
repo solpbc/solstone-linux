@@ -2117,6 +2117,7 @@ pub(crate) enum ExportOpenError {
 pub(crate) struct ExportDownloadStream {
     response: reqwest::Response,
     pub(crate) status: StatusCode,
+    pub(crate) content_length: Option<u64>,
     pub(crate) content_range: Option<String>,
     pub(crate) etag: Option<String>,
     pub(crate) transport: &'static str,
@@ -2720,6 +2721,7 @@ impl PrivateLinkCapability {
         if status == StatusCode::FORBIDDEN || self.refused_gateway(status) {
             return Err(ExportOpenError::Forbidden);
         }
+        let content_length = response.content_length();
         let content_range = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
@@ -2734,6 +2736,7 @@ impl PrivateLinkCapability {
         Ok(ExportDownloadStream {
             response,
             status,
+            content_length,
             content_range,
             etag,
             transport,
