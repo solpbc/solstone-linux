@@ -6,14 +6,16 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+## [2.0.55] - 2026-11-27
+
 ### Added
 
-- when your journal is up to date, exporting a copy in your journal's window now lets you pick where to save it first, streams it straight to disk while holding off automatic idle sleep, and checks the file before finishing. if a connection drops, your computer sleeps, or you pause the save, you can resume where it left off. when it's done, you can reveal the saved copy in your file manager.
+- when your journal is up to date, exporting it in its window now lets you pick where to save the copy first, streams it straight to disk while holding off automatic idle sleep, and checks the file before finishing. if a connection drops, your computer sleeps, or you pause the save, you can resume where it left off. when it's done, you can reveal the saved copy in your file manager.
 
 ### Fixed
 
-- terminal now marks every tmux session you've listed in `output_sessions`, even while you're using it, so an updated journal can tell the agent's work there from yours. thanks @dvanduzer.
-- when one piece of a large file times out during import, the app checks what your journal received. if that piece didn't arrive, the app can try a smaller one.
+- terminal now marks every tmux session you've listed in `output_sessions`, even while you're using it, so your journal, once it's up to date, can tell an agent's work there from yours. thanks @dvanduzer.
+- on a slow connection, a large import could keep timing out on the same piece. now when a piece times out, the app checks what your journal received, and if that piece didn't arrive, the app can try a smaller one.
 
 ## [2.0.54] - 2026-11-26
 
