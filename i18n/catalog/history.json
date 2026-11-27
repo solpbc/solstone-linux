@@ -7006,6 +7006,18 @@
       "selector": null
     },
     {
+      "id": "linux.export.savingfromjournal",
+      "resource": "m6c696e75782e6578706f72742e736176696e6766726f6d6a6f75726e616c",
+      "namespace": "linux.export",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.health.idleconfirmingwithyourjournal",
       "resource": "m6c696e75782e6865616c74682e69646c65636f6e6669726d696e6777697468796f75726a6f75726e616c",
       "namespace": "linux.health",

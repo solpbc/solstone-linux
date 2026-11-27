@@ -339,6 +339,10 @@ fn run_capture(
         .map_err(|error| ObserverError::Io(format!("linked state lock clone failed: {error}")))?;
     let (terminal_sync, terminal_activity) = crate::terminal::TerminalSync::new(config.terminal);
     let sleep_inhibit = crate::sleep_inhibit::SleepInhibit::system();
+    let exports = crate::export_transfer::ExportTransferHandle::new(
+        Arc::clone(&upload),
+        sleep_inhibit.clone(),
+    );
     let sync = SyncService::start_with_sources(
         config.clone(),
         Arc::clone(&upload),
@@ -645,6 +649,7 @@ fn run_capture(
             obsidian: obsidian.clone(),
             screenshots: screenshots.clone(),
             imports: sync.import_handle(),
+            exports,
         },
     );
     let initialized = !stopped.load(Ordering::Acquire);

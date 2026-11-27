@@ -24,6 +24,12 @@ import_contract = json.loads(import_bytes)
 auth_contract = json.loads((here / "auth-host-contract.json").read_bytes())
 if auth_contract["version"] != 2 or auth_contract["capability"] != import_contract["capability"]:
     raise SystemExit("unsupported journal auth host contract")
+export_bytes = (here / "export-host-contract.json").read_bytes()
+if hashlib.sha256(export_bytes).hexdigest() != "7c4f637d55dc879ba980cde392f4ab5f4e4fe1ab14960f6cae20f0f91b4809fc":
+    raise SystemExit("journal export host contract differs from its pin")
+export_contract = json.loads(export_bytes)
+if export_contract["version"] != 2 or export_contract["capability"] != import_contract["capability"]:
+    raise SystemExit("unsupported journal export host contract")
 contract = json.loads((here / "host-contract.json").read_bytes())
 if contract["version"] != 1:
     raise SystemExit("unsupported journal host contract")
@@ -50,6 +56,14 @@ with tempfile.TemporaryDirectory() as tmp:
               "AUTH_AUTHORIZE": auth_contract["authorize"],
               "AUTH_CANCEL": auth_contract["cancel"],
               "AUTH_RESULT": auth_contract["result"],
+              "EXPORT_CONTRACT": json.dumps(export_contract),
+              "EXPORT_START": export_contract["start"],
+              "EXPORT_STATUS": export_contract["status"],
+              "EXPORT_PAUSE": export_contract["pause"],
+              "EXPORT_RESUME": export_contract["resume"],
+              "EXPORT_CANCEL": export_contract["cancel"],
+              "EXPORT_REVEAL": export_contract["reveal"],
+              "EXPORT_DEVICE_SPACE": export_contract["deviceSpace"],
               "IMPORT_SCRIPT": (here / "import-host.js").read_text()}
     (Path(tmp) / "host-contract.h").write_text("".join(
         f"#define {name} {json.dumps(value)}\n" for name, value in values.items()

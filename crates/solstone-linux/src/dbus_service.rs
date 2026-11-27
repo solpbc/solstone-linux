@@ -36,6 +36,7 @@ pub struct Observer1<C: Clock, O: ObserverCommands> {
     pub obsidian: crate::obsidian::ObsidianHandle,
     pub screenshots: crate::screenshots::ScreenshotsHandle,
     pub imports: crate::import::ImportHandle,
+    pub exports: crate::export_transfer::ExportTransferHandle,
     pub auth: crate::auth_broker::AuthHandle,
 }
 impl<C: Clock, O: ObserverCommands> Observer1<C, O> {
@@ -245,6 +246,27 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     fn import_reconcile(&self) -> String {
         self.imports.request_reconcile();
         "ok".to_owned()
+    }
+    async fn export_start(&self, payload: String) -> String {
+        self.exports.start(&payload).await
+    }
+    fn export_status(&self, payload: String) -> String {
+        self.exports.status(&payload)
+    }
+    async fn export_pause(&self, payload: String) -> String {
+        self.exports.pause(&payload).await
+    }
+    async fn export_resume(&self, payload: String) -> String {
+        self.exports.resume(&payload).await
+    }
+    async fn export_cancel(&self, payload: String) -> String {
+        self.exports.cancel(&payload).await
+    }
+    async fn export_reveal(&self, payload: String) -> String {
+        self.exports.reveal(&payload).await
+    }
+    fn export_device_space(&self, payload: String) -> String {
+        self.exports.device_space(&payload)
     }
     async fn auth_prepare(
         &self,
@@ -620,6 +642,7 @@ mod tests {
                 obsidian: crate::obsidian::ObsidianHandle::default(),
                 screenshots: crate::screenshots::ScreenshotsHandle::default(),
                 imports: crate::import::ImportHandle::default(),
+                exports: crate::export_transfer::ExportTransferHandle::default(),
                 auth: crate::auth_broker::AuthHandle::default(),
             },
             commands,
@@ -715,6 +738,7 @@ mod tests {
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),
+            exports: crate::export_transfer::ExportTransferHandle::default(),
             auth: crate::auth_broker::AuthHandle::default(),
         };
         let mut xml = String::new();
@@ -759,6 +783,7 @@ mod tests {
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
             imports: crate::import::ImportHandle::default(),
+            exports: crate::export_transfer::ExportTransferHandle::default(),
             auth: crate::auth_broker::AuthHandle::default(),
         };
         let first = service.segment_timer();

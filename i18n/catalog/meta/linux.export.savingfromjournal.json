@@ -1,0 +1,17 @@
+{
+  "description": "Reason shown by Linux desktop power managers and systemd-inhibit while saving a journal export copy.",
+  "context": "Passed as the inhibitor reason while an active journal export copy is being saved to disk.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 48,
+  "source_revision": "71cde9992cf1a357f5a91f3e9628ce5b0c0de7127a4522dca4d78acccff43865",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

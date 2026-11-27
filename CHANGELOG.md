@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- when your journal is up to date, exporting a copy in your journal's window now lets you pick where to save it first, streams it straight to disk while holding off automatic idle sleep, and checks the file before finishing. if a connection drops, your computer sleeps, or you pause the save, you can resume where it left off. when it's done, you can reveal the saved copy in your file manager.
+
 ### Fixed
 
 - terminal now marks every tmux session you've listed in `output_sessions`, even while you're using it, so an updated journal can tell the agent's work there from yours. thanks @dvanduzer.

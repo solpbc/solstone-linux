@@ -990,3 +990,4 @@ linux.shell.itemcount = { $count ->
     [one] { $display } item
    *[other] { $display } items
 }
+linux.export.savingfromjournal = saving a copy from your journal.

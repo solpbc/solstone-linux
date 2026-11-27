@@ -10,7 +10,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -1489,6 +1489,7 @@ pub(crate) struct PrivateLinkOpener {
     facts: LinkFacts,
     generation: AtomicU64,
     relay_incarnation: AtomicU64,
+    last_transport: AtomicU8,
     shutdown_fenced: AtomicBool,
 }
 
@@ -1507,7 +1508,16 @@ impl PrivateLinkOpener {
             facts,
             generation: AtomicU64::new(0),
             relay_incarnation: AtomicU64::new(1),
+            last_transport: AtomicU8::new(0),
             shutdown_fenced: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn last_transport(&self) -> Option<&'static str> {
+        match self.last_transport.load(Ordering::Acquire) {
+            1 => Some("local"),
+            2 => Some("relay"),
+            _ => None,
         }
     }
 
@@ -1744,6 +1754,14 @@ impl PrivateLinkOpener {
             }
 
             let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            self.last_transport.store(
+                if relay_dial_incarnation.is_some() {
+                    2
+                } else {
+                    1
+                },
+                Ordering::Release,
+            );
             // Owner retirement and proof publication share the facts lock.
             for fact in [LinkFact::CarrierProven, LinkFact::ObserverRegistered] {
                 if !self.facts.publish_with_source(
@@ -1788,12 +1806,28 @@ fn proxy_headers_for_v3(
     Ok(headers)
 }
 
+pub(crate) fn is_export_download_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/app/export/api/ready/") else {
+        return false;
+    };
+    let Some(export_id) = rest.strip_suffix("/download") else {
+        return false;
+    };
+    !export_id.is_empty()
+        && export_id.len() <= 128
+        && export_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 fn streams_journal_response(request: &RequestHead) -> bool {
     (request.method == "POST"
         && matches!(
             request.path(),
             "/app/import/api/save" | "/app/import/api/start"
         ))
+        || (matches!(request.method.as_str(), "GET" | "HEAD")
+            && is_export_download_path(request.path()))
         || request.method == "GET"
             && (matches!(
                 request.path(),
@@ -2070,6 +2104,48 @@ impl LinkOutcome {
 
     pub(crate) fn is_transport_unavailable(&self) -> bool {
         matches!(self, LinkOutcome::TransportUnavailable)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExportOpenError {
+    InvalidPath,
+    Forbidden,
+    TransportUnavailable,
+}
+
+pub(crate) struct ExportDownloadStream {
+    response: reqwest::Response,
+    pub(crate) status: StatusCode,
+    pub(crate) content_range: Option<String>,
+    pub(crate) etag: Option<String>,
+    pub(crate) transport: &'static str,
+}
+
+impl ExportDownloadStream {
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, ()> {
+        match self.response.chunk().await {
+            Ok(Some(chunk)) => Ok(Some(chunk.to_vec())),
+            Ok(None) => Ok(None),
+            Err(_) => Err(()),
+        }
+    }
+
+    pub(crate) async fn read_bounded(&mut self, max_bytes: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        while out.len() < max_bytes {
+            match self.response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let take = chunk.len().min(max_bytes - out.len());
+                    out.extend_from_slice(&chunk[..take]);
+                    if take < chunk.len() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        out
     }
 }
 
@@ -2611,6 +2687,57 @@ impl PrivateLinkCapability {
         };
         self.send_import(self.inner.client.delete(url), IMPORT_ABORT_TIMEOUT)
             .await
+    }
+
+    pub(crate) async fn export_download_open(
+        &self,
+        download_path: &str,
+        range_header: Option<&str>,
+        if_range_header: Option<&str>,
+    ) -> Result<ExportDownloadStream, ExportOpenError> {
+        if !is_export_download_path(download_path) {
+            return Err(ExportOpenError::InvalidPath);
+        }
+        let Ok(url) = confine_path(&self.inner.origin, download_path) else {
+            return Err(ExportOpenError::InvalidPath);
+        };
+        let mut req = self
+            .inner
+            .client
+            .get(url)
+            .header(reqwest::header::CACHE_CONTROL, "no-cache");
+        if let Some(range) = range_header {
+            req = req.header(reqwest::header::RANGE, range);
+        }
+        if let Some(if_range) = if_range_header {
+            req = req.header(reqwest::header::IF_RANGE, if_range);
+        }
+        let response = match tokio::time::timeout(Duration::from_secs(60), req.send()).await {
+            Ok(Ok(resp)) => resp,
+            _ => return Err(ExportOpenError::TransportUnavailable),
+        };
+        let status = response.status();
+        if status == StatusCode::FORBIDDEN || self.refused_gateway(status) {
+            return Err(ExportOpenError::Forbidden);
+        }
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let transport = self.inner.opener.last_transport().unwrap_or("local");
+        Ok(ExportDownloadStream {
+            response,
+            status,
+            content_range,
+            etag,
+            transport,
+        })
     }
 
     pub(crate) async fn import_save(&self, form: multipart::Form) -> LinkOutcome {
@@ -5553,6 +5680,26 @@ pub(crate) mod tests {
         assert!(streams_journal_response(&request(
             "GET",
             "/app/import/api/journal-archive/export"
+        )));
+        assert!(streams_journal_response(&request(
+            "GET",
+            "/app/export/api/ready/exp_20261126_abc-1/download"
+        )));
+        assert!(streams_journal_response(&request(
+            "HEAD",
+            "/app/export/api/ready/exp_20261126_abc-1/download"
+        )));
+        assert!(!streams_journal_response(&request(
+            "POST",
+            "/app/export/api/ready/exp_20261126_abc-1/download"
+        )));
+        assert!(!streams_journal_response(&request(
+            "GET",
+            "/app/export/api/ready/../download"
+        )));
+        assert!(!streams_journal_response(&request(
+            "GET",
+            "/app/export/api/ready/exp_1/other"
         )));
         assert!(!streams_journal_response(&request(
             "POST",

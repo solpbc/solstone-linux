@@ -2,7 +2,7 @@
 // Copyright (c) 2026 sol pbc
 
 // This function is installed by the viewer only in the journal's top document.
-(contract, auth, nonce, origin) => {
+(contract, auth, exportContract, nonce, origin) => {
   if (window !== window.top || location.origin !== origin) return;
   const native = window.webkit.messageHandlers.journalImport;
   const documentId = crypto.randomUUID();
@@ -12,10 +12,50 @@
   const authTypes = auth && auth.version === contract.version && auth.capability === contract.capability
     ? [auth.prepare, auth.authorize, auth.cancel]
     : [];
+  const exportTypes = exportContract && exportContract.version === contract.version && exportContract.capability === contract.capability
+    ? [
+        exportContract.start,
+        exportContract.status,
+        exportContract.pause,
+        exportContract.resume,
+        exportContract.cancel,
+        exportContract.reveal,
+        exportContract.deviceSpace,
+      ]
+    : [];
   const items = new Map();
   let timer;
   let updating = false;
   let pendingNew = false;
+  let exportTimer;
+  let exportLastSerial;
+  async function pollExport() {
+    exportTimer = undefined;
+    if (!exportContract) return;
+    try {
+      const status = await post({type:exportContract.status, id:crypto.randomUUID()});
+      const serial = JSON.stringify(status);
+      if (exportLastSerial !== serial) {
+        exportLastSerial = serial;
+        window.dispatchEvent(new CustomEvent(exportContract.event, {detail: status}));
+      }
+      if (status && ['picking', 'transferring', 'verifying'].includes(status.phase)) {
+        exportTimer = setTimeout(pollExport, 250);
+      }
+    } catch (_) {
+      exportTimer = setTimeout(pollExport, 600);
+    }
+  }
+  function trackExportReply(reply) {
+    if (!exportContract || !reply || typeof reply !== 'object') return;
+    exportLastSerial = JSON.stringify(reply);
+    if (['picking', 'transferring', 'verifying'].includes(reply.phase)) {
+      if (!exportTimer) exportTimer = setTimeout(pollExport, 250);
+    } else if (exportTimer) {
+      clearTimeout(exportTimer);
+      exportTimer = undefined;
+    }
+  }
   async function update() {
     updating = true;
     timer = undefined;
@@ -50,10 +90,17 @@
     }
   }
   Object.defineProperty(window, contract.capability, {value:Object.freeze({
-    version:contract.version, types:Object.freeze([contract.pick, ...authTypes]),
+    version:contract.version, types:Object.freeze([contract.pick, ...authTypes, ...exportTypes]),
     async send(message) {
       if (!message || typeof message.id !== 'string' || typeof message.type !== 'string') throw new TypeError();
       if (authTypes.includes(message.type)) return await post(message);
+      if (exportTypes.includes(message.type)) {
+        const reply = await post(message);
+        if (message.type !== exportContract.deviceSpace && message.type !== exportContract.reveal) {
+          trackExportReply(reply);
+        }
+        return reply;
+      }
       if (message.type !== contract.pick) return {type:contract.unsupported, id:message.id};
       const reply = await post(message);
       for (const item of reply.items || []) {

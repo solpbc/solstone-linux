@@ -406,8 +406,8 @@ static gboolean create_view(Journal *journal)
         g_signal_connect(manager, "script-message-with-reply-received::journalImport",
             G_CALLBACK(import_message), journal);
         journal->nonce = g_uuid_string_random();
-        g_autofree char *source = g_strdup_printf("(%s)(%s,%s,'%s','%s')",
-            IMPORT_SCRIPT, IMPORT_CONTRACT, AUTH_CONTRACT, journal->nonce, host);
+        g_autofree char *source = g_strdup_printf("(%s)(%s,%s,%s,'%s','%s')",
+            IMPORT_SCRIPT, IMPORT_CONTRACT, AUTH_CONTRACT, EXPORT_CONTRACT, journal->nonce, host);
         // Match the dynamic loopback port inside the top-document script.
         WebKitUserScript *import = webkit_user_script_new(source,
             WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);

@@ -155,6 +155,7 @@ pub(crate) struct ShellInputs {
     pub obsidian: crate::obsidian::ObsidianHandle,
     pub screenshots: crate::screenshots::ScreenshotsHandle,
     pub imports: crate::import::ImportHandle,
+    pub exports: crate::export_transfer::ExportTransferHandle,
 }
 
 pub(crate) struct DesktopShell {
@@ -192,6 +193,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
     obsidian: crate::obsidian::ObsidianHandle,
     screenshots: crate::screenshots::ScreenshotsHandle,
     imports: crate::import::ImportHandle,
+    exports: crate::export_transfer::ExportTransferHandle,
 ) -> (Observer1<C, O>, TrayHealth) {
     let tray_health = TrayHealth {
         cell: Arc::clone(&health),
@@ -209,6 +211,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
             obsidian,
             screenshots,
             imports,
+            exports,
             auth: crate::auth_broker::AuthHandle::default(),
         },
         tray_health,
@@ -247,6 +250,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         inputs.obsidian,
         inputs.screenshots,
         inputs.imports,
+        inputs.exports,
     );
     let signal_sink = with_connection(inputs.connection.as_ref(), |connection| {
         // Setup owns the bus name before recovery. Observer1 is mounted before observer
@@ -868,6 +872,7 @@ mod tests {
             crate::obsidian::ObsidianHandle::default(),
             crate::screenshots::ScreenshotsHandle::default(),
             crate::import::ImportHandle::default(),
+            crate::export_transfer::ExportTransferHandle::default(),
         );
         assert!(Arc::ptr_eq(&interface.health, &tray_health.cell));
         assert!(Arc::ptr_eq(&interface.progress, &progress));

@@ -412,9 +412,8 @@ impl ActiveLocks {
     }
 }
 
-async fn acquire_locks(backend: &dyn SleepBackend) -> ActiveLocks {
+async fn acquire_locks(backend: &dyn SleepBackend, why: &str) -> ActiveLocks {
     let who = text!("linux.metadata.name");
-    let why = text!("linux.import.sendingtojournal");
     let mut locks = ActiveLocks::default();
 
     let logind_available = match backend.inhibit(LockKind::SleepDelay, who, why).await {
@@ -624,6 +623,13 @@ impl SleepInhibit {
     /// sleeping. Returns `Sleeping` if `PrepareForSleep(true)` is active or arrives while
     /// acquiring locks (in which case any acquired locks are released immediately).
     pub(crate) async fn acquire(&self) -> AcquireOutcome {
+        self.acquire_with_reason(text!("linux.import.sendingtojournal"))
+            .await
+    }
+
+    /// Registers an active transfer and acquires inhibitor locks with an explicit
+    /// owner-visible reason shown by desktop power managers and `systemd-inhibit`.
+    pub(crate) async fn acquire_with_reason(&self, why: &'static str) -> AcquireOutcome {
         let (need_locks, start_epoch) = {
             let mut state = self
                 .state
@@ -645,7 +651,7 @@ impl SleepInhibit {
             released: false,
         };
         if need_locks && let Some(backend) = self.backend.as_ref() {
-            let acquired = acquire_locks(backend.as_ref()).await;
+            let acquired = acquire_locks(backend.as_ref(), why).await;
             let (interrupted, surplus) = {
                 let mut state = self
                     .state

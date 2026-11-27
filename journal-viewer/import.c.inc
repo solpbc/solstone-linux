@@ -160,6 +160,42 @@ static void picked_response(GtkNativeDialog *dialog, int response, gpointer data
     g_object_unref(dialog);
 }
 
+static void export_save_picked(GtkNativeDialog *dialog, int response, gpointer data)
+{
+    ImportCall *call = data;
+    if (response == GTK_RESPONSE_ACCEPT && call->document_generation == call->journal->document_generation) {
+        g_autoptr(GFile) file = gtk_file_chooser_get_file(GTK_FILE_CHOOSER(dialog));
+        g_autofree char *path = file ? g_file_get_path(file) : NULL;
+        if (path && *path) {
+            g_autoptr(JSCValue) obj = jsc_value_new_from_json(call->context, call->options ? call->options : "{}");
+            if (obj && jsc_value_is_object(obj)) {
+                g_autoptr(JSCValue) dest = jsc_value_new_string(call->context, path);
+                jsc_value_object_set_property(obj, "destination_path", dest);
+                g_autofree char *payload = jsc_value_to_json(obj, 0);
+                daemon_call(call, "ExportStart", g_variant_new("(s)", payload ? payload : "{}"), NULL);
+                g_object_unref(dialog);
+                return;
+            }
+        }
+    }
+    g_autoptr(JSCValue) idle = jsc_value_new_object(call->context, NULL, NULL);
+    g_autoptr(JSCValue) id_val = jsc_value_new_string(call->context, call->id ? call->id : "");
+    g_autoptr(JSCValue) phase_val = jsc_value_new_string(call->context, "idle");
+    g_autoptr(JSCValue) platform_val = jsc_value_new_string(call->context, "linux");
+    g_autoptr(JSCValue) zero_val = jsc_value_new_number(call->context, 0);
+    g_autoptr(JSCValue) false_val = jsc_value_new_boolean(call->context, FALSE);
+    jsc_value_object_set_property(idle, "id", id_val);
+    jsc_value_object_set_property(idle, "phase", phase_val);
+    jsc_value_object_set_property(idle, "platform", platform_val);
+    jsc_value_object_set_property(idle, "bytes_written", zero_val);
+    jsc_value_object_set_property(idle, "total_bytes", zero_val);
+    jsc_value_object_set_property(idle, "can_reveal", false_val);
+    jsc_value_object_set_property(idle, "verified", false_val);
+    g_autofree char *encoded = jsc_value_to_json(idle, 0);
+    finish_import(call, encoded ? encoded : "{\"phase\":\"idle\",\"platform\":\"linux\",\"bytes_written\":0,\"total_bytes\":0,\"can_reveal\":false,\"verified\":false}");
+    g_object_unref(dialog);
+}
+
 static gboolean import_message(WebKitUserContentManager *manager, JSCValue *packet,
                                WebKitScriptMessageReply *reply, gpointer data)
 {
@@ -245,6 +281,46 @@ static gboolean import_message(WebKitUserContentManager *manager, JSCValue *pack
             call->auth_fallback_outcome = "cancelled";
             call->auth_fallback_reason = NULL;
         }
+        daemon_call(call, method, g_variant_new("(s)", payload), NULL);
+        return TRUE;
+    }
+    if (g_strcmp0(type, EXPORT_START) == 0 || g_strcmp0(type, EXPORT_STATUS) == 0
+        || g_strcmp0(type, EXPORT_PAUSE) == 0 || g_strcmp0(type, EXPORT_RESUME) == 0
+        || g_strcmp0(type, EXPORT_CANCEL) == 0 || g_strcmp0(type, EXPORT_REVEAL) == 0
+        || g_strcmp0(type, EXPORT_DEVICE_SPACE) == 0) {
+        if (!call->id || !*call->id || strlen(call->id) > 128) {
+            finish_import(call, "{\"type\":\"unsupported\",\"id\":\"\"}");
+            return TRUE;
+        }
+        g_autofree char *payload = jsc_value_to_json(msg, 0);
+        if (!payload) {
+            finish_import(call, "{\"type\":\"unsupported\",\"id\":\"\"}");
+            return TRUE;
+        }
+        if (g_strcmp0(type, EXPORT_START) == 0) {
+            g_autofree char *filename = string_field(msg, "filename");
+            const char *suggested = (filename && *filename) ? filename : "solstone-journal.zip";
+            call->options = g_strdup(payload);
+            GtkFileChooserNative *chooser = gtk_file_chooser_native_new(NULL, journal->window,
+                GTK_FILE_CHOOSER_ACTION_SAVE, NULL, NULL);
+            gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser), suggested);
+            GtkFileFilter *zip_filter = gtk_file_filter_new();
+            gtk_file_filter_set_name(zip_filter, "*.zip");
+            gtk_file_filter_add_pattern(zip_filter, "*.zip");
+            gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(chooser), zip_filter);
+            g_object_unref(zip_filter);
+            g_signal_connect(chooser, "response", G_CALLBACK(export_save_picked), call);
+            gtk_native_dialog_show(GTK_NATIVE_DIALOG(chooser));
+            return TRUE;
+        }
+        const char *method = NULL;
+        if (g_strcmp0(type, EXPORT_STATUS) == 0) method = "ExportStatus";
+        else if (g_strcmp0(type, EXPORT_PAUSE) == 0) method = "ExportPause";
+        else if (g_strcmp0(type, EXPORT_RESUME) == 0) method = "ExportResume";
+        else if (g_strcmp0(type, EXPORT_CANCEL) == 0) method = "ExportCancel";
+        else if (g_strcmp0(type, EXPORT_REVEAL) == 0) method = "ExportReveal";
+        else method = "ExportDeviceSpace";
+        call->timeout_ms = 10000;
         daemon_call(call, method, g_variant_new("(s)", payload), NULL);
         return TRUE;
     }
