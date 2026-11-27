@@ -1,0 +1,17 @@
+{
+  "description": "Kinds section heading.",
+  "context": "Kinds section heading.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 45,
+  "source_revision": "a4d90ceffdfece3d77f406e04381fd1f5b1f2c36f516df852ee0f0c434f11e7b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

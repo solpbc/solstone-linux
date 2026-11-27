@@ -1,0 +1,17 @@
+{
+  "description": "Unset facet dropdown option.",
+  "context": "Unset facet dropdown option.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 36,
+  "source_revision": "d980d7e701115d3d75822d824fe95e20babc7795aa99b51c60f96c96d7ad7c52",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

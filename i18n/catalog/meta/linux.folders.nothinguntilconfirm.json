@@ -1,0 +1,17 @@
+{
+  "description": "Reassurance line above confirm button at first setup.",
+  "context": "Reassurance line above confirm button at first setup.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 84,
+  "source_revision": "cb5248976133e1001c0cb19be6c88e1bd2a161c69d31ee4d204fff183a8f04ae",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

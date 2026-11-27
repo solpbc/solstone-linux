@@ -1,0 +1,17 @@
+{
+  "description": "Estimate fallback when paired journal is offline.",
+  "context": "Estimate fallback when paired journal is offline.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 151,
+  "source_revision": "ea7624c5c1abf9314631ba58d437ff39f237cb4f4fa28632a2177f2658df8432",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

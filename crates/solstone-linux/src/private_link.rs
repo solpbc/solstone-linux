@@ -2888,6 +2888,59 @@ impl PrivateLinkCapability {
         .await
     }
 
+    /// The owner's active facets from the paired journal (Protocol v3 folder contract).
+    pub(crate) async fn journal_facets(&self) -> LinkOutcome {
+        let Ok(url) = self.ingest_v3_url("/folder/facets") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(
+            self.inner
+                .client
+                .get(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS)
+                .header(reqwest::header::CACHE_CONTROL, "no-cache"),
+            LISTING_TIMEOUT,
+        )
+        .await
+    }
+
+    /// The supported file-type list published by the paired journal for folder sources.
+    pub(crate) async fn folder_supported_types(&self) -> LinkOutcome {
+        let Ok(url) = self.ingest_v3_url("/folder/supported") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(
+            self.inner
+                .client
+                .get(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS),
+            LISTING_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Backfill work estimate for a folder preview range.
+    pub(crate) async fn folder_backfill_estimate(&self, body: &serde_json::Value) -> LinkOutcome {
+        let Ok(url) = self.ingest_v3_url("/folder/estimate") else {
+            return LinkOutcome::LocalRejected {
+                status: StatusCode::BAD_REQUEST,
+            };
+        };
+        self.send(
+            self.inner
+                .client
+                .post(url)
+                .header(ROUTE_CLASS_MARKER_HEADER_NAME, INGEST_V3_ROUTE_CLASS)
+                .json(body),
+            LISTING_TIMEOUT,
+        )
+        .await
+    }
+
     pub(crate) async fn system_status_info(&self) -> Result<SystemStatusInfo, LinkOutcome> {
         let Ok(url) = confine_path(&self.inner.origin, SYSTEM_STATUS_PATH) else {
             return Err(LinkOutcome::LocalRejected {

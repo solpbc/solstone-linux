@@ -1,0 +1,22 @@
+{
+  "description": "Waiting count sub-line while items wait to reach the journal.",
+  "context": "Waiting count sub-line while items wait to reach the journal.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 58,
+  "source_revision": "cc485c64498e3a93d0b2e8c25d069c75313b0bae450649ac6336a6c23dda2cf9",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

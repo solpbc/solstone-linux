@@ -1,0 +1,17 @@
+{
+  "description": "Validation note when all six kind checkboxes are off.",
+  "context": "Validation note when all six kind checkboxes are off.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 69,
+  "source_revision": "3cc090295ca2d8ea506da9ca51b50258b89acc622b1ab600c9ee584597c234f2",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Footer action and confirm button for removing a folder.",
+  "context": "Footer action and confirm button for removing a folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 45,
+  "source_revision": "98782e48a7964abda13c83dfa51c350aa040987e990ef48865a7555566314b0c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1348,6 +1348,20 @@ fn discard_browser_pages_at(
     }
 }
 
+fn live_folders() -> Option<crate::folders::FoldersDocument> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async {
+        let client = crate::dbus_client::ControlClient::session().await.ok()?;
+        let owner = client.get_owner().await.ok()?;
+        let client = client.expect_owner(owner);
+        let raw = client.folders_state().await.ok()?;
+        crate::folders::decode_document(&raw)
+    })
+}
+
 fn live_vaults(
     config: &crate::config::Config,
 ) -> Option<(
@@ -1572,6 +1586,49 @@ fn cmd_status(paths: ConfigPaths, runner: &dyn Runner, output: &mut dyn Write) -
                 for other in others {
                     write_line(output, format!("    {}", other.line(true)))?;
                 }
+            }
+        }
+        let live_folders_doc = if live { live_folders() } else { None };
+        let folders_live = live_folders_doc.is_some();
+        let folders_doc = live_folders_doc.unwrap_or_else(|| {
+            let home = env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| config.base_dir.clone());
+            let paired = crate::private_link::credential_present(&config.config_dir);
+            crate::folders::read_disk_document(&config.state_dir().join("folders"), home, paired)
+        });
+        if !folders_doc.folders.is_empty() {
+            let head_word = if live || folders_live {
+                crate::folders::word(&folders_doc)
+            } else {
+                crate::shell_model::StateWord::NotRunning
+            };
+            write_line(
+                output,
+                crate::copy::folders::cli_line(crate::shell_model::state_label(head_word)),
+            )?;
+            for folder in &folders_doc.folders {
+                let word = if live || folders_live {
+                    crate::folders::folder_word(folder)
+                } else {
+                    crate::shell_model::StateWord::NotRunning
+                };
+                let mut parts = vec![
+                    folder.name.clone(),
+                    crate::shell_model::state_label(word).to_owned(),
+                ];
+                if let Some(facet) = folder.facet.as_ref() {
+                    parts.push(facet.title.clone());
+                }
+                if folder.items_taken_in > 0 {
+                    parts.push(crate::shell_model::format_items(folder.items_taken_in));
+                }
+                if let Some(ms) = folder.last_taken_in_ms
+                    && let Some(rel) = crate::shell_model::relative_unix_now(ms as f64 / 1000.0)
+                {
+                    parts.push(rel);
+                }
+                write_line(output, format!("    {}", parts.join(" · ")))?;
             }
         }
         let terminal_config = crate::terminal::control::config_for_status(&config, runner);

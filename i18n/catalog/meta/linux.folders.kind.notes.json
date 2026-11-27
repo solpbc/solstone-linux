@@ -1,0 +1,17 @@
+{
+  "description": "Notes kind label.",
+  "context": "Notes kind label.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 37,
+  "source_revision": "48cf7b0023e74ed28b3c400b705295f9dd1d6b7331c78e6a05d1bdc8a86af79d",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

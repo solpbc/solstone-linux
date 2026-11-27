@@ -1,0 +1,17 @@
+{
+  "description": "Folder page and tile sub-line when on and no journal is paired.",
+  "context": "Folder page and tile sub-line when on and no journal is paired.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 90,
+  "source_revision": "fe34f6395a27982485e70bf007184f17c9d9369e2b62fe808c46ec9b0c0438bc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

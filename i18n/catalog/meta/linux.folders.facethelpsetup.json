@@ -1,0 +1,22 @@
+{
+  "description": "Helper under facet picker during setup.",
+  "context": "Helper under facet picker during setup.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "facet",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 84,
+  "source_revision": "c1a796b3265ff68e8e88b3812f04a82ef497244442b309fc4dd5b1762bdf2f35",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,30 @@
+{
+  "description": "Three-unit non-money backfill estimate.",
+  "context": "Three-unit non-money backfill estimate.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "segments",
+      "type": "string"
+    },
+    {
+      "name": "days",
+      "type": "string"
+    },
+    {
+      "name": "thoughts",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 98,
+  "source_revision": "607d82b4a6f4b815a88633bbd71ef7ac79221fdff6cd84ac006a8d1dccbb4018",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

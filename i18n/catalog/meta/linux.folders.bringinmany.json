@@ -1,0 +1,22 @@
+{
+  "description": "Confirm button when 2 or more items are selected.",
+  "context": "Confirm button when 2 or more items are selected.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 57,
+  "source_revision": "42feb560690c0846f00a44d13e6fbb13f0f9ce4165f5fa3b3b8db6ab972678ce",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

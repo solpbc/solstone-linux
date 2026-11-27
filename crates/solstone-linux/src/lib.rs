@@ -29,6 +29,7 @@ pub mod desktop_session;
 pub mod doctor;
 pub mod encoding;
 pub mod export_transfer;
+pub mod folders;
 pub mod import;
 pub mod journal_link;
 mod journal_mark;

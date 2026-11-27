@@ -154,6 +154,7 @@ pub(crate) struct ShellInputs {
     pub shared: crate::shared_sources::Refresh,
     pub obsidian: crate::obsidian::ObsidianHandle,
     pub screenshots: crate::screenshots::ScreenshotsHandle,
+    pub folders: crate::folders::FoldersHandle,
     pub imports: crate::import::ImportHandle,
     pub exports: crate::export_transfer::ExportTransferHandle,
 }
@@ -192,6 +193,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
     shared: crate::shared_sources::Refresh,
     obsidian: crate::obsidian::ObsidianHandle,
     screenshots: crate::screenshots::ScreenshotsHandle,
+    folders: crate::folders::FoldersHandle,
     imports: crate::import::ImportHandle,
     exports: crate::export_transfer::ExportTransferHandle,
 ) -> (Observer1<C, O>, TrayHealth) {
@@ -210,6 +212,7 @@ fn bind_consumers<C: Clock, O: ObserverCommands>(
             shared,
             obsidian,
             screenshots,
+            folders,
             imports,
             exports,
             auth: crate::auth_broker::AuthHandle::default(),
@@ -249,6 +252,7 @@ pub(crate) fn start(runtime: &tokio::runtime::Runtime, inputs: ShellInputs) -> D
         inputs.shared,
         inputs.obsidian,
         inputs.screenshots,
+        inputs.folders,
         inputs.imports,
         inputs.exports,
     );
@@ -871,6 +875,7 @@ mod tests {
             crate::shared_sources::Refresh::default(),
             crate::obsidian::ObsidianHandle::default(),
             crate::screenshots::ScreenshotsHandle::default(),
+            crate::folders::FoldersHandle::default(),
             crate::import::ImportHandle::default(),
             crate::export_transfer::ExportTransferHandle::default(),
         );

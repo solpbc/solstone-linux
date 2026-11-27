@@ -5,6 +5,7 @@ mod controller;
 mod convert;
 mod copy_map;
 mod deck;
+mod folders_page;
 mod format;
 mod import_page;
 mod journal_setup;

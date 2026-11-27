@@ -7,7 +7,7 @@
 
 mod engine;
 mod folder;
-mod proof;
+pub(crate) mod proof;
 
 pub use engine::{Mode, Span};
 

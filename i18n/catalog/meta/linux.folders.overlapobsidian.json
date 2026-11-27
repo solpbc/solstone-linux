@@ -1,0 +1,22 @@
+{
+  "description": "Overlap target label for an Obsidian vault.",
+  "context": "Overlap target label for an Obsidian vault.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "name",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 63,
+  "source_revision": "3ef4ebee242bb768c6150d9844c20fbe12411cbe5a3f26e520657848af0e1db2",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

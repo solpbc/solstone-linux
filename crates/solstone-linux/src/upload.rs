@@ -38,6 +38,7 @@ pub struct UploadResult {
     pub stored_key: Option<String>,
     pub file_descriptors: Option<Vec<FileDescriptor>>,
     pub reason_code: Option<String>,
+    pub refused_paths: Vec<String>,
     pub is_local_failure: bool,
     pub captured_identity_key: Option<String>,
     pub captured_pairing_id: Option<String>,
@@ -58,6 +59,7 @@ impl UploadResult {
             stored_key: None,
             file_descriptors: None,
             reason_code,
+            refused_paths: Vec::new(),
             is_local_failure: false,
             captured_identity_key: None,
             captured_pairing_id: None,
@@ -74,6 +76,7 @@ impl UploadResult {
             stored_key: None,
             file_descriptors: None,
             reason_code: None,
+            refused_paths: Vec::new(),
             is_local_failure: true,
             captured_identity_key: None,
             captured_pairing_id: None,
@@ -415,6 +418,47 @@ impl UploadClient {
         .await
     }
 
+    /// Upload one five-minute folder segment (activity JSONL plus any staged
+    /// companion content parts) conforming to protocol v3 (`source = "folder"`).
+    pub async fn upload_folder_segment(
+        &self,
+        delivery: &crate::folders::SegmentDelivery,
+    ) -> UploadResult {
+        let stage_dir = std::env::temp_dir().join(format!(
+            "solstone-folder-stage-{}-{}-{}-{}",
+            std::process::id(),
+            delivery.folder_id,
+            delivery.window.day,
+            delivery.window.segment
+        ));
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        if std::fs::create_dir_all(&stage_dir).is_err() {
+            return UploadResult::failure(Some(ErrorType::Transient), None, None);
+        }
+        let Ok(files) = stage_folder_segment(delivery, &stage_dir) else {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return UploadResult::failure(Some(ErrorType::Transient), None, None);
+        };
+        let meta = FolderEnvelopeMeta {
+            v: 1,
+            id: delivery.folder_id.clone(),
+            name: delivery.folder_name.clone(),
+            facet: delivery.facet.clone(),
+            kinds: delivery.kinds.enabled_names(),
+        };
+        let result = self
+            .upload_described(
+                &delivery.window.day,
+                &delivery.window.segment,
+                &files,
+                Some(EnvelopeMeta::Folder { folder: &meta }),
+                Some(crate::folders::SOURCE),
+            )
+            .await;
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        result
+    }
+
     async fn upload_described(
         &self,
         day: &str,
@@ -500,12 +544,16 @@ impl UploadClient {
                         }
                     }
                     LinkOutcome::Success { status, body, .. } => {
-                        let reason_code =
-                            serde_json::from_slice::<Value>(&body).ok().and_then(|val| {
-                                val.get("reason_code")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_owned)
-                            });
+                        let parsed = serde_json::from_slice::<Value>(&body).ok();
+                        let reason_code = parsed.as_ref().and_then(|val| {
+                            val.get("reason_code")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        });
+                        let refused_paths = parsed
+                            .as_ref()
+                            .map(extract_refused_paths)
+                            .unwrap_or_default();
                         let mut error_type = Self::classify_error(Some(status.as_u16()), false);
                         if status == StatusCode::CONFLICT
                             && let Some(ref code) = reason_code
@@ -518,11 +566,13 @@ impl UploadClient {
                         last_status = Some(status.as_u16());
                         last_reason_code = reason_code.clone();
                         if error_type != ErrorType::Transient || reason_code.is_some() {
-                            return UploadResult::failure(
+                            let mut failure = UploadResult::failure(
                                 Some(error_type),
                                 Some(status.as_u16()),
                                 reason_code,
                             );
+                            failure.refused_paths = refused_paths;
+                            return failure;
                         }
                     }
                     LinkOutcome::LocalRejected { status } => {
@@ -742,11 +792,24 @@ impl Inner {
     }
 }
 
+fn extract_refused_paths(body: &Value) -> Vec<String> {
+    body.get("refused_files")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("path").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_upload_body(body: Value) -> UploadResult {
     let status = body.get("status").and_then(Value::as_str);
     let file_descriptors: Option<Vec<FileDescriptor>> = body
         .get("file_descriptors")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let refused_paths = extract_refused_paths(&body);
 
     match status {
         Some("ok" | "collision") => {
@@ -761,6 +824,7 @@ fn parse_upload_body(body: Value) -> UploadResult {
                 stored_key,
                 file_descriptors,
                 reason_code: None,
+                refused_paths,
                 is_local_failure: false,
                 captured_identity_key: None,
                 captured_pairing_id: None,
@@ -780,6 +844,7 @@ fn parse_upload_body(body: Value) -> UploadResult {
                 stored_key,
                 file_descriptors,
                 reason_code: None,
+                refused_paths,
                 is_local_failure: false,
                 captured_identity_key: None,
                 captured_pairing_id: None,
@@ -877,12 +942,219 @@ pub(crate) fn screenshot_envelope(
     .expect("upload envelope is serializable")
 }
 
-/// The envelope's `meta`: a capture's zone, or a screenshot's moment.
+/// The envelope's `meta`: a capture's zone, a screenshot's moment, or folder metadata.
 #[derive(Clone, Copy, Serialize)]
 #[serde(untagged)]
 enum EnvelopeMeta<'a> {
     Zone(&'a crate::recovery::CaptureZone),
     Screenshot { screenshot: &'a ScreenshotMeta },
+    Folder { folder: &'a FolderEnvelopeMeta },
+}
+
+/// `meta.folder` attached to a five-minute folder segment upload (protocol v3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FolderEnvelopeMeta {
+    pub v: u32,
+    pub id: String,
+    pub name: String,
+    pub facet: Option<String>,
+    pub kinds: Vec<&'static str>,
+}
+
+fn convert_folder_image(source: &Path, target: &Path, kind: crate::folders::FileKind) -> bool {
+    let Some(window) = crate::service::current_executable()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("solstone-linux-window")))
+    else {
+        return false;
+    };
+    let arg = match kind {
+        crate::folders::FileKind::Screenshot => crate::screenshots::CONVERT_ARG,
+        _ => crate::import::CONVERT_PHOTO_ARG,
+    };
+    let mut command = std::process::Command::new(window);
+    command.arg(arg).arg(source).arg(target);
+    matches!(
+        crate::bounded_process::run(&mut command, Some(Duration::from_secs(120)), 16 * 1024),
+        Ok(out) if out.status.success() && target.is_file()
+    )
+}
+
+/// Stage companion content parts (`c_01.<ext>`, ...) and the SHA-256-named
+/// activity log (`folder_<sha256>.jsonl`) for one five-minute folder segment.
+pub(crate) fn stage_folder_segment(
+    delivery: &crate::folders::SegmentDelivery,
+    stage_dir: &Path,
+) -> std::io::Result<Vec<PathBuf>> {
+    use std::collections::{BTreeMap, HashMap};
+
+    let mut staged_parts: HashMap<&str, (String, String)> = HashMap::new();
+    let mut companion_paths: Vec<PathBuf> = Vec::new();
+    let mut next_index = 1usize;
+
+    for content in &delivery.content_files {
+        let orig_ext = Path::new(&content.rel_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|e| !e.is_empty() && e.bytes().all(|b| b.is_ascii_alphanumeric()));
+
+        if let Some(ref note_text) = content.note_payload {
+            let ext = orig_ext.as_deref().unwrap_or("md");
+            let part_name = format!("c_{next_index:02}.{ext}");
+            let dest = stage_dir.join(&part_name);
+            let bytes = note_text.as_bytes();
+            std::fs::write(&dest, bytes)?;
+            let hash = solstone_folder_sync::files::sha256_hex(bytes);
+            staged_parts.insert(content.event_id.as_str(), (part_name, hash));
+            companion_paths.push(dest);
+            next_index += 1;
+        } else if content.needs_image_convert && content.disk_path.is_file() {
+            let out_ext = match content.kind {
+                crate::folders::FileKind::Screenshot => "png",
+                _ => "jpg",
+            };
+            let part_name = format!("c_{next_index:02}.{out_ext}");
+            let dest = stage_dir.join(&part_name);
+            if convert_folder_image(&content.disk_path, &dest, content.kind)
+                && let Ok(hash) = solstone_folder_sync::files::hash_local_file(&dest)
+            {
+                staged_parts.insert(content.event_id.as_str(), (part_name, hash));
+                companion_paths.push(dest);
+                next_index += 1;
+            }
+        } else if content.disk_path.is_file() {
+            let part_name = match orig_ext.as_deref() {
+                Some(ext) => format!("c_{next_index:02}.{ext}"),
+                None => format!("c_{next_index:02}.bin"),
+            };
+            let dest = stage_dir.join(&part_name);
+            std::fs::copy(&content.disk_path, &dest)?;
+            let hash = solstone_folder_sync::files::hash_local_file(&dest)?;
+            staged_parts.insert(content.event_id.as_str(), (part_name, hash));
+            companion_paths.push(dest);
+            next_index += 1;
+        }
+    }
+
+    let mut activity_bytes = Vec::new();
+    for ev in &delivery.events {
+        let observed_ms = if ev.observed_ms != 0 {
+            ev.observed_ms
+        } else {
+            ev.event_ms
+        };
+        let at = solstone_vault::Stamp::new(ev.event_ms, ev.offset_s).rfc3339();
+        let observed_at = solstone_vault::Stamp::new(observed_ms, ev.offset_s).rfc3339();
+        let created_at = ev
+            .metadata
+            .created_ms
+            .map(|ms| solstone_vault::Stamp::new(ms, ev.offset_s).rfc3339());
+        let modified_at =
+            solstone_vault::Stamp::new(ev.metadata.modified_ms, ev.offset_s).rfc3339();
+        let file_type = ev
+            .metadata
+            .extension
+            .as_deref()
+            .filter(|ft| !ft.is_empty() && ft.len() <= 64 && !ft.chars().any(char::is_control));
+
+        let (part, content_hash) = if ev.verb != crate::folders::ActivityVerb::Removed {
+            match staged_parts.get(ev.id.as_str()) {
+                Some((p, h)) => (Some(p.clone()), Some(h.clone())),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        let kind_hint = part.as_ref().and_then(|_| ev.kind.kind_hint());
+
+        let clean_plat = |raw: Option<&str>| -> Option<String> {
+            let trimmed = raw?.trim();
+            if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+                return None;
+            }
+            if trimmed.len() <= 2048 {
+                return Some(trimmed.to_owned());
+            }
+            let mut end = 2048;
+            while end > 0 && !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(trimmed[..end].to_owned())
+        };
+        let origin_url = clean_plat(ev.metadata.origin_url.as_deref());
+        let referrer_url = clean_plat(ev.metadata.referrer_url.as_deref());
+
+        let mut xattrs: BTreeMap<&'static str, &str> = BTreeMap::new();
+        if let Some(ref origin) = origin_url {
+            xattrs.insert("user.xdg.origin.url", origin.as_str());
+        }
+        if let Some(ref referrer) = referrer_url {
+            xattrs.insert("user.xdg.referrer.url", referrer.as_str());
+        }
+        let platform = if origin_url.is_some() || referrer_url.is_some() {
+            let mut obj = serde_json::Map::new();
+            if let Some(ref origin) = origin_url {
+                obj.insert("origin_url".into(), Value::String(origin.clone()));
+            }
+            if let Some(ref referrer) = referrer_url {
+                obj.insert("referrer_url".into(), Value::String(referrer.clone()));
+            }
+            if !xattrs.is_empty() {
+                obj.insert("xattrs".into(), serde_json::json!(xattrs));
+            }
+            Some(Value::Object(obj))
+        } else {
+            None
+        };
+
+        let mut line = serde_json::Map::new();
+        line.insert("v".into(), Value::from(1u32));
+        line.insert("event".into(), Value::from(ev.verb.wire_event()));
+        line.insert("path".into(), Value::from(ev.rel_path.as_str()));
+        if ev.verb == crate::folders::ActivityVerb::Renamed
+            && let Some(ref prev) = ev.previous_path
+        {
+            line.insert("previous_path".into(), Value::from(prev.as_str()));
+        }
+        line.insert("at".into(), Value::from(at));
+        line.insert("observed_at".into(), Value::from(observed_at));
+        if let Some(ft) = file_type {
+            line.insert("file_type".into(), Value::from(ft));
+        }
+        line.insert("size".into(), Value::from(ev.metadata.size_bytes));
+        if let Some(c) = created_at {
+            line.insert("created_at".into(), Value::from(c));
+        }
+        line.insert("modified_at".into(), Value::from(modified_at));
+        if let Some(h) = content_hash {
+            line.insert("content_hash".into(), Value::from(h));
+        }
+        match part {
+            Some(p) => line.insert("part".into(), Value::from(p)),
+            None => line.insert("part".into(), Value::Null),
+        };
+        if let Some(kh) = kind_hint {
+            line.insert("kind_hint".into(), Value::from(kh));
+        }
+        if let Some(plat) = platform {
+            line.insert("platform".into(), plat);
+        }
+
+        let mut raw = serde_json::to_vec(&Value::Object(line))
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        raw.push(b'\n');
+        activity_bytes.extend_from_slice(&raw);
+    }
+
+    let activity_hash = solstone_folder_sync::files::sha256_hex(&activity_bytes);
+    let activity_path = stage_dir.join(format!("folder_{activity_hash}.jsonl"));
+    std::fs::write(&activity_path, &activity_bytes)?;
+
+    let mut files = Vec::with_capacity(1 + companion_paths.len());
+    files.push(activity_path);
+    files.extend(companion_paths);
+    Ok(files)
 }
 
 /// `meta.screenshot`, as the client ingest contract defines it.
@@ -2462,5 +2734,232 @@ mod tests {
             Some(ErrorType::Auth)
         );
         assert_eq!(server.requests().len(), before);
+    }
+
+    #[test]
+    fn folder_stage_matches_protocol_v3_wire_contract() {
+        use crate::folders::{
+            ActivityVerb, DeliveryMode, FileKind, FolderKinds, PlatformMetadata, SegmentDelivery,
+            engine::{PendingEvent, StagedContentFile},
+        };
+        use solstone_vault::Window;
+
+        let tmp = TempDir::new().unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        let disk_png = tmp.path().join("folder_reserved_name.png");
+        std::fs::write(&disk_png, b"\x89PNG\r\n\x1a\nfake").unwrap();
+
+        let window = Window {
+            day: "20261127".into(),
+            segment: "140500_300".into(),
+        };
+        // 2026-11-27T14:06:10-07:00 == 2026-11-27T21:06:10Z
+        let t_ms: i64 = 1_795_727_170_000;
+        let offset_s: i32 = -7 * 3600;
+        let delivery = SegmentDelivery {
+            folder_id: "desktop-b2c3d4e5".into(),
+            folder_name: "Desktop".into(),
+            folder_root: tmp.path().to_path_buf(),
+            facet: Some("work".into()),
+            kinds: FolderKinds::default(),
+            window: window.clone(),
+            events: vec![
+                PendingEvent {
+                    id: "ev1".into(),
+                    rel_path: "notes/plan.md".into(),
+                    previous_path: None,
+                    verb: ActivityVerb::Added,
+                    kind: FileKind::Note,
+                    delivery: DeliveryMode::Content,
+                    event_ms: t_ms,
+                    observed_ms: t_ms + 2_000,
+                    offset_s,
+                    window: window.clone(),
+                    window_end_ms: t_ms + 230_000,
+                    metadata: PlatformMetadata {
+                        size_bytes: 12,
+                        modified_ms: t_ms,
+                        created_ms: Some(t_ms - 1_000),
+                        extension: Some("md".into()),
+                        mime: Some("text/markdown".into()),
+                        origin_url: None,
+                        referrer_url: None,
+                        origin_domain: None,
+                    },
+                    content_hash: None,
+                    note_payload: Some("# plan\nhello".into()),
+                    note_is_diff: false,
+                    is_revision: false,
+                    backfill: false,
+                    retry_at_ms: None,
+                    tries: 0,
+                },
+                PendingEvent {
+                    id: "ev2".into(),
+                    rel_path: "shots/folder_reserved_name.png".into(),
+                    previous_path: None,
+                    verb: ActivityVerb::Added,
+                    kind: FileKind::Screenshot,
+                    delivery: DeliveryMode::Content,
+                    event_ms: t_ms + 5_000,
+                    observed_ms: t_ms + 6_000,
+                    offset_s,
+                    window: window.clone(),
+                    window_end_ms: t_ms + 230_000,
+                    metadata: PlatformMetadata {
+                        size_bytes: 12,
+                        modified_ms: t_ms + 5_000,
+                        created_ms: None,
+                        extension: Some("png".into()),
+                        mime: Some("image/png".into()),
+                        origin_url: Some("https://releases.example/shot.png".into()),
+                        referrer_url: Some("https://releases.example/page".into()),
+                        origin_domain: Some("releases.example".into()),
+                    },
+                    content_hash: None,
+                    note_payload: None,
+                    note_is_diff: false,
+                    is_revision: false,
+                    backfill: false,
+                    retry_at_ms: None,
+                    tries: 0,
+                },
+                PendingEvent {
+                    id: "ev3".into(),
+                    rel_path: "archive/new.pdf".into(),
+                    previous_path: Some("archive/old.pdf".into()),
+                    verb: ActivityVerb::Renamed,
+                    kind: FileKind::Document,
+                    delivery: DeliveryMode::MetadataOnly,
+                    event_ms: t_ms + 10_000,
+                    observed_ms: t_ms + 11_000,
+                    offset_s,
+                    window,
+                    window_end_ms: t_ms + 230_000,
+                    metadata: PlatformMetadata {
+                        size_bytes: 512,
+                        modified_ms: t_ms + 10_000,
+                        created_ms: None,
+                        extension: Some("pdf".into()),
+                        mime: Some("application/pdf".into()),
+                        origin_url: None,
+                        referrer_url: None,
+                        origin_domain: None,
+                    },
+                    content_hash: None,
+                    note_payload: None,
+                    note_is_diff: false,
+                    is_revision: false,
+                    backfill: false,
+                    retry_at_ms: None,
+                    tries: 0,
+                },
+            ],
+            content_files: vec![
+                StagedContentFile {
+                    event_id: "ev1".into(),
+                    rel_path: "notes/plan.md".into(),
+                    disk_path: tmp.path().join("notes/plan.md"),
+                    kind: FileKind::Note,
+                    content_hash: None,
+                    note_payload: Some("# plan\nhello".into()),
+                    note_is_diff: false,
+                    is_revision: false,
+                    needs_image_convert: false,
+                },
+                StagedContentFile {
+                    event_id: "ev2".into(),
+                    rel_path: "shots/folder_reserved_name.png".into(),
+                    disk_path: disk_png,
+                    kind: FileKind::Screenshot,
+                    content_hash: None,
+                    note_payload: None,
+                    note_is_diff: false,
+                    is_revision: false,
+                    needs_image_convert: false,
+                },
+            ],
+        };
+
+        let files = stage_folder_segment(&delivery, &stage).unwrap();
+        assert_eq!(files.len(), 3);
+        let jsonl_name = files[0].file_name().unwrap().to_str().unwrap();
+        assert!(jsonl_name.starts_with("folder_"));
+        assert!(jsonl_name.ends_with(".jsonl"));
+        let jsonl_bytes = std::fs::read(&files[0]).unwrap();
+        assert!(jsonl_bytes.ends_with(b"\n"));
+        assert_eq!(
+            jsonl_name,
+            format!(
+                "folder_{}.jsonl",
+                solstone_folder_sync::files::sha256_hex(&jsonl_bytes)
+            )
+        );
+        // Companion parts use safe `c_01.*`, `c_02.*` simple names (never reserved prefixes).
+        assert_eq!(files[1].file_name().unwrap().to_str().unwrap(), "c_01.md");
+        assert_eq!(files[2].file_name().unwrap().to_str().unwrap(), "c_02.png");
+
+        let lines: Vec<Value> = std::str::from_utf8(&jsonl_bytes)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3);
+
+        // Line 1: note content
+        assert_eq!(lines[0]["v"], 1);
+        assert_eq!(lines[0]["event"], "added");
+        assert_eq!(lines[0]["path"], "notes/plan.md");
+        assert!(lines[0].get("previous_path").is_none());
+        assert_eq!(lines[0]["part"], "c_01.md");
+        assert_eq!(lines[0]["kind_hint"], "notes");
+        assert_eq!(
+            lines[0]["content_hash"],
+            solstone_folder_sync::files::sha256_hex(b"# plan\nhello")
+        );
+
+        // Line 2: screenshot with xattr origin metadata
+        assert_eq!(lines[1]["part"], "c_02.png");
+        assert_eq!(lines[1]["kind_hint"], "screenshots");
+        assert_eq!(
+            lines[1]["platform"]["origin_url"],
+            "https://releases.example/shot.png"
+        );
+        assert_eq!(
+            lines[1]["platform"]["xattrs"]["user.xdg.origin.url"],
+            "https://releases.example/shot.png"
+        );
+
+        // Line 3: renamed (previous_path required, part null, no content_hash)
+        assert_eq!(lines[2]["event"], "renamed");
+        assert_eq!(lines[2]["previous_path"], "archive/old.pdf");
+        assert!(lines[2]["part"].is_null());
+        assert!(lines[2].get("content_hash").is_none());
+
+        // Meta envelope serialization matches protocol v3 schema.
+        let meta = FolderEnvelopeMeta {
+            v: 1,
+            id: delivery.folder_id.clone(),
+            name: delivery.folder_name.clone(),
+            facet: delivery.facet.clone(),
+            kinds: delivery.kinds.enabled_names(),
+        };
+        let env_meta = serde_json::to_value(EnvelopeMeta::Folder { folder: &meta }).unwrap();
+        assert_eq!(env_meta["folder"]["v"], 1);
+        assert_eq!(env_meta["folder"]["id"], "desktop-b2c3d4e5");
+        assert_eq!(env_meta["folder"]["name"], "Desktop");
+        assert_eq!(env_meta["folder"]["facet"], "work");
+        assert_eq!(
+            env_meta["folder"]["kinds"],
+            json!([
+                "notes",
+                "documents",
+                "transcripts",
+                "screenshots",
+                "photos",
+                "other"
+            ])
+        );
     }
 }

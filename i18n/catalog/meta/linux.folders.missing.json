@@ -1,0 +1,22 @@
+{
+  "description": "Needs-attention line when a folder moved or was deleted.",
+  "context": "Needs-attention line when a folder moved or was deleted.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "folder",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 75,
+  "source_revision": "32f5226ad10b2d655a406af8c2303a15eaad275beb8c1a4d81c6772d40323fc1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

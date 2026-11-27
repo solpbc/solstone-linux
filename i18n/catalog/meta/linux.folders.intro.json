@@ -1,0 +1,17 @@
+{
+  "description": "Folders pane intro when no folders are added yet.",
+  "context": "Folders pane intro when no folders are added yet.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 166,
+  "source_revision": "bb2eb4f763028eec20e116aa51a5aa786f8b19da58e8c33bf3e7066ba88d0ba7",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

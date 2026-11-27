@@ -1,0 +1,22 @@
+{
+  "description": "Overlap target label for the screenshots folder.",
+  "context": "Overlap target label for the screenshots folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "name",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 67,
+  "source_revision": "fb93dc70b697d9142f442200a9b6b34044f0a3f2d5473e4ea26f2f9780f4c4bb",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

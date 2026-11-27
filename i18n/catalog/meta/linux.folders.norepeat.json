@@ -1,0 +1,17 @@
+{
+  "description": "Note under range chooser when returning or bringing in older files.",
+  "context": "Note under range chooser when returning or bringing in older files.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 86,
+  "source_revision": "89e7fba0423ff1e42797e04371fdfe567163d0ab87f2b00d55ae9ffa93d66841",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

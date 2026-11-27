@@ -1,0 +1,17 @@
+{
+  "description": "Folder picker button label and dialog title.",
+  "context": "Folder picker button label and dialog title.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 47,
+  "source_revision": "9b533da31e3d16705ae08c81a634c4ff36cb01224ab41cfc69b9baf392b0d6e5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

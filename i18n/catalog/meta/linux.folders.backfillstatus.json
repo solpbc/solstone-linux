@@ -1,0 +1,17 @@
+{
+  "description": "Calm note under backfill progress.",
+  "context": "Calm note under backfill progress.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 119,
+  "source_revision": "370040a207085403acd95ecd4db2e3d2d85a13977c69371c39ef6d46e496dd10",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,22 @@
+{
+  "description": "Overlap target label for another configured folder.",
+  "context": "Overlap target label for another configured folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "name",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 53,
+  "source_revision": "9fb32b46d40395694fcf81805f446659bf5850af68649742ffe51f674e0eeb61",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Folder page reason when this folder is paused individually.",
+  "context": "Folder page reason when this folder is paused individually.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 115,
+  "source_revision": "91358ea1d2fa5c7eb7bb10c88b0dfb13e97e8af1325c8e44e19f32d979e8d910",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

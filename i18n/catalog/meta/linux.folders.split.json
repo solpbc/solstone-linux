@@ -1,0 +1,26 @@
+{
+  "description": "Tile sub-line when folders are split between on and paused.",
+  "context": "Tile sub-line when folders are split between on and paused.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "on",
+      "type": "string"
+    },
+    {
+      "name": "paused",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 63,
+  "source_revision": "8fb7375264b7100fefd6e16a4ed12df087724565c3baaec9b7f6f0872f4ee4d5",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

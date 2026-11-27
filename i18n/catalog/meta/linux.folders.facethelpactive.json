@@ -1,0 +1,22 @@
+{
+  "description": "Helper under facet picker on an active folder.",
+  "context": "Helper under facet picker on an active folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "facet",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 81,
+  "source_revision": "f999e398a4db19f658785413f8751b453c8b808daae052329ecfed0920d6bd20",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

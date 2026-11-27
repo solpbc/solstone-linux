@@ -1,0 +1,17 @@
+{
+  "description": "Photos kind description.",
+  "context": "Photos kind description.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 56,
+  "source_revision": "f96dc641e5457d54dba6145e4972b32fbd96896712e0d23216a7cad3dce601e9",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

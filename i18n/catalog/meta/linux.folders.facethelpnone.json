@@ -1,0 +1,17 @@
+{
+  "description": "Helper under facet picker when none is chosen.",
+  "context": "Helper under facet picker when none is chosen.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 91,
+  "source_revision": "252d70d96cebbbfdb238369cfe45d37528a19833c377cf280c18b6957db421dc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

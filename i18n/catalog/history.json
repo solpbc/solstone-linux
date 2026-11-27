@@ -7018,6 +7018,1402 @@
       "selector": null
     },
     {
+      "id": "linux.folders.addfolder",
+      "resource": "m6c696e75782e666f6c646572732e616464666f6c646572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.addfolderplus",
+      "resource": "m6c696e75782e666f6c646572732e616464666f6c646572706c7573",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.allfolders",
+      "resource": "m6c696e75782e666f6c646572732e616c6c666f6c64657273",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.alreadyadded",
+      "resource": "m6c696e75782e666f6c646572732e616c72656164796164646564",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.backfillstatus",
+      "resource": "m6c696e75782e666f6c646572732e6261636b66696c6c737461747573",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.bringinmany",
+      "resource": "m6c696e75782e666f6c646572732e6272696e67696e6d616e79",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.bringinolder",
+      "resource": "m6c696e75782e666f6c646572732e6272696e67696e6f6c646572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.bringinone",
+      "resource": "m6c696e75782e666f6c646572732e6272696e67696e6f6e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.cantreadmany",
+      "resource": "m6c696e75782e666f6c646572732e63616e74726561646d616e79",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.cantreadone",
+      "resource": "m6c696e75782e666f6c646572732e63616e74726561646f6e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.checkingfolder",
+      "resource": "m6c696e75782e666f6c646572732e636865636b696e67666f6c646572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.chooseatleastone",
+      "resource": "m6c696e75782e666f6c646572732e63686f6f736561746c656173746f6e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.choosefolder",
+      "resource": "m6c696e75782e666f6c646572732e63686f6f7365666f6c646572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.cli",
+      "resource": "m6c696e75782e666f6c646572732e636c69",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "state",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.estgloss",
+      "resource": "m6c696e75782e666f6c646572732e657374676c6f7373",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.estheading",
+      "resource": "m6c696e75782e666f6c646572732e65737468656164696e67",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.estoffline",
+      "resource": "m6c696e75782e666f6c646572732e6573746f66666c696e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.estunpaired",
+      "resource": "m6c696e75782e666f6c646572732e657374756e706169726564",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.estvalues",
+      "resource": "m6c696e75782e666f6c646572732e65737476616c756573",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "segments",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "days",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "thoughts",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.facetheading",
+      "resource": "m6c696e75782e666f6c646572732e666163657468656164696e67",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.facethelpactive",
+      "resource": "m6c696e75782e666f6c646572732e666163657468656c70616374697665",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "facet",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.facethelpnone",
+      "resource": "m6c696e75782e666f6c646572732e666163657468656c706e6f6e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.facethelpsetup",
+      "resource": "m6c696e75782e666f6c646572732e666163657468656c707365747570",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "facet",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.facetnone",
+      "resource": "m6c696e75782e666f6c646572732e66616365746e6f6e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.facetoffline",
+      "resource": "m6c696e75782e666f6c646572732e66616365746f66666c696e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.facetunpaired",
+      "resource": "m6c696e75782e666f6c646572732e6661636574756e706169726564",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.fallbackmany",
+      "resource": "m6c696e75782e666f6c646572732e66616c6c6261636b6d616e79",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.fallbackone",
+      "resource": "m6c696e75782e666f6c646572732e66616c6c6261636b6f6e65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.finishsetup",
+      "resource": "m6c696e75782e666f6c646572732e66696e6973687365747570",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.intro",
+      "resource": "m6c696e75782e666f6c646572732e696e74726f",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.journalupdate",
+      "resource": "m6c696e75782e666f6c646572732e6a6f75726e616c757064617465",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.documents",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e646f63756d656e7473",
+      "namespace": "linux.folders.kind",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.documents.desc",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e646f63756d656e74732e64657363",
+      "namespace": "linux.folders.kind.documents",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.notes",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e6e6f746573",
+      "namespace": "linux.folders.kind",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.notes.desc",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e6e6f7465732e64657363",
+      "namespace": "linux.folders.kind.notes",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.other",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e6f74686572",
+      "namespace": "linux.folders.kind",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.other.desc",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e6f746865722e64657363",
+      "namespace": "linux.folders.kind.other",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.photos",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e70686f746f73",
+      "namespace": "linux.folders.kind",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.photos.desc",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e70686f746f732e64657363",
+      "namespace": "linux.folders.kind.photos",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.screenshots",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e73637265656e73686f7473",
+      "namespace": "linux.folders.kind",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.screenshots.desc",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e73637265656e73686f74732e64657363",
+      "namespace": "linux.folders.kind.screenshots",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.transcripts",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e7472616e73637269707473",
+      "namespace": "linux.folders.kind",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kind.transcripts.desc",
+      "resource": "m6c696e75782e666f6c646572732e6b696e642e7472616e736372697074732e64657363",
+      "namespace": "linux.folders.kind.transcripts",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.kindsgoingforward",
+      "resource": "m6c696e75782e666f6c646572732e6b696e6473676f696e67666f7277617264",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.label",
+      "resource": "m6c696e75782e666f6c646572732e6c6162656c",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.many",
+      "resource": "m6c696e75782e666f6c646572732e6d616e79",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.missing",
+      "resource": "m6c696e75782e666f6c646572732e6d697373696e67",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.needattentionmany",
+      "resource": "m6c696e75782e666f6c646572732e6e656564617474656e74696f6e6d616e79",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.norepeat",
+      "resource": "m6c696e75782e666f6c646572732e6e6f726570656174",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.nothinguntilconfirm",
+      "resource": "m6c696e75782e666f6c646572732e6e6f7468696e67756e74696c636f6e6669726d",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.off",
+      "resource": "m6c696e75782e666f6c646572732e6f6666",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.oneintro",
+      "resource": "m6c696e75782e666f6c646572732e6f6e65696e74726f",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.openfolder",
+      "resource": "m6c696e75782e666f6c646572732e6f70656e666f6c646572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.otheroff",
+      "resource": "m6c696e75782e666f6c646572732e6f746865726f6666",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.otheron",
+      "resource": "m6c696e75782e666f6c646572732e6f746865726f6e",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapbody",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c6170626f6479",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapchoose",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c617063686f6f7365",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapfact",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c617066616374",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "other",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapfolder",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c6170666f6c646572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapheading",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c617068656164696e67",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "other",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapobsidian",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c61706f6273696469616e",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapoverride",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c61706f76657272696465",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.overlapscreenshots",
+      "resource": "m6c696e75782e666f6c646572732e6f7665726c617073637265656e73686f7473",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "name",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.pageprogress",
+      "resource": "m6c696e75782e666f6c646572732e7061676570726f6772657373",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "done",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.pausedcomputer",
+      "resource": "m6c696e75782e666f6c646572732e706175736564636f6d7075746572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.pausedfolder",
+      "resource": "m6c696e75782e666f6c646572732e706175736564666f6c646572",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.preview",
+      "resource": "m6c696e75782e666f6c646572732e70726576696577",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.previewboth",
+      "resource": "m6c696e75782e666f6c646572732e70726576696577626f7468",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "content",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "size",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "meta",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.previewcontentonly",
+      "resource": "m6c696e75782e666f6c646572732e70726576696577636f6e74656e746f6e6c79",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "content",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "size",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.previewcount",
+      "resource": "m6c696e75782e666f6c646572732e70726576696577636f756e74",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.previewfailed",
+      "resource": "m6c696e75782e666f6c646572732e707265766965776661696c6564",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.previewmetaonly",
+      "resource": "m6c696e75782e666f6c646572732e707265766965776d6574616f6e6c79",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "meta",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.previewspan",
+      "resource": "m6c696e75782e666f6c646572732e707265766965777370616e",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "start",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "end",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.previewzero",
+      "resource": "m6c696e75782e666f6c646572732e707265766965777a65726f",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.refused",
+      "resource": "m6c696e75782e666f6c646572732e72656675736564",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.remove",
+      "resource": "m6c696e75782e666f6c646572732e72656d6f7665",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.removebody",
+      "resource": "m6c696e75782e666f6c646572732e72656d6f7665626f6479",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.removeheading",
+      "resource": "m6c696e75782e666f6c646572732e72656d6f766568656164696e67",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.scopenote",
+      "resource": "m6c696e75782e666f6c646572732e73636f70656e6f7465",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.split",
+      "resource": "m6c696e75782e666f6c646572732e73706c6974",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "on",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "paused",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.startfromtoday",
+      "resource": "m6c696e75782e666f6c646572732e737461727466726f6d746f646179",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.stays",
+      "resource": "m6c696e75782e666f6c646572732e7374617973",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.tileprogress",
+      "resource": "m6c696e75782e666f6c646572732e74696c6570726f6772657373",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "done",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "total",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.two",
+      "resource": "m6c696e75782e666f6c646572732e74776f",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "first",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        },
+        {
+          "name": "second",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.unpaired",
+      "resource": "m6c696e75782e666f6c646572732e756e706169726564",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.unreadable",
+      "resource": "m6c696e75782e666f6c646572732e756e7265616461626c65",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "folder",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.waiting",
+      "resource": "m6c696e75782e666f6c646572732e77616974696e67",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [
+        {
+          "name": "count",
+          "type": "string",
+          "numeric_style": null,
+          "min": null,
+          "max": null
+        }
+      ],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
+      "id": "linux.folders.whatcomesin",
+      "resource": "m6c696e75782e666f6c646572732e77686174636f6d6573696e",
+      "namespace": "linux.folders",
+      "owner": "linux",
+      "tombstone": false,
+      "replacement": null,
+      "format_intent": "text",
+      "arguments": [],
+      "protected_slots": [],
+      "selector": null
+    },
+    {
       "id": "linux.health.idleconfirmingwithyourjournal",
       "resource": "m6c696e75782e6865616c74682e69646c65636f6e6669726d696e6777697468796f75726a6f75726e616c",
       "namespace": "linux.health",

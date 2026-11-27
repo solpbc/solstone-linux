@@ -1,0 +1,17 @@
+{
+  "description": "Folder source label on deck tile, list heading, and CLI.",
+  "context": "Folder source label on deck tile, list heading, and CLI.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 39,
+  "source_revision": "c7beae075ebd340fbe1649b9a37361ed2a5743b8f21533e98d9c3654789daea1",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

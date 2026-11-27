@@ -1,0 +1,22 @@
+{
+  "description": "Confirmation body for removing a folder.",
+  "context": "Confirmation body for removing a folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "folder",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 162,
+  "source_revision": "b634e89311e39967170d429d20b4867421d5ee319eaecaeb38ebe030a6d96bc3",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

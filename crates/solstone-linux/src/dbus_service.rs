@@ -35,6 +35,7 @@ pub struct Observer1<C: Clock, O: ObserverCommands> {
     pub shared: crate::shared_sources::Refresh,
     pub obsidian: crate::obsidian::ObsidianHandle,
     pub screenshots: crate::screenshots::ScreenshotsHandle,
+    pub folders: crate::folders::FoldersHandle,
     pub imports: crate::import::ImportHandle,
     pub exports: crate::export_transfer::ExportTransferHandle,
     pub auth: crate::auth_broker::AuthHandle,
@@ -412,6 +413,15 @@ impl<C: Clock + Send + Sync + 'static, O: ObserverCommands + 'static> Observer1<
     async fn screenshots_retry(&self) -> String {
         self.screenshots.retry().await
     }
+    fn folders_state(&self) -> String {
+        self.folders.state_json()
+    }
+    async fn folders_check_path(&self, path: String) -> String {
+        self.folders.check_path(path).await
+    }
+    async fn folders_action(&self, payload: String) -> String {
+        self.folders.action(&payload).await
+    }
     #[zbus(signal)]
     pub(crate) async fn status_changed(
         emitter: &zbus::object_server::SignalEmitter<'_>,
@@ -641,6 +651,7 @@ mod tests {
                 shared: Default::default(),
                 obsidian: crate::obsidian::ObsidianHandle::default(),
                 screenshots: crate::screenshots::ScreenshotsHandle::default(),
+                folders: crate::folders::FoldersHandle::default(),
                 imports: crate::import::ImportHandle::default(),
                 exports: crate::export_transfer::ExportTransferHandle::default(),
                 auth: crate::auth_broker::AuthHandle::default(),
@@ -737,6 +748,7 @@ mod tests {
             shared: Default::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
+            folders: crate::folders::FoldersHandle::default(),
             imports: crate::import::ImportHandle::default(),
             exports: crate::export_transfer::ExportTransferHandle::default(),
             auth: crate::auth_broker::AuthHandle::default(),
@@ -782,6 +794,7 @@ mod tests {
             shared: Default::default(),
             obsidian: crate::obsidian::ObsidianHandle::default(),
             screenshots: crate::screenshots::ScreenshotsHandle::default(),
+            folders: crate::folders::FoldersHandle::default(),
             imports: crate::import::ImportHandle::default(),
             exports: crate::export_transfer::ExportTransferHandle::default(),
             auth: crate::auth_broker::AuthHandle::default(),

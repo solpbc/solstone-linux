@@ -81,6 +81,8 @@ struct View {
     obsidian: StateWord,
     screenshots: StateWord,
     screenshots_sub: Option<String>,
+    folders: StateWord,
+    folders_sub: Option<String>,
     intake: IntakeFile,
     pause: Option<PauseLeft>,
     paired: bool,
@@ -158,6 +160,7 @@ struct ServiceSnap {
     obsidian_vault: bool,
     others: Vec<solstone_linux::shared_sources::OtherVault>,
     screenshots: Option<solstone_linux::screenshots::ScreenshotsDocument>,
+    folders: Option<solstone_linux::folders::FoldersDocument>,
     imports: Option<solstone_linux::import::ImportDocument>,
     kept: String,
     /// The running app's own pause: `Some(bounded)` while it is paused.
@@ -183,6 +186,7 @@ impl ServiceSnap {
             obsidian_vault: false,
             others: Vec::new(),
             screenshots: None,
+            folders: None,
             imports: None,
             kept: text!("linux.window.nothingyet").to_owned(),
             pause_bounded: None,
@@ -302,6 +306,12 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         None,
         false,
     );
+    let folders = make_tile(
+        solstone_linux::copy::folders::label(),
+        GLYPH_FOLDERS,
+        None,
+        false,
+    );
     let import = make_tile(text!("linux.window.import"), GLYPH_IMPORT, None, false);
     import.1.set_visible(false);
     import.3.set_visible(false);
@@ -315,6 +325,7 @@ pub fn mount(window: &gtk::ApplicationWindow, chrome: &Chrome) {
         tile_widgets(browsers, TileId::Browsers),
         tile_widgets(obsidian, TileId::Obsidian),
         tile_widgets(screenshots, TileId::Screenshots),
+        tile_widgets(folders, TileId::Folders),
         tile_widgets(import, TileId::Import),
     ];
 
@@ -789,6 +800,23 @@ pub fn take_screenshots(doc: solstone_linux::screenshots::ScreenshotsDocument) {
             }
         }
     });
+    refresh_now();
+}
+
+/// The folders source answered: keep what it said and repaint.
+pub fn take_folders(doc: solstone_linux::folders::FoldersDocument) {
+    SERVICE.with(|slot| {
+        if let Some(snap) = slot.borrow().as_ref() {
+            let mut snap = snap.borrow_mut();
+            if snap.reading == ServiceReading::Answering {
+                snap.folders = Some(doc);
+            }
+        }
+    });
+    refresh_now();
+}
+
+pub(crate) fn refresh_now() {
     let refresh = REFRESH.with(|slot| slot.borrow().clone());
     if let Some(refresh) = refresh {
         refresh();
@@ -863,7 +891,7 @@ struct Ui {
     shelf_button: gtk::Button,
     tiles: Vec<TileWidgets>,
     add_more: gtk::Box,
-    facts: [FactWidgets; 5],
+    facts: [FactWidgets; 6],
     lead: gtk::Label,
     soft: gtk::Label,
     kept_row: gtk::Box,
@@ -896,7 +924,7 @@ struct Page {
     status: gtk::Box,
     box_: gtk::ScrolledWindow,
     home: gtk::Button,
-    glyphs: [gtk::Widget; 6],
+    glyphs: [gtk::Widget; 7],
     verdict: gtk::Box,
     imports: crate::import_page::ImportPage,
     title: gtk::Label,
@@ -920,6 +948,7 @@ struct Page {
     also_on: gtk::Box,
     vault_content: RefCell<Vec<String>>,
     screenshots: Rc<crate::screenshots_page::ScreenshotsSection>,
+    folders: Rc<crate::folders_page::FoldersSection>,
     browsers_names: gtk::Label,
     activity: gtk::Switch,
     titles: gtk::Switch,
@@ -1047,6 +1076,7 @@ impl Page {
             TileId::Browsers => view.browsers,
             TileId::Obsidian => view.obsidian,
             TileId::Screenshots => view.screenshots,
+            TileId::Folders => view.folders,
             TileId::Import => StateWord::Checking,
         });
         let shown = match id {
@@ -1055,7 +1085,8 @@ impl Page {
             TileId::Browsers => 2,
             TileId::Obsidian => 3,
             TileId::Screenshots => 4,
-            TileId::Import => 5,
+            TileId::Folders => 5,
+            TileId::Import => 6,
         };
         for (index, glyph) in self.glyphs.iter().enumerate() {
             glyph.set_visible(index == shown);
@@ -1111,13 +1142,16 @@ impl Page {
         self.show_remote_vaults(id, &snap);
         self.obsidian_extra
             .set_visible(id == TileId::Obsidian && view.service == ServiceReading::Answering);
-        // The screenshots page lays out its own reason, sentence and facts.
-        // When it has no live document, show the common disk-backed history.
+        // The screenshots and folders pages lay out their own reason, sentence and facts.
+        // When they have no live document, show the common disk-backed history.
         let screenshots = id == TileId::Screenshots && snap.screenshots.is_some();
         self.screenshots.root.set_visible(screenshots);
         self.screenshots.set_shown(screenshots);
+        let folders = id == TileId::Folders && snap.folders.is_some();
+        self.folders.root.set_visible(folders);
+        self.folders.set_shown(folders);
         self.breath.set_visible(true);
-        if screenshots {
+        if screenshots || folders {
             for label in [&self.reason, &self.next, &self.breath] {
                 label.set_visible(false);
             }
@@ -1138,10 +1172,10 @@ impl Page {
         let (so_far, last) = page_facts(id, &view.intake);
         set_fact(&self.so_far, so_far.as_deref());
         self.so_far_row
-            .set_visible(so_far.is_some() && !screenshots && !imports_shown);
+            .set_visible(so_far.is_some() && !screenshots && !folders && !imports_shown);
         set_fact(&self.last, last.as_deref());
         self.last_row
-            .set_visible(last.is_some() && !screenshots && !imports_shown);
+            .set_visible(last.is_some() && !screenshots && !folders && !imports_shown);
         // Browsers has no switch here, and Obsidian is turned on by choosing a vault
         // below, so neither shows one. Screenshots shows one once it has been on:
         // while it's set up, the confirm is what turns it on.
@@ -1158,7 +1192,7 @@ impl Page {
                 TileId::Screen => view.screen_on,
                 TileId::Terminal => view.terminal_on,
                 TileId::Screenshots => screenshots_switch.unwrap_or(false),
-                TileId::Browsers | TileId::Obsidian | TileId::Import => false,
+                TileId::Browsers | TileId::Obsidian | TileId::Folders | TileId::Import => false,
             };
             self.painting.set(true);
             paint_switch(&self.switch, on);
@@ -1349,7 +1383,7 @@ fn make_tile(
 
 struct BuiltPane {
     root: gtk::Box,
-    facts: [FactWidgets; 5],
+    facts: [FactWidgets; 6],
     lead: gtk::Label,
     connect: gtk::Button,
     soft: gtk::Label,
@@ -1442,6 +1476,11 @@ fn make_pane() -> BuiltPane {
             solstone_linux::copy::screenshots::s1(),
             GLYPH_SCREENSHOTS,
         ),
+        (
+            TileId::Folders,
+            solstone_linux::copy::folders::label(),
+            GLYPH_FOLDERS,
+        ),
     ];
     let mut facts = Vec::new();
     for (_, name, glyph) in rows {
@@ -1527,6 +1566,7 @@ fn make_pane() -> BuiltPane {
     pane.append(&page.box_);
 
     let facts = [
+        facts.remove(0),
         facts.remove(0),
         facts.remove(0),
         facts.remove(0),
@@ -1655,6 +1695,7 @@ fn make_source_page(status: gtk::Box) -> Page {
         glyph_widget(GLYPH_BROWSERS),
         glyph_widget(GLYPH_OBSIDIAN),
         glyph_widget(GLYPH_SCREENSHOTS),
+        glyph_widget(GLYPH_FOLDERS),
         glyph_widget(GLYPH_IMPORT),
     ];
     for glyph in &glyphs {
@@ -1741,6 +1782,8 @@ fn make_source_page(status: gtk::Box) -> Page {
     page_box.append(&obsidian_extra);
     let screenshots = crate::screenshots_page::ScreenshotsSection::new();
     page_box.append(&screenshots.root);
+    let folders = crate::folders_page::FoldersSection::new();
+    page_box.append(&folders.root);
     let imports = crate::import_page::ImportPage::new();
     imports.widget.set_visible(false);
     page_box.append(&imports.widget);
@@ -1783,6 +1826,7 @@ fn make_source_page(status: gtk::Box) -> Page {
         also_on,
         vault_content: RefCell::new(Vec::new()),
         screenshots,
+        folders,
         browsers_names,
         activity,
         titles,
@@ -1894,6 +1938,7 @@ fn page_breath(id: TileId) -> &'static str {
         TileId::Browsers => browsers_breath(),
         TileId::Obsidian => solstone_linux::copy::obsidian_explain(),
         TileId::Screenshots => solstone_linux::copy::screenshots::d1(),
+        TileId::Folders => solstone_linux::copy::folders::intro(),
         TileId::Import => solstone_linux::import::explanation(),
     }
 }
@@ -1998,7 +2043,7 @@ fn page_reason(id: TileId, word: StateWord, view: &View) -> (Option<String>, Opt
             Some(solstone_linux::copy::obsidian_attention_vault().to_owned()),
             None,
         ),
-        TileId::Screenshots | TileId::Import => (None, None),
+        TileId::Screenshots | TileId::Folders | TileId::Import => (None, None),
     }
 }
 
@@ -2009,6 +2054,7 @@ fn page_facts(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>)
         TileId::Browsers => shell_model::browsers_so_far(file),
         TileId::Obsidian => shell_model::obsidian_so_far(file),
         TileId::Screenshots => shell_model::screenshots_so_far(file),
+        TileId::Folders => shell_model::folders_so_far(file),
         TileId::Import => shell_model::imports_so_far(file),
     };
     let started = match file {
@@ -2018,6 +2064,7 @@ fn page_facts(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>)
             TileId::Browsers => rows.browsers.started.as_deref(),
             TileId::Obsidian => rows.obsidian.started.as_deref(),
             TileId::Screenshots => rows.screenshots.started.as_deref(),
+            TileId::Folders => rows.folders.started.as_deref(),
             TileId::Import => rows.imports.started.as_deref(),
         },
         IntakeFile::Missing | IntakeFile::Refused => None,
@@ -2856,12 +2903,14 @@ fn apply_view(ui: &Ui, view: &View) {
     ui.page
         .screenshots
         .update(snap.screenshots.as_ref(), &view.intake);
+    ui.page.folders.update(snap.folders.as_ref(), &view.intake);
     let words = [
         view.screen,
         view.terminal,
         view.browsers,
         view.obsidian,
         view.screenshots,
+        view.folders,
     ];
     let subs = tile_subs(view);
     for (tile, (word, sub)) in ui.tiles.iter().zip(words.into_iter().zip(subs)) {
@@ -2896,7 +2945,11 @@ fn apply_view(ui: &Ui, view: &View) {
             let on = match tile.id {
                 TileId::Screen => view.screen_on,
                 TileId::Terminal => view.terminal_on,
-                TileId::Browsers | TileId::Obsidian | TileId::Screenshots | TileId::Import => false,
+                TileId::Browsers
+                | TileId::Obsidian
+                | TileId::Screenshots
+                | TileId::Folders
+                | TileId::Import => false,
             };
             if switch.is_active() != on && !switch.has_focus() && switch.is_sensitive() {
                 ui.tile_painting.set(true);
@@ -2915,6 +2968,7 @@ fn apply_view(ui: &Ui, view: &View) {
         TileId::Browsers,
         TileId::Obsidian,
         TileId::Screenshots,
+        TileId::Folders,
     ];
     let mut hidden = false;
     for (fact, id) in ui.facts.iter().zip(ids) {
@@ -2958,7 +3012,7 @@ fn apply_view(ui: &Ui, view: &View) {
     }
 }
 
-fn paint_word(label: &gtk::Label, word: StateWord) {
+pub(crate) fn paint_word(label: &gtk::Label, word: StateWord) {
     label.remove_css_class("sol-review-word");
     if word == StateWord::NeedsAttention {
         label.add_css_class("sol-attn");
@@ -3054,6 +3108,7 @@ fn facts_for(id: TileId, file: &IntakeFile) -> (Option<String>, Option<String>) 
         TileId::Browsers => shell_model::browsers_so_far(file),
         TileId::Obsidian => shell_model::obsidian_so_far(file),
         TileId::Screenshots => shell_model::screenshots_so_far(file),
+        TileId::Folders => shell_model::folders_so_far(file),
         TileId::Import => return (None, None),
     };
     let last_raw = match file {
@@ -3074,6 +3129,7 @@ fn counter_last(rows: &IntakeRows, id: TileId) -> Option<&str> {
         TileId::Browsers => &rows.browsers,
         TileId::Obsidian => &rows.obsidian,
         TileId::Screenshots => &rows.screenshots,
+        TileId::Folders => &rows.folders,
         TileId::Import => &rows.imports,
     };
     counter.last.as_deref()
@@ -3290,6 +3346,7 @@ fn apply_shot_hooks(
         "browsers" => Some(TileId::Browsers),
         "obsidian" => Some(TileId::Obsidian),
         "screenshots" => Some(TileId::Screenshots),
+        "folders" => Some(TileId::Folders),
         "import" => Some(TileId::Import),
         _ => None,
     };
@@ -3339,6 +3396,15 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
                     solstone_linux::screenshots::tile_line(doc),
                 )
             });
+    let (folders, folders_sub) = snap
+        .folders
+        .as_ref()
+        .map_or((StateWord::Checking, None), |doc| {
+            (
+                solstone_linux::folders::word(doc),
+                solstone_linux::folders::tile_line(doc),
+            )
+        });
     let (mut paired, mut offline, mut offline_waiting) = journal_face(&snap);
     let mut connection = paired.then(|| connection_words(&snap.health).to_owned());
     let mut last_reached = if paired {
@@ -3372,6 +3438,8 @@ fn read_view(seen_report: &Cell<bool>, daemon_up: Option<bool>) -> View {
         obsidian: hold_pause_word(obsidian, app_paused),
         screenshots,
         screenshots_sub,
+        folders,
+        folders_sub,
         intake,
         pause: paused,
         paired,
@@ -3773,6 +3841,7 @@ const GLYPH_BROWSERS: &str = r#"<circle cx="12" cy="12" r="9"/><path d="M3 12h18
 const GLYPH_OBSIDIAN: &str =
     r#"<path d="M12 3l7 6-2.5 11h-9L5 9z"/><path d="M12 3v9l4.5 8M12 12l-7-3"/>"#;
 const GLYPH_SCREENSHOTS: &str = r#"<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><rect x="8" y="9" width="8" height="6" rx="1"/>"#;
+const GLYPH_FOLDERS: &str = r#"<path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4.2l2 2H19A1.5 1.5 0 0 1 20.5 9v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"/>"#;
 const GLYPH_PLUS: &str = r#"<path d="M12 5v14M5 12h14"/>"#;
 const GLYPH_HOME: &str = r#"<path d="M4 11l8-7 8 7v8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19z"/><path d="M10 20.5V14h4v6.5"/>"#;
 const GLYPH_JOURNAL: &str = r#"<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3"/>"#;
@@ -3975,13 +4044,13 @@ switch.sol-switch:checked slider {\
   background-color: #FEFCF8;\
   border: none;\
 }\
-checkbutton.sol-choice radio:checked {\
+checkbutton.sol-choice radio:checked, checkbutton.sol-choice check:checked {\
   background-color: #E8913A;\
   background-image: none;\
   border-color: #E8913A;\
   color: #FEFCF8;\
 }\
-checkbutton.sol-choice:focus-visible radio {\
+checkbutton.sol-choice:focus-visible radio, checkbutton.sol-choice:focus-visible check {\
   outline: 2px solid #E8913A;\
   outline-offset: 2px;\
 }\
@@ -4349,7 +4418,7 @@ pub(crate) fn mark_widget() -> gtk::DrawingArea {
     area
 }
 
-fn paint_mark(area: &gtk::DrawingArea, word: StateWord) {
+pub(crate) fn paint_mark(area: &gtk::DrawingArea, word: StateWord) {
     let kind = match word {
         StateWord::On => MarkKind::Dot,
         StateWord::NeedsAttention => MarkKind::Diamond,
@@ -4667,9 +4736,9 @@ fn show_connect(ui: &Ui, show_button: bool, text: Option<&str>) {
     }
 }
 
-fn tile_subs(view: &View) -> [Option<String>; 5] {
+fn tile_subs(view: &View) -> [Option<String>; 6] {
     if view.service != ServiceReading::Answering {
-        return [None, None, None, None, None];
+        return [None, None, None, None, None, None];
     }
     let off_sub = |word: StateWord| (word == StateWord::Off).then(|| off_sub().to_owned());
     let screen = shell_model::screen_sub_label(view.screen_sub)
@@ -4689,7 +4758,8 @@ fn tile_subs(view: &View) -> [Option<String>; 5] {
         .screenshots_sub
         .clone()
         .or_else(|| off_sub(view.screenshots));
-    [screen, terminal, browsers, obsidian, screenshots]
+    let folders = view.folders_sub.clone().or_else(|| off_sub(view.folders));
+    [screen, terminal, browsers, obsidian, screenshots, folders]
 }
 
 fn watch_service(
@@ -4886,6 +4956,7 @@ fn apply_document(
     text: &str,
     obsidian_text: Option<&str>,
     screenshots_text: Option<&str>,
+    folders_text: Option<&str>,
 ) -> Option<ServiceSnap> {
     let doc: solstone_linux::window_control::ControlDocument = serde_json::from_str(text).ok()?;
     let decoded = obsidian_text.and_then(solstone_linux::obsidian::decode_document);
@@ -4908,6 +4979,7 @@ fn apply_document(
             .as_ref()
             .is_some_and(|document| document.status.vault.is_some()),
         screenshots: screenshots_text.and_then(solstone_linux::screenshots::decode_document),
+        folders: folders_text.and_then(solstone_linux::folders::decode_document),
         kept: text!("linux.window.nothingyet").to_owned(),
         pause_bounded: doc.pause_bounded,
         mark: doc.confirmed_mark,
@@ -4944,8 +5016,14 @@ async fn fetch_service() -> Result<ServiceSnap, ControlClientError> {
     let state = client.get_control_state().await?;
     let obsidian = client.obsidian_state().await.ok();
     let screenshots = client.screenshots_state().await.ok();
-    let mut snap = apply_document(&state, obsidian.as_deref(), screenshots.as_deref())
-        .ok_or_else(|| ControlClientError::Call("invalid control state".into()))?;
+    let folders = client.folders_state().await.ok();
+    let mut snap = apply_document(
+        &state,
+        obsidian.as_deref(),
+        screenshots.as_deref(),
+        folders.as_deref(),
+    )
+    .ok_or_else(|| ControlClientError::Call("invalid control state".into()))?;
     if snap.durable == "confirmed" {
         snap.others = client
             .known_vaults()
@@ -5172,7 +5250,8 @@ mod tests {
             terminal: empty.clone(),
             browsers: empty.clone(),
             obsidian: empty.clone(),
-            screenshots: empty,
+            screenshots: empty.clone(),
+            folders: empty,
             imports: solstone_linux::source_intake::Counter {
                 total: 3,
                 started: Some("2026-11-01".into()),

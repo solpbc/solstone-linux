@@ -1,0 +1,22 @@
+{
+  "description": "Preview count header without date span.",
+  "context": "Preview count header without date span.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 48,
+  "source_revision": "cfe6ceb38620358566e105c4ff4f5eda56f77e1c79b35e1fa0447f489102929c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

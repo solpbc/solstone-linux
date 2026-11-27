@@ -1,0 +1,17 @@
+{
+  "description": "Confirm button when 1 item is selected.",
+  "context": "Confirm button when 1 item is selected.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 47,
+  "source_revision": "2dc8b6d8f9738bf33399f9e87d862d94fe7305485e4504813212d9a9c5fe554f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

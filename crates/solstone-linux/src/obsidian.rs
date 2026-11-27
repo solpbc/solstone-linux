@@ -1094,6 +1094,7 @@ mod tests {
             stored_key: None,
             file_descriptors: None,
             reason_code: None,
+            refused_paths: Vec::new(),
             is_local_failure: false,
             captured_identity_key: None,
             captured_pairing_id: None,

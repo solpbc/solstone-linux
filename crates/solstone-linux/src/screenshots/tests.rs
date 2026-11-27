@@ -26,6 +26,7 @@ fn result(success: bool, status: Option<u16>, reason: Option<&str>) -> UploadRes
         stored_key: None,
         file_descriptors: None,
         reason_code: reason.map(str::to_owned),
+        refused_paths: Vec::new(),
         is_local_failure: false,
         captured_identity_key: None,
         captured_pairing_id: None,

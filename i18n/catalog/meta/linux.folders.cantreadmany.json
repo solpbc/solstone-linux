@@ -1,0 +1,22 @@
+{
+  "description": "Non-fatal unreadable files line (plural).",
+  "context": "Non-fatal unreadable files line (plural).",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 63,
+  "source_revision": "68db59fe5c12c9c1c055459bb3eb637c6838ef2e8b1a13061e91e72e0abbbfbf",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

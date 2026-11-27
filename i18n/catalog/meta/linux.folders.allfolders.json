@@ -1,0 +1,17 @@
+{
+  "description": "Section label above aggregate totals on the folders list pane.",
+  "context": "Section label above aggregate totals on the folders list pane.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 43,
+  "source_revision": "4d5ee3f600ac558f39050babad8815251fe3bae755a040f647087e6c3dd2a3ff",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

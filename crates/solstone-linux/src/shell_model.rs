@@ -22,15 +22,17 @@ pub enum TileId {
     Browsers,
     Obsidian,
     Screenshots,
+    Folders,
     Import,
 }
 
-const TILE_ORDER: [TileId; 5] = [
+const TILE_ORDER: [TileId; 6] = [
     TileId::Screen,
     TileId::Terminal,
     TileId::Browsers,
     TileId::Obsidian,
     TileId::Screenshots,
+    TileId::Folders,
 ];
 
 /// A source tile's state word. Import is an action destination and has none.
@@ -308,7 +310,7 @@ pub fn obsidian_tile(facts: ObsidianFacts) -> StateWord {
 
 /// Every tile in deck order whose word is `needs attention`.
 #[must_use]
-pub fn attention_tiles(words: &[StateWord; 5]) -> Vec<TileId> {
+pub fn attention_tiles(words: &[StateWord; 6]) -> Vec<TileId> {
     TILE_ORDER
         .into_iter()
         .zip(words)
@@ -319,7 +321,7 @@ pub fn attention_tiles(words: &[StateWord; 5]) -> Vec<TileId> {
 
 /// The first tile in deck order whose word is `needs attention`.
 #[must_use]
-pub fn attention_tile(words: &[StateWord; 5]) -> Option<TileId> {
+pub fn attention_tile(words: &[StateWord; 6]) -> Option<TileId> {
     attention_tiles(words).into_iter().next()
 }
 
@@ -350,7 +352,7 @@ pub struct MenuRow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MenuInput {
-    pub words: [StateWord; 5],
+    pub words: [StateWord; 6],
     pub paused: bool,
     pub journal_paired: bool,
     pub journal_reachable: bool,
@@ -381,6 +383,7 @@ pub fn tile_name(tile: TileId) -> &'static str {
         TileId::Browsers => text!("linux.window.browsers"),
         TileId::Obsidian => text!("linux.copy.obsidian"),
         TileId::Screenshots => crate::copy::screenshots::s1(),
+        TileId::Folders => crate::copy::folders::label(),
         TileId::Import => text!("linux.window.import"),
     }
 }
@@ -603,6 +606,16 @@ pub fn screenshots_so_far(file: &IntakeFile) -> ShownTotal {
 #[must_use]
 pub fn imports_so_far(file: &IntakeFile) -> ShownTotal {
     so_far(file, |rows| &rows.imports, TotalUnit::Items)
+}
+
+#[must_use]
+pub fn folders_so_far(file: &IntakeFile) -> ShownTotal {
+    so_far(file, |rows| &rows.folders, TotalUnit::Items)
+}
+
+#[must_use]
+pub fn format_items(total: u64) -> String {
+    format_total(total, TotalUnit::Items)
 }
 
 fn so_far(
@@ -1287,6 +1300,11 @@ mod tests {
                 started: None,
                 last: None,
             },
+            folders: Counter {
+                total: 0,
+                started: None,
+                last: None,
+            },
         }))
     }
 
@@ -1367,6 +1385,11 @@ mod tests {
                 started: None,
                 last: None,
             },
+            folders: Counter {
+                total: 1,
+                started: None,
+                last: None,
+            },
         }));
         assert_eq!(
             browsers_so_far(&one),
@@ -1405,6 +1428,11 @@ mod tests {
             },
             imports: Counter {
                 total: 1204,
+                started: None,
+                last: None,
+            },
+            folders: Counter {
+                total: 142,
                 started: None,
                 last: None,
             },
@@ -2097,6 +2125,7 @@ mod tests {
             StateWord::NeedsAttention,
             StateWord::Off,
             StateWord::Off,
+            StateWord::Off,
         ];
         assert_eq!(attention_tile(&words), Some(TileId::Terminal));
         assert!(header_shows_pause(false, false));
@@ -2130,6 +2159,7 @@ mod tests {
             words: [
                 StateWord::NeedsAttention,
                 StateWord::NeedsAttention,
+                StateWord::Off,
                 StateWord::Off,
                 StateWord::Off,
                 StateWord::Off,
@@ -2173,6 +2203,7 @@ mod tests {
                 StateWord::NeedsAttention,
                 StateWord::Off,
                 StateWord::Off,
+                StateWord::Off,
             ],
             paused: true,
             journal_paired: true,
@@ -2197,6 +2228,7 @@ mod tests {
         assert!(!journal.enabled);
         let open = menu_rows(MenuInput {
             words: [
+                StateWord::Off,
                 StateWord::Off,
                 StateWord::Off,
                 StateWord::Off,

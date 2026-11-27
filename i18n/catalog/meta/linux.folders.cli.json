@@ -1,0 +1,22 @@
+{
+  "description": "CLI status heading line for the folder source.",
+  "context": "CLI status heading line for the folder source.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "state",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 51,
+  "source_revision": "bc859ee7fd5d8b4890044fca6b93f3519af34ae7d51dacd69dfdf4832bdb5b09",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

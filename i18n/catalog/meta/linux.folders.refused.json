@@ -1,0 +1,17 @@
+{
+  "description": "Setup refusal when the OS refuses access to a chosen folder.",
+  "context": "Setup refusal when the OS refuses access to a chosen folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 95,
+  "source_revision": "fd1fd67bc1304b9f9130d381e24a9df7babdef53f8d4ccbaaed3807c9415b65a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

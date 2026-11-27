@@ -1312,3 +1312,282 @@ pub fn journal_setup_failed() -> &'static str {
 pub fn journal_setup_open_failed() -> &'static str {
     text!("linux.copy.journalsetupopenfailed")
 }
+
+/// Owner strings for the folder source, keyed to the catalog.
+pub mod folders {
+    use solstone_i18n::{message, text};
+
+    pub fn label() -> &'static str {
+        text!("linux.folders.label")
+    }
+    pub fn add_folder() -> &'static str {
+        text!("linux.folders.addfolder")
+    }
+    pub fn add_folder_plus() -> &'static str {
+        text!("linux.folders.addfolderplus")
+    }
+    pub fn choose_folder() -> &'static str {
+        text!("linux.folders.choosefolder")
+    }
+    pub fn intro() -> &'static str {
+        text!("linux.folders.intro")
+    }
+    pub fn one_intro(folder: &str) -> String {
+        message!("linux.folders.oneintro", "folder" => folder)
+    }
+    pub fn f7_two(first: &str, second: &str) -> String {
+        message!("linux.folders.two", "first" => first, "second" => second)
+    }
+    pub fn f7_many(count: &str) -> String {
+        message!("linux.folders.many", "count" => count)
+    }
+    pub fn f8(on: &str, paused: &str) -> String {
+        message!("linux.folders.split", "on" => on, "paused" => paused)
+    }
+    pub fn f9(folder: &str, done: &str, total: &str) -> String {
+        message!("linux.folders.tileprogress", "folder" => folder, "done" => done, "total" => total)
+    }
+    pub fn f10(done: &str, total: &str) -> String {
+        message!("linux.folders.pageprogress", "done" => done, "total" => total)
+    }
+    pub fn f11(count: &str) -> String {
+        message!("linux.folders.waiting", "count" => count)
+    }
+    pub fn f12() -> &'static str {
+        text!("linux.folders.unpaired")
+    }
+    pub fn f13() -> &'static str {
+        text!("linux.folders.journalupdate")
+    }
+    pub fn f14(folder: &str) -> String {
+        message!("linux.folders.finishsetup", "folder" => folder)
+    }
+    pub fn f15() -> &'static str {
+        text!("linux.folders.pausedfolder")
+    }
+    pub fn f15b() -> &'static str {
+        text!("linux.folders.pausedcomputer")
+    }
+    pub fn f16() -> &'static str {
+        text!("linux.folders.off")
+    }
+    pub fn f17() -> &'static str {
+        text!("linux.folders.stays")
+    }
+    pub fn f18() -> &'static str {
+        text!("linux.folders.otheron")
+    }
+    pub fn f18b() -> &'static str {
+        text!("linux.folders.otheroff")
+    }
+    pub fn f20(count: &str) -> String {
+        message!("linux.folders.needattentionmany", "count" => count)
+    }
+    pub fn f21_notice(folder: &str) -> String {
+        message!("linux.folders.alreadyadded", "folder" => folder)
+    }
+    pub fn f21_open(folder: &str) -> String {
+        message!("linux.folders.openfolder", "folder" => folder)
+    }
+    pub fn f22() -> &'static str {
+        text!("linux.folders.remove")
+    }
+    pub fn f23_heading(folder: &str) -> String {
+        message!("linux.folders.removeheading", "folder" => folder)
+    }
+    pub fn f23_body(folder: &str) -> String {
+        message!("linux.folders.removebody", "folder" => folder)
+    }
+    pub fn overlap_heading(other: &str) -> String {
+        message!("linux.folders.overlapheading", "other" => other)
+    }
+    pub fn overlap_body() -> &'static str {
+        text!("linux.folders.overlapbody")
+    }
+    pub fn overlap_choose() -> &'static str {
+        text!("linux.folders.overlapchoose")
+    }
+    pub fn overlap_override() -> &'static str {
+        text!("linux.folders.overlapoverride")
+    }
+    pub fn overlap_fact(other: &str) -> String {
+        message!("linux.folders.overlapfact", "other" => other)
+    }
+    pub fn overlap_target(target: &crate::folders::OverlapTarget) -> String {
+        match target {
+            crate::folders::OverlapTarget::Obsidian { name } => {
+                message!("linux.folders.overlapobsidian", "name" => name.as_str())
+            }
+            crate::folders::OverlapTarget::Screenshots { name } => {
+                message!("linux.folders.overlapscreenshots", "name" => name.as_str())
+            }
+            crate::folders::OverlapTarget::Folder { name, .. } => {
+                message!("linux.folders.overlapfolder", "name" => name.as_str())
+            }
+        }
+    }
+    pub fn what_comes_in() -> &'static str {
+        text!("linux.folders.whatcomesin")
+    }
+    pub fn kind_notes() -> (&'static str, &'static str) {
+        (
+            text!("linux.folders.kind.notes"),
+            text!("linux.folders.kind.notes.desc"),
+        )
+    }
+    pub fn kind_documents() -> (&'static str, &'static str) {
+        (
+            text!("linux.folders.kind.documents"),
+            text!("linux.folders.kind.documents.desc"),
+        )
+    }
+    pub fn kind_transcripts() -> (&'static str, &'static str) {
+        (
+            text!("linux.folders.kind.transcripts"),
+            text!("linux.folders.kind.transcripts.desc"),
+        )
+    }
+    pub fn kind_screenshots() -> (&'static str, &'static str) {
+        (
+            text!("linux.folders.kind.screenshots"),
+            text!("linux.folders.kind.screenshots.desc"),
+        )
+    }
+    pub fn kind_photos() -> (&'static str, &'static str) {
+        (
+            text!("linux.folders.kind.photos"),
+            text!("linux.folders.kind.photos.desc"),
+        )
+    }
+    pub fn kind_other() -> (&'static str, &'static str) {
+        (
+            text!("linux.folders.kind.other"),
+            text!("linux.folders.kind.other.desc"),
+        )
+    }
+    pub fn choose_at_least_one() -> &'static str {
+        text!("linux.folders.chooseatleastone")
+    }
+    pub fn kinds_going_forward() -> &'static str {
+        text!("linux.folders.kindsgoingforward")
+    }
+    pub fn facet_heading() -> &'static str {
+        text!("linux.folders.facetheading")
+    }
+    pub fn facet_none() -> &'static str {
+        text!("linux.folders.facetnone")
+    }
+    pub fn facet_help_none() -> &'static str {
+        text!("linux.folders.facethelpnone")
+    }
+    pub fn facet_help_setup(facet: &str) -> String {
+        message!("linux.folders.facethelpsetup", "facet" => facet)
+    }
+    pub fn facet_help_active(facet: &str) -> String {
+        message!("linux.folders.facethelpactive", "facet" => facet)
+    }
+    pub fn facet_unpaired() -> &'static str {
+        text!("linux.folders.facetunpaired")
+    }
+    pub fn facet_offline() -> &'static str {
+        text!("linux.folders.facetoffline")
+    }
+    pub fn preview_heading() -> &'static str {
+        text!("linux.folders.preview")
+    }
+    pub fn checking_folder() -> &'static str {
+        text!("linux.folders.checkingfolder")
+    }
+    pub fn preview_span(count: &str, start: &str, end: &str) -> String {
+        message!("linux.folders.previewspan", "count" => count, "start" => start, "end" => end)
+    }
+    pub fn preview_count(count: &str) -> String {
+        message!("linux.folders.previewcount", "count" => count)
+    }
+    pub fn preview_zero() -> &'static str {
+        text!("linux.folders.previewzero")
+    }
+    pub fn preview_both(content: &str, size: &str, meta: &str) -> String {
+        message!("linux.folders.previewboth", "content" => content, "size" => size, "meta" => meta)
+    }
+    pub fn preview_content_only(content: &str, size: &str) -> String {
+        message!("linux.folders.previewcontentonly", "content" => content, "size" => size)
+    }
+    pub fn preview_meta_only(meta: &str) -> String {
+        message!("linux.folders.previewmetaonly", "meta" => meta)
+    }
+    pub fn est_heading() -> &'static str {
+        text!("linux.folders.estheading")
+    }
+    pub fn est_values(segments: &str, days: &str, thoughts: &str) -> String {
+        message!("linux.folders.estvalues", "segments" => segments, "days" => days, "thoughts" => thoughts)
+    }
+    pub fn est_gloss() -> &'static str {
+        text!("linux.folders.estgloss")
+    }
+    pub fn est_unpaired() -> &'static str {
+        text!("linux.folders.estunpaired")
+    }
+    pub fn est_offline() -> &'static str {
+        text!("linux.folders.estoffline")
+    }
+    pub fn scope_note() -> &'static str {
+        text!("linux.folders.scopenote")
+    }
+    pub fn nothing_until_confirm() -> &'static str {
+        text!("linux.folders.nothinguntilconfirm")
+    }
+    pub fn no_repeat() -> &'static str {
+        text!("linux.folders.norepeat")
+    }
+    pub fn confirm_label(count: u64, today_only: bool) -> String {
+        if today_only || count == 0 {
+            text!("linux.folders.startfromtoday").to_owned()
+        } else if count == 1 {
+            text!("linux.folders.bringinone").to_owned()
+        } else {
+            let grouped = crate::screenshots::group(count);
+            message!("linux.folders.bringinmany", "count" => grouped.as_str())
+        }
+    }
+    pub fn preview_failed() -> &'static str {
+        text!("linux.folders.previewfailed")
+    }
+    pub fn bring_in_older() -> &'static str {
+        text!("linux.folders.bringinolder")
+    }
+    pub fn backfill_status() -> &'static str {
+        text!("linux.folders.backfillstatus")
+    }
+    pub fn e1(folder: &str) -> String {
+        message!("linux.folders.missing", "folder" => folder)
+    }
+    pub fn e2(folder: &str) -> String {
+        message!("linux.folders.unreadable", "folder" => folder)
+    }
+    pub fn cant_read(count: u64) -> String {
+        if count == 1 {
+            text!("linux.folders.cantreadone").to_owned()
+        } else {
+            let grouped = crate::screenshots::group(count);
+            message!("linux.folders.cantreadmany", "count" => grouped.as_str())
+        }
+    }
+    pub fn fallback_to_details(count: u64) -> String {
+        if count == 1 {
+            text!("linux.folders.fallbackone").to_owned()
+        } else {
+            let grouped = crate::screenshots::group(count);
+            message!("linux.folders.fallbackmany", "count" => grouped.as_str())
+        }
+    }
+    pub fn refused() -> &'static str {
+        text!("linux.folders.refused")
+    }
+    pub fn all_folders() -> &'static str {
+        text!("linux.folders.allfolders")
+    }
+    pub fn cli_line(state: &str) -> String {
+        message!("linux.folders.cli", "state" => state)
+    }
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Preview section heading.",
+  "context": "Preview section heading.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 39,
+  "source_revision": "fa8dff1df470b3a2178e849ee51cf04fa22bd9ffdbf72e5f385f7ae58073db0b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

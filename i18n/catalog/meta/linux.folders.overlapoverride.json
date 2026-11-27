@@ -1,0 +1,17 @@
+{
+  "description": "Explicit override button on overlap warning.",
+  "context": "Explicit override button on overlap warning.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 54,
+  "source_revision": "7058ed35545ffd4d992e3ecd76ca7933a508d932696579a5ceb6d4a0f6118e8e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

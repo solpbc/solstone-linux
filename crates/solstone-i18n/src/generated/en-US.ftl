@@ -873,6 +873,182 @@ m6c696e75782e646f63746f722e796f75726465736b746f7073657373696f6e69736e747468656f6
 
 m6c696e75782e6578706f72742e736176696e6766726f6d6a6f75726e616c = saving a copy from your journal.
 
+m6c696e75782e666f6c646572732e616464666f6c646572 = add a folder
+
+m6c696e75782e666f6c646572732e616464666f6c646572706c7573 = + add a folder
+
+m6c696e75782e666f6c646572732e616c6c666f6c64657273 = all folders
+
+m6c696e75782e666f6c646572732e616c72656164796164646564 = { $folder } is already added.
+
+m6c696e75782e666f6c646572732e6261636b66696c6c737461747573 = older days are processed behind recent days. follow progress on status in your journal.
+
+m6c696e75782e666f6c646572732e6272696e67696e6d616e79 = bring in { $count } items
+
+m6c696e75782e666f6c646572732e6272696e67696e6f6c646572 = bring in older files
+
+m6c696e75782e666f6c646572732e6272696e67696e6f6e65 = bring in 1 item
+
+m6c696e75782e666f6c646572732e63616e74726561646d616e79 = couldn't read { $count } files.
+
+m6c696e75782e666f6c646572732e63616e74726561646f6e65 = couldn't read 1 file.
+
+m6c696e75782e666f6c646572732e636865636b696e67666f6c646572 = checking this folder…
+
+m6c696e75782e666f6c646572732e63686f6f736561746c656173746f6e65 = choose at least one kind to bring in.
+
+m6c696e75782e666f6c646572732e63686f6f7365666f6c646572 = choose a folder
+
+m6c696e75782e666f6c646572732e636c69 = folders: { $state }
+
+m6c696e75782e666f6c646572732e657374676c6f7373 = files touched within 5 minutes share one segment. details-only files take no thoughts.
+
+m6c696e75782e666f6c646572732e65737468656164696e67 = estimated work in your journal
+
+m6c696e75782e666f6c646572732e6573746f66666c696e65 = journal estimate unavailable while your journal is offline. you can still confirm and files will wait on this computer.
+
+m6c696e75782e666f6c646572732e657374756e706169726564 = connect a journal to see an estimate. you can still confirm and files will wait on this computer.
+
+m6c696e75782e666f6c646572732e65737476616c756573 = ~{ $segments } segments · { $days } days · ~{ $thoughts } thoughts
+
+m6c696e75782e666f6c646572732e666163657468656164696e67 = facet (optional)
+
+m6c696e75782e666f6c646572732e666163657468656c70616374697665 = new segments from this folder go into { $facet }.
+
+m6c696e75782e666f6c646572732e666163657468656c706e6f6e65 = choose a facet to add it to every segment from this folder.
+
+m6c696e75782e666f6c646572732e666163657468656c707365747570 = every segment from this folder goes into { $facet }.
+
+m6c696e75782e666f6c646572732e66616365746e6f6e65 = none
+
+m6c696e75782e666f6c646572732e66616365746f66666c696e65 = facets unavailable while your journal is offline.
+
+m6c696e75782e666f6c646572732e6661636574756e706169726564 = connect a journal to choose a facet.
+
+m6c696e75782e666f6c646572732e66616c6c6261636b6d616e79 = { $count } files' contents couldn't be added, so only their details came in.
+
+m6c696e75782e666f6c646572732e66616c6c6261636b6f6e65 = 1 file's contents couldn't be added, so only its details came in.
+
+m6c696e75782e666f6c646572732e66696e6973687365747570 = finish setting up { $folder }.
+
+m6c696e75782e666f6c646572732e696e74726f = while this is on, the solstone app takes in changes from the folders you choose and adds them to your journal in five-minute segments.
+
+m6c696e75782e666f6c646572732e6a6f75726e616c757064617465 = waiting for a journal update. changes wait on this computer.
+
+m6c696e75782e666f6c646572732e6b696e642e646f63756d656e7473 = documents
+
+m6c696e75782e666f6c646572732e6b696e642e646f63756d656e74732e64657363 = PDFs and longer documents. revisions come in after an hour without saves.
+
+m6c696e75782e666f6c646572732e6b696e642e6e6f746573 = notes
+
+m6c696e75782e666f6c646572732e6b696e642e6e6f7465732e64657363 = markdown and text notes. changes come in as you edit them.
+
+m6c696e75782e666f6c646572732e6b696e642e6f74686572 = other files (names and details only)
+
+m6c696e75782e666f6c646572732e6b696e642e6f746865722e64657363 = installers, audio, video, and other files. only names, sizes, and file details come in, never the file contents.
+
+m6c696e75782e666f6c646572732e6b696e642e70686f746f73 = photos
+
+m6c696e75782e666f6c646572732e6b696e642e70686f746f732e64657363 = photos and other images.
+
+m6c696e75782e666f6c646572732e6b696e642e73637265656e73686f7473 = screenshots
+
+m6c696e75782e666f6c646572732e6b696e642e73637265656e73686f74732e64657363 = screenshots saved in this folder.
+
+m6c696e75782e666f6c646572732e6b696e642e7472616e73637269707473 = transcripts
+
+m6c696e75782e666f6c646572732e6b696e642e7472616e736372697074732e64657363 = subtitles and saved transcripts.
+
+m6c696e75782e666f6c646572732e6b696e6473676f696e67666f7277617264 = changes to these kinds apply going forward. what's already in your journal stays.
+
+m6c696e75782e666f6c646572732e6c6162656c = folders
+
+m6c696e75782e666f6c646572732e6d616e79 = { $count } folders
+
+m6c696e75782e666f6c646572732e6d697373696e67 = { $folder } isn't on this computer anymore.
+
+m6c696e75782e666f6c646572732e6e656564617474656e74696f6e6d616e79 = { $count } folders need attention
+
+m6c696e75782e666f6c646572732e6e6f726570656174 = items already in your journal aren't brought in again.
+
+m6c696e75782e666f6c646572732e6e6f7468696e67756e74696c636f6e6669726d = nothing from this folder comes in until you confirm.
+
+m6c696e75782e666f6c646572732e6f6666 = this folder is off. what's already in your journal stays.
+
+m6c696e75782e666f6c646572732e6f6e65696e74726f = while this is on, the solstone app takes in changes from { $folder } and adds them to your journal in five-minute segments.
+
+m6c696e75782e666f6c646572732e6f70656e666f6c646572 = open { $folder }
+
+m6c696e75782e666f6c646572732e6f746865726f6666 = only files of the kinds you chose under 64 MB come in.
+
+m6c696e75782e666f6c646572732e6f746865726f6e = with other files on, kinds you turned off and files over 64 MB come in as names and details only.
+
+m6c696e75782e666f6c646572732e6f7665726c6170626f6479 = files in both places may come into your journal twice. you can pick another folder or use this one anyway.
+
+m6c696e75782e666f6c646572732e6f7665726c617063686f6f7365 = choose another folder
+
+m6c696e75782e666f6c646572732e6f7665726c617066616374 = overlaps with { $other }.
+
+m6c696e75782e666f6c646572732e6f7665726c6170666f6c646572 = your { $name } folder
+
+m6c696e75782e666f6c646572732e6f7665726c617068656164696e67 = this folder overlaps with { $other }.
+
+m6c696e75782e666f6c646572732e6f7665726c61706f6273696469616e = your Obsidian vault ({ $name })
+
+m6c696e75782e666f6c646572732e6f7665726c61706f76657272696465 = use this folder anyway
+
+m6c696e75782e666f6c646572732e6f7665726c617073637265656e73686f7473 = your screenshots folder ({ $name })
+
+m6c696e75782e666f6c646572732e7061676570726f6772657373 = { $done } of { $total } items in your journal
+
+m6c696e75782e666f6c646572732e706175736564636f6d7075746572 = changes wait on this computer.
+
+m6c696e75782e666f6c646572732e706175736564666f6c646572 = you paused syncing for this folder. changes wait on this computer until you resume.
+
+m6c696e75782e666f6c646572732e70726576696577 = preview
+
+m6c696e75782e666f6c646572732e70726576696577626f7468 = { $content } files with content ({ $size }) · { $meta } other files (details only)
+
+m6c696e75782e666f6c646572732e70726576696577636f6e74656e746f6e6c79 = { $content } files with content ({ $size })
+
+m6c696e75782e666f6c646572732e70726576696577636f756e74 = { $count } items
+
+m6c696e75782e666f6c646572732e707265766965776661696c6564 = couldn't read this folder to count what's inside.
+
+m6c696e75782e666f6c646572732e707265766965776d6574616f6e6c79 = { $meta } other files (details only)
+
+m6c696e75782e666f6c646572732e707265766965777370616e = { $count } items · { $start } to { $end }
+
+m6c696e75782e666f6c646572732e707265766965777a65726f = 0 existing items selected
+
+m6c696e75782e666f6c646572732e72656675736564 = the solstone app can't open this folder. choose another folder.
+
+m6c696e75782e666f6c646572732e72656d6f7665 = remove folder
+
+m6c696e75782e666f6c646572732e72656d6f7665626f6479 = nothing more from this folder will go into your journal. what's already in your journal stays, and nothing in { $folder } changes.
+
+m6c696e75782e666f6c646572732e72656d6f766568656164696e67 = remove { $folder } from the solstone app?
+
+m6c696e75782e666f6c646572732e73636f70656e6f7465 = includes subfolders. unfinished downloads wait until they finish; hidden files are skipped.
+
+m6c696e75782e666f6c646572732e73706c6974 = { $on } on · { $paused } paused
+
+m6c696e75782e666f6c646572732e737461727466726f6d746f646179 = start from today
+
+m6c696e75782e666f6c646572732e7374617973 = what's already in your journal stays if you delete a file from the folder, pause, or turn this off.
+
+m6c696e75782e666f6c646572732e74696c6570726f6772657373 = { $folder } · { $done } of { $total } in your journal
+
+m6c696e75782e666f6c646572732e74776f = { $first }, { $second }
+
+m6c696e75782e666f6c646572732e756e706169726564 = changes wait on this computer until you connect a journal.
+
+m6c696e75782e666f6c646572732e756e7265616461626c65 = can't read { $folder }.
+
+m6c696e75782e666f6c646572732e77616974696e67 = { $count } waiting to sync
+
+m6c696e75782e666f6c646572732e77686174636f6d6573696e = what comes in
+
 m6c696e75782e6865616c74682e69646c65636f6e6669726d696e6777697468796f75726a6f75726e616c = idle, confirming with your journal
 
 m6c696e75782e6865616c74682e69646c65636f6e6e6563746564 = idle, connected

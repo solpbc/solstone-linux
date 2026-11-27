@@ -1,0 +1,22 @@
+{
+  "description": "Non-fatal fallback line when multiple files' contents were refused.",
+  "context": "Non-fatal fallback line when multiple files' contents were refused.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 108,
+  "source_revision": "73154791ab77406e50643918308942447cea736a793e23853039aebad821a093",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

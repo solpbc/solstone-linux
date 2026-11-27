@@ -1,0 +1,30 @@
+{
+  "description": "Preview count header with date span.",
+  "context": "Preview count header with date span.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    },
+    {
+      "name": "start",
+      "type": "string"
+    },
+    {
+      "name": "end",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 73,
+  "source_revision": "b29adcc58d4dbad35b27c50f3440e2059c4d7e89b4c0e7ae45c63d197208a092",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

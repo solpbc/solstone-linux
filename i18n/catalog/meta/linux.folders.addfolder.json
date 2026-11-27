@@ -1,0 +1,17 @@
+{
+  "description": "Primary button to pick and add a folder.",
+  "context": "Primary button to pick and add a folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 44,
+  "source_revision": "7588a01bd3edf74a1454e1acd7c7b6867733c359c73447714ceab7f44eb81c50",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Folder page reason when paired journal lacks folder support.",
+  "context": "Folder page reason when paired journal lacks folder support.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 92,
+  "source_revision": "ad3248e9dbea11da3dfc7c836f167d717f4138ac640abf69d2a0e71216eb6a6a",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,22 @@
+{
+  "description": "Inline notice when the owner picks an already-added folder.",
+  "context": "Inline notice when the owner picks an already-added folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "folder",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 61,
+  "source_revision": "e4189fde05aea5ade23fc2a0b5d2522fb740feb74284253ad0cb4f4bf2e1946b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

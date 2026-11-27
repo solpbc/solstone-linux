@@ -101,6 +101,9 @@
       <method name="ScreenshotsState"><arg direction="out" type="s" /></method>
       <method name="ScreenshotsTurnOff"><arg direction="out" type="s" /></method>
       <method name="ScreenshotsTurnOn"><arg direction="out" type="s" /></method>
+      <method name="FoldersAction"><arg name="payload" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="FoldersCheckPath"><arg name="path" direction="in" type="s" /><arg direction="out" type="s" /></method>
+      <method name="FoldersState"><arg direction="out" type="s" /></method>
       <method name="WriteSetting">
           <arg name="field" direction="in" type="s" />
           <arg name="value" direction="in" type="s" />

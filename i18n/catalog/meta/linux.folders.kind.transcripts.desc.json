@@ -1,0 +1,17 @@
+{
+  "description": "Transcripts kind description.",
+  "context": "Transcripts kind description.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 64,
+  "source_revision": "f46dc3f5d35e88a2c93c9054999cb6d4ee1cd73764200991e0e0cb8ccf1c53cc",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

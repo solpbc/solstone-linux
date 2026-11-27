@@ -370,6 +370,20 @@ impl ControlClient {
             .await
     }
 
+    pub async fn folders_state(&self) -> Result<String, ControlClientError> {
+        self.call_method("FoldersState", &(), DEFAULT_TIMEOUT).await
+    }
+
+    pub async fn folders_check_path(&self, path: &str) -> Result<String, ControlClientError> {
+        self.call_method("FoldersCheckPath", &(path.to_string(),), DEFAULT_TIMEOUT)
+            .await
+    }
+
+    pub async fn folders_action(&self, payload: &str) -> Result<String, ControlClientError> {
+        self.call_method("FoldersAction", &(payload.to_string(),), DEFAULT_TIMEOUT)
+            .await
+    }
+
     pub async fn obsidian_turn_on(&self, path: &str) -> Result<String, ControlClientError> {
         self.call_method("ObsidianTurnOn", &(path.to_string(),), DEFAULT_TIMEOUT)
             .await

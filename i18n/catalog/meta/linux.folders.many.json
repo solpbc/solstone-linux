@@ -1,0 +1,22 @@
+{
+  "description": "Tile sub-line when three or more folders are on.",
+  "context": "Tile sub-line when three or more folders are on.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "count",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 50,
+  "source_revision": "88b554d2d7fc21106ce069a5f84b165e89660ea0361ef2ec9bdb5fb1da4e8e19",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

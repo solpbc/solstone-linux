@@ -1,0 +1,26 @@
+{
+  "description": "Preview size line when only content files exist.",
+  "context": "Preview size line when only content files exist.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "content",
+      "type": "string"
+    },
+    {
+      "name": "size",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 75,
+  "source_revision": "ea8b9681cfaa1ca0f0d0e3772f78eb8c6029bf491ba51441969ebd81f47c0b02",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

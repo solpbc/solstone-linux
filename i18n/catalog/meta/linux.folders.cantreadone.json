@@ -1,0 +1,17 @@
+{
+  "description": "Non-fatal unreadable file line (singular).",
+  "context": "Non-fatal unreadable file line (singular).",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 53,
+  "source_revision": "80197f49139e53041a16a067bbf90e6c95ea40eb951450ad803db816b60c91cb",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

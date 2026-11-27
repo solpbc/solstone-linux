@@ -1,0 +1,17 @@
+{
+  "description": "Optional facet picker heading.",
+  "context": "Optional facet picker heading.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 48,
+  "source_revision": "50e94f624436a61866bf6ed478a796c5f6b0b0dd5860d4326e1140a4af87a49e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

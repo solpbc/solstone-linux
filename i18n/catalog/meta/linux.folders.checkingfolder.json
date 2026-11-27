@@ -1,0 +1,17 @@
+{
+  "description": "Loading state while scanning a folder for preview.",
+  "context": "Loading state while scanning a folder for preview.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 53,
+  "source_revision": "56a66476d45f6fc4b7994dbae8a51e57b6579513a7988328d64efb7aee2f4550",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

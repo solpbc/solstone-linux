@@ -1,0 +1,17 @@
+{
+  "description": "Secondary button on an active folder page to widen history.",
+  "context": "Secondary button on an active folder page to widen history.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 52,
+  "source_revision": "ca4e75e4e76f1c4628c40321ea9e6ce401a6be681e3e2b9f3036cf55410dbe4e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

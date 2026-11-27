@@ -1,0 +1,17 @@
+{
+  "description": "Note under kinds when editing an active folder.",
+  "context": "Note under kinds when editing an active folder.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 113,
+  "source_revision": "c34879ad0b20cf00e13f6df2ebd5cce192fbf4eee185a99a6a4af9d82e2c1877",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

@@ -1,0 +1,17 @@
+{
+  "description": "Folder page reason and tile sub-line under whole-computer pause.",
+  "context": "Folder page reason and tile sub-line under whole-computer pause.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 62,
+  "source_revision": "0795e1f9455070af8ecc20e971ad4a2e179ea178d74d6497086c205b64a4773b",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

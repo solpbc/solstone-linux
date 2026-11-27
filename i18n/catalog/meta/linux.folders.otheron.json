@@ -1,0 +1,17 @@
+{
+  "description": "Folder page facts note when other files is on.",
+  "context": "Folder page facts note when other files is on.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 129,
+  "source_revision": "b24fbbdcae2b2b3ab4386a850fd135b7f70d6b2024fe12eaacf377104413a065",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

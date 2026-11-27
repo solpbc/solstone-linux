@@ -1,0 +1,26 @@
+{
+  "description": "Folder page progress line while chosen history is coming in.",
+  "context": "Folder page progress line while chosen history is coming in.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "done",
+      "type": "string"
+    },
+    {
+      "name": "total",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 77,
+  "source_revision": "dd0c61bdd02d1db8841f9a58dc923c0b45c377b5771f2cf6a53c2d6023559200",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

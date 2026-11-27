@@ -1,0 +1,22 @@
+{
+  "description": "Needs-attention line when folder permissions are refused.",
+  "context": "Needs-attention line when folder permissions are refused.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "folder",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 55,
+  "source_revision": "7a5fbdc3fd75b5abf383c4a47fc1fe5b78ba9faff8bf32d4892550b26274656e",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

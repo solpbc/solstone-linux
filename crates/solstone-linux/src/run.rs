@@ -418,6 +418,67 @@ fn run_capture(
         tray_receiver.clone(),
         config.state_dir(),
     );
+    let folders_home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| config.base_dir.clone());
+    let overlap_obsidian_dir = config.base_dir.join("obsidian");
+    let overlap_screenshots = screenshots.clone();
+    let (folders, folders_task) = {
+        let _guard = runtime.enter();
+        crate::folders::start(
+            Arc::clone(&upload),
+            config.state_dir().join("folders"),
+            folders_home,
+            config.state_dir(),
+            Arc::new(move || {
+                let obsidian = std::fs::read(overlap_obsidian_dir.join("source.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|val| {
+                        let enabled = val.get("enabled").and_then(|v| v.as_bool())?;
+                        if !enabled {
+                            return None;
+                        }
+                        let root = val.get("vault_root").and_then(|v| v.as_str())?;
+                        let name = val
+                            .get("vault_name")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| {
+                                std::path::Path::new(root)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "Obsidian".into())
+                            });
+                        Some((std::path::PathBuf::from(root), name))
+                    });
+                let shots = crate::screenshots::decode_document(&overlap_screenshots.state_json())
+                    .and_then(|doc| {
+                        if doc.mode != crate::screenshots::Mode::On {
+                            return None;
+                        }
+                        doc.folder.map(|p| {
+                            let name = doc.folder_name.unwrap_or_else(|| "Screenshots".into());
+                            (std::path::PathBuf::from(p), name)
+                        })
+                    });
+                crate::folders::OverlapContext {
+                    obsidian,
+                    screenshots: shots,
+                }
+            }),
+        )
+    };
+    {
+        let mut pause_rx = tray_receiver.clone();
+        let pause_folders = folders.clone();
+        runtime.spawn(async move {
+            pause_folders.set_computer_paused(pause_rx.borrow().paused);
+            while pause_rx.changed().await.is_ok() {
+                pause_folders.set_computer_paused(pause_rx.borrow().paused);
+            }
+        });
+    }
     let (incoming_commands, router_receiver) = std::sync::mpsc::channel();
     let (observer_commands, command_receiver) = std::sync::mpsc::channel();
     let commands = CommandSender::new(incoming_commands.clone());
@@ -540,11 +601,13 @@ fn run_capture(
         supervisor.attach_live_settings(Arc::clone(&live_settings));
         let restart_obsidian = obsidian.clone();
         let restart_screenshots = screenshots.clone();
+        let restart_folders = folders.clone();
         let source_cache_dir = config.state_dir();
         supervisor.attach_new_pairing(Arc::new(move || {
             crate::shared_sources::forget(&source_cache_dir);
             restart_obsidian.restart_send();
             restart_screenshots.restart_setup();
+            restart_folders.restart_setup();
         }));
         supervisor.attach_activity_runtime(
             Arc::clone(&activity_fault),
@@ -648,6 +711,7 @@ fn run_capture(
             shared: shared.refresh.clone(),
             obsidian: obsidian.clone(),
             screenshots: screenshots.clone(),
+            folders: folders.clone(),
             imports: sync.import_handle(),
             exports,
         },
@@ -743,6 +807,9 @@ fn run_capture(
     }
     if let Some(task) = screenshots_task {
         runtime.block_on(screenshots.shutdown(task));
+    }
+    if let Some(task) = folders_task {
+        runtime.block_on(folders.shutdown(task));
     }
     let linked_start = async move {
         linked_shutdown_notify.notify_one();

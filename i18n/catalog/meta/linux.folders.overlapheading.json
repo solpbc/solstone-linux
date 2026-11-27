@@ -1,0 +1,22 @@
+{
+  "description": "Overlap warning heading.",
+  "context": "Overlap warning heading.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [
+    {
+      "name": "other",
+      "type": "string"
+    }
+  ],
+  "format_intent": "text",
+  "max_length": 69,
+  "source_revision": "d6e42dd084c5d72ebc1a56dbfa26b97054fad81bbe7386ff130e98578ecaa05c",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

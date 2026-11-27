@@ -1,0 +1,17 @@
+{
+  "description": "Documents kind description.",
+  "context": "Documents kind description.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 105,
+  "source_revision": "68bb8347c82a2f49ec61a43bb7544df01e4d141802488151fe1fae9b30b04b63",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

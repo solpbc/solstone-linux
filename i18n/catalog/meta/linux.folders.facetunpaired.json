@@ -1,0 +1,17 @@
+{
+  "description": "Quiet note when unpaired during setup.",
+  "context": "Quiet note when unpaired during setup.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 68,
+  "source_revision": "a525da7c231d745c2025e6f335bf17612fdacea29e22793ed81b756fc2693d1f",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

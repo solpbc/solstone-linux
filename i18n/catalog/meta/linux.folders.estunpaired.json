@@ -1,0 +1,17 @@
+{
+  "description": "Estimate fallback when unpaired.",
+  "context": "Estimate fallback when unpaired.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 129,
+  "source_revision": "906e11e01f6b4ed4378510300b44f6e27d46e21b104842cc823825c13c3e0eca",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

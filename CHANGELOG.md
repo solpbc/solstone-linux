@@ -6,6 +6,10 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- when your journal is up to date, you can now share any folder on your computer with your journal from the folders tile in the app's window. choose what kinds of files to bring in (notes, documents, transcripts, screenshots, photos, or names and details for other files), and tie a folder to a facet in your journal if you like. choose how much older history to bring in and preview it before anything goes into your journal, and pause or turn off each folder on its own. files stay where they are on your computer, unfinished downloads wait until they finish, and pausing a folder holds syncing without skipping changes until you resume.
+
 ## [2.0.55] - 2026-11-27
 
 ### Added
