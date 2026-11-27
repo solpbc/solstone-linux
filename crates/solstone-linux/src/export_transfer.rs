@@ -17,7 +17,10 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -262,13 +265,20 @@ struct ActiveTransfer {
     initial_transport: Option<&'static str>,
     allow_relay: bool,
     control_tx: watch::Sender<ControlSignal>,
+    cancel_flag: Arc<AtomicBool>,
+    publish_lock: Arc<Mutex<()>>,
 }
+
+#[cfg(test)]
+type VerifyChunkHook = Arc<dyn Fn(u64) + Send + Sync>;
 
 struct ExportInner {
     opener: Arc<dyn ExportStreamOpener>,
     sleep: SleepInhibit,
     space_probe: SpaceProbe,
     state: Mutex<ExportState>,
+    #[cfg(test)]
+    verify_chunk_hook: Mutex<Option<VerifyChunkHook>>,
 }
 
 struct ExportState {
@@ -306,6 +316,8 @@ impl Default for ExportTransferHandle {
                 sleep: SleepInhibit::disabled(),
                 space_probe: Arc::new(statvfs_available_bytes),
                 state: Mutex::new(ExportState::default()),
+                #[cfg(test)]
+                verify_chunk_hook: Mutex::new(None),
             }),
         }
     }
@@ -319,6 +331,8 @@ impl ExportTransferHandle {
                 sleep,
                 space_probe: Arc::new(statvfs_available_bytes),
                 state: Mutex::new(ExportState::default()),
+                #[cfg(test)]
+                verify_chunk_hook: Mutex::new(None),
             }),
         }
     }
@@ -335,8 +349,18 @@ impl ExportTransferHandle {
                 sleep,
                 space_probe,
                 state: Mutex::new(ExportState::default()),
+                verify_chunk_hook: Mutex::new(None),
             }),
         }
+    }
+
+    #[cfg(test)]
+    fn set_verify_chunk_hook(&self, hook: Option<VerifyChunkHook>) {
+        *self
+            .inner
+            .verify_chunk_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
     pub async fn start(&self, payload: &str) -> String {
@@ -393,12 +417,22 @@ impl ExportTransferHandle {
             .or_else(|| req.filename.clone().filter(|s| !s.is_empty()))
             .unwrap_or_else(|| "solstone-journal.zip".to_owned());
 
-        let part_path = sibling_part_path(parent, &req.export_id);
-        let existing_part_len = fs::symlink_metadata(&part_path)
-            .ok()
-            .filter(|meta| meta.file_type().is_file())
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let (part_path, existing_part_len) = {
+            let state = self.lock_state();
+            if let Some(prev) = &state.active
+                && prev.export_id == req.export_id
+                && prev.destination_path == destination_path
+            {
+                let len = fs::symlink_metadata(&prev.part_path)
+                    .ok()
+                    .filter(|meta| meta.file_type().is_file())
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                (Some(prev.part_path.clone()), len)
+            } else {
+                (None, 0)
+            }
+        };
         let remaining_needed = req.size_bytes.saturating_sub(existing_part_len);
         let required = required_device_bytes(remaining_needed);
         if let Some(available) = (self.inner.space_probe)(parent)
@@ -434,13 +468,28 @@ impl ExportTransferHandle {
                     "export_already_running",
                 ));
             }
-            if let Some(prev) = state.active.take()
-                && prev.export_id != req.export_id
-            {
-                let _ = fs::remove_file(&prev.part_path);
-            }
+            let reused_part = if let Some(prev) = state.active.take() {
+                prev.cancel_flag.store(true, Ordering::Release);
+                let _ = prev.control_tx.send(ControlSignal::Cancel);
+                if prev.export_id == req.export_id && prev.destination_path == destination_path {
+                    Some(prev.part_path)
+                } else {
+                    let _ = fs::remove_file(&prev.part_path);
+                    None
+                }
+            } else {
+                None
+            };
             state.next_generation = state.next_generation.wrapping_add(1);
             let generation = state.next_generation;
+            let chosen_part_path = reused_part
+                .or(part_path)
+                .unwrap_or_else(|| sibling_part_path(parent, &req.export_id, generation));
+            let actual_existing_len = fs::symlink_metadata(&chosen_part_path)
+                .ok()
+                .filter(|meta| meta.file_type().is_file())
+                .map(|meta| meta.len())
+                .unwrap_or(0);
             let (control_tx, _) = watch::channel(ControlSignal::Run);
             state.active = Some(ActiveTransfer {
                 generation,
@@ -450,18 +499,20 @@ impl ExportTransferHandle {
                 sha256: req.sha256.to_ascii_lowercase(),
                 etag: req.etag,
                 destination_path,
-                part_path,
+                part_path: chosen_part_path,
                 destination_display: destination_display.clone(),
                 link_token,
                 initial_transport: None,
                 allow_relay: false,
                 control_tx,
+                cancel_flag: Arc::new(AtomicBool::new(false)),
+                publish_lock: Arc::new(Mutex::new(())),
             });
             state.snapshot = ExportStatusReply {
                 id: None,
                 export_id: Some(req.export_id),
                 phase: "transferring".to_owned(),
-                bytes_written: existing_part_len.min(req.size_bytes),
+                bytes_written: actual_existing_len.min(req.size_bytes),
                 total_bytes: req.size_bytes,
                 destination_display: Some(destination_display),
                 pause_reason: None,
@@ -535,6 +586,8 @@ impl ExportTransferHandle {
                 let next_gen = state.next_generation.wrapping_add(1);
                 state.next_generation = next_gen;
                 let active_size = state.active.as_mut().map(|active| {
+                    active.cancel_flag.store(true, Ordering::Release);
+                    let _ = active.control_tx.send(ControlSignal::Cancel);
                     active.generation = next_gen;
                     if was_relay_pause {
                         active.allow_relay = true;
@@ -542,6 +595,8 @@ impl ExportTransferHandle {
                     }
                     let (control_tx, _) = watch::channel(ControlSignal::Run);
                     active.control_tx = control_tx;
+                    active.cancel_flag = Arc::new(AtomicBool::new(false));
+                    active.publish_lock = Arc::new(Mutex::new(()));
                     active.size_bytes
                 });
                 if let Some(size_bytes) = active_size {
@@ -565,15 +620,32 @@ impl ExportTransferHandle {
         let req = serde_json::from_str::<ControlPayload>(payload).ok();
         let req_id = req.as_ref().and_then(|r| r.id.clone());
         let target_id = req.as_ref().and_then(|r| r.export_id.clone());
-        let (part_to_remove, reply) = {
-            let mut state = self.lock_state();
-            let matches_active = state
+
+        // Signal cooperative cancellation immediately before waiting on publish_lock
+        // so any blocking SHA-256 verification exits on the very next chunk and drops its fd.
+        let pending = {
+            let state = self.lock_state();
+            state
                 .active
                 .as_ref()
-                .is_some_and(|active| target_id.as_deref().is_none_or(|id| id == active.export_id));
-            if matches_active {
+                .filter(|active| target_id.as_deref().is_none_or(|id| id == active.export_id))
+                .map(|active| {
+                    active.cancel_flag.store(true, Ordering::Release);
+                    let _ = active.control_tx.send(ControlSignal::Cancel);
+                    (active.generation, Arc::clone(&active.publish_lock))
+                })
+        };
+
+        let (part_to_remove, reply) = if let Some((gen_to_cancel, publish_lock)) = pending {
+            // Lock ordering is always publish_lock -> state (matches verify_and_finalize).
+            let _pub_guard = publish_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.lock_state();
+            if state
+                .active
+                .as_ref()
+                .is_some_and(|a| a.generation == gen_to_cancel)
+            {
                 let active = state.active.take().expect("checked active");
-                let _ = active.control_tx.send(ControlSignal::Cancel);
                 state.snapshot = ExportStatusReply {
                     id: None,
                     export_id: Some(active.export_id),
@@ -591,8 +663,12 @@ impl ExportTransferHandle {
                 };
                 (Some(active.part_path), state.snapshot.with_id(req_id))
             } else {
+                // Worker already finalized before publish_lock was acquired; report truthfully.
                 (None, state.snapshot.with_id(req_id))
             }
+        } else {
+            let state = self.lock_state();
+            (None, state.snapshot.with_id(req_id))
         };
         if let Some(part_path) = part_to_remove {
             let _ = fs::remove_file(part_path);
@@ -997,18 +1073,44 @@ impl ExportTransferHandle {
         let part_path = params.part_path.clone();
         let expected_size = params.size_bytes;
         let expected_sha = params.sha256.clone();
+        let cancel_flag = Arc::clone(&params.cancel_flag);
+        #[cfg(test)]
+        let chunk_hook = self
+            .inner
+            .verify_chunk_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let verify_result = tokio::task::spawn_blocking(move || {
-            hash_and_check_file(&part_path, expected_size, &expected_sha)
+            hash_and_check_file(
+                &part_path,
+                expected_size,
+                &expected_sha,
+                &cancel_flag,
+                #[cfg(test)]
+                chunk_hook.as_deref(),
+            )
         })
         .await;
 
         match verify_result {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => {
+            Ok(Ok(VerifyOutcome::Matched)) => {}
+            Ok(Ok(VerifyOutcome::Cancelled)) => {
+                // Attempt was cancelled or superseded; its unique part file is
+                // owned only by this generation and removed without touching
+                // any newer attempt's partial.
+                let _ = fs::remove_file(&params.part_path);
+                return;
+            }
+            Ok(Ok(VerifyOutcome::Mismatched)) => {
                 self.fail_and_cleanup(generation, "checksum_mismatch");
                 return;
             }
             Ok(Err(_)) | Err(_) => {
+                if params.cancel_flag.load(Ordering::Acquire) {
+                    let _ = fs::remove_file(&params.part_path);
+                    return;
+                }
                 self.fail_and_cleanup(generation, "dest_write_failed");
                 return;
             }
@@ -1017,46 +1119,80 @@ impl ExportTransferHandle {
         if self.check_pairing_lost(generation, &params.link_token) {
             return;
         }
-        if *params.control_rx.borrow() == ControlSignal::Cancel {
+        if params.cancel_flag.load(Ordering::Acquire)
+            || *params.control_rx.borrow() == ControlSignal::Cancel
+        {
             let _ = fs::remove_file(&params.part_path);
             return;
         }
 
+        let publish_lock = Arc::clone(&params.publish_lock);
+        let cancel_flag = Arc::clone(&params.cancel_flag);
+        let inner_for_publish = Arc::clone(&self.inner);
         let part_path = params.part_path.clone();
         let dest_path = params.destination_path.clone();
-        let rename_result =
-            tokio::task::spawn_blocking(move || fs::rename(&part_path, &dest_path)).await;
-        match rename_result {
-            Ok(Ok(())) => {
-                let mut state = self.lock_state();
+        let publish_result = tokio::task::spawn_blocking(move || -> io::Result<bool> {
+            // Lock ordering is always publish_lock -> state (matches cancel()).
+            let _pub_guard = publish_lock.lock().unwrap_or_else(|e| e.into_inner());
+            if cancel_flag.load(Ordering::Acquire) {
+                let _ = fs::remove_file(&part_path);
+                return Ok(false);
+            }
+            {
+                let state = inner_for_publish
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 if !state
                     .active
                     .as_ref()
                     .is_some_and(|a| a.generation == generation)
                 {
+                    let _ = fs::remove_file(&part_path);
+                    return Ok(false);
+                }
+            }
+            fs::rename(&part_path, &dest_path)?;
+            let mut state = inner_for_publish
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|a| a.generation == generation)
+            {
+                return Ok(false);
+            }
+            let active = state.active.take().expect("active checked");
+            state.saved_export_id = Some(active.export_id.clone());
+            state.saved_destination = Some(active.destination_path);
+            state.saved_display = Some(active.destination_display.clone());
+            state.snapshot = ExportStatusReply {
+                id: None,
+                export_id: Some(active.export_id),
+                phase: "saved".to_owned(),
+                bytes_written: active.size_bytes,
+                total_bytes: active.size_bytes,
+                destination_display: Some(active.destination_display),
+                pause_reason: None,
+                error_code: None,
+                required_bytes: None,
+                available_bytes: None,
+                can_reveal: true,
+                verified: true,
+                platform: PLATFORM,
+            };
+            Ok(true)
+        })
+        .await;
+        match publish_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                if params.cancel_flag.load(Ordering::Acquire) {
+                    let _ = fs::remove_file(&params.part_path);
                     return;
                 }
-                let active = state.active.take().expect("active checked");
-                state.saved_export_id = Some(active.export_id.clone());
-                state.saved_destination = Some(active.destination_path);
-                state.saved_display = Some(active.destination_display.clone());
-                state.snapshot = ExportStatusReply {
-                    id: None,
-                    export_id: Some(active.export_id),
-                    phase: "saved".to_owned(),
-                    bytes_written: active.size_bytes,
-                    total_bytes: active.size_bytes,
-                    destination_display: Some(active.destination_display),
-                    pause_reason: None,
-                    error_code: None,
-                    required_bytes: None,
-                    available_bytes: None,
-                    can_reveal: true,
-                    verified: true,
-                    platform: PLATFORM,
-                };
-            }
-            Ok(Err(error)) => {
                 let code = if is_disk_space_io_error(&error) {
                     "insufficient_device_space"
                 } else {
@@ -1085,6 +1221,8 @@ impl ExportTransferHandle {
             part_path: active.part_path.clone(),
             link_token: active.link_token.clone(),
             control_rx: active.control_tx.subscribe(),
+            cancel_flag: Arc::clone(&active.cancel_flag),
+            publish_lock: Arc::clone(&active.publish_lock),
         })
     }
 
@@ -1130,6 +1268,7 @@ impl ExportTransferHandle {
                 return true;
             }
             let active = state.active.take().expect("active checked");
+            active.cancel_flag.store(true, Ordering::Release);
             let _ = active.control_tx.send(ControlSignal::Cancel);
             state.snapshot = ExportStatusReply {
                 id: None,
@@ -1232,6 +1371,8 @@ struct RunParams {
     part_path: PathBuf,
     link_token: LinkToken,
     control_rx: watch::Receiver<ControlSignal>,
+    cancel_flag: Arc<AtomicBool>,
+    publish_lock: Arc<Mutex<()>>,
 }
 
 async fn wait_control_stop(rx: &mut watch::Receiver<ControlSignal>) {
@@ -1274,11 +1415,23 @@ fn open_part_file(part_path: &Path, start_offset: u64) -> io::Result<File> {
     Ok(file)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerifyOutcome {
+    Matched,
+    Mismatched,
+    Cancelled,
+}
+
 fn hash_and_check_file(
     part_path: &Path,
     expected_size: u64,
     expected_sha: &str,
-) -> io::Result<bool> {
+    cancel_flag: &AtomicBool,
+    #[cfg(test)] on_chunk: Option<&(dyn Fn(u64) + Send + Sync)>,
+) -> io::Result<VerifyOutcome> {
+    if cancel_flag.load(Ordering::Acquire) {
+        return Ok(VerifyOutcome::Cancelled);
+    }
     let fd = rustix::fs::openat(
         rustix::fs::CWD,
         part_path,
@@ -1291,18 +1444,32 @@ fn hash_and_check_file(
     let mut buf = vec![0u8; HASH_READ_BUFFER_BYTES];
     let mut total = 0u64;
     loop {
+        if cancel_flag.load(Ordering::Acquire) {
+            return Ok(VerifyOutcome::Cancelled);
+        }
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
         total += n as u64;
         hasher.update(&buf[..n]);
+        #[cfg(test)]
+        if let Some(hook) = on_chunk {
+            hook(total);
+        }
+        if cancel_flag.load(Ordering::Acquire) {
+            return Ok(VerifyOutcome::Cancelled);
+        }
     }
     if total != expected_size {
-        return Ok(false);
+        return Ok(VerifyOutcome::Mismatched);
     }
     let digest = encode_hex(&hasher.finalize());
-    Ok(digest.eq_ignore_ascii_case(expected_sha))
+    if digest.eq_ignore_ascii_case(expected_sha) {
+        Ok(VerifyOutcome::Matched)
+    } else {
+        Ok(VerifyOutcome::Mismatched)
+    }
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -1315,8 +1482,8 @@ fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn sibling_part_path(parent: &Path, export_id: &str) -> PathBuf {
-    parent.join(format!(".solstone-export-{export_id}.part"))
+fn sibling_part_path(parent: &Path, export_id: &str, generation: u64) -> PathBuf {
+    parent.join(format!(".solstone-export-{export_id}-{generation}.part"))
 }
 
 pub(crate) fn required_device_bytes(remaining_bytes: u64) -> u64 {
@@ -1635,7 +1802,7 @@ mod tests {
         assert_eq!(done["can_reveal"], true);
         assert_eq!(done["bytes_written"], payload.len() as u64);
         assert_eq!(fs::read(&dest).unwrap(), payload);
-        assert!(!sibling_part_path(tmp.path(), "exp_full_1").exists());
+        assert!(!has_any_part_file(tmp.path(), "exp_full_1"));
     }
 
     #[tokio::test]
@@ -1841,7 +2008,7 @@ mod tests {
         let failed = wait_for_phase(&handle, "exp_err_1", "error").await;
         assert_eq!(failed["error_code"], "export_invalidated_by_erasure");
         assert_eq!(fs::read(&dest).unwrap(), b"original-archive");
-        assert!(!sibling_part_path(tmp.path(), "exp_err_1").exists());
+        assert!(!has_any_part_file(tmp.path(), "exp_err_1"));
     }
 
     #[tokio::test]
@@ -1909,6 +2076,129 @@ mod tests {
         let saved = wait_for_phase(&handle, "exp_etag_1", "saved").await;
         assert_eq!(saved["verified"], true);
         assert_eq!(fs::read(&dest).unwrap(), payload);
+    }
+
+    fn has_any_part_file(dir: &Path, export_id: &str) -> bool {
+        let prefix = format!(".solstone-export-{export_id}");
+        fs::read_dir(dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".part"))
+            })
+    }
+
+    #[tokio::test]
+    async fn cancel_during_verification_stops_promptly_preserves_destination_and_allows_fresh_save()
+    {
+        use std::sync::atomic::AtomicU64;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("verified-cancel.zip");
+        fs::write(&dest, b"keep-original-owner-file").unwrap();
+
+        // 16 MiB payload so verification takes multiple 256 KiB chunks.
+        let payload: Vec<u8> = (0..(16 * 1024 * 1024))
+            .map(|i| ((i * 29 + (i >> 8)) & 0xff) as u8)
+            .collect();
+        let sha = sha_hex(&payload);
+        let etag = format!("\"sha256-{sha}\"");
+
+        let opener = Arc::new(ScriptedOpener::new(vec![
+            Ok(OpenedExportStream {
+                status: 200,
+                content_range: None,
+                etag: Some(etag.clone()),
+                transport: "local",
+                body: Box::new(ScriptedStream {
+                    chunks: VecDeque::from(vec![Ok(payload.clone())]),
+                }),
+            }),
+            Ok(OpenedExportStream {
+                status: 200,
+                content_range: None,
+                etag: Some(etag.clone()),
+                transport: "local",
+                body: Box::new(ScriptedStream {
+                    chunks: VecDeque::from(vec![Ok(payload.clone())]),
+                }),
+            }),
+        ]));
+
+        let handle = ExportTransferHandle::with_opener_for_test(
+            opener,
+            SleepInhibit::disabled(),
+            Arc::new(|_| Some(500 * 1024 * 1024)),
+        );
+
+        let bytes_hashed_first = Arc::new(AtomicU64::new(0));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let bytes_ref = Arc::clone(&bytes_hashed_first);
+        let entered_ref = Arc::clone(&entered_tx);
+        let release_ref = Arc::clone(&release_rx);
+        handle.set_verify_chunk_hook(Some(Arc::new(move |total| {
+            bytes_ref.store(total, Ordering::Release);
+            if let Some(tx) = entered_ref.lock().unwrap().take() {
+                let _ = tx.send(());
+                let _ = release_ref
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            }
+        })));
+
+        let start_req = serde_json::json!({
+            "id": "cv1",
+            "export_id": "exp_vcan_1",
+            "download_path": "/app/export/api/ready/exp_vcan_1/download",
+            "size_bytes": payload.len(),
+            "sha256": sha,
+            "etag": etag,
+            "destination_path": dest.to_string_lossy(),
+        })
+        .to_string();
+
+        let _ = handle.start(&start_req).await;
+        // Wait until verification has read the first 256 KiB chunk.
+        tokio::time::timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .expect("verification entered")
+            .unwrap();
+
+        // Cancel while verification is paused right after byte 262,144.
+        let cancelled: serde_json::Value = serde_json::from_str(
+            &handle
+                .cancel(&serde_json::json!({"id": "c1", "export_id": "exp_vcan_1"}).to_string())
+                .await,
+        )
+        .unwrap();
+        assert_eq!(cancelled["phase"], "cancelled");
+
+        // Unblock the hook; cooperative cancellation must exit immediately without reading the 16 MiB file.
+        let _ = release_tx.send(());
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let hashed = bytes_hashed_first.load(Ordering::Acquire);
+        assert!(
+            hashed <= 512 * 1024,
+            "cancelled verification must stop promptly at <= 512 KiB, read {hashed} bytes"
+        );
+        assert_eq!(fs::read(&dest).unwrap(), b"keep-original-owner-file");
+        assert!(!has_any_part_file(tmp.path(), "exp_vcan_1"));
+
+        // Clear hook and immediately start a fresh save to the exact same destination; must succeed cleanly.
+        handle.set_verify_chunk_hook(None);
+        let _ = handle.start(&start_req).await;
+        let saved = wait_for_phase(&handle, "exp_vcan_1", "saved").await;
+        assert_eq!(saved["verified"], true);
+        assert_eq!(fs::read(&dest).unwrap(), payload);
+        assert!(!has_any_part_file(tmp.path(), "exp_vcan_1"));
     }
 
     #[test]
