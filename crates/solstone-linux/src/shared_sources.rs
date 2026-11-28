@@ -16,6 +16,7 @@ use std::{
 use tokio::sync::{Notify, watch};
 
 const FILE: &str = "known-sources.json";
+const MAX_DECLARATION_ENTRIES: usize = 64;
 #[derive(Clone, Default, Debug, Eq, PartialEq)]
 pub(crate) enum Advertisement {
     #[default]
@@ -42,6 +43,7 @@ pub(crate) fn local(
     desktop: LocalDesktop,
     vault: &crate::obsidian::ObsidianHandle,
     shots: &crate::screenshots::ScreenshotsHandle,
+    folders: &crate::folders::FoldersHandle,
     terminal: bool,
     browser: bool,
 ) -> Vec<Entry> {
@@ -114,7 +116,64 @@ pub(crate) fn local(
     if browser {
         add("browsers", active, None);
     }
+    if let Some(doc) = crate::folders::decode_document(&folders.state_json()) {
+        append_folder_entries(&mut rows, &doc, desktop.paused);
+    }
     rows
+}
+
+fn append_folder_entries(
+    rows: &mut Vec<Entry>,
+    doc: &crate::folders::FoldersDocument,
+    desktop_paused: bool,
+) {
+    use crate::folders::FolderMode;
+
+    if doc.journal_lists == Some(false) {
+        return;
+    }
+    let remaining = MAX_DECLARATION_ENTRIES.saturating_sub(rows.len());
+    if remaining == 0 {
+        return;
+    }
+    // Priority order within the 64-entry wire limit:
+    // needs_attention > paused > on, tie-broken by folder_id ascending.
+    let mut candidates: Vec<(u8, &'static str, String)> = doc
+        .folders
+        .iter()
+        .filter_map(|folder| {
+            if folder.id.trim().is_empty() {
+                return None;
+            }
+            let (priority, state) = match folder.mode {
+                FolderMode::SettingUp | FolderMode::Off => return None,
+                FolderMode::Paused | FolderMode::On if folder.attention.is_some() => {
+                    (0u8, "needs_attention")
+                }
+                FolderMode::Paused => (1u8, "paused"),
+                FolderMode::On if folder.paused_by_computer || desktop_paused => (1u8, "paused"),
+                FolderMode::On => (2u8, "on"),
+            };
+            Some((priority, state, folder.id.clone()))
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    let mut seen = HashSet::new();
+    let mut added = 0usize;
+    for (_, state, id) in candidates {
+        if added >= remaining {
+            break;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        rows.push(Entry {
+            source: "folder",
+            state,
+            detail: Some(id),
+        });
+        added += 1;
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -607,5 +666,160 @@ mod tests {
         );
         progress.rejected = populated.clone();
         assert!(pending_declaration(&populated, &progress).is_none());
+    }
+
+    fn folder_row(
+        id: &str,
+        name: &str,
+        mode: crate::folders::FolderMode,
+        attention: Option<crate::folders::FolderAttention>,
+        paused_by_computer: bool,
+    ) -> crate::folders::FolderSummary {
+        crate::folders::FolderSummary {
+            id: id.into(),
+            name: name.into(),
+            path: format!("/home/user/{name}"),
+            label: format!("~/{name}"),
+            mode,
+            returning: false,
+            kinds: crate::folders::FolderKinds::default(),
+            facet: None,
+            overlap: None,
+            attention,
+            preview: None,
+            progress: None,
+            waiting: 0,
+            items_taken_in: 0,
+            last_taken_in_ms: None,
+            last_checked_ms: None,
+            cant_read: 0,
+            fallback_to_details: 0,
+            journal_lists: Some(true),
+            paused_by_computer,
+        }
+    }
+
+    #[test]
+    fn folder_declarations_map_states_omit_off_and_setting_up_and_cap_at_64() {
+        use crate::folders::{FolderAttention, FolderMode, FoldersDocument};
+
+        let mut rows = vec![
+            Entry {
+                source: "obsidian",
+                state: "on",
+                detail: Some("Notes".into()),
+            },
+            Entry {
+                source: "screenshots",
+                state: "on",
+                detail: None,
+            },
+        ];
+        let mut folders = vec![
+            folder_row("off-1", "Off", FolderMode::Off, None, false),
+            folder_row(
+                "off-attn",
+                "OffBroken",
+                FolderMode::Off,
+                Some(FolderAttention::Missing),
+                false,
+            ),
+            folder_row("setup-1", "Setup", FolderMode::SettingUp, None, false),
+            folder_row(
+                "attn-b",
+                "BrokenB",
+                FolderMode::Paused,
+                Some(FolderAttention::Missing),
+                false,
+            ),
+            folder_row(
+                "attn-a",
+                "BrokenA",
+                FolderMode::On,
+                Some(FolderAttention::Unreadable),
+                false,
+            ),
+            folder_row("paused-1", "Paused", FolderMode::Paused, None, false),
+            folder_row("comp-paused", "CompPaused", FolderMode::On, None, true),
+        ];
+        for i in 0..70 {
+            folders.push(folder_row(
+                &format!("on-{i:03}"),
+                "SameName",
+                FolderMode::On,
+                None,
+                false,
+            ));
+        }
+        let doc = FoldersDocument {
+            v: 1,
+            folders,
+            journal_lists: Some(true),
+            ..FoldersDocument::default()
+        };
+        append_folder_entries(&mut rows, &doc, false);
+
+        assert_eq!(rows.len(), 64);
+        assert_eq!(rows[0].source, "obsidian");
+        assert_eq!(rows[1].source, "screenshots");
+        assert_eq!(
+            rows[2],
+            Entry {
+                source: "folder",
+                state: "needs_attention",
+                detail: Some("attn-a".into())
+            }
+        );
+        assert_eq!(
+            rows[3],
+            Entry {
+                source: "folder",
+                state: "needs_attention",
+                detail: Some("attn-b".into())
+            }
+        );
+        assert_eq!(
+            rows[4],
+            Entry {
+                source: "folder",
+                state: "paused",
+                detail: Some("comp-paused".into())
+            }
+        );
+        assert_eq!(
+            rows[5],
+            Entry {
+                source: "folder",
+                state: "paused",
+                detail: Some("paused-1".into())
+            }
+        );
+        assert_eq!(
+            rows[6],
+            Entry {
+                source: "folder",
+                state: "on",
+                detail: Some("on-000".into())
+            }
+        );
+        assert!(!rows.iter().any(|r| r.detail.as_deref() == Some("off-1")));
+        assert!(!rows.iter().any(|r| r.detail.as_deref() == Some("off-attn")));
+        assert!(!rows.iter().any(|r| r.detail.as_deref() == Some("setup-1")));
+
+        // Omitted completely when the journal does not advertise the folder capability.
+        let mut old_journal_rows = vec![Entry {
+            source: "obsidian",
+            state: "on",
+            detail: Some("Notes".into()),
+        }];
+        let unsupported = FoldersDocument {
+            v: 1,
+            folders: vec![folder_row("dl-1", "Downloads", FolderMode::On, None, false)],
+            journal_lists: Some(false),
+            ..FoldersDocument::default()
+        };
+        append_folder_entries(&mut old_journal_rows, &unsupported, false);
+        assert_eq!(old_journal_rows.len(), 1);
+        assert_eq!(old_journal_rows[0].source, "obsidian");
     }
 }

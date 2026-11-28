@@ -752,6 +752,7 @@ fn run_capture(
             },
             &obsidian,
             &screenshots,
+            &folders,
             terminal_sync.is_enabled(),
             browser_connected,
         ));
