@@ -2,7 +2,7 @@
 # marks an architecture whose images and proof values were not yet observed on
 # a native host; candidate commands for that architecture refuse it.
 [x86_64]
-build_ubuntu = "sha256:8a1ab30cb4300d0129159ffff04ec2a821c77382a97b418859f1e24acd3070fc"
+build_ubuntu = "sha256:d64075e148cdae5da2431916675bf0085194388910d2a59eff5cd4795c563153"
 build_fedora = "sha256:a368feec383f694ce0477a0bb259827c8fcfc16edc5ff34b3063ff504ed67ff0"
 proof_debian = "sha256:7087fff19e26f69b0bffc49de9355047dc3704d9f5246d87231da5875d63d06a"
 proof_rpm = "sha256:b09827bd81a1cea0f19085b8bf07ae8c1241969f7b27333c344fc4438d9b0de7"
