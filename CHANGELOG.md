@@ -6,13 +6,11 @@ and this project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
-### Fixed
-
-- when you confirm your journal's mark while pairing, folder changes waiting to sync go into that journal unless the folder is paused. when you set up the folder for this journal, you choose how much older history to add.
+## [2.0.56] - 2026-11-28
 
 ### Added
 
-- when your journal is up to date, you can now share any folder on your computer with your journal from the folders tile in the app's window. choose what kinds of files to bring in (notes, documents, transcripts, screenshots, photos, or names and details for other files), and tie a folder to a facet in your journal if you like. choose how much older history to bring in and preview it before anything goes into your journal, and pause or turn off each folder on its own. files stay where they are on your computer, unfinished downloads wait until they finish, and pausing a folder holds syncing without skipping changes until you resume.
+- when your journal is up to date, you can now share any folder on your computer with your journal from the folders tile in the app's window. choose what kinds of files to bring in (notes, documents, transcripts, screenshots, photos, or names and details for other files), and tie a folder to a facet in your journal if you like. choose how much older history to bring in and preview it before anything goes into your journal, and pause or turn off each folder on its own. files stay where they are on your computer, unfinished downloads wait until they finish, and pausing a folder holds syncing without skipping changes until you resume. if you pair the app with a different journal, changes still waiting to sync go into the journal whose mark you confirm unless the folder is paused, and you choose how much older history to add to that journal.
 
 ## [2.0.55] - 2026-11-27
 
