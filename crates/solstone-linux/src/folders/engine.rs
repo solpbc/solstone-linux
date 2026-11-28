@@ -328,7 +328,7 @@ impl Engine {
         let mut changed = false;
         for folder in &mut self.ledger.folders {
             for event in &mut folder.pending {
-                if event.kind != FileKind::Other
+                if !matches!(event.kind, FileKind::Other | FileKind::Note)
                     || !matches!(event.verb, ActivityVerb::Added | ActivityVerb::Edited)
                 {
                     continue;
@@ -373,30 +373,40 @@ impl Engine {
                     folder.kinds,
                     &self.supported,
                 );
-                if delivery != DeliveryMode::Content {
+                if event.kind == kind || !matches!(kind, FileKind::Transcript | FileKind::Document)
+                {
                     continue;
                 }
-                let hash = bytes.as_deref().map(sha256_hex).or_else(|| {
-                    local::hash_file(
-                        &folder.path,
-                        &event.rel_path,
-                        self.supported.max_content_bytes,
-                    )
-                    .ok()
-                });
-                let Some(hash) = hash else {
-                    continue;
+                let hash = if delivery == DeliveryMode::Content {
+                    let Some(hash) = bytes.as_deref().map(sha256_hex).or_else(|| {
+                        local::hash_file(
+                            &folder.path,
+                            &event.rel_path,
+                            self.supported.max_content_bytes,
+                        )
+                        .ok()
+                    }) else {
+                        continue;
+                    };
+                    Some(hash)
+                } else {
+                    None
                 };
                 event.kind = kind;
                 event.delivery = delivery;
-                event.content_hash = Some(hash.clone());
+                event.content_hash = hash.clone();
+                event.note_payload = None;
+                event.note_is_diff = false;
                 if let Some(file) = folder.files.get_mut(&event.rel_path) {
                     file.kind = kind;
                     file.delivery = delivery;
-                    file.content_hash = Some(hash);
+                    file.content_hash = hash;
                 }
                 changed = true;
             }
+            folder
+                .pending
+                .retain(|event| event.delivery != DeliveryMode::Ignore);
         }
         if changed {
             let _ = self.save();
@@ -2101,13 +2111,15 @@ mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     #[test]
-    fn supported_refresh_rechecks_a_waiting_office_file() {
+    fn supported_refresh_rechecks_waiting_office_and_chat_files() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("Docs");
         fs::create_dir(&dir).unwrap();
         let now = 1_795_689_600_000;
         fs::write(dir.join("presentation.pptx"), b"content").unwrap();
         set_mtime_ms(&dir.join("presentation.pptx"), now - 310_000);
+        fs::write(dir.join("chat.txt"), b"user: hello\nassistant: hi").unwrap();
+        set_mtime_ms(&dir.join("chat.txt"), now - 310_000);
         let mut engine = Engine::open(
             temp.path().join("state"),
             temp.path().to_owned(),
@@ -2115,20 +2127,18 @@ mod tests {
         );
         let id = engine.begin_setup(&dir, None).unwrap();
         engine.confirm_folder(&id, Span::Today).unwrap();
-        assert!(
-            engine
-                .next_delivery(false)
-                .unwrap()
-                .content_files
-                .is_empty()
+        assert_eq!(
+            engine.next_delivery(false).unwrap().content_files[0].kind,
+            FileKind::Note
         );
         let mut rules = SupportedList::default();
         rules.document_extensions.insert("pptx".into());
+        rules.transcript_extensions.insert("txt".into());
         engine.set_supported_list(rules);
-        assert_eq!(
-            engine.next_delivery(false).unwrap().content_files[0].kind,
-            FileKind::Document
-        );
+        let content = engine.next_delivery(false).unwrap().content_files;
+        assert_eq!(content.len(), 2);
+        assert!(content.iter().any(|file| file.kind == FileKind::Transcript));
+        assert!(content.iter().any(|file| file.kind == FileKind::Document));
     }
 
     #[test]
