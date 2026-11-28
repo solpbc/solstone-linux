@@ -203,15 +203,20 @@ ci: rust-preflight check-cargo-deny check-observer-contract check-rust-release-m
 	$(MAKE) shellcheck
 	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 
-# The full gate: the routine gate, then the tests behind the full-tests feature
-# (processes, sockets, host state, wall-clock waits), linted and run.
-ci-full: ci
-	$(CARGO) clippy $(CARGO_LOCKED) -p rust-release-manifest --features full-tests --all-targets -- -D warnings
-	$(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest --features full-tests --test notices
-	$(CARGO) clippy $(CARGO_LOCKED) -p solstone-linux --features full-tests --all-targets -- -D warnings
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-linux --features full-tests
-	$(CARGO) clippy $(CARGO_LOCKED) -p solstone-terminal --features full-tests --all-targets -- -D warnings
-	$(CARGO) test $(CARGO_LOCKED) -p solstone-terminal --features full-tests
+# The full gate: every routine check plus the tests behind the full-tests
+# feature (processes, sockets, host state, wall-clock waits), without running
+# the default-feature test suites a second time. Default-feature compilation is
+# verified by workspace clippy and check-observer-contract above.
+ci-full: rust-preflight check-cargo-deny check-observer-contract check-rust-release-manifest check-audit-signed-packet check-i18n
+	@echo "Evidence class: host evidence (format, lint, full tests, and offline dependency policy)."
+	@echo "This gate does not run target-package validation or the release FLAC soak."
+	$(CARGO) fmt --check
+	$(CARGO) clippy $(CARGO_LOCKED) --all-targets -- -D warnings
+	$(CARGO) clippy $(CARGO_LOCKED) -p rust-release-manifest -p solstone-linux -p solstone-terminal --features full-tests --all-targets -- -D warnings
+	$(CARGO) test $(CARGO_LOCKED) --workspace --exclude rust-release-manifest --exclude solstone-linux --exclude solstone-terminal
+	$(CARGO) test $(CARGO_LOCKED) -p rust-release-manifest -p solstone-linux -p solstone-terminal --features full-tests
+	$(MAKE) shellcheck
+	cargo deny $(CARGO_LOCKED) --offline check licenses bans sources
 
 check-transparency-minisign:
 	@test "$(TRANSPARENCY_ACTIVATED)" = 1 || { echo "the in-repo v1 transparency publisher is retired; v2 app records are produced outside this repository (see trust.solstone.app); TRANSPARENCY_ACTIVATED=1 does not by itself authorize a publish" >&2; exit 2; }
@@ -285,8 +290,16 @@ release: release-candidate
 release-images:
 	@test -n "$(UBUNTU_STOCK_BASE)" && test -n "$(FEDORA_STOCK_BASE)" || { echo "error: release architecture mismatch: expected x86_64 or aarch64, actual '$(RELEASE_ARCH)'" >&2; exit 1; }
 	@test "$(RELEASE_ARCH)" = "$$(uname -m)" || { echo "error: release architecture mismatch: expected native host architecture $$(uname -m), actual requested $(RELEASE_ARCH)" >&2; echo "repair: run make release-images on a native $(RELEASE_ARCH) host" >&2; exit 1; }
-	podman build --pull=never --file journal-viewer/engine/Containerfile --tag localhost/solstone-linux-journal-sdk \
-		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" .
+	@sdk_input_sha256=$$({ printf 'arch=%s\nbase=%s\n' "$(RELEASE_ARCH)" "$(UBUNTU_STOCK_BASE)"; LC_ALL=C find journal-viewer/engine -maxdepth 1 -type f ! -name 'x86_64.json' ! -name 'aarch64.json' | LC_ALL=C sort | xargs sha256sum; } | sha256sum | cut -d' ' -f1); \
+	test -n "$$sdk_input_sha256" || { echo "error: failed to compute journal SDK input digest" >&2; exit 1; }; \
+	existing_sdk_sha256=$$(podman image inspect --format '{{ index .Config.Labels "io.solstone.journal-sdk.input-sha256" }}' localhost/solstone-linux-journal-sdk 2>/dev/null || true); \
+	if [ "$${FORCE_SDK_REBUILD:-0}" != 1 ] && [ -n "$$existing_sdk_sha256" ] && [ "$$existing_sdk_sha256" = "$$sdk_input_sha256" ]; then \
+		echo "Reusing localhost/solstone-linux-journal-sdk matching input digest $$sdk_input_sha256"; \
+	else \
+		podman build --pull=never --file journal-viewer/engine/Containerfile --tag localhost/solstone-linux-journal-sdk \
+			--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" \
+			--build-arg "SDK_INPUT_SHA256=$$sdk_input_sha256" .; \
+	fi
 	@# Build and proof images share the same explicitly pinned stock bases.
 	podman build --pull=never --no-cache --file packaging/Containerfile.tools --target ubuntu-tools --tag localhost/solstone-linux-build-ubuntu \
 		--build-arg "UBUNTU_STOCK_BASE=$(UBUNTU_STOCK_BASE)" --build-arg "FEDORA_STOCK_BASE=$(FEDORA_STOCK_BASE)" \

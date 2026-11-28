@@ -11,3 +11,5 @@ RUN sed -n 's/^deb /deb-src /p' /etc/apt/sources.list > /etc/apt/sources.list.d/
     && rm -rf /var/lib/apt/lists/*
 COPY journal-viewer/engine/build-sdk.sh journal-viewer/engine/stage.py journal-viewer/engine/upstream.gpg journal-viewer/engine/*.patch /src/journal-viewer/engine/
 RUN /src/journal-viewer/engine/build-sdk.sh
+ARG SDK_INPUT_SHA256=""
+LABEL io.solstone.journal-sdk.input-sha256="${SDK_INPUT_SHA256}"

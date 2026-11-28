@@ -43,3 +43,12 @@ strip = true
 # panic stays "unwind": Restart=on-failure plus the watchdog make either strategy
 # safe, so abort buys nothing today. Re-decide at cutover, not as a size cleanup.
 panic = "unwind"
+
+# Mark derivation runs Argon2id (64 MiB) in tests; optimizing only the KDF and
+# its Blake2b primitive keeps debug/test runs responsive without weakening the
+# real derivation or altering release builds.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
