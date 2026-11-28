@@ -981,9 +981,9 @@ m6c696e75782e666f6c646572732e6f6e65696e74726f = while this is on, the solstone a
 
 m6c696e75782e666f6c646572732e6f70656e666f6c646572 = open { $folder }
 
-m6c696e75782e666f6c646572732e6f746865726f6666 = only files of the kinds you chose under 64 MB come in.
+m6c696e75782e666f6c646572732e6f746865726f6666 = only the kinds you choose go into your journal. if one of those files is too large or can't be read, only its name and details go in.
 
-m6c696e75782e666f6c646572732e6f746865726f6e = with other files on, kinds you turned off and files over 64 MB come in as names and details only.
+m6c696e75782e666f6c646572732e6f746865726f6e = for files outside the kinds you choose, including unrecognized file types, only names and details go into your journal. files of the kinds you choose that are too large or can't be read also come in as names and details.
 
 m6c696e75782e666f6c646572732e6f7665726c6170626f6479 = files in both places may come into your journal twice. you can pick another folder or use this one anyway.
 

@@ -357,14 +357,13 @@ impl Engine {
                 {
                     continue;
                 }
-                let bytes = if self.supported.transcript_extensions.contains(ext)
-                    && meta.len() <= self.supported.max_note_bytes
-                {
-                    local::read_file(&folder.path, &event.rel_path, self.supported.max_note_bytes)
-                        .ok()
-                } else {
-                    None
-                };
+                let bytes = read_classification(
+                    &folder.path,
+                    &event.rel_path,
+                    Some(ext),
+                    meta.len(),
+                    &self.supported,
+                );
                 let (kind, delivery) = classify_file(
                     Some(ext),
                     meta.len(),
@@ -631,11 +630,14 @@ impl Engine {
             if already_delivered.contains(&file.rel_path) {
                 continue;
             }
-            let note_bytes = if file.resident
-                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
-                && file.size_bytes <= self.supported.max_note_bytes
-            {
-                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            let note_bytes = if file.resident {
+                read_classification(
+                    &root,
+                    &file.rel_path,
+                    file.metadata.extension.as_deref(),
+                    file.size_bytes,
+                    &self.supported,
+                )
             } else {
                 None
             };
@@ -806,11 +808,14 @@ impl Engine {
                 continue;
             }
 
-            let note_bytes = if file.resident
-                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
-                && file.size_bytes <= self.supported.max_note_bytes
-            {
-                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            let note_bytes = if file.resident {
+                read_classification(
+                    &root,
+                    &file.rel_path,
+                    file.metadata.extension.as_deref(),
+                    file.size_bytes,
+                    &self.supported,
+                )
             } else {
                 None
             };
@@ -1248,11 +1253,14 @@ impl Engine {
         // Newly appeared files.
         let folder_id = self.ledger.folders[idx].id.clone();
         for file in remaining_new {
-            let note_bytes = if file.resident
-                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
-                && file.size_bytes <= self.supported.max_note_bytes
-            {
-                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            let note_bytes = if file.resident {
+                read_classification(
+                    &root,
+                    &file.rel_path,
+                    file.metadata.extension.as_deref(),
+                    file.size_bytes,
+                    &self.supported,
+                )
             } else {
                 None
             };
@@ -1338,11 +1346,14 @@ impl Engine {
         // Modified files: note edits coalesce in the 5-minute window; already-delivered
         // documents/transcripts enter the one-hour revision cool-down!
         for file in modified_candidates {
-            let note_bytes = if file.resident
-                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
-                && file.size_bytes <= self.supported.max_note_bytes
-            {
-                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            let note_bytes = if file.resident {
+                read_classification(
+                    &root,
+                    &file.rel_path,
+                    file.metadata.extension.as_deref(),
+                    file.size_bytes,
+                    &self.supported,
+                )
             } else {
                 None
             };
@@ -1912,11 +1923,33 @@ impl Engine {
     }
 }
 
-fn needs_classification_bytes(ext: Option<&str>, supported: &SupportedList) -> bool {
-    ext.is_some_and(|e| {
-        supported.note_extensions.contains(e)
-            || (supported.transcript_extensions.contains(e) && !matches!(e, "vtt" | "srt"))
-    })
+fn classification_limit(ext: Option<&str>, supported: &SupportedList) -> Option<u64> {
+    let ext = ext?;
+    if supported.transcript_extensions.contains(ext)
+        && matches!(ext, "json" | "html" | "csv" | "tsv")
+    {
+        Some(super::structured_exports::MAX_STRUCTURED_EXPORT_BYTES as u64)
+    } else if supported.note_extensions.contains(ext)
+        || (supported.transcript_extensions.contains(ext) && !matches!(ext, "vtt" | "srt"))
+    {
+        Some(supported.max_note_bytes)
+    } else {
+        None
+    }
+}
+
+fn read_classification(
+    root: &Path,
+    rel_path: &str,
+    ext: Option<&str>,
+    size: u64,
+    supported: &SupportedList,
+) -> Option<Vec<u8>> {
+    let limit = classification_limit(ext, supported)?.min(supported.max_content_bytes);
+    if size > limit {
+        return None;
+    }
+    local::read_file(root, rel_path, limit).ok()
 }
 
 fn span_start_ms(span: Span, now_ms: i64, clock: &dyn Clock) -> i64 {
@@ -2139,6 +2172,44 @@ mod tests {
         assert_eq!(content.len(), 2);
         assert!(content.iter().any(|file| file.kind == FileKind::Transcript));
         assert!(content.iter().any(|file| file.kind == FileKind::Document));
+    }
+
+    #[test]
+    fn structured_export_limit_is_independent_of_note_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut rules = SupportedList::default();
+        rules.transcript_extensions.insert("json".into());
+        let padding = " ".repeat(5 * 1024 * 1024);
+        let positive = format!(
+            r#"{{"text":"hello","language":"en","segments":[{padding}{{"start":0,"end":1,"text":"hello"}}]}}"#
+        );
+        let ordinary = format!(r#"{{"values":[{padding}1]}}"#);
+        for (name, body, expected) in [
+            ("positive.json", positive, FileKind::Transcript),
+            ("ordinary.json", ordinary, FileKind::Other),
+        ] {
+            fs::write(root.join(name), &body).unwrap();
+            let size = body.len() as u64;
+            let bytes = read_classification(root, name, Some("json"), size, &rules).unwrap();
+            assert_eq!(
+                classify_file(
+                    Some("json"),
+                    size,
+                    false,
+                    Some(&bytes),
+                    FolderKinds::default(),
+                    &rules
+                )
+                .0,
+                expected
+            );
+            assert!(read_classification(root, name, Some("txt"), size, &rules).is_none());
+            assert!(
+                read_classification(root, name, Some("json"), 32 * 1024 * 1024 + 1, &rules)
+                    .is_none()
+            );
+        }
     }
 
     #[test]
