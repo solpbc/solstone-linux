@@ -114,6 +114,137 @@ pub fn classify_text_file(bytes: &[u8], supported: &SupportedList) -> FileKind {
     }
 }
 
+fn export_clock(value: &str, leading_digits: std::ops::RangeInclusive<usize>) -> bool {
+    let mut fields = value.split(':');
+    let Some(first) = fields.next() else {
+        return false;
+    };
+    let valid_minutes = |field: &str| {
+        field.len() == 2 && field.bytes().all(|b| b.is_ascii_digit()) && field.as_bytes()[0] <= b'5'
+    };
+    leading_digits.contains(&first.len())
+        && first.bytes().all(|b| b.is_ascii_digit())
+        && fields.next().is_some_and(valid_minutes)
+        && fields.next().is_none_or(valid_minutes)
+        && fields.next().is_none()
+}
+
+fn text_export_layout(text: &str) -> bool {
+    let lines: Vec<_> = text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .take(257)
+        .collect();
+    let mut roles = BTreeSet::new();
+    let mut irc_speakers = BTreeSet::new();
+    let mut irc_turns = 0;
+    let mut irc_context = 0;
+    for (idx, line) in lines.iter().take(256).enumerate() {
+        let role_line = line.trim_start_matches('#').trim_start();
+        if let Some((name, body)) = role_line.split_once(':') {
+            let role = name.trim_matches('*').to_ascii_lowercase();
+            let inline = !body.trim_matches('*').trim().is_empty();
+            let heading_body = line.starts_with('#')
+                && lines
+                    .get(idx + 1)
+                    .is_some_and(|body| !body.starts_with('#'));
+            if (inline || heading_body)
+                && matches!(
+                    role.as_str(),
+                    "you"
+                        | "user"
+                        | "assistant"
+                        | "human"
+                        | "system"
+                        | "chatgpt"
+                        | "claude"
+                        | "gemini"
+                )
+            {
+                roles.insert(role);
+            }
+        }
+
+        if line.starts_with("--- Log ") || line.starts_with("--- Day changed ") {
+            irc_context += 1;
+        } else if let Some((clock, rest)) = line.split_once(char::is_whitespace)
+            && export_clock(clock, 2..=2)
+        {
+            if rest.starts_with("-!- ") {
+                irc_context += 1;
+            } else if let Some((nick, body)) = rest
+                .trim_start()
+                .strip_prefix('<')
+                .and_then(|s| s.split_once("> "))
+            {
+                let nick = nick.trim_start_matches([' ', '@', '+', '%', '~', '&']);
+                if !nick.is_empty()
+                    && nick.len() <= 40
+                    && !nick.contains(char::is_whitespace)
+                    && !body.trim().is_empty()
+                {
+                    irc_turns += 1;
+                    irc_speakers.insert(nick);
+                }
+            }
+        }
+    }
+    if roles.len() >= 2
+        || (irc_turns >= 3
+            && irc_speakers.len() >= 2
+            && (irc_turns + irc_context) * 3 >= lines.len() * 2)
+    {
+        return true;
+    }
+    // The branded exports below require the real footer; a bounded prefix cannot prove it.
+    let tail: Vec<_> = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .take(3)
+        .collect();
+    let border = "==============================================================";
+    if lines.len() >= 9
+        && lines[0] == border
+        && lines[1].starts_with("Guild: ")
+        && lines[2].starts_with("Channel: ")
+        && tail[0] == border
+        && tail[2] == border
+        && tail[1].starts_with("Exported ")
+        && tail[1].ends_with(" message(s)")
+        && lines[3..]
+            .iter()
+            .any(|line| line.starts_with('[') && line.contains("] "))
+    {
+        return true;
+    }
+    if tail.first() != Some(&"Transcribed by https://otter.ai") {
+        return false;
+    }
+    let mut turns = 0;
+    let mut has_body = false;
+    for line in lines
+        .iter()
+        .take_while(|line| **line != "Transcribed by https://otter.ai")
+    {
+        let clock = line.rsplit_once("  ").map_or(*line, |(_, clock)| clock);
+        if export_clock(clock, 1..=3) {
+            if turns > 0 && !has_body {
+                return false;
+            }
+            turns += 1;
+            has_body = false;
+        } else if turns == 0 {
+            return false;
+        } else {
+            has_body = true;
+        }
+    }
+    turns >= 2 && has_body
+}
+
 // Journal-advertised transcript extensions overlap notes and ordinary files.
 // Admit structured exports only when their conversation layout is present.
 fn transcript_layout(ext: &str, bytes: Option<&[u8]>) -> bool {
@@ -135,29 +266,7 @@ fn transcript_layout(ext: &str, bytes: Option<&[u8]>) -> bool {
         "csv" => parse_fireflies_csv(text).is_some(),
         "tsv" => parse_whisper_tsv(text).is_some(),
         "html" => parse_telegram_html(text).is_some(),
-        "md" | "markdown" | "txt" | "log" => {
-            let mut speakers = BTreeSet::new();
-            for line in text.lines().take(256) {
-                if let Some((role, body)) = line.trim().split_once(':') {
-                    let role = role.trim_matches('*').to_ascii_lowercase();
-                    if !body.trim_matches('*').trim().is_empty()
-                        && matches!(
-                            role.as_str(),
-                            "user"
-                                | "assistant"
-                                | "human"
-                                | "system"
-                                | "chatgpt"
-                                | "claude"
-                                | "gemini"
-                        )
-                    {
-                        speakers.insert(role);
-                    }
-                }
-            }
-            speakers.len() >= 2
-        }
+        "md" | "markdown" | "txt" | "log" => text_export_layout(text),
         _ => false,
     }
 }
@@ -487,6 +596,37 @@ mod tests {
 #[cfg(test)]
 mod advertised_layout_tests {
     use super::*;
+    #[test]
+    fn text_conversation_layouts() {
+        let bar = "=".repeat(62);
+        for (text, expected) in [
+            (
+                "--- Log opened Tue Sep 3 00:00:00 2024\n00:00 -!- lio has joined\n00:01 <@lio> Ready.\n00:01 < val> Over here.\n00:02 <@lio> Coming.\n",
+                true,
+            ),
+            (
+                &format!(
+                    "{bar}\nGuild: Potters\nChannel: firing\n{bar}\n\n[4/7/2025 10:02 AM] lio\nReady.\n\n[4/7/2025 10:03 AM] val\nComing.\n\n{bar}\nExported 2 message(s)\n{bar}\n"
+                ),
+                true,
+            ),
+            (
+                "Unknown Speaker  0:04\nThe wind is picking up.\nUnknown Speaker  2:13\nThe smaller boats have tied up.\nTranscribed by https://otter.ai\n",
+                true,
+            ),
+            (
+                "---\ntitle: Kiln\n---\n\n# First firing\n\n#### You:\nIs the glaze dry?\n\n#### ChatGPT:\nIt takes a day.\n",
+                true,
+            ),
+            (
+                "I meant to find this later.\nTranscribed by https://otter.ai\n",
+                false,
+            ),
+        ] {
+            assert_eq!(text_export_layout(text), expected);
+        }
+    }
+
     #[test]
     fn structured_files_require_an_advertised_transcript_layout() {
         let mut list = SupportedList::default();
