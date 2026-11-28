@@ -321,7 +321,86 @@ impl Engine {
     }
 
     pub fn set_supported_list(&mut self, supported: SupportedList) {
+        if self.supported == supported {
+            return;
+        }
         self.supported = supported;
+        let mut changed = false;
+        for folder in &mut self.ledger.folders {
+            for event in &mut folder.pending {
+                if event.kind != FileKind::Other
+                    || !matches!(event.verb, ActivityVerb::Added | ActivityVerb::Edited)
+                {
+                    continue;
+                }
+                let Some(ext) = event.metadata.extension.as_deref() else {
+                    continue;
+                };
+                if !self.supported.document_extensions.contains(ext)
+                    && !self.supported.transcript_extensions.contains(ext)
+                {
+                    continue;
+                }
+                let path = Path::new(&event.rel_path);
+                let Ok(handle) = local::object(&folder.path, path) else {
+                    continue;
+                };
+                if !local::content_available(&handle) {
+                    continue;
+                }
+                let Ok(meta) = handle.metadata() else {
+                    continue;
+                };
+                if !meta.is_file()
+                    || meta.len() != event.metadata.size_bytes
+                    || meta.modified().ok().map(system_time_ms) != Some(event.metadata.modified_ms)
+                {
+                    continue;
+                }
+                let bytes = if self.supported.transcript_extensions.contains(ext)
+                    && meta.len() <= self.supported.max_note_bytes
+                {
+                    local::read_file(&folder.path, &event.rel_path, self.supported.max_note_bytes)
+                        .ok()
+                } else {
+                    None
+                };
+                let (kind, delivery) = classify_file(
+                    Some(ext),
+                    meta.len(),
+                    false,
+                    bytes.as_deref(),
+                    folder.kinds,
+                    &self.supported,
+                );
+                if delivery != DeliveryMode::Content {
+                    continue;
+                }
+                let hash = bytes.as_deref().map(sha256_hex).or_else(|| {
+                    local::hash_file(
+                        &folder.path,
+                        &event.rel_path,
+                        self.supported.max_content_bytes,
+                    )
+                    .ok()
+                });
+                let Some(hash) = hash else {
+                    continue;
+                };
+                event.kind = kind;
+                event.delivery = delivery;
+                event.content_hash = Some(hash.clone());
+                if let Some(file) = folder.files.get_mut(&event.rel_path) {
+                    file.kind = kind;
+                    file.delivery = delivery;
+                    file.content_hash = Some(hash);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = self.save();
+        }
     }
 
     #[must_use]
@@ -2020,6 +2099,37 @@ fn walk_folder(root: &Path, recents: &Recents) -> Result<WalkOutcome, ListingErr
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
+
+    #[test]
+    fn supported_refresh_rechecks_a_waiting_office_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Docs");
+        fs::create_dir(&dir).unwrap();
+        let now = 1_795_689_600_000;
+        fs::write(dir.join("presentation.pptx"), b"content").unwrap();
+        set_mtime_ms(&dir.join("presentation.pptx"), now - 310_000);
+        let mut engine = Engine::open(
+            temp.path().join("state"),
+            temp.path().to_owned(),
+            TestClock::new(now, 0),
+        );
+        let id = engine.begin_setup(&dir, None).unwrap();
+        engine.confirm_folder(&id, Span::Today).unwrap();
+        assert!(
+            engine
+                .next_delivery(false)
+                .unwrap()
+                .content_files
+                .is_empty()
+        );
+        let mut rules = SupportedList::default();
+        rules.document_extensions.insert("pptx".into());
+        engine.set_supported_list(rules);
+        assert_eq!(
+            engine.next_delivery(false).unwrap().content_files[0].kind,
+            FileKind::Document
+        );
+    }
 
     #[test]
     fn preview_cutoff_clamps_months_and_leap_years() {

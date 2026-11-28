@@ -446,7 +446,7 @@ async fn run_worker(
                 false
             };
             let _ = folder_worker::with_state(&mut state, |eng| eng.scan_all()).await;
-            if paired && listed {
+            if paired && listed && supported_until.is_some() {
                 while !*shutdown_rx.borrow() && !wake.restart_pending() {
                     let paused_now = *paused_rx.borrow();
                     let next = folder_worker::with_state(&mut state, move |eng| {
