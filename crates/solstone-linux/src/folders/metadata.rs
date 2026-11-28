@@ -16,7 +16,7 @@ use super::types::PlatformMetadata;
 
 const XDG_ORIGIN_URL: &str = "user.xdg.origin.url";
 const XDG_REFERRER_URL: &str = "user.xdg.referrer.url";
-const MAX_XATTR_BYTES: usize = 8 * 1024;
+const MAX_XATTR_BYTES: usize = 2048;
 
 /// Read a UTF-8 extended attribute on Linux safely through `rustix`.
 fn read_xattr_utf8(path: &Path, name: &str) -> Option<String> {
@@ -28,7 +28,8 @@ fn read_xattr_utf8(path: &Path, name: &str) -> Option<String> {
                 buf.truncate(written);
                 let text = String::from_utf8(buf).ok()?;
                 let trimmed = text.trim_matches(|c: char| c == '\0' || c.is_whitespace());
-                return (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                return (!trimmed.is_empty() && !trimmed.chars().any(char::is_control))
+                    .then(|| trimmed.to_owned());
             }
             Err(Errno::RANGE) if size < MAX_XATTR_BYTES => {
                 size = (size * 2).min(MAX_XATTR_BYTES);
@@ -85,7 +86,7 @@ pub fn extension_lower(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase)
-        .filter(|ext| !ext.is_empty())
+        .filter(|ext| !ext.is_empty() && ext.len() <= 64 && !ext.chars().any(char::is_control))
 }
 
 /// Best-effort MIME type from file extension for deterministic activity lines.
@@ -147,13 +148,17 @@ pub(crate) fn system_time_ms(time: std::time::SystemTime) -> i64 {
 
 /// Collect platform metadata for one local file.
 #[must_use]
-pub fn collect_metadata(path: &Path, fs_meta: &fs::Metadata) -> PlatformMetadata {
+pub fn collect_metadata(
+    path: &Path,
+    attrs_path: &Path,
+    fs_meta: &fs::Metadata,
+) -> PlatformMetadata {
     let modified_ms = fs_meta.modified().map(system_time_ms).unwrap_or(0);
     let created_ms = fs_meta.created().ok().map(system_time_ms);
     let extension = extension_lower(path);
     let mime = guess_mime(extension.as_deref());
-    let origin_url = read_xdg_origin_url(path);
-    let referrer_url = read_xdg_referrer_url(path);
+    let origin_url = read_xdg_origin_url(attrs_path);
+    let referrer_url = read_xdg_referrer_url(attrs_path);
     let origin_domain = origin_url.as_deref().and_then(origin_domain);
     PlatformMetadata {
         size_bytes: fs_meta.len(),
@@ -201,7 +206,7 @@ mod tests {
         .is_ok()
         {
             assert_eq!(read_xdg_origin_url(&file).as_deref(), Some(url));
-            let meta = collect_metadata(&file, &fs::metadata(&file).unwrap());
+            let meta = collect_metadata(&file, &file, &fs::metadata(&file).unwrap());
             assert_eq!(meta.origin_domain.as_deref(), Some("download.mozilla.org"));
         }
     }

@@ -114,6 +114,54 @@ pub fn classify_text_file(bytes: &[u8], supported: &SupportedList) -> FileKind {
     }
 }
 
+// Journal-advertised transcript extensions overlap notes and ordinary files.
+// Admit structured exports only when their conversation layout is present.
+fn transcript_layout(ext: &str, bytes: Option<&[u8]>) -> bool {
+    if matches!(ext, "srt" | "vtt") {
+        return true;
+    }
+    use super::structured_exports::*;
+    let Some(text) = bytes.and_then(decode_structured_utf8) else {
+        return false;
+    };
+    match ext {
+        "json" => {
+            parse_slack_json(text).is_some()
+                || parse_telegram_json(text).is_some()
+                || parse_whisper_json(text).is_some()
+                || parse_macwhisper_json(text).is_some()
+                || parse_podcast_transcript_json(text).is_some()
+        }
+        "csv" => parse_fireflies_csv(text).is_some(),
+        "tsv" => parse_whisper_tsv(text).is_some(),
+        "html" => parse_telegram_html(text).is_some(),
+        "md" | "markdown" | "txt" | "log" => {
+            let mut speakers = BTreeSet::new();
+            for line in text.lines().take(256) {
+                if let Some((role, body)) = line.trim().split_once(':') {
+                    let role = role.trim_matches('*').to_ascii_lowercase();
+                    if !body.trim_matches('*').trim().is_empty()
+                        && matches!(
+                            role.as_str(),
+                            "user"
+                                | "assistant"
+                                | "human"
+                                | "system"
+                                | "chatgpt"
+                                | "claude"
+                                | "gemini"
+                        )
+                    {
+                        speakers.insert(role);
+                    }
+                }
+            }
+            speakers.len() >= 2
+        }
+        _ => false,
+    }
+}
+
 /// Deterministic sorting table: assigns a file kind and decides whether file
 /// bytes are sent (`Content`), only metadata goes (`MetadataOnly`), or the
 /// file is ignored (`Ignore`).
@@ -134,6 +182,10 @@ pub fn classify_file(
 
     let file_kind = if is_screenshot && is_image {
         FileKind::Screenshot
+    } else if supported.transcript_extensions.contains(ext_str)
+        && transcript_layout(ext_str, note_bytes)
+    {
+        FileKind::Transcript
     } else if supported.note_extensions.contains(ext_str) {
         if size_bytes > supported.max_note_bytes {
             FileKind::Document
@@ -144,8 +196,6 @@ pub fn classify_file(
         }
     } else if supported.document_extensions.contains(ext_str) {
         FileKind::Document
-    } else if supported.transcript_extensions.contains(ext_str) {
-        FileKind::Transcript
     } else if is_image {
         FileKind::Photo
     } else {
@@ -161,7 +211,7 @@ pub fn classify_file(
         }
     } else if kinds.enabled_for(file_kind) && within_size {
         DeliveryMode::Content
-    } else if kinds.other {
+    } else if kinds.enabled_for(file_kind) || kinds.other {
         DeliveryMode::MetadataOnly
     } else {
         DeliveryMode::Ignore
@@ -247,11 +297,26 @@ pub fn folder_label(folder: &Path, home: &Path) -> String {
 /// Short display name for a folder path (its final path component).
 #[must_use]
 pub fn folder_name(folder: &Path) -> String {
-    folder
+    let raw = folder
         .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty())
-        .map_or_else(|| folder.display().to_string(), str::to_owned)
+        .unwrap_or(folder.as_os_str())
+        .to_string_lossy();
+    bounded_folder_name(&raw)
+}
+
+pub(super) fn bounded_folder_name(raw: &str) -> String {
+    let mut name = String::new();
+    for ch in raw.trim().chars().filter(|ch| !ch.is_control()) {
+        if name.len() + ch.len_utf8() > 128 {
+            break;
+        }
+        name.push(ch);
+    }
+    if name.trim().is_empty() {
+        "folder".into()
+    } else {
+        name
+    }
 }
 
 /// Canonicalize a candidate path, preserving it verbatim if canonicalize fails.
@@ -416,5 +481,59 @@ mod tests {
         let canon_root = std::fs::canonicalize(&root).unwrap();
         assert!(!symlink_stays_inside(&canon_root, &esc_link));
         assert!(symlink_stays_inside(&canon_root, &ok_link));
+    }
+}
+
+#[cfg(test)]
+mod advertised_layout_tests {
+    use super::*;
+    #[test]
+    fn structured_files_require_an_advertised_transcript_layout() {
+        let mut list = SupportedList::default();
+        let selected = FolderKinds {
+            other: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_file(
+                Some("pdf"),
+                list.max_content_bytes + 1,
+                false,
+                None,
+                selected,
+                &list
+            )
+            .1,
+            DeliveryMode::MetadataOnly
+        );
+        list.transcript_extensions
+            .extend(["json".into(), "tsv".into()]);
+        for (ext, bytes, expected) in [
+            (
+                "tsv",
+                "start\tend\ttext\n0\t1000\tHello\n",
+                FileKind::Transcript,
+            ),
+            ("tsv", "id\tvalue\n1\twidget\n", FileKind::Other),
+            (
+                "json",
+                r#"{"text":"Hi","language":"en","segments":[{"start":0,"end":1,"text":"Hi"}]}"#,
+                FileKind::Transcript,
+            ),
+            ("json", r#"{"name":"Hi","values":[1]}"#, FileKind::Other),
+        ] {
+            assert_eq!(
+                classify_file(
+                    Some(ext),
+                    bytes.len() as u64,
+                    false,
+                    Some(bytes.as_bytes()),
+                    FolderKinds::default(),
+                    &list
+                )
+                .0,
+                expected
+            );
+        }
     }
 }

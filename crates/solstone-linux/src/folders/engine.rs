@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use solstone_folder_sync::files::{
-    ListingError, hash_local_file, is_placeholder, read_local, settled, sha256_hex, visit_directory,
+    ListingError, is_placeholder, settled, sha256_hex, visit_directory,
 };
 use solstone_vault::{Clock, Window};
 
@@ -27,8 +27,9 @@ use crate::screenshots::proof::{self, Recents};
 
 use super::classify::{
     OverlapOutcome, classify_file, detect_overlap, folder_label, folder_name, is_junk_entry,
-    is_partial_download, normalize_path, symlink_stays_inside,
+    is_partial_download, normalize_path,
 };
+use super::local;
 use super::metadata::{collect_metadata, extension_lower, system_time_ms};
 use super::note_diff::net_line_diff;
 use super::types::{
@@ -129,6 +130,8 @@ pub struct FolderRecord {
     #[serde(default)]
     pub returning: bool,
     #[serde(default)]
+    pub pause_during_setup: bool,
+    #[serde(default)]
     pub kinds: FolderKinds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facet: Option<FacetOption>,
@@ -158,6 +161,8 @@ pub struct FolderRecord {
     pub last_checked_ms: Option<i64>,
     #[serde(skip)]
     pub cant_read: u64,
+    #[serde(default)]
+    pub limited_mount: bool,
     #[serde(skip)]
     pub preview: Option<PreviewSummary>,
 }
@@ -187,7 +192,6 @@ pub struct SegmentDelivery {
 pub struct StagedContentFile {
     pub event_id: String,
     pub rel_path: String,
-    pub disk_path: PathBuf,
     pub kind: FileKind,
     pub content_hash: Option<String>,
     pub note_payload: Option<String>,
@@ -224,8 +228,8 @@ pub struct OverlapContext {
 }
 
 struct WalkedFile {
+    resident: bool,
     rel_path: String,
-    abs_path: PathBuf,
     inode: Option<(u64, u64)>,
     size_bytes: u64,
     mtime_ns: i128,
@@ -234,10 +238,37 @@ struct WalkedFile {
 }
 
 struct WalkOutcome {
+    limited_mount: bool,
     files: Vec<WalkedFile>,
     unreadable: u64,
     deferred_partials: usize,
     complete: bool,
+}
+
+fn apply_kind_choices(folder: &mut FolderRecord) {
+    let kinds = folder.kinds;
+    folder.pending.retain_mut(|event| {
+        if kinds.enabled_for(event.kind) {
+            return true;
+        }
+        if !kinds.other {
+            return false;
+        }
+        event.delivery = DeliveryMode::MetadataOnly;
+        event.content_hash = None;
+        event.note_payload = None;
+        true
+    });
+    if !kinds.other {
+        for file in folder
+            .files
+            .values_mut()
+            .filter(|f| !kinds.enabled_for(f.kind))
+        {
+            file.pending_revision_hash = None;
+            file.pending_revision_save_ms = None;
+        }
+    }
 }
 
 pub struct Engine {
@@ -253,7 +284,7 @@ pub struct Engine {
 impl Engine {
     pub fn open(state_dir: PathBuf, home: PathBuf, clock: Arc<dyn Clock>) -> Self {
         let ledger_path = state_dir.join(LEDGER_FILE);
-        let ledger = fs::read(&ledger_path)
+        let mut ledger = fs::read(&ledger_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Ledger>(&bytes).ok())
             .filter(|l| l.v == LEDGER_VERSION)
@@ -261,6 +292,10 @@ impl Engine {
                 v: LEDGER_VERSION,
                 folders: Vec::new(),
             });
+        for folder in &mut ledger.folders {
+            folder.name = super::classify::bounded_folder_name(&folder.name);
+            apply_kind_choices(folder);
+        }
         let recents_path = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
@@ -379,6 +414,7 @@ impl Engine {
             label,
             mode: FolderMode::SettingUp,
             returning: false,
+            pause_during_setup: false,
             kinds: FolderKinds::default(),
             facet: None,
             overlap,
@@ -394,6 +430,7 @@ impl Engine {
             attention: None,
             last_checked_ms: None,
             cant_read: 0,
+            limited_mount: false,
             preview: None,
         };
         self.ledger.folders.push(record);
@@ -429,6 +466,7 @@ impl Engine {
             return false;
         };
         folder.kinds = kinds;
+        apply_kind_choices(folder);
         folder.preview = None;
         let _ = self.save();
         true
@@ -469,7 +507,7 @@ impl Engine {
             .collect();
 
         let stamp = self.clock.now();
-        let from_ms = span_start_ms(span, stamp.ms, stamp.offset_s);
+        let from_ms = span_start_ms(span, stamp.ms, self.clock.as_ref());
         let recents = self.load_recents();
         let walk = match walk_folder(&root, &recents) {
             Ok(w) => w,
@@ -484,7 +522,10 @@ impl Engine {
             }
         };
 
+        self.ledger.folders[idx].limited_mount = walk.limited_mount;
         let mut summary = PreviewSummary {
+            from_ms: (span != Span::All).then_some(from_ms),
+            to_ms: (span != Span::All).then_some(stamp.ms),
             span: Some(span),
             unreadable: walk.unreadable,
             ..PreviewSummary::default()
@@ -501,14 +542,14 @@ impl Engine {
             if already_delivered.contains(&file.rel_path) {
                 continue;
             }
-            let note_bytes =
-                if is_note_candidate(file.metadata.extension.as_deref(), &self.supported)
-                    && file.size_bytes <= self.supported.max_note_bytes
-                {
-                    read_local(&file.abs_path).ok()
-                } else {
-                    None
-                };
+            let note_bytes = if file.resident
+                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
+                && file.size_bytes <= self.supported.max_note_bytes
+            {
+                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            } else {
+                None
+            };
             let (kind, delivery) = classify_file(
                 file.metadata.extension.as_deref(),
                 file.size_bytes,
@@ -517,6 +558,11 @@ impl Engine {
                 kinds,
                 &self.supported,
             );
+            let delivery = if !file.resident && delivery == DeliveryMode::Content {
+                DeliveryMode::MetadataOnly
+            } else {
+                delivery
+            };
             if delivery == DeliveryMode::Ignore {
                 continue;
             }
@@ -607,28 +653,45 @@ impl Engine {
             return Err("no_kinds_selected".into());
         }
         let stamp = self.clock.now();
-        let from_ms = span_start_ms(span, stamp.ms, stamp.offset_s);
+        let from_ms = span_start_ms(span, stamp.ms, self.clock.as_ref());
         let root = self.ledger.folders[idx].path.clone();
         let kinds = self.ledger.folders[idx].kinds;
         let recents = self.load_recents();
         let walk = walk_folder(&root, &recents).map_err(|_| "unreadable".to_owned())?;
 
         let folder = &mut self.ledger.folders[idx];
-        folder.mode = FolderMode::On;
+        folder.mode = if folder.pause_during_setup {
+            FolderMode::Paused
+        } else {
+            FolderMode::On
+        };
+        folder.pause_during_setup = false;
         folder.returning = true;
         folder.folder_seen = true;
         folder.attention = None;
         folder.last_checked_ms = Some(stamp.ms);
         folder.cant_read = walk.unreadable;
+        folder.limited_mount = walk.limited_mount;
         folder.span_from_ms = Some(match folder.span_from_ms {
             Some(prev) => prev.min(from_ms),
             None => from_ms,
         });
 
+        let waiting_paths: BTreeSet<_> = folder
+            .pending
+            .iter()
+            .map(|event| event.rel_path.clone())
+            .collect();
         let mut queued_now = 0u64;
         for file in walk.files {
+            if waiting_paths.contains(&file.rel_path) {
+                continue;
+            }
             if let Some(existing) = folder.files.get(&file.rel_path)
-                && existing.delivered_to_journal
+                && (existing.delivered_to_journal
+                    || (existing.pending_revision_save_ms.is_some()
+                        && existing.size_bytes == file.size_bytes
+                        && existing.mtime_ns == file.mtime_ns))
             {
                 continue;
             }
@@ -654,14 +717,14 @@ impl Engine {
                 continue;
             }
 
-            let note_bytes =
-                if is_note_candidate(file.metadata.extension.as_deref(), &self.supported)
-                    && file.size_bytes <= self.supported.max_note_bytes
-                {
-                    read_local(&file.abs_path).ok()
-                } else {
-                    None
-                };
+            let note_bytes = if file.resident
+                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
+                && file.size_bytes <= self.supported.max_note_bytes
+            {
+                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            } else {
+                None
+            };
             let (kind, delivery) = classify_file(
                 file.metadata.extension.as_deref(),
                 file.size_bytes,
@@ -670,6 +733,11 @@ impl Engine {
                 kinds,
                 &self.supported,
             );
+            let delivery = if !file.resident && delivery == DeliveryMode::Content {
+                DeliveryMode::MetadataOnly
+            } else {
+                delivery
+            };
             if delivery == DeliveryMode::Ignore {
                 continue;
             }
@@ -678,7 +746,7 @@ impl Engine {
                 if let Some(ref nb) = note_bytes {
                     Some(sha256_hex(nb))
                 } else {
-                    hash_local_file(&file.abs_path).ok()
+                    local::hash_file(&root, &file.rel_path, self.supported.max_content_bytes).ok()
                 }
             } else {
                 None
@@ -783,7 +851,12 @@ impl Engine {
             return false;
         };
         folder.mode = FolderMode::Off;
+        folder.pause_during_setup = false;
         folder.pending.clear();
+        for tracked in folder.files.values_mut() {
+            tracked.pending_revision_save_ms = None;
+            tracked.pending_revision_hash = None;
+        }
         folder.backfill_total = 0;
         folder.backfill_done = 0;
         folder.attention = None;
@@ -817,23 +890,25 @@ impl Engine {
 
     /// Pairing principle 9: a new journal pairing restarts first setup on all
     /// active/paused folders while keeping the owner's granted folders, kinds,
-    /// and facet choice. Pending items from the old pairing never cross over.
+    /// and facet choice. Already confirmed changes follow the new pairing.
     pub fn restart_setup(&mut self) {
         for folder in &mut self.ledger.folders {
             if matches!(folder.mode, FolderMode::On | FolderMode::Paused) {
+                folder.pause_during_setup = folder.mode == FolderMode::Paused;
                 folder.mode = FolderMode::SettingUp;
                 folder.returning = true;
             }
-            folder.pending.clear();
             folder.backfill_total = 0;
             folder.backfill_done = 0;
+            folder.items_taken_in = 0;
+            folder.last_taken_in_ms = None;
+            folder.fallback_to_details = 0;
             folder.span_from_ms = None;
             folder.preview = None;
             for tracked in folder.files.values_mut() {
                 tracked.delivered_to_journal = false;
                 tracked.last_sent_hash = None;
-                tracked.pending_revision_save_ms = None;
-                tracked.pending_revision_hash = None;
+                tracked.last_note_text = None;
             }
         }
         let _ = self.save();
@@ -850,6 +925,10 @@ impl Engine {
 
         for idx in 0..self.ledger.folders.len() {
             let mode = self.ledger.folders[idx].mode;
+            if mode == FolderMode::SettingUp {
+                dirty |= self.release_due_revisions(idx, now_stamp.ms);
+                continue;
+            }
             if !matches!(mode, FolderMode::On | FolderMode::Paused) {
                 continue;
             }
@@ -871,6 +950,7 @@ impl Engine {
                 self.ledger.folders[idx].folder_seen = true;
                 self.ledger.folders[idx].last_checked_ms = Some(now_ms);
                 self.ledger.folders[idx].cant_read = w.unreadable;
+                self.ledger.folders[idx].limited_mount = w.limited_mount;
                 w
             }
             Err(ListingError::Missing) => {
@@ -949,7 +1029,8 @@ impl Engine {
             // 2. Content hash match (when size matches and old had a content hash)
             if matched_old.is_none()
                 && disappeared_sizes.contains(&cand.size_bytes)
-                && let Ok(cand_hash) = hash_local_file(&cand.abs_path)
+                && let Ok(cand_hash) =
+                    local::hash_file(&root, &cand.rel_path, self.supported.max_content_bytes)
             {
                 for old_rel in &disappeared_paths {
                     if matched_disappeared.contains(old_rel) {
@@ -1030,11 +1111,10 @@ impl Engine {
                 let Some(old) = self.ledger.folders[idx].files.remove(&old_rel) else {
                     continue;
                 };
+                self.ledger.folders[idx]
+                    .pending
+                    .retain(|ev| ev.rel_path != old_rel);
                 if !old.delivered_to_journal {
-                    // Delete before send: drop any waiting events for this file; nothing goes!
-                    self.ledger.folders[idx]
-                        .pending
-                        .retain(|ev| ev.rel_path != old_rel);
                     changed = true;
                 } else if !old.excluded_before_span {
                     // Already received by the journal: emit one `removed` activity line.
@@ -1079,14 +1159,14 @@ impl Engine {
         // Newly appeared files.
         let folder_id = self.ledger.folders[idx].id.clone();
         for file in remaining_new {
-            let note_bytes =
-                if is_note_candidate(file.metadata.extension.as_deref(), &self.supported)
-                    && file.size_bytes <= self.supported.max_note_bytes
-                {
-                    read_local(&file.abs_path).ok()
-                } else {
-                    None
-                };
+            let note_bytes = if file.resident
+                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
+                && file.size_bytes <= self.supported.max_note_bytes
+            {
+                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            } else {
+                None
+            };
             let (kind, delivery) = classify_file(
                 file.metadata.extension.as_deref(),
                 file.size_bytes,
@@ -1095,6 +1175,11 @@ impl Engine {
                 kinds,
                 &self.supported,
             );
+            let delivery = if !file.resident && delivery == DeliveryMode::Content {
+                DeliveryMode::MetadataOnly
+            } else {
+                delivery
+            };
             if delivery == DeliveryMode::Ignore {
                 continue;
             }
@@ -1102,7 +1187,7 @@ impl Engine {
                 if let Some(ref nb) = note_bytes {
                     Some(sha256_hex(nb))
                 } else {
-                    hash_local_file(&file.abs_path).ok()
+                    local::hash_file(&root, &file.rel_path, self.supported.max_content_bytes).ok()
                 }
             } else {
                 None
@@ -1164,14 +1249,14 @@ impl Engine {
         // Modified files: note edits coalesce in the 5-minute window; already-delivered
         // documents/transcripts enter the one-hour revision cool-down!
         for file in modified_candidates {
-            let note_bytes =
-                if is_note_candidate(file.metadata.extension.as_deref(), &self.supported)
-                    && file.size_bytes <= self.supported.max_note_bytes
-                {
-                    read_local(&file.abs_path).ok()
-                } else {
-                    None
-                };
+            let note_bytes = if file.resident
+                && needs_classification_bytes(file.metadata.extension.as_deref(), &self.supported)
+                && file.size_bytes <= self.supported.max_note_bytes
+            {
+                local::read_file(&root, &file.rel_path, self.supported.max_note_bytes).ok()
+            } else {
+                None
+            };
             let (kind, delivery) = classify_file(
                 file.metadata.extension.as_deref(),
                 file.size_bytes,
@@ -1180,6 +1265,11 @@ impl Engine {
                 kinds,
                 &self.supported,
             );
+            let delivery = if !file.resident && delivery == DeliveryMode::Content {
+                DeliveryMode::MetadataOnly
+            } else {
+                delivery
+            };
             if delivery == DeliveryMode::Ignore {
                 continue;
             }
@@ -1187,7 +1277,7 @@ impl Engine {
                 if let Some(ref nb) = note_bytes {
                     Some(sha256_hex(nb))
                 } else {
-                    hash_local_file(&file.abs_path).ok()
+                    local::hash_file(&root, &file.rel_path, self.supported.max_content_bytes).ok()
                 }
             } else {
                 None
@@ -1269,11 +1359,13 @@ impl Engine {
                 }
                 (FileKind::Document | FileKind::Transcript, DeliveryMode::Content, true) => {
                     // Already sent once: start or reset the one-hour revision cool-down.
-                    if new_hash.as_deref() != tracked.last_sent_hash.as_deref() {
-                        tracked.pending_revision_save_ms = Some(ev_ms);
-                        tracked.pending_revision_hash = new_hash;
-                        changed = true;
-                    }
+                    let revised = new_hash.is_some() && new_hash != tracked.last_sent_hash;
+                    tracked.pending_revision_save_ms = revised.then_some(ev_ms);
+                    tracked.pending_revision_hash = if revised { new_hash } else { None };
+                    self.ledger.folders[idx]
+                        .pending
+                        .retain(|ev| ev.rel_path != file.rel_path || !ev.is_revision);
+                    changed = true;
                 }
                 (FileKind::Document | FileKind::Transcript, DeliveryMode::Content, false) => {
                     // Not yet delivered: refresh its waiting upload in place.
@@ -1334,7 +1426,13 @@ impl Engine {
             }
         }
 
-        // Check one-hour revision cool-downs across all tracked documents & transcripts.
+        self.release_due_revisions(idx, now_ms) || changed
+    }
+
+    fn release_due_revisions(&mut self, idx: usize, now_ms: i64) -> bool {
+        let root = self.ledger.folders[idx].path.clone();
+        let folder_id = self.ledger.folders[idx].id.clone();
+        let mut changed = false;
         let rev_wait_ms = self.supported.document_revision_cooldown_ms;
         let due_revisions: Vec<(String, i64, FileKind, Option<String>)> = self.ledger.folders[idx]
             .files
@@ -1355,11 +1453,20 @@ impl Engine {
             .collect();
 
         for (rel_path, save_ms, kind, rev_hash) in due_revisions {
-            let abs_path = root.join(&rel_path);
-            let Ok(fs_meta) = fs::metadata(&abs_path) else {
+            let Ok(object) = local::object(&root, Path::new(&rel_path)) else {
                 continue;
             };
-            let metadata = collect_metadata(&abs_path, &fs_meta);
+            let Ok(fs_meta) = object.metadata() else {
+                continue;
+            };
+            let metadata =
+                collect_metadata(Path::new(&rel_path), &local::fd_path(&object), &fs_meta);
+            let tracked = &self.ledger.folders[idx].files[&rel_path];
+            if metadata.size_bytes != tracked.size_bytes
+                || i128::from(metadata.modified_ms) * 1_000_000 != tracked.mtime_ns
+            {
+                continue;
+            }
             let ev_stamp = self.clock.stamp_at(save_ms);
             let event_id = event_id_for(&folder_id, &rel_path, ActivityVerb::Revised, save_ms);
             self.ledger.folders[idx].pending.push(PendingEvent {
@@ -1390,6 +1497,9 @@ impl Engine {
             changed = true;
         }
 
+        if changed {
+            apply_kind_choices(&mut self.ledger.folders[idx]);
+        }
         changed
     }
 
@@ -1404,7 +1514,10 @@ impl Engine {
         let mut best_key: Option<(usize, Window)> = None;
 
         for (idx, folder) in self.ledger.folders.iter().enumerate() {
-            if folder.mode != FolderMode::On || folder.attention.is_some() {
+            if !(folder.mode == FolderMode::On
+                || (folder.mode == FolderMode::SettingUp && !folder.pause_during_setup))
+                || folder.attention.is_some()
+            {
                 continue;
             }
             for ev in &folder.pending {
@@ -1448,27 +1561,45 @@ impl Engine {
         let mut dropped_ids: BTreeSet<String> = BTreeSet::new();
         let mut selected_events: Vec<PendingEvent> = Vec::with_capacity(events.len());
         let mut staged_files = Vec::new();
-        for ev in events {
+        for mut ev in events {
+            // Bound the JSONL part as well as the number of content parts.
+            if selected_events.len() >= 500 {
+                break;
+            }
+            if ev.verb != ActivityVerb::Removed {
+                match local::object(&folder.path, Path::new(&ev.rel_path))
+                    .and_then(|fd| Ok((fd.metadata()?, local::content_available(&fd))))
+                {
+                    Ok((meta, resident)) if meta.is_file() => {
+                        if !resident {
+                            ev.delivery = DeliveryMode::MetadataOnly;
+                            ev.content_hash = None;
+                            ev.note_payload = None;
+                        }
+                    }
+                    Ok(_) => {
+                        dropped_ids.insert(ev.id);
+                        continue;
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                        dropped_ids.insert(ev.id);
+                        continue;
+                    }
+                    Err(_) => {
+                        if let Some(held) = folder.pending.iter_mut().find(|held| held.id == ev.id)
+                        {
+                            held.retry_at_ms = Some(now_ms.saturating_add(RETRY_MS[0]));
+                        }
+                        continue;
+                    }
+                }
+            }
             if ev.delivery != DeliveryMode::Content {
                 selected_events.push(ev);
                 continue;
             }
             if staged_files.len() >= MAX_UPLOAD_CONTENT_PARTS {
-                // Leave overflow content events in `pending` for the next upload pass.
                 continue;
-            }
-            let disk_path = folder.path.join(&ev.rel_path);
-            let exists = disk_path.is_file();
-            if !exists {
-                let delivered = folder
-                    .files
-                    .get(&ev.rel_path)
-                    .is_some_and(|t| t.delivered_to_journal);
-                if !delivered {
-                    dropped_ids.insert(ev.id.clone());
-                    folder.files.remove(&ev.rel_path);
-                    continue;
-                }
             }
             let ext = ev.metadata.extension.as_deref().unwrap_or("");
             let needs_image_convert = matches!(ev.kind, FileKind::Screenshot | FileKind::Photo)
@@ -1476,7 +1607,6 @@ impl Engine {
             staged_files.push(StagedContentFile {
                 event_id: ev.id.clone(),
                 rel_path: ev.rel_path.clone(),
-                disk_path,
                 kind: ev.kind,
                 content_hash: ev.content_hash.clone(),
                 note_payload: ev.note_payload.clone(),
@@ -1496,9 +1626,9 @@ impl Engine {
         if !dropped_ids.is_empty() {
             folder.pending.retain(|ev| !dropped_ids.contains(&ev.id));
             let _ = self.save();
-            if selected_events.is_empty() {
-                return None;
-            }
+        }
+        if selected_events.is_empty() {
+            return None;
         }
 
         Some(SegmentDelivery {
@@ -1664,6 +1794,7 @@ impl Engine {
                     last_taken_in_ms: f.last_taken_in_ms,
                     last_checked_ms: f.last_checked_ms,
                     cant_read: f.cant_read,
+                    limited_mount: f.limited_mount,
                     fallback_to_details: f.fallback_to_details,
                     journal_lists,
                     paused_by_computer: computer_paused && f.mode == FolderMode::On,
@@ -1692,21 +1823,50 @@ impl Engine {
     }
 }
 
-fn is_note_candidate(ext: Option<&str>, supported: &SupportedList) -> bool {
-    ext.is_some_and(|e| supported.note_extensions.contains(&e.to_ascii_lowercase()))
+fn needs_classification_bytes(ext: Option<&str>, supported: &SupportedList) -> bool {
+    ext.is_some_and(|e| {
+        supported.note_extensions.contains(e)
+            || (supported.transcript_extensions.contains(e) && !matches!(e, "vtt" | "srt"))
+    })
 }
 
-fn span_start_ms(span: Span, now_ms: i64, offset_s: i32) -> i64 {
-    match span {
-        Span::Last30Days => now_ms - 30 * DAY_MS,
-        Span::Last6Months => now_ms - 183 * DAY_MS,
-        Span::LastYear => now_ms - 365 * DAY_MS,
-        Span::All => i64::MIN,
-        Span::Today => {
-            let local = now_ms + i64::from(offset_s) * 1000;
-            local - local.rem_euclid(DAY_MS) - i64::from(offset_s) * 1000
+fn span_start_ms(span: Span, now_ms: i64, clock: &dyn Clock) -> i64 {
+    use jiff::{Span as Period, Timestamp, tz::Offset};
+    if span == Span::All {
+        return i64::MIN;
+    }
+    let Ok(instant) = Timestamp::from_millisecond(now_ms) else {
+        return now_ms;
+    };
+    let offset = Offset::from_seconds(clock.offset_s_at(now_ms)).unwrap_or(Offset::UTC);
+    let today = offset.to_datetime(instant).date();
+    let date = match span {
+        Span::Today => today,
+        Span::Last30Days => today.saturating_sub(Period::new().days(30)),
+        Span::Last6Months => today.saturating_sub(Period::new().months(6)),
+        Span::LastYear => today.saturating_sub(Period::new().years(1)),
+        Span::All => unreachable!(),
+    };
+    let Ok(midnight) = Offset::UTC.to_timestamp(date.at(0, 0, 0, 0)) else {
+        return now_ms;
+    };
+    let wall = midnight.as_millisecond();
+    let local_day = |ms| (ms + i64::from(clock.offset_s_at(ms)) * 1000).div_euclid(DAY_MS);
+    let target = wall.div_euclid(DAY_MS);
+    let candidate = wall - i64::from(clock.offset_s_at(wall)) * 1000;
+    if local_day(candidate) == target && local_day(candidate - 1) < target {
+        return candidate;
+    }
+    let (mut lo, mut hi) = (wall - DAY_MS, wall + DAY_MS);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if local_day(mid) >= target {
+            hi = mid
+        } else {
+            lo = mid
         }
     }
+    hi
 }
 
 /// Build a deterministic client-assigned folder ID matching
@@ -1744,29 +1904,29 @@ fn event_id_for(folder_id: &str, rel_path: &str, verb: ActivityVerb, event_ms: i
 /// junk/hidden skips, and symlink confinement. Only `complete == true` permits
 /// deletion reconciliation.
 fn walk_folder(root: &Path, recents: &Recents) -> Result<WalkOutcome, ListingError> {
-    if !root.exists() {
-        return Err(ListingError::Missing);
-    }
-    let canonical_root = fs::canonicalize(root).map_err(|err| {
+    let root_object = local::object(root, Path::new(".")).map_err(|err| {
         if err.kind() == io::ErrorKind::NotFound {
             ListingError::Missing
         } else {
             ListingError::Incomplete(err)
         }
     })?;
-
     let mut out = WalkOutcome {
         files: Vec::new(),
+        limited_mount: !local::content_available(&root_object),
         unreadable: 0,
         deferred_partials: 0,
         complete: true,
     };
-    let mut stack: Vec<(PathBuf, String)> = vec![(canonical_root.clone(), String::new())];
-    let mut visited_dirs: BTreeSet<PathBuf> = BTreeSet::new();
-    visited_dirs.insert(canonical_root.clone());
+    let root_meta = root_object.metadata().map_err(ListingError::Incomplete)?;
+    let mut stack = vec![String::new()];
+    let mut visited_dirs = BTreeSet::from([(root_meta.dev(), root_meta.ino())]);
 
-    while let Some((dir, prefix)) = stack.pop() {
-        let result = visit_directory(&dir, |entry| {
+    while let Some(prefix) = stack.pop() {
+        let relative = if prefix.is_empty() { "." } else { &prefix };
+        let directory =
+            local::object(root, Path::new(relative)).map_err(ListingError::Incomplete)?;
+        let result = visit_directory(&local::fd_path(&directory), |entry| {
             let name_os = entry.file_name();
             let Some(name) = name_os.to_str() else {
                 return Ok(());
@@ -1776,25 +1936,6 @@ fn walk_folder(root: &Path, recents: &Recents) -> Result<WalkOutcome, ListingErr
             }
             if is_partial_download(name) {
                 out.deferred_partials += 1;
-                return Ok(());
-            }
-            let abs_path = entry.path();
-            let Ok(sym_meta) = fs::symlink_metadata(&abs_path) else {
-                out.unreadable += 1;
-                out.complete = false;
-                return Ok(());
-            };
-            if sym_meta.file_type().is_symlink()
-                && !symlink_stays_inside(&canonical_root, &abs_path)
-            {
-                return Ok(());
-            }
-            let Ok(meta) = fs::metadata(&abs_path) else {
-                out.unreadable += 1;
-                out.complete = false;
-                return Ok(());
-            };
-            if is_placeholder(&meta) {
                 return Ok(());
             }
             let rel_path = if prefix.is_empty() {
@@ -1808,32 +1949,47 @@ fn walk_folder(root: &Path, recents: &Recents) -> Result<WalkOutcome, ListingErr
             {
                 return Ok(());
             }
+            let object = match local::object(root, Path::new(&rel_path)) {
+                Ok(object) => object,
+                Err(err) if err.raw_os_error() == Some(rustix::io::Errno::XDEV.raw_os_error()) => {
+                    return Ok(());
+                }
+                Err(_) => {
+                    out.unreadable += 1;
+                    out.complete = false;
+                    return Ok(());
+                }
+            };
+            let meta = object.metadata()?;
+            if is_placeholder(&meta) {
+                return Ok(());
+            }
             if meta.is_dir() {
-                if let Ok(canon_dir) = fs::canonicalize(&abs_path)
-                    && canon_dir.starts_with(&canonical_root)
-                    && visited_dirs.insert(canon_dir.clone())
-                {
-                    stack.push((canon_dir, rel_path));
+                if visited_dirs.insert((meta.dev(), meta.ino())) {
+                    stack.push(rel_path);
                 }
                 return Ok(());
             }
             if !meta.is_file() {
                 return Ok(());
             }
-            let platform_meta = collect_metadata(&abs_path, &meta);
-            let is_screenshot = platform_meta
-                .extension
-                .as_deref()
-                .and_then(|ext| proof::prove(&abs_path, ext, recents).ok().flatten())
-                .is_some();
+            let resident = local::content_available(&object);
+            out.limited_mount |= !resident;
+            let physical = local::fd_path(&object);
+            let logical = root.join(&rel_path);
+            let platform_meta = collect_metadata(&logical, &physical, &meta);
+            let is_screenshot = recents.saved_ms(&logical).is_some()
+                || (resident
+                    && platform_meta.extension.as_deref() == Some("png")
+                    && proof::file_has_gnome_mark(&physical).unwrap_or(false));
             let mtime_ns = meta
                 .modified()
                 .ok()
                 .map(|t| i128::from(system_time_ms(t)) * 1_000_000)
                 .unwrap_or(0);
             out.files.push(WalkedFile {
+                resident,
                 rel_path,
-                abs_path,
                 inode: Some((meta.dev(), meta.ino())),
                 size_bytes: meta.len(),
                 mtime_ns,
@@ -1845,10 +2001,10 @@ fn walk_folder(root: &Path, recents: &Recents) -> Result<WalkOutcome, ListingErr
 
         match result {
             Ok(()) => {}
-            Err(ListingError::Missing) if dir == canonical_root => {
+            Err(ListingError::Missing) if prefix.is_empty() => {
                 return Err(ListingError::Missing);
             }
-            Err(ListingError::Incomplete(err)) if dir == canonical_root => {
+            Err(ListingError::Incomplete(err)) if prefix.is_empty() => {
                 return Err(ListingError::Incomplete(err));
             }
             Err(_) => {
@@ -1864,6 +2020,53 @@ fn walk_folder(root: &Path, recents: &Recents) -> Result<WalkOutcome, ListingErr
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
+
+    #[test]
+    fn preview_cutoff_clamps_months_and_leap_years() {
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let clock = TestClock::new(0, 0);
+        for (span, now, start) in [
+            (
+                Span::Last6Months,
+                "2024-08-31T18:00:00Z",
+                "2024-02-29T00:00:00Z",
+            ),
+            (
+                Span::LastYear,
+                "2024-02-29T18:00:00Z",
+                "2023-02-28T00:00:00Z",
+            ),
+            (
+                Span::Last30Days,
+                "2024-03-01T18:00:00Z",
+                "2024-01-31T00:00:00Z",
+            ),
+        ] {
+            assert_eq!(span_start_ms(span, ms(now), clock.as_ref()), ms(start));
+        }
+    }
+
+    #[test]
+    fn today_starts_at_local_midnight_on_both_clock_changes() {
+        struct Denver;
+        impl Clock for Denver {
+            fn now_ms(&self) -> i64 {
+                unreachable!()
+            }
+            fn offset_s_at(&self, ms: i64) -> i32 {
+                let zone = jiff::tz::TimeZone::get("America/Denver").unwrap();
+                zone.to_offset(jiff::Timestamp::from_millisecond(ms).unwrap())
+                    .seconds()
+            }
+        }
+        for (now, expected) in [
+            ("2026-03-08T19:00:00Z", "2026-03-08T07:00:00Z"),
+            ("2026-11-01T19:00:00Z", "2026-11-01T06:00:00Z"),
+        ] {
+            let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+            assert_eq!(span_start_ms(Span::Today, ms(now), &Denver), ms(expected));
+        }
+    }
 
     struct TestClock {
         ms: AtomicI64,
@@ -2022,6 +2225,25 @@ mod tests {
         assert_eq!(rev_seg.events[0].rel_path, "proposal.pdf");
         assert_eq!(rev_seg.events[0].verb, ActivityVerb::Revised);
         assert!(rev_seg.events[0].is_revision);
+        fs::write(&doc, b"%PDF-1.4 v1").unwrap();
+        set_mtime_ms(&doc, clock.now_ms());
+        clock.advance_ms(5_000);
+        engine.scan_all();
+        clock.advance_ms(65 * 60 * 1000);
+        engine.scan_all();
+        assert!(engine.next_delivery(false).is_none());
+        fs::write(&doc, b"%PDF-1.4 v3").unwrap();
+        set_mtime_ms(&doc, clock.now_ms());
+        clock.advance_ms(5_000);
+        engine.scan_all();
+        engine.restart_setup();
+        assert!(engine.next_delivery(false).is_none());
+        clock.advance_ms(60 * 60 * 1000);
+        engine.scan_all();
+        assert_eq!(
+            engine.next_delivery(false).unwrap().events[0].verb,
+            ActivityVerb::Revised
+        );
     }
 
     #[test]
@@ -2068,8 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_holds_sync_without_skipping_and_restart_setup_keeps_folders_without_crossing_pairings()
-    {
+    fn pause_holds_sync_without_skipping_and_restart_setup_preserves_waiting_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let folder = tmp.path().join("Notes");
@@ -2096,11 +2317,35 @@ mod tests {
         assert_eq!(seg.events.len(), 1);
         assert_eq!(seg.events[0].rel_path, "during-pause.md");
 
-        // Pairing principle 9: re-pairing returns folder to SettingUp and clears queue.
+        // A new pairing can drain held material while first setup is still open.
         engine.restart_setup();
         assert_eq!(engine.folders()[0].mode, FolderMode::SettingUp);
         assert!(engine.folders()[0].returning);
+        clock.advance_ms(2 * DAY_MS);
+        let fresh = folder.join("fresh.md");
+        fs::write(&fresh, "after pairing").unwrap();
+        set_mtime_ms(&fresh, clock.now_ms() - 310_000);
+        engine.scan_all();
+        let waiting = engine.next_delivery(false).unwrap();
+        assert_eq!(waiting.events, seg.events);
+        let mut kinds = FolderKinds {
+            notes: false,
+            ..Default::default()
+        };
+        assert!(engine.set_kinds(&id, kinds));
+        let limited = engine.next_delivery(false).unwrap();
+        assert!(limited.content_files.is_empty());
+        assert_eq!(limited.events[0].delivery, DeliveryMode::MetadataOnly);
+        kinds.other = false;
+        assert!(engine.set_kinds(&id, kinds));
         assert!(engine.next_delivery(false).is_none());
+        assert!(engine.set_kinds(&id, FolderKinds::default()));
+        assert!(engine.next_delivery(false).is_none());
+        engine.confirm_folder(&id, Span::Today).unwrap();
+        assert_eq!(
+            engine.next_delivery(false).unwrap().events[0].rel_path,
+            "fresh.md"
+        );
     }
 
     #[test]

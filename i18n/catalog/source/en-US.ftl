@@ -1079,3 +1079,5 @@ linux.folders.fallbackmany = { $count } files' contents couldn't be added, so on
 linux.folders.refused = the solstone app can't open this folder. choose another folder.
 linux.folders.allfolders = all folders
 linux.folders.cli = folders: { $state }
+
+linux.folders.mountdetails = for any part of this folder where your computer can't reliably tell which files are already downloaded, only file names and details go into your journal.

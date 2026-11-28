@@ -1534,6 +1534,9 @@ pub mod folders {
     pub fn scope_note() -> &'static str {
         text!("linux.folders.scopenote")
     }
+    pub fn mount_details() -> &'static str {
+        text!("linux.folders.mountdetails")
+    }
     pub fn nothing_until_confirm() -> &'static str {
         text!("linux.folders.nothinguntilconfirm")
     }

@@ -1,0 +1,17 @@
+{
+  "description": "Explains why some folder entries are sent as details only.",
+  "context": "Shown in the folder preview and details when a mount cannot establish local file residency.",
+  "surfaces": [
+    "linux"
+  ],
+  "bundles": [
+    "linux"
+  ],
+  "arguments": [],
+  "format_intent": "text",
+  "max_length": 190,
+  "source_revision": "a2118f056dff2d2c042689bc5f281c65186c8800e52c77366916220b4d540e40",
+  "risk": "routine",
+  "auto_merge": true,
+  "protected_slots": []
+}

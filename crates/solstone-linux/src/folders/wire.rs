@@ -300,16 +300,7 @@ pub(crate) fn parse_supported_list(body: &[u8]) -> Option<SupportedList> {
         }
     }
 
-    // Unambiguous transcript extensions (`vtt`, `srt`, etc. not overlapping
-    // notes or documents).
-    let transcripts: BTreeSet<String> = norm(wire.kinds.transcripts.extensions)
-        .into_iter()
-        .filter(|ext| {
-            !list.note_extensions.contains(ext)
-                && !list.document_extensions.contains(ext)
-                && matches!(ext.as_str(), "vtt" | "srt")
-        })
-        .collect();
+    let transcripts = norm(wire.kinds.transcripts.extensions);
     if !transcripts.is_empty() {
         list.transcript_extensions = transcripts;
     }

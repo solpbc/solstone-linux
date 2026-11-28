@@ -8,8 +8,10 @@
 
 pub mod classify;
 pub mod engine;
+pub(crate) mod local;
 pub mod metadata;
 pub mod note_diff;
+mod structured_exports;
 pub mod types;
 pub mod wire;
 
@@ -410,7 +412,7 @@ async fn run_worker(
     let mut schedule = CheckSchedule::default();
     let mut facets: Vec<FacetOption> = Vec::new();
     let mut facets_state = FacetsAvailability::Unpaired;
-    let mut supported_fetched = false;
+    let mut supported_until = None;
 
     loop {
         if *shutdown_rx.borrow() {
@@ -420,50 +422,54 @@ async fn run_worker(
 
         if wake.take_restart() {
             cap_cache.clear();
-            supported_fetched = false;
+            supported_until = None;
             facets.clear();
             let _ = folder_worker::with_state(&mut state, |eng| eng.restart_setup()).await;
         }
 
         if schedule.due() {
-            let _ = folder_worker::with_state(&mut state, |eng| eng.scan_all()).await;
-            if transport.is_paired() {
+            let paired = transport.is_paired();
+            let listed = if paired {
                 let listed = cap_cache.check(&*transport, CAPABILITY_RETRY).await;
                 if listed
-                    && !supported_fetched
+                    && supported_until.is_none_or(|until| std::time::Instant::now() >= until)
                     && let Some(sup) = transport.fetch_supported().await
                 {
                     let _ = folder_worker::with_state(&mut state, move |eng| {
                         eng.set_supported_list(sup);
                     })
                     .await;
-                    supported_fetched = true;
+                    supported_until = Some(std::time::Instant::now() + Duration::from_secs(300));
                 }
-                if listed {
-                    while !*shutdown_rx.borrow() && !wake.restart_pending() {
-                        let paused_now = *paused_rx.borrow();
-                        let next = folder_worker::with_state(&mut state, move |eng| {
-                            eng.next_delivery(paused_now)
-                        })
+                listed
+            } else {
+                false
+            };
+            let _ = folder_worker::with_state(&mut state, |eng| eng.scan_all()).await;
+            if paired && listed {
+                while !*shutdown_rx.borrow() && !wake.restart_pending() {
+                    let paused_now = *paused_rx.borrow();
+                    let next = folder_worker::with_state(&mut state, move |eng| {
+                        eng.next_delivery(paused_now)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .flatten();
+                    let Some(delivery) = next else {
+                        break;
+                    };
+                    let reply = folder_worker::deliver(&*transport, &delivery, None)
                         .await
-                        .ok()
-                        .flatten()
                         .flatten();
-                        let Some(delivery) = next else {
-                            break;
-                        };
-                        let reply = folder_worker::deliver(&*transport, &delivery, None)
-                            .await
-                            .flatten();
-                        let outcome = reply.unwrap_or(DeliveryOutcome::Hold);
-                        let held = matches!(outcome, DeliveryOutcome::Hold);
-                        let _ = folder_worker::with_state(&mut state, move |eng| {
-                            eng.record_outcome(&delivery, outcome);
-                        })
-                        .await;
-                        if held {
-                            break;
-                        }
+                    let outcome = reply.unwrap_or(DeliveryOutcome::Hold);
+                    let held = matches!(outcome, DeliveryOutcome::Hold);
+                    let _ = folder_worker::with_state(&mut state, move |eng| {
+                        eng.record_outcome(&delivery, outcome);
+                    })
+                    .await;
+                    if held {
+                        break;
                     }
                 }
             }

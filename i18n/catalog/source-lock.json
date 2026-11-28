@@ -14066,6 +14066,13 @@
       "locales": []
     },
     {
+      "id": "linux.folders.mountdetails",
+      "source": "a2118f056dff2d2c042689bc5f281c65186c8800e52c77366916220b4d540e40",
+      "contract": "8a5ccf516e1ddd1e6845a51578bf3090e7732eef71f84117434e952b20202586",
+      "protected": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "locales": []
+    },
+    {
       "id": "linux.folders.needattentionmany",
       "source": "f3fcf49426dfd222c775bf3b0b927105b49605bc45a4e4222caa1216ca32573d",
       "contract": "19e7d110b0675a598f9a9e24dfeb3bbb9e32c316ba52b9871ff2708989a5ef3e",

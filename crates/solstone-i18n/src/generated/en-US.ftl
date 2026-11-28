@@ -967,6 +967,8 @@ m6c696e75782e666f6c646572732e6d616e79 = { $count } folders
 
 m6c696e75782e666f6c646572732e6d697373696e67 = { $folder } isn't on this computer anymore.
 
+m6c696e75782e666f6c646572732e6d6f756e7464657461696c73 = for any part of this folder where your computer can't reliably tell which files are already downloaded, only file names and details go into your journal.
+
 m6c696e75782e666f6c646572732e6e656564617474656e74696f6e6d616e79 = { $count } folders need attention
 
 m6c696e75782e666f6c646572732e6e6f726570656174 = items already in your journal aren't brought in again.

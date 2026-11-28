@@ -109,6 +109,7 @@ pub struct FoldersSection {
     cant_read_label: gtk::Label,
     cant_read_retry: gtk::Button,
     fallback_label: gtk::Label,
+    mount_notice: gtk::Label,
 
     // Kind checkboxes
     kind_checks: [gtk::CheckButton; 6],
@@ -285,6 +286,11 @@ impl FoldersSection {
         cant_read_box.append(&cant_read_label);
         cant_read_box.append(&cant_read_retry);
         detail_box.append(&cant_read_box);
+
+        let mount_notice = note_label(Some(copy::mount_details()));
+        mount_notice.add_css_class("sol-quiet");
+        mount_notice.set_visible(false);
+        detail_box.append(&mount_notice);
 
         let fallback_label = note_label(None);
         fallback_label.add_css_class("sol-quiet");
@@ -493,6 +499,7 @@ impl FoldersSection {
             cant_read_label,
             cant_read_retry,
             fallback_label,
+            mount_notice,
             kind_checks,
             kinds_error,
             kinds_note,
@@ -1300,6 +1307,7 @@ impl FoldersSection {
         }
 
         // Non-fatal unreadable files & content fallback notices
+        self.mount_notice.set_visible(folder.limited_mount);
         if folder.cant_read > 0 {
             self.cant_read_label
                 .set_text(&copy::cant_read(folder.cant_read));
@@ -1411,27 +1419,27 @@ impl FoldersSection {
                 }
                 Some(p) => {
                     self.preview_retry.set_visible(false);
+                    let status_line = match (p.from_ms.or(p.oldest_ms), p.to_ms.or(p.newest_ms)) {
+                        (Some(old), Some(new)) => {
+                            let start = format_local_date(old);
+                            let end = format_local_date(new);
+                            if !start.is_empty() && !end.is_empty() {
+                                copy::preview_span(&group(p.total_items), &start, &end)
+                            } else {
+                                copy::preview_count(&group(p.total_items))
+                            }
+                        }
+                        _ if p.total_items == 0 => copy::preview_zero().to_owned(),
+                        _ => copy::preview_count(&group(p.total_items)),
+                    };
+                    self.preview_status.set_text(&status_line);
+
                     if p.total_items == 0 {
-                        self.preview_status.set_text(copy::preview_zero());
                         self.preview_split.set_visible(false);
                         self.preview_est_heading.set_visible(false);
                         self.preview_est_values.set_visible(false);
                         self.preview_est_gloss.set_visible(false);
                     } else {
-                        let status_line = match (p.oldest_ms, p.newest_ms) {
-                            (Some(old), Some(new)) => {
-                                let start = format_local_date(old);
-                                let end = format_local_date(new);
-                                if !start.is_empty() && !end.is_empty() {
-                                    copy::preview_span(&group(p.total_items), &start, &end)
-                                } else {
-                                    copy::preview_count(&group(p.total_items))
-                                }
-                            }
-                            _ => copy::preview_count(&group(p.total_items)),
-                        };
-                        self.preview_status.set_text(&status_line);
-
                         let split = match (p.content_items > 0, p.metadata_only_items > 0) {
                             (true, true) => Some(copy::preview_both(
                                 &group(p.content_items),

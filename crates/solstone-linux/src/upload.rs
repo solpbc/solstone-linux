@@ -424,21 +424,28 @@ impl UploadClient {
         &self,
         delivery: &crate::folders::SegmentDelivery,
     ) -> UploadResult {
-        let stage_dir = std::env::temp_dir().join(format!(
-            "solstone-folder-stage-{}-{}-{}-{}",
-            std::process::id(),
-            delivery.folder_id,
-            delivery.window.day,
-            delivery.window.segment
-        ));
-        let _ = std::fs::remove_dir_all(&stage_dir);
-        if std::fs::create_dir_all(&stage_dir).is_err() {
-            return UploadResult::failure(Some(ErrorType::Transient), None, None);
-        }
-        let Ok(files) = stage_folder_segment(delivery, &stage_dir) else {
-            let _ = std::fs::remove_dir_all(&stage_dir);
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(stage) = tempfile::Builder::new()
+            .prefix("solstone-folder-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+        else {
             return UploadResult::failure(Some(ErrorType::Transient), None, None);
         };
+        let Ok(files) = stage_folder_segment(delivery, stage.path()) else {
+            return UploadResult::failure(Some(ErrorType::Transient), None, None);
+        };
+        if delivery.events.iter().any(|event| {
+            event.verb != crate::folders::ActivityVerb::Removed
+                && !crate::folders::local::object(&delivery.folder_root, Path::new(&event.rel_path))
+                    .is_ok_and(|file| {
+                        file.metadata().is_ok_and(|m| m.is_file())
+                            && (event.delivery != crate::folders::DeliveryMode::Content
+                                || crate::folders::local::content_available(&file))
+                    })
+        }) {
+            return UploadResult::failure(Some(ErrorType::Transient), None, None);
+        }
         let meta = FolderEnvelopeMeta {
             v: 1,
             id: delivery.folder_id.clone(),
@@ -446,17 +453,14 @@ impl UploadClient {
             facet: delivery.facet.clone(),
             kinds: delivery.kinds.enabled_names(),
         };
-        let result = self
-            .upload_described(
-                &delivery.window.day,
-                &delivery.window.segment,
-                &files,
-                Some(EnvelopeMeta::Folder { folder: &meta }),
-                Some(crate::folders::SOURCE),
-            )
-            .await;
-        let _ = std::fs::remove_dir_all(&stage_dir);
-        result
+        self.upload_described(
+            &delivery.window.day,
+            &delivery.window.segment,
+            &files,
+            Some(EnvelopeMeta::Folder { folder: &meta }),
+            Some(crate::folders::SOURCE),
+        )
+        .await
     }
 
     async fn upload_described(
@@ -999,42 +1003,52 @@ pub(crate) fn stage_folder_segment(
             .map(str::to_ascii_lowercase)
             .filter(|e| !e.is_empty() && e.bytes().all(|b| b.is_ascii_alphanumeric()));
 
+        let relative = Path::new(&content.rel_path);
+        let ext = orig_ext.as_deref().unwrap_or("bin");
+        let part_name = format!("c_{next_index:02}.{ext}");
+        let mut dest = stage_dir.join(&part_name);
+        let mut part_name = part_name;
         if let Some(ref note_text) = content.note_payload {
-            let ext = orig_ext.as_deref().unwrap_or("md");
-            let part_name = format!("c_{next_index:02}.{ext}");
-            let dest = stage_dir.join(&part_name);
-            let bytes = note_text.as_bytes();
-            std::fs::write(&dest, bytes)?;
-            let hash = solstone_folder_sync::files::sha256_hex(bytes);
-            staged_parts.insert(content.event_id.as_str(), (part_name, hash));
-            companion_paths.push(dest);
-            next_index += 1;
-        } else if content.needs_image_convert && content.disk_path.is_file() {
-            let out_ext = match content.kind {
-                crate::folders::FileKind::Screenshot => "png",
-                _ => "jpg",
-            };
-            let part_name = format!("c_{next_index:02}.{out_ext}");
-            let dest = stage_dir.join(&part_name);
-            if convert_folder_image(&content.disk_path, &dest, content.kind)
-                && let Ok(hash) = solstone_folder_sync::files::hash_local_file(&dest)
-            {
-                staged_parts.insert(content.event_id.as_str(), (part_name, hash));
-                companion_paths.push(dest);
-                next_index += 1;
+            let current = crate::folders::local::object(&delivery.folder_root, relative)?;
+            if !current.metadata()?.is_file() {
+                return Err(std::io::Error::other("waiting note is unavailable"));
             }
-        } else if content.disk_path.is_file() {
-            let part_name = match orig_ext.as_deref() {
-                Some(ext) => format!("c_{next_index:02}.{ext}"),
-                None => format!("c_{next_index:02}.bin"),
-            };
-            let dest = stage_dir.join(&part_name);
-            std::fs::copy(&content.disk_path, &dest)?;
+            std::fs::write(&dest, note_text.as_bytes())?;
+        } else {
+            crate::folders::local::copy_file(
+                &delivery.folder_root,
+                relative,
+                crate::folders::types::MAX_CONTENT_BYTES,
+                &mut std::fs::File::create(&dest)?,
+            )?;
             let hash = solstone_folder_sync::files::hash_local_file(&dest)?;
-            staged_parts.insert(content.event_id.as_str(), (part_name, hash));
-            companion_paths.push(dest);
-            next_index += 1;
+            if content
+                .content_hash
+                .as_ref()
+                .is_some_and(|expected| expected != &hash)
+            {
+                return Err(std::io::Error::other("folder file changed before staging"));
+            }
+            if content.needs_image_convert {
+                let out_ext = if content.kind == crate::folders::FileKind::Screenshot {
+                    "png"
+                } else {
+                    "jpg"
+                };
+                part_name = format!("c_{next_index:02}.{out_ext}");
+                let converted = stage_dir.join(&part_name);
+                let ok = convert_folder_image(&dest, &converted, content.kind);
+                std::fs::remove_file(&dest)?;
+                if !ok {
+                    continue;
+                }
+                dest = converted;
+            }
         }
+        let hash = solstone_folder_sync::files::hash_local_file(&dest)?;
+        staged_parts.insert(content.event_id.as_str(), (part_name, hash));
+        companion_paths.push(dest);
+        next_index += 1;
     }
 
     let mut activity_bytes = Vec::new();
@@ -2747,7 +2761,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let stage = tmp.path().join("stage");
         std::fs::create_dir_all(&stage).unwrap();
-        let disk_png = tmp.path().join("folder_reserved_name.png");
+        std::fs::create_dir(tmp.path().join("notes")).unwrap();
+        std::fs::write(tmp.path().join("notes/plan.md"), "# plan\nhello").unwrap();
+        std::fs::create_dir(tmp.path().join("shots")).unwrap();
+        let disk_png = tmp.path().join("shots/folder_reserved_name.png");
         std::fs::write(&disk_png, b"\x89PNG\r\n\x1a\nfake").unwrap();
 
         let window = Window {
@@ -2860,7 +2877,6 @@ mod tests {
                 StagedContentFile {
                     event_id: "ev1".into(),
                     rel_path: "notes/plan.md".into(),
-                    disk_path: tmp.path().join("notes/plan.md"),
                     kind: FileKind::Note,
                     content_hash: None,
                     note_payload: Some("# plan\nhello".into()),
@@ -2871,7 +2887,6 @@ mod tests {
                 StagedContentFile {
                     event_id: "ev2".into(),
                     rel_path: "shots/folder_reserved_name.png".into(),
-                    disk_path: disk_png,
                     kind: FileKind::Screenshot,
                     content_hash: None,
                     note_payload: None,

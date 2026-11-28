@@ -288,6 +288,10 @@ pub struct BackfillEstimate {
 /// Preview counts and range summary shown before confirmation.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PreviewSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_ms: Option<i64>,
     pub span: Option<Span>,
     pub total_items: u64,
     pub content_items: u64,
@@ -398,6 +402,8 @@ pub struct FolderSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checked_ms: Option<i64>,
     pub cant_read: u64,
+    #[serde(default)]
+    pub limited_mount: bool,
     pub fallback_to_details: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_lists: Option<bool>,

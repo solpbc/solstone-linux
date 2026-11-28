@@ -693,6 +693,7 @@ mod tests {
             last_taken_in_ms: None,
             last_checked_ms: None,
             cant_read: 0,
+            limited_mount: false,
             fallback_to_details: 0,
             journal_lists: Some(true),
             paused_by_computer,

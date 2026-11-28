@@ -15475,6 +15475,36 @@
     {
       "bundle": "linux",
       "call_contract": {
+        "arguments": [],
+        "bundle": "linux",
+        "entry": "render(locale, MessageId, named_args)",
+        "enum_argument": null,
+        "format_passes": 1,
+        "gettext_lookup_key": "linux.folders.mountdetails\u0004m6c696e75782e666f6c646572732e6d6f756e7464657461696c73",
+        "gettext_plural_key": "m6c696e75782e666f6c646572732e6d6f756e7464657461696c73_plural",
+        "gettext_unsigned_quantity": null,
+        "locale": "en-US",
+        "message_id": "linux.folders.mountdetails",
+        "resource_key": "m6c696e75782e666f6c646572732e6d6f756e7464657461696c73",
+        "signed_quantity": null
+      },
+      "cardinal": "en",
+      "expectation_kind": "resource-golden",
+      "expected": "for any part of this folder where your computer can't reliably tell which files are already downloaded, only file names and details go into your journal.",
+      "folder": null,
+      "inputs": {},
+      "locale": "en-US",
+      "logical_expected": "for any part of this folder where your computer can't reliably tell which files are already downloaded, only file names and details go into your journal.",
+      "message_id": "linux.folders.mountdetails",
+      "own_reader": "rust-api",
+      "own_reader_call": "render(\"en-US\", \"linux.folders.mountdetails\", &[])",
+      "platform_reader": "pending",
+      "resource_key": "m6c696e75782e666f6c646572732e6d6f756e7464657461696c73",
+      "target": "rust"
+    },
+    {
+      "bundle": "linux",
+      "call_contract": {
         "arguments": [
           {
             "name": "count",
